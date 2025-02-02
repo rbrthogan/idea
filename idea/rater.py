@@ -1,11 +1,14 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.responses import JSONResponse
 
 import random
 import uvicorn
 import json
 import uuid
+import os
+from pathlib import Path
 
 from idea.models import FlattenedIdea, RatingResult
 
@@ -39,6 +42,9 @@ FILE_PATH = "data/gemini_flash_exp1.json"
 
 # Global store for flattened ideas keyed by idea_id
 IDEAS_DB = {}
+
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
 
 def load_ideas_from_file(file_path: str):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -202,6 +208,36 @@ def get_mean_elo():
         mean_elo_by_gen[g_idx] = total_elo / count_by_gen[g_idx]
 
     return mean_elo_by_gen
+
+@app.get("/api/list-evolution-files")
+def list_evolution_files():
+    """List all JSON files in the data directory"""
+    files = [f.name for f in DATA_DIR.glob("*.json")]
+    return JSONResponse(files)
+
+@app.get("/api/load-evolution/{filename}")
+def load_evolution_file(filename: str):
+    """Load a specific evolution file"""
+    try:
+        file_path = DATA_DIR / filename
+        if not file_path.exists():
+            raise HTTPException(404, "File not found")
+        with open(file_path) as f:
+            return JSONResponse(json.load(f))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.post("/api/save-evolution")
+def save_evolution(data: dict):
+    """Save evolution data to file"""
+    try:
+        filename = data.get("filename")
+        file_path = DATA_DIR / filename
+        with open(file_path, "w") as f:
+            json.dump(data["data"], f, indent=2)
+        return JSONResponse({"status": "success"})
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 # Run the server
 if __name__ == "__main__":

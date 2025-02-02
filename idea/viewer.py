@@ -9,6 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from asyncio import Queue
 import random
+from pathlib import Path
+import json
+from pydantic import BaseModel
 
 from idea.evolution import EvolutionEngine
 from idea.models import Idea
@@ -41,6 +44,15 @@ evolution_status = {
     "is_running": False,
     "history": []
 }
+
+# Add this near other constants
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+# Add this class for the request body
+class SaveEvolutionRequest(BaseModel):
+    data: dict
+    filename: str
 
 # --------------------------------------------------
 # Routes
@@ -160,6 +172,17 @@ async def get_progress():
         print(f"Error getting queue updates: {e}")
 
     return JSONResponse(evolution_status)
+
+@app.post("/api/save-evolution")
+async def save_evolution(request: SaveEvolutionRequest):
+    """Save evolution data to file"""
+    try:
+        file_path = DATA_DIR / request.filename
+        with open(file_path, "w") as f:
+            json.dump(request.data, f, indent=2)
+        return JSONResponse({"status": "success"})
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 # Run the server
 if __name__ == "__main__":

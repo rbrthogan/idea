@@ -144,3 +144,40 @@ document.addEventListener("keydown", (event) => {
       break;
   }
 });
+
+// Add these functions
+function showLoadDialog() {
+    // Fetch available files from data directory
+    fetch('/api/list-evolution-files')
+        .then(res => res.json())
+        .then(files => {
+            const fileList = document.getElementById('fileList');
+            fileList.innerHTML = '';
+
+            files.forEach(file => {
+                const button = document.createElement('button');
+                button.className = 'btn btn-link';
+                button.textContent = file;
+                button.onclick = () => loadEvolutionData(file);
+                fileList.appendChild(button);
+            });
+
+            new bootstrap.Modal(document.getElementById('loadDataModal')).show();
+        });
+}
+
+function loadEvolutionData(filename) {
+    fetch(`/api/load-evolution/${filename}`)
+        .then(res => res.json())
+        .then(data => {
+            // Initialize the rater with the loaded data
+            if (data && data.history) {
+                const ideas = data.history.flat();
+                IDEAS_DB = ideas.reduce((acc, idea) => {
+                    acc[idea.id] = idea;
+                    return acc;
+                }, {});
+                refreshPair();
+            }
+        });
+}

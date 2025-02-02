@@ -40,6 +40,8 @@ It will currently have to complete the full evolution before you can see the app
 
 Navigate to [http://localhost:8000](http://localhost:8000) to see the app.
 
+Be sure to save the evolution results to later load into the rater
+
 ### Idea Rater
 
 To run the idea rater:
@@ -49,6 +51,13 @@ uvicorn idea.rater:app --port 8001
 
 Navigate to [http://localhost:8001](http://localhost:8001) to see the app.
 
+You can rater ideas via pairwise comparison, viewing the mean ELO rating by generation, and view the ranking.
+
+
 ## TODO
 
-- Experiment with initial seed context
+- Allow viewer to load previous evolution just for inspection
+- combine viewer and rater into one app
+- Do automated rating with LLM
+- Update to evolution to use the genotype/phenotype model
+- Have an evolution variant to take human ratings as input during evolution

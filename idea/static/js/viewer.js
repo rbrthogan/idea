@@ -55,6 +55,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         // Enable download button
                         const downloadButton = document.getElementById('downloadButton');
                         downloadButton.disabled = false;
+                        downloadButton.textContent = 'Save Results';
                         downloadButton.onclick = () => downloadResults(data);
                     } else {
                         console.error("Invalid history data:", data);
@@ -190,25 +191,54 @@ function updateContextDisplay() {
 }
 
 function downloadResults(data) {
-    const resultsData = {
-        history: data.history.map(generation =>
-            generation.map(idea => ({
-                ...idea,
-                id: generateUUID(),  // Add unique IDs for ELO rating
-                elo: 1500  // Initial ELO rating
-            }))
-        )
+    const modal = new bootstrap.Modal(document.getElementById('saveDataModal'));
+    const defaultFilename = `evolution-results-${new Date().toISOString().replace(/:/g, '-')}.json`;
+    document.getElementById('saveFilename').value = defaultFilename;
+
+    document.getElementById('confirmSave').onclick = async () => {
+        const filename = document.getElementById('saveFilename').value;
+        const resultsData = {
+            history: data.history.map(generation =>
+                generation.map(idea => ({
+                    ...idea,
+                    id: generateUUID(),
+                    elo: 1500
+                }))
+            )
+        };
+
+        try {
+            const response = await fetch('/api/save-evolution', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    data: resultsData,
+                    filename: filename
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+
+            // Show success feedback
+            const downloadButton = document.getElementById('downloadButton');
+            const originalText = downloadButton.textContent;
+            downloadButton.textContent = 'Saved!';
+            setTimeout(() => {
+                downloadButton.textContent = originalText;
+            }, 2000);
+
+            modal.hide();
+        } catch (error) {
+            console.error('Error saving file:', error);
+            alert('Error saving file: ' + error.message);
+        }
     };
 
-    const blob = new Blob([JSON.stringify(resultsData, null, 2)], { type: 'application/json' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `evolution-results-${new Date().toISOString()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(a);
+    modal.show();
 }
 
 function generateUUID() {
