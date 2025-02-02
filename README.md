@@ -35,3 +35,10 @@ uvicorn main:app --reload
 It will currently have to complete the full evolution before you can see the app.
 
 Navigate to [http://localhost:8000](http://localhost:8000) to see the app.
+
+
+## TODO
+
+- Save history to file to enable reloading
+- Add ELO system to generate idea rankings for a given history (this could for human review or LLM review)
+- Experiment with initial seed context

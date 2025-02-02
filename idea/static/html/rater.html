@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Idea ELO Rater</title>
+    <link rel="stylesheet" href="/static/css/style.css" />
+  </head>
+  <body>
+    <h1>Idea ELO Rater</h1>
+    <div id="pair-container">
+      <!-- We'll place the two ideas here -->
+      <div class="idea-box" id="ideaA">
+        <h2 id="titleA"></h2>
+        <p id="proposalA"></p>
+        <button onclick="vote('A')">Vote for A</button>
+      </div>
+      <div class="idea-box" id="ideaB">
+        <h2 id="titleB"></h2>
+        <p id="proposalB"></p>
+        <button onclick="vote('B')">Vote for B</button>
+      </div>
+    </div>
+
+    <div id="tie-container">
+      <button onclick="vote('tie')">Tie</button>
+    </div>
+
+    <div id="buttons">
+      <button onclick="refreshPair()">Next Pair</button>
+      <button onclick="showRanking()">Show Ranking</button>
+      <button onclick="showMeanElo()">Show Mean ELO</button>
+    </div>
+
+    <div id="results-container"></div>
+
+    <script src="/static/js/rater.js"></script>
+  </body>
+</html>

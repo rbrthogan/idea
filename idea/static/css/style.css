@@ -1,0 +1,206 @@
+/* static/css/style.css */
+
+/* Global styling */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: #f8f9fa;
+    padding: 20px;
+}
+
+.generations-wrapper {
+    margin-top: 2rem;
+}
+
+.generation-section {
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 2rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.generation-title {
+    font-size: 1.5rem;
+    margin-bottom: 1rem;
+    color: #333;
+}
+
+.scroll-container {
+    display: flex;
+    gap: 1rem;
+    overflow-x: auto;
+    padding: 1rem 0;
+}
+
+.gen-card {
+    flex: 0 0 auto;
+    width: 250px;  /* Reduced width since we're only showing title */
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    background: white;
+}
+
+.gen-card .card-body {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.gen-card .card-title {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0;
+    /* Add ellipsis for long titles */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+}
+
+.gen-card .card-text {
+    font-size: 0.9rem;
+    color: #666;
+}
+
+/* Make sure horizontal scrolling is smooth */
+.scroll-container {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: #999 #f0f0f0;
+}
+
+/* Custom scrollbar styling */
+.scroll-container::-webkit-scrollbar {
+    height: 8px;
+}
+
+.scroll-container::-webkit-scrollbar-track {
+    background: #f0f0f0;
+    border-radius: 4px;
+}
+
+.scroll-container::-webkit-scrollbar-thumb {
+    background: #999;
+    border-radius: 4px;
+}
+
+h1 {
+    font-weight: 300;
+    text-align: center; /* Add text alignment */
+}
+
+/* Generation section heading */
+.generation-title {
+    margin-top: 2rem;
+    margin-bottom: 1rem;
+}
+
+/* Horizontal scrolling container for each generation */
+.scroll-container {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 1rem;
+    overflow-x: auto;   /* horizontal scroll */
+    padding-bottom: 1rem;
+}
+
+/* Force cards to have a minimum width so they don't shrink too small */
+.gen-card {
+    min-width: 200px;
+    max-width: 300px;  /* Add maximum width */
+    flex: 0 0 auto;
+}
+
+.gen-card .card-body {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+/* Add styling for card titles */
+.gen-card .card-title {
+    font-size: 0.95rem;  /* Slightly smaller font size */
+    word-wrap: break-word;  /* Allow word wrapping */
+    hyphens: auto;  /* Enable hyphenation if needed */
+}
+
+#pair-container {
+    display: flex;
+    justify-content: space-around;
+    margin: 20px 0;
+}
+
+.idea-box {
+    width: 40%;
+    background: #fff;
+    padding: 15px;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.idea-box button {
+    margin-top: 10px;
+}
+
+#tie-container {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 20px;
+}
+
+#buttons {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    margin-bottom: 20px;
+}
+
+#results-container {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+}
+
+th, td {
+    border: 1px solid #ddd;
+    padding: 8px;
+}
+
+.progress {
+    height: 25px;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,.1);
+    margin: 1rem 0;
+}
+
+.progress-bar {
+    height: 100%;
+    background-color: #007bff;
+    color: white;
+    text-align: center;
+    line-height: 25px;
+    transition: width .6s ease;
+}
+
+.view-idea {
+    align-self: flex-end;
+    margin-top: auto;
+}
+
+/* Modal styles */
+.modal-dialog {
+    max-width: 800px;
+}
+
+.modal-body {
+    max-height: 70vh;
+    overflow-y: auto;
+}
