@@ -63,16 +63,29 @@ async def start_evolution(request: Request):
     data = await request.json()
     pop_size = int(data.get('popSize', 3))
     generations = int(data.get('generations', 2))
-    idea_type = data.get('ideaType', 'airesearch')  # Default to airesearch if not specified
+    idea_type = data.get('ideaType', 'airesearch')
+    model_type = data.get('modelType', 'gemini-1.5-flash')
+    context_type = data.get('contextType', 'random_words')
 
-    print(f"Starting evolution with pop_size={pop_size}, generations={generations}, idea_type={idea_type}")
+    print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
+          f"idea_type={idea_type}, model_type={model_type}, context_type={context_type}")
 
-    # Create and run evolution with specified idea type
+    # Create and run evolution with specified parameters
     engine = EvolutionEngine(
         pop_size=pop_size,
         generations=generations,
-        idea_type=idea_type
+        idea_type=idea_type,
+        model_type=model_type,
+        context_type=context_type
     )
+
+    # Generate contexts for each idea
+    contexts = []
+    for _ in range(pop_size):
+        context = engine.ideator.generate_context(context_type,
+            engine.ideator.idea_field_map.get(idea_type))
+        contexts.append(context)
+
     engine.run_evolution()
 
     # Convert results to JSON-serializable format
@@ -81,7 +94,8 @@ async def start_evolution(request: Request):
 
     return JSONResponse({
         "status": "success",
-        "history": history
+        "history": history,
+        "contexts": contexts
     })
 
 def idea_to_dict(idea: Idea) -> dict:

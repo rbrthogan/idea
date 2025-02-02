@@ -93,12 +93,19 @@ class Ideator(LLMWrapper):
     You should format your idea with enough specificity that a developer can implement it."""
 
     def __init__(self, **kwargs):
+        self.idea_field_map = {
+            "airesearch": "AI Research",
+            "game_design": "2D arcade game design"
+        }
         super().__init__(**kwargs)
 
-    def generate_context(self, method: str) -> str:
+    def generate_context(self, method: str, field: str = None) -> str:
         """Generate initial context for ideation"""
         if method == "random_words":
             return self.generate_text(self.RANDOM_WORDS_PROMPT, temperature=1.0)
+        elif method == "key_ideas_elements":
+            text = self.generate_text(self.KEY_IDEAS_ELEMENTS.format(field=field), temperature=1.0)
+            return text.split("CONCEPTS:")[1].strip()
         raise ValueError(f"Invalid method: {method}")
 
     def get_idea_prompt(self, idea_type: str) -> str:
@@ -112,9 +119,12 @@ class Ideator(LLMWrapper):
     def seed_ideas(self, n: int, context_type: str, idea_type: str) -> List[str]:
         """Generate n initial ideas"""
         idea_prompt = self.get_idea_prompt(idea_type)
+
         ideas = []
+
         for _ in tqdm(range(n), desc="Generating ideas"):
-            context = self.generate_context(context_type)
+            context = self.generate_context(context_type, self.idea_field_map[idea_type])
+            print(f"Context: {context}")
             prompt = f"{context}\nInstruction: {idea_prompt}"
             response = self.generate_text(prompt, temperature=1.0)
             ideas.append(response)

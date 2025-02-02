@@ -14,6 +14,7 @@ class EvolutionEngine:
         context_type="random_words",
         pop_size: int = 5,
         generations: int = 3,
+        model_type: str = "gemini-1.5-flash"
     ):
         self.idea_type = idea_type
         self.context_type = context_type
@@ -22,9 +23,9 @@ class EvolutionEngine:
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
-        self.ideator = Ideator(provider="google_generative_ai", model_name="gemini-2.0-flash-exp")
+        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
-        self.critic = Critic(provider="google_generative_ai", model_name="gemini-2.0-flash-exp")
+        self.critic = Critic(provider="google_generative_ai", model_name=model_type)
         self.history = []  # List[List[Idea]]
 
     def run_evolution(self):

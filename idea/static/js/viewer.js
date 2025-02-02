@@ -2,6 +2,8 @@
 
 let pollingInterval;
 let isEvolutionRunning = false;
+let currentContextIndex = 0;
+let contexts = [];
 
 document.addEventListener("DOMContentLoaded", () => {
     console.log("viewer.js loaded!");
@@ -13,6 +15,8 @@ document.addEventListener("DOMContentLoaded", () => {
             const popSize = document.getElementById('popSize').value;
             const generations = document.getElementById('generations').value;
             const ideaType = document.getElementById('ideaType').value;
+            const modelType = document.getElementById('modelType').value;
+            const contextType = document.getElementById('contextType').value;
 
             // Clear previous results
             const container = document.getElementById('generations-container');
@@ -21,7 +25,7 @@ document.addEventListener("DOMContentLoaded", () => {
             startButton.textContent = 'Running...';
 
             try {
-                console.log("Sending request with:", { popSize, generations, ideaType });
+                console.log("Sending request with:", { popSize, generations, ideaType, modelType, contextType });
                 const response = await fetch('/api/start-evolution', {
                     method: 'POST',
                     headers: {
@@ -30,15 +34,24 @@ document.addEventListener("DOMContentLoaded", () => {
                     body: JSON.stringify({
                         popSize,
                         generations,
-                        ideaType
+                        ideaType,
+                        modelType,
+                        contextType
                     })
                 });
 
                 if (response.ok) {
                     const data = await response.json();
                     console.log("Received response data:", data);
+
+                    // Reset contexts and index
+                    contexts = data.contexts || [];
+                    currentContextIndex = 0;
+                    console.log("Loaded contexts:", contexts);
+
                     if (data.history && Array.isArray(data.history)) {
                         renderGenerations(data.history);
+                        updateContextDisplay();  // Update context display after loading new data
                     } else {
                         console.error("Invalid history data:", data);
                     }
@@ -53,6 +66,20 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         };
     }
+
+    document.getElementById('prevContext')?.addEventListener('click', () => {
+        if (currentContextIndex > 0) {
+            currentContextIndex--;
+            updateContextDisplay();
+        }
+    });
+
+    document.getElementById('nextContext')?.addEventListener('click', () => {
+        if (currentContextIndex < contexts.length - 1) {
+            currentContextIndex++;
+            updateContextDisplay();
+        }
+    });
 });
 
 function renderGenerations(history) {
@@ -104,4 +131,57 @@ function showIdeaModal(idea) {
     document.getElementById('ideaModalLabel').textContent = idea.title;
     document.getElementById('ideaModalContent').textContent = idea.proposal;
     modal.show();
+}
+
+function updateContextDisplay() {
+    const contextDisplay = document.getElementById('contextDisplay');
+    const navigation = document.querySelector('.context-navigation');
+
+    console.log('Updating context display:', {
+        currentIndex: currentContextIndex,
+        totalContexts: contexts.length,
+        currentContext: contexts[currentContextIndex]
+    });
+
+    if (contexts.length > 0) {
+        // Format the context text for better readability
+        const contextText = contexts[currentContextIndex]
+            .split(',')
+            .map(word => word.trim())
+            .join('\n');
+
+        contextDisplay.innerHTML = `
+            <div class="context-content">
+                <pre>${contextText}</pre>
+            </div>
+            <div class="context-navigation mt-3">
+                <div class="d-flex justify-content-between align-items-center">
+                    <button class="btn btn-sm btn-outline-primary" id="prevContext" ${currentContextIndex === 0 ? 'disabled' : ''}>
+                        &larr; Previous
+                    </button>
+                    <span id="contextCounter">Context ${currentContextIndex + 1} of ${contexts.length}</span>
+                    <button class="btn btn-sm btn-outline-primary" id="nextContext" ${currentContextIndex === contexts.length - 1 ? 'disabled' : ''}>
+                        Next &rarr;
+                    </button>
+                </div>
+            </div>
+        `;
+
+        // Add event listeners to the newly created buttons
+        document.getElementById('prevContext')?.addEventListener('click', () => {
+            if (currentContextIndex > 0) {
+                currentContextIndex--;
+                updateContextDisplay();
+            }
+        });
+
+        document.getElementById('nextContext')?.addEventListener('click', () => {
+            if (currentContextIndex < contexts.length - 1) {
+                currentContextIndex++;
+                updateContextDisplay();
+            }
+        });
+    } else {
+        contextDisplay.innerHTML = '<p class="text-muted">Context will appear here when evolution starts...</p>';
+    }
 }

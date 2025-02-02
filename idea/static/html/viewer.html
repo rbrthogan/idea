@@ -33,6 +33,21 @@
               </select>
             </div>
             <div class="mb-3">
+              <label for="contextType" class="form-label">Context Type</label>
+              <select class="form-select" id="contextType">
+                <option value="random_words">Random Words</option>
+                <option value="key_ideas_elements">Key concepts from big ideas in the field</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label for="modelType" class="form-label">Model Type</label>
+              <select class="form-select" id="modelType">
+                <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash</option>
+                <option value="gemini-2.0-flash-thinking-exp-01-21">Gemini 2.0 Flash Thinking</option>
+              </select>
+            </div>
+            <div class="mb-3">
               <label for="popSize" class="form-label">Population Size</label>
               <input type="number" class="form-control" id="popSize" value="3">
             </div>
@@ -41,6 +56,25 @@
               <input type="number" class="form-control" id="generations" value="2">
             </div>
             <button class="btn btn-primary" id="startButton">Start Evolution</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Context Display Card -->
+      <div class="col-md-6">
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title">Initial Context</h5>
+            <div id="contextDisplay" class="context-wrapper">
+              <p class="text-muted">Context will appear here when evolution starts...</p>
+            </div>
+            <div class="context-navigation mt-3" style="display: none;">
+              <div class="d-flex justify-content-between align-items-center">
+                <button class="btn btn-sm btn-outline-primary" id="prevContext">&larr; Previous</button>
+                <span id="contextCounter">Context 1 of 3</span>
+                <button class="btn btn-sm btn-outline-primary" id="nextContext">Next &rarr;</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

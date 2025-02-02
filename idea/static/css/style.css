@@ -204,3 +204,42 @@ th, td {
     max-height: 70vh;
     overflow-y: auto;
 }
+
+.context-wrapper {
+    background: #f8f9fa;
+    border-radius: 4px;
+    padding: 1rem;
+    min-height: 200px;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    font-family: monospace;
+    font-size: 0.9rem;
+}
+
+.context-content {
+    margin-bottom: 1rem;
+}
+
+.context-content pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.context-navigation {
+    border-top: 1px solid #dee2e6;
+    padding-top: 1rem;
+    margin-top: 1rem;
+}
+
+#contextCounter {
+    font-size: 0.9rem;
+    color: #6c757d;
+}
+
+.context-wrapper:empty::before {
+    content: "Waiting for context...";
+    color: #6c757d;
+    font-style: italic;
+}
