@@ -52,6 +52,10 @@ document.addEventListener("DOMContentLoaded", () => {
                     if (data.history && Array.isArray(data.history)) {
                         renderGenerations(data.history);
                         updateContextDisplay();  // Update context display after loading new data
+                        // Enable download button
+                        const downloadButton = document.getElementById('downloadButton');
+                        downloadButton.disabled = false;
+                        downloadButton.onclick = () => downloadResults(data);
                     } else {
                         console.error("Invalid history data:", data);
                     }
@@ -80,6 +84,11 @@ document.addEventListener("DOMContentLoaded", () => {
             updateContextDisplay();
         }
     });
+
+    const downloadButton = document.getElementById('downloadButton');
+    if (downloadButton) {
+        downloadButton.disabled = true;
+    }
 });
 
 function renderGenerations(history) {
@@ -135,33 +144,27 @@ function showIdeaModal(idea) {
 
 function updateContextDisplay() {
     const contextDisplay = document.getElementById('contextDisplay');
-    const navigation = document.querySelector('.context-navigation');
-
-    console.log('Updating context display:', {
-        currentIndex: currentContextIndex,
-        totalContexts: contexts.length,
-        currentContext: contexts[currentContextIndex]
-    });
 
     if (contexts.length > 0) {
-        // Format the context text for better readability
-        const contextText = contexts[currentContextIndex]
-            .split(',')
-            .map(word => word.trim())
-            .join('\n');
+        // Format the context text into separate items
+        const contextItems = contexts[currentContextIndex]
+            .split('\n')
+            .filter(item => item.trim())
+            .map(item => `<div class="context-item">${item.trim()}</div>`)
+            .join('');
 
         contextDisplay.innerHTML = `
             <div class="context-content">
-                <pre>${contextText}</pre>
+                ${contextItems}
             </div>
-            <div class="context-navigation mt-3">
-                <div class="d-flex justify-content-between align-items-center">
-                    <button class="btn btn-sm btn-outline-primary" id="prevContext" ${currentContextIndex === 0 ? 'disabled' : ''}>
-                        &larr; Previous
+            <div class="context-navigation">
+                <div class="context-nav-buttons">
+                    <button class="context-nav-btn" id="prevContext" ${currentContextIndex === 0 ? 'disabled' : ''}>
+                        ← Previous
                     </button>
                     <span id="contextCounter">Context ${currentContextIndex + 1} of ${contexts.length}</span>
-                    <button class="btn btn-sm btn-outline-primary" id="nextContext" ${currentContextIndex === contexts.length - 1 ? 'disabled' : ''}>
-                        Next &rarr;
+                    <button class="context-nav-btn" id="nextContext" ${currentContextIndex === contexts.length - 1 ? 'disabled' : ''}>
+                        Next →
                     </button>
                 </div>
             </div>
@@ -184,4 +187,34 @@ function updateContextDisplay() {
     } else {
         contextDisplay.innerHTML = '<p class="text-muted">Context will appear here when evolution starts...</p>';
     }
+}
+
+function downloadResults(data) {
+    const resultsData = {
+        history: data.history.map(generation =>
+            generation.map(idea => ({
+                ...idea,
+                id: generateUUID(),  // Add unique IDs for ELO rating
+                elo: 1500  // Initial ELO rating
+            }))
+        )
+    };
+
+    const blob = new Blob([JSON.stringify(resultsData, null, 2)], { type: 'application/json' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `evolution-results-${new Date().toISOString()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+}
+
+function generateUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        const v = c == 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
 }
