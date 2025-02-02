@@ -8,7 +8,8 @@ body {
 }
 
 .container {
-    max-width: 1400px;
+    max-width: 1400px;  /* Increased from default Bootstrap container */
+    padding: 2rem;
 }
 
 /* Card styling */
@@ -23,13 +24,24 @@ body {
 }
 
 .card-body {
-    padding: 1.5rem;
+    padding: 1.5rem;   /* Slightly reduced padding */
+    display: flex;
+    flex-direction: column;
+    min-height: 400px; /* Set minimum height to prevent jumping */
 }
 
 .card-title {
+    font-size: 1.5rem;  /* Reduced from 1.8rem */
+    margin-bottom: 1rem;
+    line-height: 1.3;
     color: #2c3e50;
-    font-weight: 600;
-    margin-bottom: 1.5rem;
+}
+
+.card-text {
+    font-size: 1rem;   /* Reduced from 1.1rem */
+    line-height: 1.5;
+    margin-bottom: 1rem;
+    color: #34495e;
 }
 
 /* Form controls */
@@ -53,7 +65,8 @@ body {
 
 /* Button styling */
 .btn {
-    padding: 0.625rem 1.25rem;
+    padding: 0.75rem 2rem;  /* Larger buttons */
+    font-size: 1.1rem;
     font-weight: 500;
     border-radius: 6px;
     transition: all 0.2s ease;
@@ -163,8 +176,10 @@ body {
 }
 
 h1 {
-    font-weight: 300;
-    text-align: center; /* Add text alignment */
+    font-size: 2.2rem; /* Reduced from 2.5rem */
+    margin-bottom: 1.5rem;
+    text-align: center;
+    color: #2c3e50;
 }
 
 /* Generation section heading */
@@ -209,11 +224,15 @@ h1 {
 }
 
 .idea-box {
-    width: 40%;
-    background: #fff;
-    padding: 15px;
-    border-radius: 4px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    height: auto;
+    margin-bottom: 20px;
+    transition: transform 0.2s;
+    max-width: 650px;  /* Increased max-width */
+    margin: 0 auto;    /* Center the cards */
+}
+
+.idea-box:hover {
+    transform: translateY(-2px);
 }
 
 .idea-box button {
@@ -234,8 +253,8 @@ h1 {
 }
 
 #results-container {
-    max-width: 900px;
-    margin: 0 auto;
+    max-width: 1200px;  /* Wider results container */
+    margin: 2rem auto;
 }
 
 table {
@@ -364,4 +383,232 @@ th, td {
     content: "Waiting for context...";
     color: #6c757d;
     font-style: italic;
+}
+
+/* Add these styles to the existing file */
+.card-title {
+    font-size: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+#results-container table {
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+#results-container th {
+    background: #f8f9fa;
+    font-weight: 600;
+}
+
+#results-container td, #results-container th {
+    padding: 12px 15px;
+}
+
+/* Center content */
+.text-center {
+    margin: 2rem 0;
+}
+
+/* Control buttons container */
+.controls-container {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin: 2rem 0;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .container {
+        padding: 1rem;
+    }
+
+    .card-title {
+        font-size: 1.5rem;
+    }
+
+    .card-text {
+        font-size: 1rem;
+    }
+
+    .btn {
+        padding: 0.5rem 1.5rem;
+    }
+}
+
+/* Layout structure */
+.layout-container {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* Fixed side panel */
+.controls-panel {
+    width: 280px;  /* Slightly wider to accommodate buttons */
+    background-color: #f8f9fa;
+    padding: 2rem;
+    position: fixed;
+    height: 100vh;
+    left: 0;
+    top: 0;
+    border-right: 1px solid #dee2e6;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+.controls-panel h2 {
+    font-size: 1.3rem;
+    margin-bottom: 1rem;
+    color: #2c3e50;
+}
+
+.controls-panel h3 {
+    font-size: 1.1rem;
+    margin-bottom: 0.8rem;
+    color: #2c3e50;
+}
+
+/* Voting controls section */
+.voting-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid #dee2e6;
+}
+
+.voting-controls .btn {
+    width: 100%;
+}
+
+/* Navigation controls section */
+.controls-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+}
+
+.controls-buttons .btn {
+    width: 100%;
+}
+
+/* Main content adjustments */
+.main-content {
+    margin-left: 280px;  /* Match new panel width */
+    padding: 2rem;
+    max-width: calc(100vw - 280px);
+}
+
+/* Ideas container */
+.ideas-container {
+    display: flex;
+    gap: 2rem;
+    margin-bottom: 2rem;
+}
+
+.idea-box {
+    flex: 1;
+    max-width: 650px;
+}
+
+.card {
+    height: 100%;
+    margin-bottom: 0;
+}
+
+.card-body {
+    padding: 1.5rem;
+    min-height: 0;  /* Remove minimum height since we don't need it anymore */
+}
+
+.card-title {
+    font-size: 1.5rem;
+    margin-bottom: 1rem;
+    line-height: 1.3;
+    color: #2c3e50;
+}
+
+.card-text {
+    font-size: 1rem;
+    line-height: 1.5;
+    color: #34495e;
+}
+
+/* Tie button container */
+.tie-container {
+    text-align: center;
+    margin: 2rem 0;
+}
+
+/* Results container */
+#results-container {
+    margin-top: 2rem;
+}
+
+#results-container table {
+    width: 100%;
+    font-size: 1rem;   /* Reduced from 1.1rem */
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+#results-container th {
+    background: #f8f9fa;
+    font-weight: 600;
+}
+
+#results-container td {
+    padding: 1rem 1.5rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1200px) {
+    .ideas-container {
+        flex-direction: column;
+    }
+
+    .idea-box {
+        max-width: 100%;
+    }
+}
+
+@media (max-width: 768px) {
+    .layout-container {
+        flex-direction: column;
+    }
+
+    .controls-panel {
+        position: static;
+        width: 100%;
+        height: auto;
+        padding: 1rem;
+    }
+
+    .main-content {
+        margin-left: 0;
+        max-width: 100%;
+    }
+
+    .voting-controls, .controls-buttons {
+        flex-direction: row;
+        flex-wrap: wrap;
+    }
+
+    .voting-controls .btn, .controls-buttons .btn {
+        width: auto;
+    }
+}
+
+/* Position the vote buttons */
+.card .btn {
+    margin-top: auto;  /* Push button to bottom of card */
+    align-self: flex-start; /* Align to left side */
+    font-size: 1rem;   /* Reduced from 1.1rem */
+    padding: 0.5rem 1.5rem;
 }

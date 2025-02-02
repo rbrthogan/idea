@@ -117,8 +117,7 @@ def compute_elo(
 @app.get("/")
 def serve_index(request: Request):
     """
-    Serves the main HTML page (via Jinja2). This page will load
-    Bootstrap and our custom script, which fetches generations.
+    Serves the main HTML page with Bootstrap styling
     """
     return templates.TemplateResponse("rater.html", {"request": request})
 
