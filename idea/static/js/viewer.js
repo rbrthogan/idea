@@ -4,6 +4,7 @@ let pollingInterval;
 let isEvolutionRunning = false;
 let currentContextIndex = 0;
 let contexts = [];
+let currentEvolutionId = null;
 
 document.addEventListener("DOMContentLoaded", () => {
     console.log("viewer.js loaded!");
@@ -204,7 +205,8 @@ function downloadResults(data) {
                     id: generateUUID(),
                     elo: 1500
                 }))
-            )
+            ),
+            contexts: contexts  // Add contexts to saved data
         };
 
         try {
@@ -248,3 +250,50 @@ function generateUUID() {
         return v.toString(16);
     });
 }
+
+async function loadEvolutions() {
+    const response = await fetch('/api/evolutions');
+    const evolutions = await response.json();
+
+    const select = document.getElementById('evolutionSelect');
+    select.innerHTML = '<option value="">Current Evolution</option>';
+
+    evolutions.forEach(evolution => {
+        const option = document.createElement('option');
+        option.value = evolution.id;
+        option.textContent = `Evolution from ${new Date(evolution.timestamp).toLocaleString()} - ${evolution.filename}`;
+        select.appendChild(option);
+    });
+}
+
+document.getElementById('evolutionSelect').addEventListener('change', async (e) => {
+    const evolutionId = e.target.value;
+    if (evolutionId) {
+        const response = await fetch(`/api/evolution/${evolutionId}`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.data && data.data.history) {
+                renderGenerations(data.data.history);
+                // Update contexts if available
+                if (data.data.contexts) {
+                    contexts = data.data.contexts;
+                    currentContextIndex = 0;
+                    updateContextDisplay();
+                }
+            }
+        } else {
+            console.error('Failed to load evolution:', await response.text());
+        }
+    } else {
+        // Load current evolution
+        loadCurrentEvolution();
+    }
+});
+
+// Modify existing loadCurrentEvolution function
+async function loadCurrentEvolution() {
+    // ... existing code ...
+}
+
+// Call this when page loads
+loadEvolutions();

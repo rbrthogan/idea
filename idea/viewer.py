@@ -1,6 +1,6 @@
 # main.py
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import JSONResponse
@@ -12,6 +12,8 @@ import random
 from pathlib import Path
 import json
 from pydantic import BaseModel
+from flask import jsonify
+from datetime import datetime
 
 from idea.evolution import EvolutionEngine
 from idea.models import Idea
@@ -182,7 +184,46 @@ async def save_evolution(request: SaveEvolutionRequest):
             json.dump(request.data, f, indent=2)
         return JSONResponse({"status": "success"})
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/api/evolutions')
+async def get_evolutions(request: Request):
+    """Get list of evolutions from file system"""
+    evolutions_list = []
+
+    try:
+        for file_path in DATA_DIR.glob('*.json'):
+            file_stat = file_path.stat()
+            evolutions_list.append({
+                'id': file_path.stem,  # Use filename without extension as ID
+                'timestamp': datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
+                'filename': file_path.name
+            })
+
+        # Sort by timestamp descending
+        evolutions_list.sort(key=lambda x: x['timestamp'], reverse=True)
+        return JSONResponse(evolutions_list)
+    except Exception as e:
+        print(f"Error reading evolution files: {e}")
+        return JSONResponse([])
+
+@app.get('/api/evolution/{evolution_id}')
+async def get_evolution(request: Request, evolution_id: str):
+    """Get evolution data from file"""
+    try:
+        file_path = DATA_DIR / f"{evolution_id}.json"
+        if file_path.exists():
+            with open(file_path) as f:
+                data = json.load(f)
+                return JSONResponse({
+                    'id': evolution_id,
+                    'timestamp': datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(),
+                    'data': data
+                })
+
+        raise HTTPException(status_code=404, detail="Evolution not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Run the server
 if __name__ == "__main__":

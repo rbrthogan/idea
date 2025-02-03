@@ -56,7 +56,6 @@ You can rater ideas via pairwise comparison, viewing the mean ELO rating by gene
 
 ## TODO
 
-- Allow viewer to load previous evolution just for inspection
 - combine viewer and rater into one app
 - Do automated rating with LLM
 - Update to evolution to use the genotype/phenotype model
