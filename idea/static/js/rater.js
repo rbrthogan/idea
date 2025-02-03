@@ -1,69 +1,90 @@
-let ideaA = null;
-let ideaB = null;
+let currentPair = null;
+let currentEvolutionId = null;
+let ideasDb = {};
 
 // Fetch a random pair on load
 window.addEventListener("load", () => {
   refreshPair();
+  loadEvolutions();
+  loadCurrentEvolution();
 });
 
-function refreshPair() {
-  fetch("/random-pair")
-    .then((res) => {
-      if (!res.ok) {
-        throw new Error("Failed to get random pair: " + res.statusText);
-      }
-      return res.json();
-    })
-    .then((data) => {
-      ideaA = data.ideaA;
-      ideaB = data.ideaB;
-      document.getElementById("titleA").textContent = ideaA.title;
-      document.getElementById("proposalA").textContent = ideaA.proposal;
-      document.getElementById("titleB").textContent = ideaB.title;
-      document.getElementById("proposalB").textContent = ideaB.proposal;
+async function initializeRating(ideas) {
+    // Reset state
+    ideasDb = {};
 
-      // Clear any leftover results
-      document.getElementById("results-container").innerHTML = "";
-    })
-    .catch((error) => {
-      console.error(error);
-      alert(error.message);
+    // Initialize ideas database with IDs
+    ideas.forEach(idea => {
+        if (!idea.id) {
+            idea.id = generateUUID();
+        }
+        if (!idea.elo) {
+            idea.elo = 1500;
+        }
+        ideasDb[idea.id] = idea;
     });
+
+    await refreshPair();
 }
 
-function vote(outcome) {
-  // outcome can be "A", "B", or "tie"
-  if (!ideaA || !ideaB) return;
+async function refreshPair() {
+    if (Object.keys(ideasDb).length < 2) {
+        document.getElementById("titleA").textContent = "No ideas to rate";
+        document.getElementById("proposalA").textContent = "";
+        document.getElementById("titleB").textContent = "";
+        document.getElementById("proposalB").textContent = "";
+        return;
+    }
 
-  const payload = {
-    idea_a_id: ideaA.id,
-    idea_b_id: ideaB.id,
-    outcome: outcome,
-  };
+    // Get random pair
+    const ids = Object.keys(ideasDb);
+    const idA = ids[Math.floor(Math.random() * ids.length)];
+    let idB;
+    do {
+        idB = ids[Math.floor(Math.random() * ids.length)];
+    } while (idB === idA);
 
-  fetch("/rate", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  })
-    .then((res) => {
-      if (!res.ok) {
-        throw new Error("Failed to post rating: " + res.statusText);
-      }
-      return res.json();
-    })
-    .then((data) => {
-      // ELO updated
-      console.log(data);
-      // Optionally, auto-refresh the pair
-      refreshPair();
-    })
-    .catch((err) => {
-      console.error(err);
-      alert(err.message);
-    });
+    currentPair = [ideasDb[idA], ideasDb[idB]];
+
+    // Display the pair
+    document.getElementById("titleA").textContent = currentPair[0].title;
+    document.getElementById("proposalA").textContent = currentPair[0].proposal;
+    document.getElementById("titleB").textContent = currentPair[1].title;
+    document.getElementById("proposalB").textContent = currentPair[1].proposal;
+}
+
+async function vote(outcome) {
+    if (!currentPair) return;
+
+    try {
+        const response = await fetch('/api/submit-rating', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                idea_a_id: currentPair[0].id,
+                idea_b_id: currentPair[1].id,
+                outcome: outcome,
+                evolution_id: currentEvolutionId
+            })
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            // Update local ELO ratings
+            if (result.updated_elos) {
+                Object.entries(result.updated_elos).forEach(([id, elo]) => {
+                    if (ideasDb[id]) {
+                        ideasDb[id].elo = elo;
+                    }
+                });
+            }
+            await refreshPair();
+        }
+    } catch (error) {
+        console.error('Error submitting rating:', error);
+    }
 }
 
 function showRanking() {
@@ -145,39 +166,62 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-// Add these functions
-function showLoadDialog() {
-    // Fetch available files from data directory
-    fetch('/api/list-evolution-files')
-        .then(res => res.json())
-        .then(files => {
-            const fileList = document.getElementById('fileList');
-            fileList.innerHTML = '';
-
-            files.forEach(file => {
-                const button = document.createElement('button');
-                button.className = 'btn btn-link';
-                button.textContent = file;
-                button.onclick = () => loadEvolutionData(file);
-                fileList.appendChild(button);
-            });
-
-            new bootstrap.Modal(document.getElementById('loadDataModal')).show();
-        });
-}
-
-function loadEvolutionData(filename) {
-    fetch(`/api/load-evolution/${filename}`)
-        .then(res => res.json())
-        .then(data => {
-            // Initialize the rater with the loaded data
-            if (data && data.history) {
-                const ideas = data.history.flat();
-                IDEAS_DB = ideas.reduce((acc, idea) => {
-                    acc[idea.id] = idea;
-                    return acc;
-                }, {});
-                refreshPair();
+async function loadCurrentEvolution() {
+    try {
+        const response = await fetch('/api/generations');
+        if (response.ok) {
+            const generations = await response.json();
+            if (generations.length > 0) {
+                // Flatten all generations into a single array of ideas
+                const ideas = generations.flat().map(idea => ({
+                    ...idea,
+                    id: generateUUID(),
+                    elo: 1500
+                }));
+                await initializeRating(ideas);
             }
-        });
+        }
+    } catch (error) {
+        console.error('Error loading current evolution:', error);
+    }
 }
+
+async function loadEvolutions() {
+    const response = await fetch('/api/evolutions');
+    const evolutions = await response.json();
+
+    const select = document.getElementById('evolutionSelect');
+    select.innerHTML = '<option value="">Current Evolution</option>';
+
+    evolutions.forEach(evolution => {
+        const option = document.createElement('option');
+        option.value = evolution.id;
+        option.textContent = `Evolution from ${new Date(evolution.timestamp).toLocaleString()} - ${evolution.filename}`;
+        select.appendChild(option);
+    });
+}
+
+document.getElementById('evolutionSelect').addEventListener('change', async (e) => {
+    const evolutionId = e.target.value;
+    currentEvolutionId = evolutionId;
+
+    if (evolutionId) {
+        const response = await fetch(`/api/evolution/${evolutionId}`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.data && data.data.history) {
+                // Flatten all generations into a single array of ideas
+                const ideas = data.data.history.flat().map(idea => ({
+                    ...idea,
+                    id: idea.id || generateUUID()
+                }));
+                await initializeRating(ideas);
+            }
+        } else {
+            console.error('Failed to load evolution:', await response.text());
+        }
+    } else {
+        // Load current evolution
+        await loadCurrentEvolution();
+    }
+});

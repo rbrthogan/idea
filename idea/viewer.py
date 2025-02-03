@@ -61,12 +61,14 @@ class SaveEvolutionRequest(BaseModel):
 # --------------------------------------------------
 
 @app.get("/")
-def serve_index(request: Request):
-    """
-    Serves the main HTML page (via Jinja2). This page will load
-    Bootstrap and our custom script, which allows configuration.
-    """
+def serve_viewer(request: Request):
+    """Serves the viewer page"""
     return templates.TemplateResponse("viewer.html", {"request": request})
+
+@app.get("/rate")
+def serve_rater(request: Request):
+    """Serves the rater page"""
+    return templates.TemplateResponse("rater.html", {"request": request})
 
 @app.post("/api/start-evolution")
 async def start_evolution(request: Request):
@@ -222,6 +224,30 @@ async def get_evolution(request: Request, evolution_id: str):
                 })
 
         raise HTTPException(status_code=404, detail="Evolution not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/submit-rating")
+async def submit_rating(request: Request):
+    data = await request.json()
+    try:
+        # Process the rating and calculate new ELOs
+        k_factor = 32
+        idea_a_id = data['idea_a_id']
+        idea_b_id = data['idea_b_id']
+        outcome = data['outcome']
+
+        # Calculate ELO updates
+        # ... (implement ELO calculation logic here)
+
+        # Return the updated ELOs
+        return JSONResponse({
+            "status": "success",
+            "updated_elos": {
+                idea_a_id: new_elo_a,
+                idea_b_id: new_elo_b
+            }
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
