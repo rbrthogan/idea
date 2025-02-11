@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Type, Optional, Dict, Any, List
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
-
+import numpy as np
 from idea.models import Idea
 
 class LLMWrapper(ABC):
@@ -204,7 +204,12 @@ class Critic(LLMWrapper):
 
         result = self.generate_text(prompt)
         parsed_result = result.split("Worst Idea:")[1].strip()
-        return [ideas[i] for i in range(len(ideas)) if i != int(parsed_result) - 1]
+        try:
+            idea_index = int(parsed_result) - 1
+        except ValueError:
+            print(f"Invalid idea index: {parsed_result}")
+            idea_index = np.random.randint(0, len(ideas))
+        return [ideas[i] for i in range(len(ideas)) if i != idea_index]
 
 if __name__ == "__main__":
     import os

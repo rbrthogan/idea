@@ -5,6 +5,7 @@ let isEvolutionRunning = false;
 let currentContextIndex = 0;
 let contexts = [];
 let currentEvolutionId = null;
+let currentEvolutionData = null;
 
 document.addEventListener("DOMContentLoaded", () => {
     console.log("viewer.js loaded!");
@@ -273,20 +274,33 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
         if (response.ok) {
             const data = await response.json();
             if (data.data && data.data.history) {
+                // Clear existing content
+                document.getElementById('generations-container').innerHTML = '';
+
+                // Render the generations
                 renderGenerations(data.data.history);
+
                 // Update contexts if available
                 if (data.data.contexts) {
                     contexts = data.data.contexts;
                     currentContextIndex = 0;
                     updateContextDisplay();
+                    document.querySelector('.context-navigation').style.display = 'block';
                 }
+
+                // Enable download button
+                document.getElementById('downloadButton').disabled = false;
             }
         } else {
             console.error('Failed to load evolution:', await response.text());
         }
     } else {
-        // Load current evolution
-        loadCurrentEvolution();
+        // Clear display for current evolution
+        document.getElementById('generations-container').innerHTML = '';
+        document.getElementById('contextDisplay').innerHTML =
+            '<p class="text-muted">Context will appear here when evolution starts...</p>';
+        document.querySelector('.context-navigation').style.display = 'none';
+        document.getElementById('downloadButton').disabled = true;
     }
 });
 
@@ -297,3 +311,132 @@ async function loadCurrentEvolution() {
 
 // Call this when page loads
 loadEvolutions();
+
+async function pollProgress() {
+    try {
+        const response = await fetch('/api/progress');
+        const data = await response.json();
+
+        if (data.is_running) {
+            // Update UI with current progress
+            if (data.history && data.history.length > 0) {
+                renderGenerations(data.history);
+            }
+            if (data.contexts) {
+                contexts = data.contexts;
+                currentContextIndex = 0;
+                updateContextDisplay();
+                document.querySelector('.context-navigation').style.display = 'block';
+            }
+            // Continue polling
+            setTimeout(pollProgress, 1000);
+        } else if (data.history && data.history.length > 0) {
+            // Evolution complete - save final state and enable save button
+            currentEvolutionData = data;
+            renderGenerations(data.history);
+            document.getElementById('downloadButton').disabled = false;
+
+            // Show completion notification
+            const startButton = document.getElementById('startButton');
+            startButton.textContent = 'Evolution Complete!';
+            startButton.disabled = false;
+            setTimeout(() => {
+                startButton.textContent = 'Start Evolution';
+            }, 2000);
+        }
+    } catch (error) {
+        console.error('Error polling progress:', error);
+    }
+}
+
+function downloadResults() {
+    if (!currentEvolutionData) {
+        console.error('No evolution data available to save');
+        return;
+    }
+
+    const modal = new bootstrap.Modal(document.getElementById('saveDataModal'));
+    const defaultFilename = `evolution-results-${new Date().toISOString().replace(/:/g, '-')}.json`;
+    document.getElementById('saveFilename').value = defaultFilename;
+
+    document.getElementById('confirmSave').onclick = async () => {
+        const filename = document.getElementById('saveFilename').value;
+
+        try {
+            const response = await fetch('/api/save-evolution', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    data: currentEvolutionData,
+                    filename: filename
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+
+            // Show success feedback
+            const downloadButton = document.getElementById('downloadButton');
+            const originalText = downloadButton.textContent;
+            downloadButton.textContent = 'Saved!';
+            setTimeout(() => {
+                downloadButton.textContent = originalText;
+            }, 2000);
+
+            modal.hide();
+        } catch (error) {
+            console.error('Error saving file:', error);
+            alert('Error saving file: ' + error.message);
+        }
+    };
+
+    modal.show();
+}
+
+document.getElementById('startButton').addEventListener('click', async () => {
+    const button = document.getElementById('startButton');
+    button.disabled = true;
+    button.textContent = 'Running...';
+
+    // Reset state
+    currentEvolutionData = null;
+    document.getElementById('downloadButton').disabled = true;
+    document.getElementById('generations-container').innerHTML = '';
+
+    // Get configuration
+    const config = {
+        popSize: document.getElementById('popSize').value,
+        generations: document.getElementById('generations').value,
+        ideaType: document.getElementById('ideaType').value,
+        modelType: document.getElementById('modelType').value,
+        contextType: document.getElementById('contextType').value
+    };
+
+    try {
+        const response = await fetch('/api/start-evolution', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(config)
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to start evolution');
+        }
+
+        // Start polling for progress
+        pollProgress();
+    } catch (error) {
+        console.error('Error:', error);
+        button.disabled = false;
+        button.textContent = 'Start Evolution';
+        alert('Error starting evolution: ' + error.message);
+    }
+});
+
+// Add click handler for download button
+document.getElementById('downloadButton').addEventListener('click', downloadResults);
