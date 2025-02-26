@@ -6,6 +6,7 @@ let currentContextIndex = 0;
 let contexts = [];
 let currentEvolutionId = null;
 let currentEvolutionData = null;
+let generations = [];
 
 document.addEventListener("DOMContentLoaded", () => {
     console.log("viewer.js loaded!");
@@ -94,12 +95,18 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 });
 
-function renderGenerations(history) {
-    console.log("Starting renderGenerations with:", history);
+function renderGenerations(gens) {
+    generations = gens; // Store the generations globally
+    console.log("Received generations:", generations); // Debug log
+
+    if (!generations || generations.length === 0) {
+        console.warn("Received empty generations data");
+        return;
+    }
     const container = document.getElementById('generations-container');
     container.innerHTML = '';
 
-    history.forEach((generation, index) => {
+    generations.forEach((generation, index) => {
         const genDiv = document.createElement('div');
         genDiv.className = 'generation-section mb-4';
 
@@ -351,49 +358,28 @@ async function pollProgress() {
 
 function downloadResults() {
     if (!currentEvolutionData) {
-        console.error('No evolution data available to save');
+        console.warn("No evolution data available to save");
         return;
     }
 
-    const modal = new bootstrap.Modal(document.getElementById('saveDataModal'));
-    const defaultFilename = `evolution-results-${new Date().toISOString().replace(/:/g, '-')}.json`;
-    document.getElementById('saveFilename').value = defaultFilename;
-
-    document.getElementById('confirmSave').onclick = async () => {
-        const filename = document.getElementById('saveFilename').value;
-
-        try {
-            const response = await fetch('/api/save-evolution', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    data: currentEvolutionData,
-                    filename: filename
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error('Network response was not ok');
-            }
-
-            // Show success feedback
-            const downloadButton = document.getElementById('downloadButton');
-            const originalText = downloadButton.textContent;
-            downloadButton.textContent = 'Saved!';
-            setTimeout(() => {
-                downloadButton.textContent = originalText;
-            }, 2000);
-
-            modal.hide();
-        } catch (error) {
-            console.error('Error saving file:', error);
-            alert('Error saving file: ' + error.message);
-        }
+    // Ensure we have the data structure we need
+    const evolutionData = {
+        history: currentEvolutionData.history,
+        contexts: currentEvolutionData.contexts,
+        // Add any other relevant data you want to save
     };
 
-    modal.show();
+    // Create and trigger download
+    const dataStr = JSON.stringify(evolutionData);
+    const dataBlob = new Blob([dataStr], {type: 'application/json'});
+    const url = window.URL.createObjectURL(dataBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'evolution_results.json';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
 }
 
 document.getElementById('startButton').addEventListener('click', async () => {
@@ -439,4 +425,10 @@ document.getElementById('startButton').addEventListener('click', async () => {
 });
 
 // Add click handler for download button
-document.getElementById('downloadButton').addEventListener('click', downloadResults);
+document.getElementById('downloadButton').addEventListener('click', function() {
+    if (currentEvolutionData && currentEvolutionData.history && currentEvolutionData.history.length > 0) {
+        downloadResults();
+    } else {
+        console.warn("No evolution data available to save");
+    }
+});

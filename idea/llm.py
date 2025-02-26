@@ -82,7 +82,8 @@ class Ideator(LLMWrapper):
     AI_RESEARCH_PROMPT = """The above is some context to get you inspired.
     Using some or none of it for inspiration,
     suggest a promising area for novel research in AI (it can be a big idea, or a small idea, in any subdomain).
-    keep it concise and to the point but with enough detail for a researcher to critique it."""
+    keep it concise and to the point but with enough detail for a researcher to critique it.
+    Try have a sensible structure to the idea with markdown headings."""
 
     GAME_DESIGN_PROMPT = """You are a uniquely creative game designer.
     The above is some context to get you inspired.
@@ -90,7 +91,8 @@ class Ideator(LLMWrapper):
     suggest a new game design that is both interesting and fun to play.
     With key game mechanics and controls.
     The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
-    You should format your idea with enough specificity that a developer can implement it."""
+    You should format your idea with enough specificity that a developer can implement it.
+    Try have a sensible structure to the idea with markdown headings."""
 
     def __init__(self, **kwargs):
         self.idea_field_map = {
@@ -162,7 +164,8 @@ class Critic(LLMWrapper):
     {idea}
 
     Please consider the above proposal. Offer critical feedback.
-    Pointing out potential pitfalls as well as strengths.
+    Pointing out potential pitfalls as well as strengths. If the idea doesn't have a clear structure,
+    or sufficient detail, please suggest how to improve it and ask for elaboration of specific points of interest.
     No additional text, just the critique."""
 
     REFINE_PROMPT = """Current Idea:
@@ -172,7 +175,9 @@ class Critic(LLMWrapper):
 
     Please review both, consider your own opinion and create your own proposal.
     This could be a refinement of the original proposal or a fresh take on it.
-    No additional text, just the refined idea on its own."""
+    No additional text, just the refined idea on its own.
+    Try have a sensible structure to the idea with markdown headings.
+    It should be sufficient detailed to convey main idea to someone in the field."""
 
     def __init__(self, **kwargs):
         super().__init__(temperature=0.4, **kwargs)
@@ -196,6 +201,7 @@ class Critic(LLMWrapper):
         idea_str = "\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
         prompt = f"""You are an experienced reviewer and you are given a list of proposals.
         Please review the ideas and give a once sentence pro and con for each.
+        If an idea is unsufficiently detailed or lacks a clear structure this should count against it.
         After this, please give the idea that you think is the worst considering value, novelty, and feasibility.
         The ideas are:
         {idea_str}
