@@ -16,11 +16,14 @@ class LLMWrapper(ABC):
                  provider: str = "google_generative_ai",
                  model_name: str = "gemini-1.5-flash",
                  prompt_template: str = "",
-                 temperature: float = 0.7):
+                 temperature: float = 0.7,
+                 agent_name: str = ""):
         self.provider = provider
         self.model_name = model_name
         self.prompt_template = prompt_template
         self.temperature = temperature
+        self.total_token_count = 0
+        self.agent_name = agent_name
         self._setup_provider()
 
     def _setup_provider(self):
@@ -47,6 +50,8 @@ class LLMWrapper(ABC):
                 generation_config=config
             )
             response = model.generate_content(prompt, generation_config=config)
+            self.total_token_count += response.usage_metadata.total_token_count
+            print(f"Total tokens {self.agent_name}: {self.total_token_count}")
             return response.text if response.text else "No response."
         return "Not implemented"
 
@@ -66,6 +71,7 @@ class LLMWrapper(ABC):
 
 class Ideator(LLMWrapper):
     """Generates and manages ideas"""
+    agent_name = "Ideator"
     RANDOM_WORDS_PROMPT = """generate a list of 50 randomly choses english words.
     When generating each new reword, review what has come before
     and create a word that is as different as possible from the preceding set.
@@ -83,7 +89,7 @@ class Ideator(LLMWrapper):
     Using some or none of it for inspiration,
     suggest a promising area for novel research in AI (it can be a big idea, or a small idea, in any subdomain).
     keep it concise and to the point but with enough detail for a researcher to critique it.
-    Try have a sensible structure to the idea with markdown headings."""
+    The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate"""
 
     GAME_DESIGN_PROMPT = """You are a uniquely creative game designer.
     The above is some context to get you inspired.
@@ -92,14 +98,14 @@ class Ideator(LLMWrapper):
     With key game mechanics and controls.
     The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
     You should format your idea with enough specificity that a developer can implement it.
-    Try have a sensible structure to the idea with markdown headings."""
+     The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate"""
 
     def __init__(self, **kwargs):
         self.idea_field_map = {
             "airesearch": "AI Research",
             "game_design": "2D arcade game design"
         }
-        super().__init__(**kwargs)
+        super().__init__(agent_name=self.agent_name, **kwargs)
 
     def generate_context(self, method: str, field: str = None) -> str:
         """Generate initial context for ideation"""
@@ -140,16 +146,18 @@ class Ideator(LLMWrapper):
         Considering the above ideas please propose a new idea, that could be completely new
         and different from the ideas above or could combine ideas to create a new idea.
         Please avoid minor refinements of the ideas above, and instead propose a new idea
-        that is a significant departure."""
+        that is a significant departure.
+        The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate"""
         return self.generate_text(prompt, temperature=1.0)
 
 class Formatter(LLMWrapper):
     """Reformats unstructured ideas into a cleaner format"""
+    agent_name = "Formatter"
     DEFAULT_PROMPT = """Take the following idea and rewrite it in a clear,
-    structured format: {input_text}"""
+    structured format. The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate: {input_text}"""
 
     def __init__(self, **kwargs):
-        super().__init__(prompt_template=self.DEFAULT_PROMPT, temperature=0.3, **kwargs)
+        super().__init__(agent_name=self.agent_name, prompt_template=self.DEFAULT_PROMPT, temperature=0.3, **kwargs)
 
     def format_idea(self, raw_idea: str) -> str:
         prompt = self.prompt_template.format(input_text=raw_idea)
@@ -159,6 +167,8 @@ class Formatter(LLMWrapper):
 
 class Critic(LLMWrapper):
     """Analyzes and refines ideas"""
+    agent_name = "Critic"
+
     CRITIQUE_PROMPT = """You are a helpful AI that refines ideas.
     Current Idea:
     {idea}
@@ -180,7 +190,7 @@ class Critic(LLMWrapper):
     It should be sufficient detailed to convey main idea to someone in the field."""
 
     def __init__(self, **kwargs):
-        super().__init__(temperature=0.4, **kwargs)
+        super().__init__(agent_name=self.agent_name, temperature=0.4, **kwargs)
 
     def critique(self, idea: str) -> str:
         """Provide critique for an idea"""
