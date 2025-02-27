@@ -92,9 +92,175 @@ document.addEventListener("DOMContentLoaded", () => {
     const downloadButton = document.getElementById('downloadButton');
     if (downloadButton) {
         downloadButton.disabled = true;
+        downloadButton.addEventListener('click', function() {
+            console.log("Download button clicked");
+            // Create data object from current state
+            const currentData = {
+                history: generations,
+                contexts: contexts
+            };
+            downloadResults(currentData);
+        });
     }
 });
 
+// Improve the markdown rendering function with better newline handling
+function renderMarkdown(text) {
+    if (!text) return '';
+
+    // Normalize line endings
+    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    // Escape HTML to prevent XSS
+    text = text.replace(/&/g, '&amp;')
+               .replace(/</g, '&lt;')
+               .replace(/>/g, '&gt;');
+
+    // Process code blocks first
+    text = text.replace(/```([\s\S]*?)```/g, function(match, code) {
+        return '<pre><code>' + code.trim() + '</code></pre>';
+    });
+
+    // Process inline code
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Process headings - ensure they're at the start of a line
+    text = text.replace(/^(#{1,6})\s+(.*?)$/gm, function(match, hashes, content) {
+        const level = hashes.length;
+        return `<h${level}>${content.trim()}</h${level}>`;
+    });
+
+    // Process bold and italic
+    text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/\*(.*?)\*/g, '<em>$1</em>');
+    text = text.replace(/\_\_(.*?)\_\_/g, '<strong>$1</strong>');
+    text = text.replace(/\_(.*?)\_/g, '<em>$1</em>');
+
+    // Process lists - mark each list item
+    let lines = text.split('\n');
+    let inList = false;
+    let listType = null;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        // Unordered list items
+        if (/^\s*[\*\-]\s+/.test(line)) {
+            if (!inList || listType !== 'ul') {
+                lines[i] = inList ? '</ol><ul><li>' + line.replace(/^\s*[\*\-]\s+/, '') + '</li>' : '<ul><li>' + line.replace(/^\s*[\*\-]\s+/, '') + '</li>';
+                inList = true;
+                listType = 'ul';
+            } else {
+                lines[i] = '<li>' + line.replace(/^\s*[\*\-]\s+/, '') + '</li>';
+            }
+        }
+        // Ordered list items
+        else if (/^\s*\d+\.\s+/.test(line)) {
+            if (!inList || listType !== 'ol') {
+                lines[i] = inList ? '</ul><ol><li>' + line.replace(/^\s*\d+\.\s+/, '') + '</li>' : '<ol><li>' + line.replace(/^\s*\d+\.\s+/, '') + '</li>';
+                inList = true;
+                listType = 'ol';
+            } else {
+                lines[i] = '<li>' + line.replace(/^\s*\d+\.\s+/, '') + '</li>';
+            }
+        }
+        // Not a list item
+        else if (inList && line.trim() === '') {
+            lines[i] = listType === 'ul' ? '</ul>' : '</ol>';
+            inList = false;
+            listType = null;
+        }
+    }
+
+    // Close any open list
+    if (inList) {
+        lines.push(listType === 'ul' ? '</ul>' : '</ol>');
+    }
+
+    text = lines.join('\n');
+
+    // Process blockquotes
+    text = text.replace(/^>\s+(.*?)$/gm, '<blockquote>$1</blockquote>');
+
+    // Process links
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+    // Process paragraphs - any line that's not already a block element
+    lines = text.split('\n');
+    let inParagraph = false;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+
+        // Skip if line is empty or already a block element
+        if (line === '' ||
+            line.startsWith('<h') ||
+            line.startsWith('<ul') ||
+            line.startsWith('<ol') ||
+            line.startsWith('</ul') ||
+            line.startsWith('</ol') ||
+            line.startsWith('<li') ||
+            line.startsWith('<blockquote') ||
+            line.startsWith('<pre')) {
+
+            if (inParagraph) {
+                // Close the paragraph before this line
+                lines[i-1] += '</p>';
+                inParagraph = false;
+            }
+            continue;
+        }
+
+        // If not in paragraph, start one
+        if (!inParagraph) {
+            lines[i] = '<p>' + lines[i];
+            inParagraph = true;
+        } else if (i === lines.length - 1 || lines[i+1].trim() === '') {
+            // If this is the last line or next line is empty, close paragraph
+            lines[i] += '</p>';
+            inParagraph = false;
+        }
+    }
+
+    // Close any open paragraph
+    if (inParagraph) {
+        lines[lines.length - 1] += '</p>';
+    }
+
+    return lines.join('\n');
+}
+
+// Update the card preview function to better handle text
+function createCardPreview(text, maxLength = 150) {
+    if (!text) return '';
+
+    // Normalize line endings
+    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    // Strip markdown syntax for preview
+    let preview = text
+        .replace(/#{1,6}\s+/g, '') // Remove headings
+        .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold
+        .replace(/\*(.*?)\*/g, '$1') // Remove italic
+        .replace(/`{3}[\s\S]*?`{3}/g, '[Code Block]') // Replace code blocks
+        .replace(/`([^`]+)`/g, '$1') // Remove inline code
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1') // Replace links with just text
+        .replace(/^>+\s*/gm, '') // Remove blockquote markers
+        .replace(/^\s*[\*\-]\s+/gm, '• ') // Convert list markers to bullets
+        .replace(/^\s*\d+\.\s+/gm, '• '); // Convert numbered lists to bullets
+
+    // Replace multiple newlines with a single space
+    preview = preview.replace(/\n\s*\n/g, ' ').replace(/\n/g, ' ');
+
+    // Truncate to maxLength
+    if (preview.length > maxLength) {
+        preview = preview.substring(0, maxLength) + '...';
+    }
+
+    return preview;
+}
+
+// Update the renderGenerations function to use the improved preview
 function renderGenerations(gens) {
     generations = gens; // Store the generations globally
     console.log("Received generations:", generations); // Debug log
@@ -124,10 +290,17 @@ function renderGenerations(gens) {
         generation.forEach((idea, ideaIndex) => {
             const card = document.createElement('div');
             card.className = 'card gen-card';
+
+            // Create a plain text preview for the card
+            const plainPreview = createCardPreview(idea.proposal, 150);
+
             card.innerHTML = `
                 <div class="card-body">
                     <h5 class="card-title">${idea.title || 'Untitled'}</h5>
-                    <button class="btn btn-primary btn-sm view-idea">View</button>
+                    <div class="card-preview">
+                        <p>${plainPreview}</p>
+                    </div>
+                    <button class="btn btn-primary btn-sm view-idea">View Full Idea</button>
                 </div>
             `;
 
@@ -145,11 +318,37 @@ function renderGenerations(gens) {
     });
 }
 
+// Update the showIdeaModal function to ensure the modal is properly initialized
 function showIdeaModal(idea) {
-    const modal = new bootstrap.Modal(document.getElementById('ideaModal'));
-    document.getElementById('ideaModalLabel').textContent = idea.title;
-    document.getElementById('ideaModalContent').textContent = idea.proposal;
-    modal.show();
+    // Get the modal element
+    const modalElement = document.getElementById('ideaModal');
+
+    // Set the title
+    document.getElementById('ideaModalLabel').textContent = idea.title || 'Untitled';
+
+    // Render the markdown content
+    const modalContent = document.getElementById('ideaModalContent');
+
+    // For debugging
+    console.log("Rendering markdown for:", idea.proposal);
+
+    // Set the content
+    const renderedContent = renderMarkdown(idea.proposal || '');
+    modalContent.innerHTML = renderedContent;
+
+    // For debugging
+    console.log("Rendered content:", renderedContent);
+
+    // Initialize the modal if it hasn't been already
+    let modal;
+    if (window.bootstrap) {
+        modal = new bootstrap.Modal(modalElement);
+        modal.show();
+    } else {
+        console.error("Bootstrap is not available. Make sure it's properly loaded.");
+        // Fallback for testing - just make the modal visible
+        modalElement.style.display = 'block';
+    }
 }
 
 function updateContextDisplay() {
@@ -199,39 +398,51 @@ function updateContextDisplay() {
     }
 }
 
+// Replace the downloadResults function with a server-side save approach
 function downloadResults(data) {
+    console.log("Preparing to save results with data:", data);
+
+    if (!data || (!data.history && !generations)) {
+        console.warn("No evolution data available to save");
+        alert("No evolution data available to save");
+        return;
+    }
+
+    // Use either the passed data or the global generations
+    const evolutionData = {
+        history: data.history || generations,
+        contexts: data.contexts || contexts
+    };
+
+    // Show save modal with default filename
     const modal = new bootstrap.Modal(document.getElementById('saveDataModal'));
     const defaultFilename = `evolution-results-${new Date().toISOString().replace(/:/g, '-')}.json`;
     document.getElementById('saveFilename').value = defaultFilename;
 
+    // Set up the save button handler
     document.getElementById('confirmSave').onclick = async () => {
         const filename = document.getElementById('saveFilename').value;
-        const resultsData = {
-            history: data.history.map(generation =>
-                generation.map(idea => ({
-                    ...idea,
-                    id: generateUUID(),
-                    elo: 1500
-                }))
-            ),
-            contexts: contexts  // Add contexts to saved data
-        };
 
         try {
+            console.log("Sending data to server for saving...");
+
             const response = await fetch('/api/save-evolution', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    data: resultsData,
+                    data: evolutionData,
                     filename: filename
                 })
             });
 
             if (!response.ok) {
-                throw new Error('Network response was not ok');
+                throw new Error(await response.text() || 'Failed to save file on server');
             }
+
+            const result = await response.json();
+            console.log("Save successful:", result);
 
             // Show success feedback
             const downloadButton = document.getElementById('downloadButton');
@@ -242,9 +453,13 @@ function downloadResults(data) {
             }, 2000);
 
             modal.hide();
+
+            // Refresh the evolution list
+            loadEvolutions();
+
         } catch (error) {
-            console.error('Error saving file:', error);
-            alert('Error saving file: ' + error.message);
+            console.error("Error saving file:", error);
+            alert("Error saving file: " + error.message);
         }
     };
 
@@ -355,80 +570,3 @@ async function pollProgress() {
         console.error('Error polling progress:', error);
     }
 }
-
-function downloadResults() {
-    if (!currentEvolutionData) {
-        console.warn("No evolution data available to save");
-        return;
-    }
-
-    // Ensure we have the data structure we need
-    const evolutionData = {
-        history: currentEvolutionData.history,
-        contexts: currentEvolutionData.contexts,
-        // Add any other relevant data you want to save
-    };
-
-    // Create and trigger download
-    const dataStr = JSON.stringify(evolutionData);
-    const dataBlob = new Blob([dataStr], {type: 'application/json'});
-    const url = window.URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'evolution_results.json';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
-}
-
-document.getElementById('startButton').addEventListener('click', async () => {
-    const button = document.getElementById('startButton');
-    button.disabled = true;
-    button.textContent = 'Running...';
-
-    // Reset state
-    currentEvolutionData = null;
-    document.getElementById('downloadButton').disabled = true;
-    document.getElementById('generations-container').innerHTML = '';
-
-    // Get configuration
-    const config = {
-        popSize: document.getElementById('popSize').value,
-        generations: document.getElementById('generations').value,
-        ideaType: document.getElementById('ideaType').value,
-        modelType: document.getElementById('modelType').value,
-        contextType: document.getElementById('contextType').value
-    };
-
-    try {
-        const response = await fetch('/api/start-evolution', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(config)
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to start evolution');
-        }
-
-        // Start polling for progress
-        pollProgress();
-    } catch (error) {
-        console.error('Error:', error);
-        button.disabled = false;
-        button.textContent = 'Start Evolution';
-        alert('Error starting evolution: ' + error.message);
-    }
-});
-
-// Add click handler for download button
-document.getElementById('downloadButton').addEventListener('click', function() {
-    if (currentEvolutionData && currentEvolutionData.history && currentEvolutionData.history.length > 0) {
-        downloadResults();
-    } else {
-        console.warn("No evolution data available to save");
-    }
-});

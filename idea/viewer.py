@@ -251,6 +251,44 @@ async def submit_rating(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.route('/api/save-evolution', methods=['POST'])
+def save_evolution():
+    try:
+        data = request.json
+
+        # Get filename from request or generate default
+        filename = data.get('filename', '')
+        if not filename:
+            timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+            filename = f"evolution-results-{timestamp}.json"
+
+        # Ensure filename has .json extension
+        if not filename.endswith('.json'):
+            filename += '.json'
+
+        # Ensure the data directory exists
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+        os.makedirs(data_dir, exist_ok=True)
+
+        # Full path to save file
+        file_path = os.path.join(data_dir, filename)
+
+        # Save the data
+        with open(file_path, 'w') as f:
+            json.dump(data['data'], f, indent=2)
+
+        return jsonify({
+            'success': True,
+            'message': f'File saved as {filename}',
+            'path': file_path
+        })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 # Run the server
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
