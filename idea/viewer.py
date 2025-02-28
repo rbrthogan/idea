@@ -17,6 +17,8 @@ from datetime import datetime
 
 from idea.evolution import EvolutionEngine
 from idea.models import Idea
+from idea.llm import Critic
+from idea.config import LLM_MODELS, DEFAULT_MODEL
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -288,6 +290,130 @@ def save_evolution():
             'success': False,
             'error': str(e)
         }), 500
+
+@app.post("/api/auto-rate")
+async def auto_rate(request: Request):
+    """Automatically rate ideas using the Critic agent from llm.py"""
+    try:
+        data = await request.json()
+        num_comparisons = int(data.get('numComparisons', 10))
+        evolution_id = data.get('evolutionId')
+        model_id = data.get('modelId', DEFAULT_MODEL)
+        skip_save = data.get('skipSave', False)  # New parameter to skip saving for intermediate chunks
+
+        print(f"Starting auto-rating for evolution {evolution_id} with {num_comparisons} comparisons using model {model_id}")
+
+        # Validate model ID
+        valid_model_ids = [model["id"] for model in LLM_MODELS]
+        if model_id not in valid_model_ids:
+            return JSONResponse({
+                'status': 'error',
+                'message': f'Invalid model ID: {model_id}'
+            }, status_code=400)
+
+        # Load the evolution data
+        file_path = DATA_DIR / f"{evolution_id}.json"
+        if not file_path.exists():
+            print(f"Evolution file not found: {file_path}")
+            raise HTTPException(status_code=404, detail="Evolution not found")
+
+        with open(file_path) as f:
+            evolution_data = json.load(f)
+
+        # Extract all ideas from all generations with generation info
+        all_ideas = []
+        for gen_index, generation in enumerate(evolution_data.get('history', [])):
+            for idea in generation:
+                # Add an ID if not present
+                if 'id' not in idea:
+                    idea['id'] = f"idea_{len(all_ideas)}"
+                # Initialize Elo if not present
+                if 'elo' not in idea:
+                    idea['elo'] = 1500
+                # Add generation info
+                idea['generation'] = gen_index + 1
+                all_ideas.append(idea)
+
+        print(f"Found {len(all_ideas)} ideas to rate")
+
+        if len(all_ideas) < 2:
+            return JSONResponse({
+                'status': 'error',
+                'message': 'Not enough ideas to compare (minimum 2 required)'
+            }, status_code=400)
+
+        # Create a critic agent from llm.py with the specified model
+        critic = Critic(model_name=model_id)
+
+        # Perform the requested number of comparisons
+        results = []
+        for i in range(num_comparisons):
+            print(f"Comparison {i+1}/{num_comparisons}")
+
+            # Randomly select two different ideas
+            idea_a, idea_b = random.sample(all_ideas, 2)
+
+            print(f"Comparing idea {idea_a.get('id')} vs {idea_b.get('id')}")
+
+            # Use the critic to determine the winner
+            winner = critic.compare_ideas(idea_a, idea_b)
+            print(f"Winner: {winner}")
+
+            # Convert to outcome format (1 = A wins, 0 = B wins, 0.5 = tie)
+            if winner == "A":
+                outcome = 1
+            elif winner == "B":
+                outcome = 0
+            else:  # Tie
+                outcome = 0.5
+
+            # Calculate new Elos
+            k_factor = 32
+            expected_a = 1 / (1 + 10 ** ((idea_b['elo'] - idea_a['elo']) / 400))
+            expected_b = 1 / (1 + 10 ** ((idea_a['elo'] - idea_b['elo']) / 400))
+
+            idea_a['elo'] = round(idea_a['elo'] + k_factor * (outcome - expected_a))
+            idea_b['elo'] = round(idea_b['elo'] + k_factor * (1 - outcome - expected_b))
+
+            # Record the result
+            results.append({
+                'idea_a': idea_a.get('id', 'unknown'),
+                'idea_b': idea_b.get('id', 'unknown'),
+                'outcome': winner,
+                'new_elo_a': idea_a['elo'],
+                'new_elo_b': idea_b['elo']
+            })
+
+        print(f"Completed {len(results)} comparisons")
+
+        # Save the updated Elo scores back to the file (unless skipSave is True)
+        if not skip_save:
+            with open(file_path, 'w') as f:
+                json.dump(evolution_data, f, indent=2)
+
+        # Return the results with sorted ideas including generation info
+        return JSONResponse({
+            'status': 'success',
+            'results': results,
+            'ideas': sorted(all_ideas, key=lambda x: x['elo'], reverse=True)
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"Error in auto-rate: {e}")
+        print(traceback.format_exc())
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status_code=500)
+
+@app.get("/api/models")
+async def get_models():
+    """Return the list of available LLM models"""
+    return JSONResponse({
+        "models": LLM_MODELS,
+        "default": DEFAULT_MODEL
+    })
 
 # Run the server
 if __name__ == "__main__":

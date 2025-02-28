@@ -97,6 +97,8 @@ class Ideator(LLMWrapper):
     suggest a new game design that is both interesting and fun to play.
     With key game mechanics and controls.
     The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
+    The game complexity should similar in level to classic games like Breakout, Snake, Tetris, Pong, Pac-Man, Space Invaders, Frogger, Minesweeper, Tic Tac Toe, 2048, Wordle etc.
+    Avoid being derivative of these but limit the ambition to the level of complexity of these games.
     You should format your idea with enough specificity that a developer can implement it.
      The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate"""
 
@@ -226,6 +228,61 @@ class Critic(LLMWrapper):
             print(f"Invalid idea index: {parsed_result}")
             idea_index = np.random.randint(0, len(ideas))
         return [ideas[i] for i in range(len(ideas)) if i != idea_index]
+
+    def compare_ideas(self, idea_a, idea_b):
+        """
+        Compare two ideas using the LLM and determine which is better.
+        Returns: "A", "B", or "tie"
+        """
+        prompt = f"""You are an expert evaluator of ideas. You will be presented with two ideas, and your task is to determine which one is better.
+
+        Idea A:
+        Title: {idea_a.get('title', 'Untitled')}
+        {idea_a.get('proposal', '')}
+
+        Idea B:
+        Title: {idea_b.get('title', 'Untitled')}
+        {idea_b.get('proposal', '')}
+
+        Evaluate both ideas based on the following criteria:
+        1. Originality and novelty
+        2. Potential impact and significance
+        3. Feasibility and practicality
+        4. Clarity and coherence
+
+        Criterion 1 is the most important.
+
+        After your evaluation, respond with exactly one of these three options:
+        - "Result: A" if Idea A is better
+        - "Result: B" if Idea B is better
+        - "Result: tie" if both ideas are approximately equal in quality
+
+        Your response must contain exactly one of these three phrases and nothing else.
+        """
+
+        try:
+            response = self.generate_text(prompt, temperature=0.3)
+            result = response.strip().upper()
+
+            print(f"LLM comparison response: {result}")
+
+            # More robust parsing
+            if "RESULT: A" in result:
+                return "A"
+            elif "RESULT: B" in result:
+                return "B"
+            elif "RESULT: TIE" in result:
+                return "tie"
+            elif "A" in result and "B" not in result:
+                return "A"
+            elif "B" in result and "A" not in result:
+                return "B"
+            else:
+                return "tie"
+        except Exception as e:
+            print(f"Error in compare_ideas: {e}")
+            # Fallback to a simple heuristic
+            return "tie"
 
 if __name__ == "__main__":
     import os

@@ -95,6 +95,22 @@
 
             <hr>
 
+            <!-- Automated Rating Controls -->
+            <label class="form-label">Automated Rating</label>
+            <div class="mb-3">
+              <label for="numComparisons" class="form-label">Number of Comparisons</label>
+              <input type="number" class="form-control" id="numComparisons" value="10" min="1" max="100">
+            </div>
+            <div class="mb-3">
+              <label for="modelSelect" class="form-label">Model</label>
+              <select id="modelSelect" class="form-select">
+                <!-- Models will be populated here -->
+              </select>
+            </div>
+            <button id="startAutoRating" class="btn btn-outline-primary mb-3">Start Auto Rating</button>
+
+            <hr>
+
             <!-- Voting controls -->
             <label class="form-label">Vote</label>
             <button onclick="vote('A')" class="btn btn-primary">Vote for A</button>
@@ -112,7 +128,7 @@
               <div class="card">
                 <div class="card-body">
                   <h2 id="titleA" class="card-title"></h2>
-                  <p id="proposalA" class="card-text"></p>
+                  <div id="proposalA" class="card-text idea-content"></div>
                 </div>
               </div>
             </div>
@@ -121,13 +137,45 @@
               <div class="card">
                 <div class="card-body">
                   <h2 id="titleB" class="card-title"></h2>
-                  <p id="proposalB" class="card-text"></p>
+                  <div id="proposalB" class="card-text idea-content"></div>
                 </div>
               </div>
             </div>
           </div>
 
           <div id="results-container"></div>
+
+          <!-- Move the results display here -->
+          <div id="autoRatingResults" style="display: none;" class="mt-4">
+            <div class="card">
+              <div class="card-header">
+                <h5>Auto Rating Results</h5>
+              </div>
+              <div class="card-body">
+                <h6>Progress:</h6>
+                <div class="progress mb-2">
+                  <div class="progress-bar" id="ratingProgress" role="progressbar" style="width: 0%"></div>
+                </div>
+                <div id="ratingStats"></div>
+
+                <h6 class="mt-3">Idea Rankings:</h6>
+                <table class="table table-striped">
+                  <thead>
+                    <tr>
+                      <th>Rank</th>
+                      <th>Idea</th>
+                      <th>Elo</th>
+                      <th>Generation</th>
+                    </tr>
+                  </thead>
+                  <tbody id="rankingsTable">
+                  </tbody>
+                </table>
+
+                <button id="returnToComparison" class="btn btn-primary mt-3 w-100">Return to Comparison View</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -135,5 +183,23 @@
     <!-- Bootstrap JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="/static/js/rater.js"></script>
+
+    <!-- Add this modal at the end of the body, before the closing </body> tag -->
+    <div class="modal fade" id="ideaModal" tabindex="-1" aria-labelledby="ideaModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="ideaModalLabel">Idea Details</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="idea-content" id="modalIdeaContent"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </body>
 </html>
