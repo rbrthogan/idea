@@ -232,7 +232,7 @@ class Critic(LLMWrapper):
     def compare_ideas(self, idea_a, idea_b):
         """
         Compare two ideas using the LLM and determine which is better.
-        Returns: "A", "B", or "tie"
+        Returns: "A", "B", "tie", or None if there was an error
         """
         prompt = f"""You are an expert evaluator of ideas. You will be presented with two ideas, and your task is to determine which one is better.
 
@@ -281,8 +281,7 @@ class Critic(LLMWrapper):
                 return "tie"
         except Exception as e:
             print(f"Error in compare_ideas: {e}")
-            # Fallback to a simple heuristic
-            return "tie"
+            return None  # Return None instead of "tie" on error
 
 if __name__ == "__main__":
     import os

@@ -397,6 +397,11 @@ async def auto_rate(request: Request):
             winner = critic.compare_ideas(idea_a, idea_b)
             print(f"Winner: {winner}")
 
+            # Skip this comparison if there was an error (winner is None)
+            if winner is None:
+                print("Skipping this comparison due to an error")
+                continue
+
             # Convert to outcome format (1 = A wins, 0 = B wins, 0.5 = tie)
             if winner == "A":
                 outcome = 1
