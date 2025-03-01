@@ -231,65 +231,84 @@ async def get_evolution(request: Request, evolution_id: str):
 
 @app.post("/api/submit-rating")
 async def submit_rating(request: Request):
-    data = await request.json()
+    """Submit a manual rating for a pair of ideas"""
     try:
-        # Process the rating and calculate new ELOs
+        data = await request.json()
+        idea_a_id = data.get('idea_a_id')
+        idea_b_id = data.get('idea_b_id')
+        outcome = data.get('outcome')
+        evolution_id = data.get('evolution_id')
+
+        # Load the evolution data
+        file_path = DATA_DIR / f"{evolution_id}.json"
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Evolution not found")
+
+        with open(file_path) as f:
+            evolution_data = json.load(f)
+
+        # Find the ideas
+        idea_a = None
+        idea_b = None
+
+        for generation in evolution_data.get('history', []):
+            for idea in generation:
+                if idea.get('id') == idea_a_id:
+                    idea_a = idea
+                elif idea.get('id') == idea_b_id:
+                    idea_b = idea
+
+        if not idea_a or not idea_b:
+            raise HTTPException(status_code=404, detail="Ideas not found")
+
+        # Initialize ratings if not present
+        if 'ratings' not in idea_a:
+            idea_a['ratings'] = {'auto': 1500, 'manual': 1500}
+        elif isinstance(idea_a['ratings'], (int, float)):
+            old_elo = idea_a['ratings']
+            idea_a['ratings'] = {'auto': old_elo, 'manual': old_elo}
+
+        if 'ratings' not in idea_b:
+            idea_b['ratings'] = {'auto': 1500, 'manual': 1500}
+        elif isinstance(idea_b['ratings'], (int, float)):
+            old_elo = idea_b['ratings']
+            idea_b['ratings'] = {'auto': old_elo, 'manual': old_elo}
+
+        # Convert outcome to numeric value
+        if outcome == "A":
+            outcome_value = 1
+        elif outcome == "B":
+            outcome_value = 0
+        else:  # Tie
+            outcome_value = 0.5
+
+        # Calculate new Elos for manual ratings
         k_factor = 32
-        idea_a_id = data['idea_a_id']
-        idea_b_id = data['idea_b_id']
-        outcome = data['outcome']
+        expected_a = 1 / (1 + 10 ** ((idea_b['ratings']['manual'] - idea_a['ratings']['manual']) / 400))
+        expected_b = 1 / (1 + 10 ** ((idea_a['ratings']['manual'] - idea_b['ratings']['manual']) / 400))
 
-        # Calculate ELO updates
-        # ... (implement ELO calculation logic here)
+        idea_a['ratings']['manual'] = round(idea_a['ratings']['manual'] + k_factor * (outcome_value - expected_a))
+        idea_b['ratings']['manual'] = round(idea_b['ratings']['manual'] + k_factor * (1 - outcome_value - expected_b))
 
-        # Return the updated ELOs
+        # Save the updated data
+        with open(file_path, 'w') as f:
+            json.dump(evolution_data, f, indent=2)
+
+        # Return the updated ELO ratings
         return JSONResponse({
-            "status": "success",
-            "updated_elos": {
-                idea_a_id: new_elo_a,
-                idea_b_id: new_elo_b
+            'status': 'success',
+            'updated_elos': {
+                idea_a_id: idea_a['ratings']['manual'],
+                idea_b_id: idea_b['ratings']['manual']
             }
         })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.route('/api/save-evolution', methods=['POST'])
-def save_evolution():
-    try:
-        data = request.json
-
-        # Get filename from request or generate default
-        filename = data.get('filename', '')
-        if not filename:
-            timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-            filename = f"evolution-results-{timestamp}.json"
-
-        # Ensure filename has .json extension
-        if not filename.endswith('.json'):
-            filename += '.json'
-
-        # Ensure the data directory exists
-        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
-        os.makedirs(data_dir, exist_ok=True)
-
-        # Full path to save file
-        file_path = os.path.join(data_dir, filename)
-
-        # Save the data
-        with open(file_path, 'w') as f:
-            json.dump(data['data'], f, indent=2)
-
-        return jsonify({
-            'success': True,
-            'message': f'File saved as {filename}',
-            'path': file_path
-        })
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        print(f"Error submitting rating: {e}")
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status_code=500)
 
 @app.post("/api/auto-rate")
 async def auto_rate(request: Request):
@@ -299,7 +318,7 @@ async def auto_rate(request: Request):
         num_comparisons = int(data.get('numComparisons', 10))
         evolution_id = data.get('evolutionId')
         model_id = data.get('modelId', DEFAULT_MODEL)
-        skip_save = data.get('skipSave', False)  # New parameter to skip saving for intermediate chunks
+        skip_save = data.get('skipSave', False)
 
         print(f"Starting auto-rating for evolution {evolution_id} with {num_comparisons} comparisons using model {model_id}")
 
@@ -327,9 +346,28 @@ async def auto_rate(request: Request):
                 # Add an ID if not present
                 if 'id' not in idea:
                     idea['id'] = f"idea_{len(all_ideas)}"
-                # Initialize Elo if not present
-                if 'elo' not in idea:
-                    idea['elo'] = 1500
+
+                # Initialize ratings if not present
+                if 'ratings' not in idea:
+                    idea['ratings'] = {
+                        'auto': 1500,
+                        'manual': 1500
+                    }
+                elif isinstance(idea['ratings'], (int, float)):
+                    # Convert old format to new format
+                    old_elo = idea['ratings']
+                    idea['ratings'] = {
+                        'auto': old_elo,
+                        'manual': old_elo
+                    }
+                elif 'auto' not in idea['ratings']:
+                    idea['ratings']['auto'] = 1500
+                elif 'manual' not in idea['ratings']:
+                    idea['ratings']['manual'] = 1500
+
+                # For backward compatibility
+                idea['elo'] = idea['ratings']['auto']
+
                 # Add generation info
                 idea['generation'] = gen_index + 1
                 all_ideas.append(idea)
@@ -367,21 +405,25 @@ async def auto_rate(request: Request):
             else:  # Tie
                 outcome = 0.5
 
-            # Calculate new Elos
+            # Calculate new Elos for auto ratings
             k_factor = 32
-            expected_a = 1 / (1 + 10 ** ((idea_b['elo'] - idea_a['elo']) / 400))
-            expected_b = 1 / (1 + 10 ** ((idea_a['elo'] - idea_b['elo']) / 400))
+            expected_a = 1 / (1 + 10 ** ((idea_b['ratings']['auto'] - idea_a['ratings']['auto']) / 400))
+            expected_b = 1 / (1 + 10 ** ((idea_a['ratings']['auto'] - idea_b['ratings']['auto']) / 400))
 
-            idea_a['elo'] = round(idea_a['elo'] + k_factor * (outcome - expected_a))
-            idea_b['elo'] = round(idea_b['elo'] + k_factor * (1 - outcome - expected_b))
+            idea_a['ratings']['auto'] = round(idea_a['ratings']['auto'] + k_factor * (outcome - expected_a))
+            idea_b['ratings']['auto'] = round(idea_b['ratings']['auto'] + k_factor * (1 - outcome - expected_b))
+
+            # Update the elo field for backward compatibility
+            idea_a['elo'] = idea_a['ratings']['auto']
+            idea_b['elo'] = idea_b['ratings']['auto']
 
             # Record the result
             results.append({
                 'idea_a': idea_a.get('id', 'unknown'),
                 'idea_b': idea_b.get('id', 'unknown'),
                 'outcome': winner,
-                'new_elo_a': idea_a['elo'],
-                'new_elo_b': idea_b['elo']
+                'new_elo_a': idea_a['ratings']['auto'],
+                'new_elo_b': idea_b['ratings']['auto']
             })
 
         print(f"Completed {len(results)} comparisons")
@@ -395,7 +437,7 @@ async def auto_rate(request: Request):
         return JSONResponse({
             'status': 'success',
             'results': results,
-            'ideas': sorted(all_ideas, key=lambda x: x['elo'], reverse=True)
+            'ideas': sorted(all_ideas, key=lambda x: x['ratings']['auto'], reverse=True)
         })
 
     except Exception as e:
@@ -414,6 +456,56 @@ async def get_models():
         "models": LLM_MODELS,
         "default": DEFAULT_MODEL
     })
+
+@app.post("/api/reset-ratings")
+async def reset_ratings(request: Request):
+    """Reset ratings for an evolution"""
+    try:
+        data = await request.json()
+        evolution_id = data.get('evolutionId')
+        rating_type = data.get('ratingType', 'all')  # 'all', 'auto', or 'manual'
+
+        # Load the evolution data
+        file_path = DATA_DIR / f"{evolution_id}.json"
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Evolution not found")
+
+        with open(file_path) as f:
+            evolution_data = json.load(f)
+
+        # Reset ratings based on type
+        for generation in evolution_data.get('history', []):
+            for idea in generation:
+                # Initialize ratings object if needed
+                if 'ratings' not in idea:
+                    idea['ratings'] = {'auto': 1500, 'manual': 1500}
+                elif isinstance(idea['ratings'], (int, float)):
+                    old_elo = idea['ratings']
+                    idea['ratings'] = {'auto': old_elo, 'manual': old_elo}
+
+                # Reset the specified rating type(s)
+                if rating_type == 'all' or rating_type == 'auto':
+                    idea['ratings']['auto'] = 1500
+                    idea['elo'] = 1500  # For backward compatibility
+
+                if rating_type == 'all' or rating_type == 'manual':
+                    idea['ratings']['manual'] = 1500
+
+        # Save the updated data
+        with open(file_path, 'w') as f:
+            json.dump(evolution_data, f, indent=2)
+
+        return JSONResponse({
+            'status': 'success',
+            'message': f'{rating_type.capitalize()} ratings reset successfully'
+        })
+
+    except Exception as e:
+        print(f"Error resetting ratings: {e}")
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status_code=500)
 
 # Run the server
 if __name__ == "__main__":

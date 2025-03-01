@@ -88,34 +88,44 @@
             </select>
           </div>
 
+          <!-- Rating mode toggle -->
+          <div class="mb-3">
+            <label class="form-label">Rating Mode</label>
+            <div class="btn-group w-100" role="group">
+              <button id="manualModeBtn" type="button" class="btn btn-outline-primary active" onclick="toggleRatingMode('manual')">Manual</button>
+              <button id="autoModeBtn" type="button" class="btn btn-outline-primary" onclick="toggleRatingMode('auto')">Automated</button>
+            </div>
+          </div>
+
           <div class="controls-buttons">
             <button onclick="refreshPair()" class="btn btn-outline-primary">Next Pair</button>
             <button onclick="showRanking()" class="btn btn-outline-primary">Show Ranking</button>
-            <button onclick="showMeanElo()" class="btn btn-outline-primary">Show Mean ELO</button>
 
             <hr>
+
+            <!-- Manual Rating Controls -->
+            <div id="manualRatingControls">
+              <label class="form-label">Vote</label>
+              <button onclick="vote('A')" class="btn btn-primary w-100 mb-2">Vote for A</button>
+              <button onclick="vote('B')" class="btn btn-primary w-100 mb-2">Vote for B</button>
+              <button onclick="vote('tie')" class="btn btn-secondary w-100">Tie</button>
+            </div>
 
             <!-- Automated Rating Controls -->
-            <label class="form-label">Automated Rating</label>
-            <div class="mb-3">
-              <label for="numComparisons" class="form-label">Number of Comparisons</label>
-              <input type="number" class="form-control" id="numComparisons" value="10" min="1" max="100">
+            <div id="autoRatingControls" style="display: none;">
+              <label class="form-label">Automated Rating</label>
+              <div class="mb-3">
+                <label for="numComparisons" class="form-label">Number of Comparisons</label>
+                <input type="number" class="form-control" id="numComparisons" value="10" min="1" max="100">
+              </div>
+              <div class="mb-3">
+                <label for="modelSelect" class="form-label">Model</label>
+                <select id="modelSelect" class="form-select">
+                  <!-- Models will be populated here -->
+                </select>
+              </div>
+              <button id="startAutoRating" class="btn btn-primary w-100">Start Auto Rating</button>
             </div>
-            <div class="mb-3">
-              <label for="modelSelect" class="form-label">Model</label>
-              <select id="modelSelect" class="form-select">
-                <!-- Models will be populated here -->
-              </select>
-            </div>
-            <button id="startAutoRating" class="btn btn-outline-primary mb-3">Start Auto Rating</button>
-
-            <hr>
-
-            <!-- Voting controls -->
-            <label class="form-label">Vote</label>
-            <button onclick="vote('A')" class="btn btn-primary">Vote for A</button>
-            <button onclick="vote('B')" class="btn btn-primary">Vote for B</button>
-            <button onclick="vote('tie')" class="btn btn-secondary">Tie</button>
           </div>
         </div>
 
@@ -149,7 +159,27 @@
           <div id="autoRatingResults" style="display: none;" class="mt-4">
             <div class="card">
               <div class="card-header">
-                <h5>Auto Rating Results</h5>
+                <h5>Rating Results</h5>
+
+                <!-- Rating Type Controls -->
+                <div class="mb-3 mt-3">
+                  <label class="form-label">Rating Type</label>
+                  <div class="btn-group w-100" role="group">
+                    <button id="autoRatingTypeBtn" type="button" class="btn btn-outline-primary active" onclick="toggleRatingType('auto')">Auto</button>
+                    <button id="manualRatingTypeBtn" type="button" class="btn btn-outline-primary" onclick="toggleRatingType('manual')">Manual</button>
+                    <button id="diffRatingTypeBtn" type="button" class="btn btn-outline-primary" onclick="toggleRatingType('diff')">Diff</button>
+                  </div>
+                </div>
+
+                <!-- Reset Controls -->
+                <div class="mb-3">
+                  <label class="form-label">Reset Ratings</label>
+                  <div class="btn-group w-100" role="group">
+                    <button onclick="resetRatings('auto')" class="btn btn-outline-danger">Reset Auto</button>
+                    <button onclick="resetRatings('manual')" class="btn btn-outline-danger">Reset Manual</button>
+                    <button onclick="resetRatings('all')" class="btn btn-outline-danger">Reset All</button>
+                  </div>
+                </div>
               </div>
               <div class="card-body">
                 <h6>Progress:</h6>
@@ -171,6 +201,12 @@
                   <tbody id="rankingsTable">
                   </tbody>
                 </table>
+
+                <!-- Add this after the rankings table in the results card -->
+                <div class="mt-4">
+                  <h6>ELO Ratings by Generation:</h6>
+                  <canvas id="eloChart" width="400" height="200"></canvas>
+                </div>
 
                 <button id="returnToComparison" class="btn btn-primary mt-3 w-100">Return to Comparison View</button>
               </div>
@@ -201,5 +237,8 @@
         </div>
       </div>
     </div>
+
+    <!-- Add Chart.js library before the closing body tag -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   </body>
 </html>
