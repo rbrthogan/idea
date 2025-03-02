@@ -55,11 +55,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     if (data.history && Array.isArray(data.history)) {
                         renderGenerations(data.history);
                         updateContextDisplay();  // Update context display after loading new data
-                        // Enable download button
-                        const downloadButton = document.getElementById('downloadButton');
-                        downloadButton.disabled = false;
-                        downloadButton.textContent = 'Save Results';
-                        downloadButton.onclick = () => downloadResults(data);
+                        // Use our setup function instead of directly setting onclick
+                        setupDownloadButton(data);
                     } else {
                         console.error("Invalid history data:", data);
                     }
@@ -89,17 +86,26 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
-    const downloadButton = document.getElementById('downloadButton');
-    if (downloadButton) {
-        downloadButton.disabled = true;
-        downloadButton.addEventListener('click', function() {
+    // Function to set up the download button properly
+    function setupDownloadButton(data) {
+        console.log("Setting up download button with data:", data);
+        const downloadButton = document.getElementById('downloadButton');
+
+        if (!downloadButton) return;
+
+        // Remove all existing event listeners by cloning
+        const newButton = downloadButton.cloneNode(true);
+        downloadButton.parentNode.replaceChild(newButton, downloadButton);
+
+        // Enable the button
+        newButton.disabled = false;
+        newButton.textContent = 'Save Results';
+
+        // Add a single click handler
+        newButton.addEventListener('click', function(event) {
+            event.preventDefault();
             console.log("Download button clicked");
-            // Create data object from current state
-            const currentData = {
-                history: generations,
-                contexts: contexts
-            };
-            downloadResults(currentData);
+            downloadResults(data);
         });
     }
 });
@@ -398,72 +404,64 @@ function updateContextDisplay() {
     }
 }
 
-// Replace the downloadResults function with a server-side save approach
+// Clean implementation of downloadResults to prevent double-saving
 function downloadResults(data) {
-    console.log("Preparing to save results with data:", data);
+    console.log("Download function called with data:", data);
 
-    if (!data || (!data.history && !generations)) {
-        console.warn("No evolution data available to save");
-        alert("No evolution data available to save");
+    // Ensure we have valid data
+    if (!data || (!data.history && !data.contexts)) {
+        alert("No data available to save");
         return;
     }
 
-    // Use either the passed data or the global generations
-    const evolutionData = {
-        history: data.history || generations,
-        contexts: data.contexts || contexts
-    };
+    // Use browser's built-in prompt for simplicity
+    const filename = prompt("Enter filename to save:", `evolution_${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
 
-    // Show save modal with default filename
-    const modal = new bootstrap.Modal(document.getElementById('saveDataModal'));
-    const defaultFilename = `evolution-results-${new Date().toISOString().replace(/:/g, '-')}.json`;
-    document.getElementById('saveFilename').value = defaultFilename;
+    // Exit if user cancels
+    if (!filename) {
+        console.log("Save cancelled by user");
+        return;
+    }
 
-    // Set up the save button handler
-    document.getElementById('confirmSave').onclick = async () => {
-        const filename = document.getElementById('saveFilename').value;
+    console.log(`Saving to filename: ${filename}`);
 
-        try {
-            console.log("Sending data to server for saving...");
+    // Disable the download button to prevent double-clicks
+    const downloadButton = document.getElementById('downloadButton');
+    if (downloadButton) {
+        downloadButton.disabled = true;
+    }
 
-            const response = await fetch('/api/save-evolution', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    data: evolutionData,
-                    filename: filename
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(await response.text() || 'Failed to save file on server');
-            }
-
-            const result = await response.json();
-            console.log("Save successful:", result);
-
-            // Show success feedback
-            const downloadButton = document.getElementById('downloadButton');
-            const originalText = downloadButton.textContent;
-            downloadButton.textContent = 'Saved!';
-            setTimeout(() => {
-                downloadButton.textContent = originalText;
-            }, 2000);
-
-            modal.hide();
-
-            // Refresh the evolution list
-            loadEvolutions();
-
-        } catch (error) {
-            console.error("Error saving file:", error);
-            alert("Error saving file: " + error.message);
+    // Send to server
+    fetch('/api/save-evolution', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            data: data,
+            filename: filename
+        })
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error(`Save failed: ${response.status} ${response.statusText}`);
         }
-    };
-
-    modal.show();
+        return response.json();
+    })
+    .then(result => {
+        console.log("Save successful:", result);
+        alert('Save successful!');
+    })
+    .catch(error => {
+        console.error("Save error:", error);
+        alert(`Error saving: ${error.message}`);
+    })
+    .finally(() => {
+        // Re-enable the button
+        if (downloadButton) {
+            downloadButton.disabled = false;
+        }
+    });
 }
 
 function generateUUID() {
@@ -569,4 +567,188 @@ async function pollProgress() {
     } catch (error) {
         console.error('Error polling progress:', error);
     }
+}
+
+// Add debouncing to save operations
+function debounce(func, wait) {
+  let timeout;
+  return function(...args) {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func.apply(this, args), wait);
+  };
+}
+
+// Use debounced version of save function
+const debouncedSave = debounce(saveEvolution, 300);
+
+async function handleSave() {
+  // Show loading indicator
+  showLoadingIndicator();
+
+  try {
+    // Perform save operation
+    await saveEvolution();
+
+    // Update UI after save completes
+    updateUIAfterSave();
+  } catch (error) {
+    console.error("Save failed:", error);
+    showErrorMessage("Save failed. Please try again.");
+  } finally {
+    // Always hide loading indicator
+    hideLoadingIndicator();
+  }
+}
+
+// Add these utility functions for modal overlay management
+function showLoadingOverlay() {
+  const overlay = document.createElement('div');
+  overlay.id = 'loading-overlay';
+  overlay.style.position = 'fixed';
+  overlay.style.top = '0';
+  overlay.style.left = '0';
+  overlay.style.width = '100%';
+  overlay.style.height = '100%';
+  overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+  overlay.style.zIndex = '1000';
+  overlay.style.display = 'flex';
+  overlay.style.justifyContent = 'center';
+  overlay.style.alignItems = 'center';
+
+  const spinner = document.createElement('div');
+  spinner.className = 'spinner';
+  spinner.style.width = '50px';
+  spinner.style.height = '50px';
+  spinner.style.border = '5px solid #f3f3f3';
+  spinner.style.borderTop = '5px solid #3498db';
+  spinner.style.borderRadius = '50%';
+  spinner.style.animation = 'spin 1s linear infinite';
+
+  // Add keyframes for spinner animation
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  `;
+  document.head.appendChild(style);
+
+  overlay.appendChild(spinner);
+  document.body.appendChild(overlay);
+}
+
+function hideLoadingOverlay() {
+  const overlay = document.getElementById('loading-overlay');
+  if (overlay) {
+    document.body.removeChild(overlay);
+  }
+}
+
+// Replace the existing showLoadingIndicator and hideLoadingIndicator functions
+function showLoadingIndicator() {
+  showLoadingOverlay();
+  // Disable all interactive elements
+  document.querySelectorAll('button, input, select').forEach(el => {
+    el.dataset.wasDisabled = el.disabled;
+    el.disabled = true;
+  });
+}
+
+function hideLoadingIndicator() {
+  hideLoadingOverlay();
+  // Re-enable elements that weren't disabled before
+  document.querySelectorAll('button, input, select').forEach(el => {
+    if (el.dataset.wasDisabled !== 'true') {
+      el.disabled = false;
+    }
+    delete el.dataset.wasDisabled;
+  });
+}
+
+// Add a function to show error messages
+function showErrorMessage(message) {
+  const errorDiv = document.createElement('div');
+  errorDiv.className = 'error-message';
+  errorDiv.style.position = 'fixed';
+  errorDiv.style.top = '20px';
+  errorDiv.style.left = '50%';
+  errorDiv.style.transform = 'translateX(-50%)';
+  errorDiv.style.backgroundColor = '#f44336';
+  errorDiv.style.color = 'white';
+  errorDiv.style.padding = '15px';
+  errorDiv.style.borderRadius = '5px';
+  errorDiv.style.zIndex = '1001';
+  errorDiv.textContent = message;
+
+  document.body.appendChild(errorDiv);
+
+  // Remove after 3 seconds
+  setTimeout(() => {
+    if (document.body.contains(errorDiv)) {
+      document.body.removeChild(errorDiv);
+    }
+  }, 3000);
+}
+
+// Update the saveEvolution function to use the new overlay
+async function saveEvolution(data) {
+  showLoadingIndicator();
+
+  try {
+    // Get the filename from the UI or generate one
+    const filename = document.getElementById('saveFilename')?.value ||
+                     `evolution_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+
+    const response = await fetch('/api/save-evolution', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        data: data || currentEvolutionData,
+        filename: filename
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Save failed: ${response.statusText}`);
+    }
+
+    // Show success message
+    showSuccessMessage('Evolution saved successfully!');
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error saving evolution:', error);
+    showErrorMessage(`Save failed: ${error.message}`);
+    throw error;
+  } finally {
+    hideLoadingIndicator();
+  }
+}
+
+// Add a success message function
+function showSuccessMessage(message) {
+  const successDiv = document.createElement('div');
+  successDiv.className = 'success-message';
+  successDiv.style.position = 'fixed';
+  successDiv.style.top = '20px';
+  successDiv.style.left = '50%';
+  successDiv.style.transform = 'translateX(-50%)';
+  successDiv.style.backgroundColor = '#4CAF50';
+  successDiv.style.color = 'white';
+  successDiv.style.padding = '15px';
+  successDiv.style.borderRadius = '5px';
+  successDiv.style.zIndex = '1001';
+  successDiv.textContent = message;
+
+  document.body.appendChild(successDiv);
+
+  // Remove after 3 seconds
+  setTimeout(() => {
+    if (document.body.contains(successDiv)) {
+      document.body.removeChild(successDiv);
+    }
+  }, 3000);
 }

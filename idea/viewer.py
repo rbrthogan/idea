@@ -189,7 +189,13 @@ async def save_evolution(request: SaveEvolutionRequest):
             json.dump(request.data, f, indent=2)
         return JSONResponse({"status": "success"})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        print(f"Error saving evolution: {e}")
+        print(traceback.format_exc())
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
 
 @app.get('/api/evolutions')
 async def get_evolutions(request: Request):
