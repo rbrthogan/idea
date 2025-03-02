@@ -7,6 +7,7 @@ from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
 import numpy as np
 from idea.models import Idea
+from idea.prompts.loader import get_prompts, get_field_name
 
 class LLMWrapper(ABC):
     """Base class for LLM interactions"""
@@ -72,99 +73,31 @@ class LLMWrapper(ABC):
 class Ideator(LLMWrapper):
     """Generates and manages ideas"""
     agent_name = "Ideator"
-    # TODO: the context prompts often return very similar things. Create 1 large context prompt and split result among initial ideas
-    RANDOM_WORDS_PROMPT = """generate a list of 50 randomly choses english words.
-    When generating each new reword, review what has come before
-    and create a word that is as different as possible from the preceding set.
-    Return the list of words as a single string, separated by spaces with no other text."""
-
-    KEY_IDEAS_ELEMENTS_RESEARCH = """ You are a historian of innovation.
-    Please give 5 ideas that demonstrated crucial innovation in the field of {field}.
-    Write a very short description of each idea, no more than 20 words.
-    Finally, extract some of the key elements or concepts that are important to the idea without
-    giving away the idea itself. Keep them more general and abstract.
-    When finished, collect all the concepts/elements and return them as a comma separated list in the format:
-    CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>"""
-
-    KEY_IDEAS_ELEMENTS_GAME_DESIGN = """ You are a uniquely creative game designer.
-    Please give 5 simple game designs that demonstrated crucial innovation in the field of {field}.
-    Write a very short description of each game design, no more than 20 words.
-    Finally, extract some of the key elements or concepts that are important to the game design without
-    giving away the game design itself. Keep them more general and abstract.
-    When finished, collect all the concepts/elements and return them as a comma separated list in the format:
-    CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>"""
-
-    KEY_IDEAS_ELEMENTS_DRABBLE = """ You are a uniquely creative writer.
-    Please list 5 impactful short stories that had a lasting impact on the field of {field}.
-    Write a very short description of each story, no more than 20 words.
-    Finally, extract some of the key elements or concepts that are important to the story without
-    giving away the story itself. Keep them more general and abstract.
-    When finished, collect all the concepts/elements and return them as a comma separated list in the format:
-    CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>"""
-
-    AI_RESEARCH_PROMPT = """The above is some context to get you inspired.
-    Using some or none of it for inspiration,
-    suggest a promising area for novel research in AI (it can be a big idea, or a small idea, in any subdomain).
-    keep it concise and to the point but with enough detail for a researcher to critique it.
-    The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate"""
-
-    GAME_DESIGN_PROMPT = """You are a uniquely creative game designer.
-    The above is some context to get you inspired.
-    Using some or none of it for inspiration,
-    suggest a new game design that is both interesting and fun to play.
-    With key game mechanics and controls.
-    The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
-    The game complexity should similar in level to classic games like Breakout, Snake, Tetris, Pong, Pac-Man, Space Invaders, Frogger, Minesweeper, Tic Tac Toe, 2048, Wordle etc.
-    Avoid being derivative of these but limit the ambition to the level of complexity of these games.
-    You should format your idea with enough specificity that a developer can implement it.
-     The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate"""
-
-    DRABBLE_PROMPT = """Write a drabble - a complete story in exactly 100 words.
-
-    A drabble is a short work of fiction exactly 100 words in length (not including the title).
-    Despite its brevity, a drabble should tell a complete story with a beginning, middle, and end.
-
-    Your story will be judge on creativity, originality, and the ability to tell a complete story in 100 words.
-
-    Format your response as:
-    Title: [Your creative title]
-    Proposal: [Your 100-word story]
-    """
-
 
     def __init__(self, **kwargs):
-        self.idea_field_map = {
-            "airesearch": "AI Research",
-            "game_design": "2D arcade game design",
-            "drabble": "Creative writing"
-        }
         super().__init__(agent_name=self.agent_name, **kwargs)
 
-    def generate_context(self, method: str, field: str = None) -> str:
+    def generate_context(self, method: str, idea_type: str) -> str:
         """Generate initial context for ideation"""
+        prompts = get_prompts(idea_type)
+        field = get_field_name(idea_type)
+
         if method == "random_words":
-            return self.generate_text(self.RANDOM_WORDS_PROMPT, temperature=1.0)
+            return self.generate_text(prompts.RANDOM_WORDS_PROMPT, temperature=1.0)
         elif method == "key_ideas_elements":
-            if field == "AI Research":
-                text = self.generate_text(self.KEY_IDEAS_ELEMENTS_RESEARCH.format(field=field), temperature=1.0)
-            elif field == "2D arcade game design":
-                text = self.generate_text(self.KEY_IDEAS_ELEMENTS_GAME_DESIGN.format(field=field), temperature=1.0)
-            elif field == "Creative writing":
-                text = self.generate_text(self.KEY_IDEAS_ELEMENTS_DRABBLE.format(field=field), temperature=1.0)
-            else:
-                raise ValueError(f"Invalid field: {field}")
+            text = self.generate_text(prompts.KEY_IDEAS_ELEMENTS_PROMPT.format(field=field), temperature=1.0)
             return text.split("CONCEPTS:")[1].strip()
         raise ValueError(f"Invalid method: {method}")
 
     def get_idea_prompt(self, idea_type: str) -> str:
         """Get prompt template for specific idea type"""
-        if idea_type == "airesearch":
-            return self.AI_RESEARCH_PROMPT
-        elif idea_type == "game_design":
-            return self.GAME_DESIGN_PROMPT
-        elif idea_type == "drabble":
-            return self.DRABBLE_PROMPT
-        raise ValueError(f"Invalid idea type: {idea_type}")
+        prompts = get_prompts(idea_type)
+        return prompts.IDEA_PROMPT
+
+    def get_new_idea_prompt(self, idea_type: str) -> str:
+        """Get prompt template for generating a new idea"""
+        prompts = get_prompts(idea_type)
+        return prompts.NEW_IDEA_PROMPT
 
     def seed_ideas(self, n: int, context_type: str, idea_type: str) -> List[str]:
         """Generate n initial ideas"""
@@ -173,44 +106,30 @@ class Ideator(LLMWrapper):
         ideas = []
 
         for _ in tqdm(range(n), desc="Generating ideas"):
-            context = self.generate_context(context_type, self.idea_field_map[idea_type])
+            context = self.generate_context(context_type, idea_type)
             print(f"Context: {context}")
             prompt = f"{context}\nInstruction: {idea_prompt}"
             response = self.generate_text(prompt, temperature=1.0)
             ideas.append(response)
         return ideas
 
-    def generate_new_idea(self, ideas: List[str]) -> str:
-        # TODO: fix this for drabble
+    def generate_new_idea(self, ideas: List[str], idea_type: str) -> str:
         """Generate a new idea based on existing ones"""
-        idea_str = "\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
-        prompt = f"""You are an experienced researcher and you are given a list of proposals.
-        {idea_str}
-        Considering the above ideas please propose a new idea, that could be completely new
-        and different from the ideas above or could combine ideas to create a new idea.
-        Please avoid minor refinements of the ideas above, and instead propose a new idea
-        that is a significant departure.
-        The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate"""
+        current_ideas = "\n\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
+        prompt = self.get_new_idea_prompt(idea_type).format(current_ideas=current_ideas)
+        prompt = f"current ideas:\n{current_ideas}\n\n{prompt}"
         return self.generate_text(prompt, temperature=1.0)
 
 class Formatter(LLMWrapper):
     """Reformats unstructured ideas into a cleaner format"""
     agent_name = "Formatter"
-    DEFAULT_PROMPT = """Take the following idea and rewrite it in a clear,
-    structured format. The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate: {input_text}"""
-
-    DRABBLE_PROMPT = """Take the following idea and rewrite it in a clear,
-    structured format. With a title denoted by [Title:], and the story proposal denoted by [Proposal:]: {input_text}"""
 
     def __init__(self, **kwargs):
-        super().__init__(agent_name=self.agent_name, prompt_template=self.DEFAULT_PROMPT, temperature=0.3, **kwargs)
+        super().__init__(agent_name=self.agent_name, temperature=0.3, **kwargs)
 
     def format_idea(self, raw_idea: str, idea_type: str) -> str:
-        if idea_type == "drabble":
-            print(f"Formatting drabble: {raw_idea}")
-            prompt = self.DRABBLE_PROMPT.format(input_text=raw_idea)
-        else:
-            prompt = self.prompt_template.format(input_text=raw_idea)
+        prompts = get_prompts(idea_type)
+        prompt = prompts.FORMAT_PROMPT.format(input_text=raw_idea)
         response = self.generate_text(prompt, response_schema=Idea)
         idea = Idea(**json.loads(response))
         return idea
@@ -219,57 +138,35 @@ class Critic(LLMWrapper):
     """Analyzes and refines ideas"""
     agent_name = "Critic"
 
-    CRITIQUE_PROMPT = """You are a helpful AI that refines ideas.
-    Current Idea:
-    {idea}
-
-    Please consider the above proposal. Offer critical feedback.
-    Pointing out potential pitfalls as well as strengths. If the idea doesn't have a clear structure,
-    or sufficient detail, please suggest how to improve it and ask for elaboration of specific points of interest.
-    No additional text, just the critique."""
-
-    REFINE_PROMPT = """Current Idea:
-    {idea}
-
-    Critique: {critique}
-
-    Please review both, consider your own opinion and create your own proposal.
-    This could be a refinement of the original proposal or a fresh take on it.
-    No additional text, just the refined idea on its own.
-    Try have a sensible structure to the idea with markdown headings.
-    It should be sufficient detailed to convey main idea to someone in the field."""
-
     def __init__(self, **kwargs):
         super().__init__(agent_name=self.agent_name, temperature=0.4, **kwargs)
 
-    def critique(self, idea: str) -> str:
+    def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
-        prompt = self.CRITIQUE_PROMPT.format(idea=idea)
+        prompts = get_prompts(idea_type)
+        prompt = prompts.CRITIQUE_PROMPT.format(idea=idea)
         return self.generate_text(prompt)
 
-    def refine(self, idea: str) -> str:
+    def refine(self, idea: str, idea_type: str) -> str:
         """Refine an idea based on critique"""
-        critique = self.critique(idea)
-        prompt = self.REFINE_PROMPT.format(
+        critique = self.critique(idea, idea_type)
+        prompts = get_prompts(idea_type)
+        prompt = prompts.REFINE_PROMPT.format(
             idea=idea,
             critique=critique
         )
         return self.generate_text(prompt)
 
-    def remove_worst_idea(self, ideas: List[str]) -> List[str]:
+    def remove_worst_idea(self, ideas: List[str], idea_type: str) -> List[str]:
         """Identify and remove the worst idea from a list"""
         idea_str = "\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
-        prompt = f"""You are an experienced reviewer and you are given a list of proposals.
-        Please review the proposals and give a once sentence pro and con for each.
-        If a proposal is unsufficiently detailed or lacks a clear structure this should count against it.
-        After this, please give the proposal that you think is the worst considering value, novelty, and feasibility.
-        The proposals are:
-        {idea_str}
-        Please return the proposal that you think is the worst in the following format (with no other text following):
-        Worst Proposal: <proposal number>"""
-
+        prompts = get_prompts(idea_type)
+        prompt = prompts.REMOVE_WORST_IDEA_PROMPT.format(
+            ideas=idea_str,
+            criteria=", ".join(prompts.COMPARISON_CRITERIA)
+        )
         result = self.generate_text(prompt)
-        parsed_result = result.split("Worst Proposal:")[1].strip()
+        parsed_result = result.split("Worst Entry:")[1].strip()
         try:
             idea_index = int(parsed_result) - 1
         except ValueError:
@@ -278,21 +175,16 @@ class Critic(LLMWrapper):
         return [ideas[i] for i in range(len(ideas)) if i != idea_index]
 
     def compare_ideas(self, idea_a, idea_b, idea_type: str):
-        if idea_type == "drabble":
-            item_type = "stories"
-            criteria = ["creativity", "originality", "completeness", "impact"]
-        elif idea_type == "game_design":
-            item_type = "game designs"
-            criteria = ["originality and creativity", "simplicity", "fun factor", "feasability for simple standard browser implementation"]
-        elif idea_type == "airesearch":
-            item_type = "AI research proposals"
-            criteria = ["originality and novelty", "potential impact and significance", "feasibility and practicality", "clarity and coherence"]
-        else:
-            raise ValueError(f"Invalid idea type: {idea_type}")
-        f"""
-        Compare two {item_type} using the LLM and determine which is better.
+        """
+        Compare two ideas using the LLM and determine which is better.
         Returns: "A", "B", "tie", or None if there was an error
         """
+        prompts = get_prompts(idea_type)
+
+        # Get the item type from the prompt configuration
+        item_type = getattr(prompts, "ITEM_TYPE", "ideas")
+        criteria = prompts.COMPARISON_CRITERIA
+
         prompt = f"""You are an expert evaluator of {item_type}. You will be presented with two {item_type}, and your task is to determine which one is better.
 
         Idea A:

@@ -19,6 +19,7 @@ from idea.evolution import EvolutionEngine
 from idea.models import Idea
 from idea.llm import Critic
 from idea.config import LLM_MODELS, DEFAULT_MODEL
+from idea.prompts.loader import get_field_name
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -100,8 +101,8 @@ async def start_evolution(request: Request):
     # Generate contexts for each idea
     contexts = []
     for _ in range(pop_size):
-        context = engine.ideator.generate_context(context_type,
-            engine.ideator.idea_field_map.get(idea_type))
+        # Pass the idea_type directly, not the field name
+        context = engine.ideator.generate_context(context_type, idea_type)
         contexts.append(context)
 
     engine.run_evolution()

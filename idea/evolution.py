@@ -36,7 +36,7 @@ class EvolutionEngine:
         print("Generating initial population...")
         self.population = self.ideator.seed_ideas(self.pop_size, self.context_type, self.idea_type)
         print("Refining initial population...")
-        # self.population = [self.critic.refine(idea) for idea in self.population]
+        self.population = [self.critic.refine(idea, self.idea_type) for idea in self.population]
         print("Formatting initial population...")
         self.population = [self.formatter.format_idea(idea, self.idea_type) for idea in self.population]
         self.history.append(self.population)
@@ -52,15 +52,15 @@ class EvolutionEngine:
             # Process population in chunks
             for i in range(0, len(self.population), chunk_size):
                 group = self.population[i : i + chunk_size]
-                group = self.critic.remove_worst_idea(group)
-                new_idea = self.ideator.generate_new_idea(group)
+                group = self.critic.remove_worst_idea(group, self.idea_type)
+                new_idea = self.ideator.generate_new_idea(group, self.idea_type)
                 group.append(new_idea)
                 new_population.extend(group)
 
             # Update population with refined ideas
             print(f"Refining generation {gen + 1}...")
             self.population = new_population
-            # self.population = [self.critic.refine(idea) for idea in self.population]
+            # self.population = [self.critic.refine(idea, self.idea_type) for idea in self.population]
             self.population = [self.formatter.format_idea(idea, self.idea_type) for idea in self.population]
             self.history.append(self.population)
             print(f"Generation {gen + 1} complete. Population size: {len(self.population)}")
