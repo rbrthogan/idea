@@ -36,9 +36,9 @@ class EvolutionEngine:
         print("Generating initial population...")
         self.population = self.ideator.seed_ideas(self.pop_size, self.context_type, self.idea_type)
         print("Refining initial population...")
-        self.population = [self.critic.refine(idea) for idea in self.population]
+        # self.population = [self.critic.refine(idea) for idea in self.population]
         print("Formatting initial population...")
-        self.population = [self.formatter.format_idea(idea) for idea in self.population]
+        self.population = [self.formatter.format_idea(idea, self.idea_type) for idea in self.population]
         self.history.append(self.population)
         print(f"Initial population size: {len(self.population)}")
 
@@ -61,7 +61,7 @@ class EvolutionEngine:
             print(f"Refining generation {gen + 1}...")
             self.population = new_population
             # self.population = [self.critic.refine(idea) for idea in self.population]
-            self.population = [self.formatter.format_idea(idea) for idea in self.population]
+            self.population = [self.formatter.format_idea(idea, self.idea_type) for idea in self.population]
             self.history.append(self.population)
             print(f"Generation {gen + 1} complete. Population size: {len(self.population)}")
 

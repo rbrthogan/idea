@@ -320,6 +320,9 @@ async def auto_rate(request: Request):
         model_id = data.get('modelId', DEFAULT_MODEL)
         skip_save = data.get('skipSave', False)
 
+        # Get idea_type from the request or use a default
+        idea_type = data.get('ideaType', 'airesearch')
+
         print(f"Starting auto-rating for evolution {evolution_id} with {num_comparisons} comparisons using model {model_id}")
 
         # Validate model ID
@@ -338,6 +341,10 @@ async def auto_rate(request: Request):
 
         with open(file_path) as f:
             evolution_data = json.load(f)
+
+        # Try to extract idea_type from the evolution data if not provided in request
+        if 'idea_type' in evolution_data and not idea_type:
+            idea_type = evolution_data.get('idea_type', 'airesearch')
 
         # Extract all ideas from all generations with generation info
         all_ideas = []
@@ -393,8 +400,8 @@ async def auto_rate(request: Request):
 
             print(f"Comparing idea {idea_a.get('id')} vs {idea_b.get('id')}")
 
-            # Use the critic to determine the winner
-            winner = critic.compare_ideas(idea_a, idea_b)
+            # Use the critic to determine the winner - pass the idea_type parameter
+            winner = critic.compare_ideas(idea_a, idea_b, idea_type)
             print(f"Winner: {winner}")
 
             # Skip this comparison if there was an error (winner is None)
