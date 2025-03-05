@@ -66,11 +66,16 @@ COMPARISON_CRITERIA = [
     "clarity and coherence"
 ]
 
-REMOVE_WORST_IDEA_PROMPT = """You are an experienced researcher and you are given a list of proposals.
-Please review the proposals and give a once sentence pro and con for each.
-If a proposal is unsufficiently detailed or lacks a clear structure this should count against it.
-After this, please give the proposal that you think is the worst considering {criteria}.
-The proposals are:
+
+BREED_PROMPT = """
 {ideas}
-Please return the proposal that you think is the worst in the following format (with no other text following):
-Worst Entry: <proposal number>"""
+You are an experienced ai researcher and you are given the above research proposals.
+These proposals received good feedback but were unable to be selected for funding. Your task it to create a new proposal that is better.
+This can be a combination of the best elements of the existing proposals, a refinement of the existing proposals or a completely new one that you were inspired to create.
+
+Importantly you will be judged on originality of the new propos so need to make sure you bring something new to the table.
+Think outside the box and be creative.
+
+Format your response as:
+Title: [Your creative title]
+Proposal: [Your 100-word story]"""

@@ -332,14 +332,6 @@ async def auto_rate(request: Request):
 
         print(f"Starting auto-rating for evolution {evolution_id} with {num_comparisons} comparisons using model {model_id}")
 
-        # Validate model ID
-        valid_model_ids = [model["id"] for model in LLM_MODELS]
-        if model_id not in valid_model_ids:
-            return JSONResponse({
-                'status': 'error',
-                'message': f'Invalid model ID: {model_id}'
-            }, status_code=400)
-
         # Load the evolution data
         file_path = DATA_DIR / f"{evolution_id}.json"
         if not file_path.exists():
@@ -353,13 +345,19 @@ async def auto_rate(request: Request):
         if 'idea_type' in evolution_data and not idea_type:
             idea_type = evolution_data.get('idea_type', 'airesearch')
 
+        # Create a mapping from idea ID to its location in the evolution_data structure
+        idea_map = {}
+
         # Extract all ideas from all generations with generation info
         all_ideas = []
         for gen_index, generation in enumerate(evolution_data.get('history', [])):
-            for idea in generation:
+            for idea_index, idea in enumerate(generation):
                 # Add an ID if not present
                 if 'id' not in idea:
                     idea['id'] = f"idea_{len(all_ideas)}"
+
+                # Store the location of this idea in the evolution_data structure
+                idea_map[idea['id']] = (gen_index, idea_index)
 
                 # Initialize ratings if not present
                 if 'ratings' not in idea:
@@ -436,6 +434,17 @@ async def auto_rate(request: Request):
             idea_a['elo'] = idea_a['ratings']['auto']
             idea_b['elo'] = idea_b['ratings']['auto']
 
+            # Update the original ideas in the evolution_data structure
+            if idea_a['id'] in idea_map:
+                gen_idx, idea_idx = idea_map[idea_a['id']]
+                evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_a['ratings']
+                evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_a['elo']
+
+            if idea_b['id'] in idea_map:
+                gen_idx, idea_idx = idea_map[idea_b['id']]
+                evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_b['ratings']
+                evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_b['elo']
+
             # Record the result
             results.append({
                 'idea_a': idea_a.get('id', 'unknown'),
@@ -445,9 +454,15 @@ async def auto_rate(request: Request):
                 'new_elo_b': idea_b['ratings']['auto']
             })
 
+            # Save after every 5 comparisons to ensure progress is not lost
+            if (i + 1) % 5 == 0 and not skip_save:
+                with open(file_path, 'w') as f:
+                    json.dump(evolution_data, f, indent=2)
+                print(f"Saved progress after {i + 1} comparisons")
+
         print(f"Completed {len(results)} comparisons")
 
-        # Save the updated Elo scores back to the file (unless skipSave is True)
+        # Save the final updated Elo scores back to the file (unless skipSave is True)
         if not skip_save:
             with open(file_path, 'w') as f:
                 json.dump(evolution_data, f, indent=2)

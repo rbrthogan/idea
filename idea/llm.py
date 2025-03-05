@@ -1,4 +1,5 @@
 from abc import ABC
+import random
 import google.generativeai as genai
 import json
 from pydantic import BaseModel
@@ -83,11 +84,16 @@ class Ideator(LLMWrapper):
         field = get_field_name(idea_type)
 
         if method == "random_words":
-            return self.generate_text(prompts.RANDOM_WORDS_PROMPT, temperature=1.0)
+            context_text = self.generate_text(prompts.RANDOM_WORDS_PROMPT, temperature=2.0)
         elif method == "key_ideas_elements":
-            text = self.generate_text(prompts.KEY_IDEAS_ELEMENTS_PROMPT.format(field=field), temperature=1.0)
-            return text.split("CONCEPTS:")[1].strip()
-        raise ValueError(f"Invalid method: {method}")
+            text = self.generate_text(prompts.KEY_IDEAS_ELEMENTS_PROMPT.format(field=field), temperature=2.0)
+            print(f"Text: {text}")
+            context_text = text.split("CONCEPTS:")[1].strip()
+        else:
+            raise ValueError(f"Invalid method: {method}")
+        #sample 10% of the words
+        words = [word.strip() for word in context_text.split(',')]
+        return ", ".join(random.sample(words, max(1, int(len(words) * 0.1))))
 
     def get_idea_prompt(self, idea_type: str) -> str:
         """Get prompt template for specific idea type"""
@@ -109,7 +115,7 @@ class Ideator(LLMWrapper):
             context = self.generate_context(context_type, idea_type)
             print(f"Context: {context}")
             prompt = f"{context}\nInstruction: {idea_prompt}"
-            response = self.generate_text(prompt, temperature=1.0)
+            response = self.generate_text(prompt, temperature=1.5)
             ideas.append(response)
         return ideas
 
@@ -139,7 +145,7 @@ class Critic(LLMWrapper):
     agent_name = "Critic"
 
     def __init__(self, **kwargs):
-        super().__init__(agent_name=self.agent_name, temperature=0.4, **kwargs)
+        super().__init__(agent_name=self.agent_name, temperature=0.7, **kwargs)
 
     def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
@@ -156,6 +162,44 @@ class Critic(LLMWrapper):
             critique=critique
         )
         return self.generate_text(prompt)
+
+    def _elo_update(self, elo_a, elo_b, winner):
+        """Update the Elo rating of an idea"""
+        k = 32
+        expected_a = 1 / (1 + 10 ** ((elo_b - elo_a) / 400))
+        expected_b = 1 / (1 + 10 ** ((elo_a - elo_b) / 400))
+
+        if winner == "A":
+            elo_a = elo_a + k * (1 - expected_a)
+            elo_b = elo_b + k * (0 - expected_b)
+        elif winner == "B":
+            elo_a = elo_a + k * (0 - expected_a)
+            elo_b = elo_b + k * (1 - expected_b)
+        else:
+            elo_a = elo_a + k * (0.5 - expected_a)
+            elo_b = elo_b + k * (0.5 - expected_b)
+
+        return elo_a, elo_b
+
+    def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int) -> dict:
+        """Get the tournament rank of an idea"""
+
+        ranks = {i: 1500 for i in range(len(ideas))}
+        for k in range(comparisons):
+            if k < len(ideas):
+                # assert that each idea is one side of the comparison at least once
+                idea_idx_a = k
+                # Create a list of valid indices excluding idea_idx_a
+                valid_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
+                idea_idx_b = np.random.choice(valid_indices, size=1)[0]
+            else:
+                idea_idx_a, idea_idx_b = np.random.choice(len(ideas), size=2, replace=False)
+            winner = self.compare_ideas(ideas[idea_idx_a].dict(), ideas[idea_idx_b].dict(), idea_type)
+            elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
+            ranks[idea_idx_a] = elo_a
+            ranks[idea_idx_b] = elo_b
+
+        return ranks
 
     def remove_worst_idea(self, ideas: List[str], idea_type: str) -> List[str]:
         """Identify and remove the worst idea from a list"""
@@ -257,3 +301,24 @@ if __name__ == "__main__":
     )
 
     print(response.json())
+
+
+class Breeder(LLMWrapper):
+    """Breeds ideas"""
+    agent_name = "Breeder"
+    parent_count = 2
+
+    def __init__(self, **kwargs):
+        super().__init__(agent_name=self.agent_name, temperature=1.0, **kwargs)
+
+    def breed(self, ideas: List[str], idea_type: str) -> str:
+        """Breed two ideas"""
+        prompt = self.get_breed_prompt(idea_type)
+        return self.generate_text(prompt)
+
+    def get_breed_prompt(self, idea_type: str) -> str:
+        """Get prompt template for breeding ideas"""
+        prompts = get_prompts(idea_type)
+        return prompts.BREED_PROMPT
+
+    # TODO: and a method to convert idea Phenotype to Genotype (basic components used in breeding)
