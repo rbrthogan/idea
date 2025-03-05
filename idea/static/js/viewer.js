@@ -21,9 +21,10 @@ document.addEventListener("DOMContentLoaded", () => {
             const modelType = document.getElementById('modelType').value;
             const contextType = document.getElementById('contextType').value;
 
-            // Clear previous results
-            const container = document.getElementById('generations-container');
-            container.innerHTML = '';
+            // Reset UI state
+            resetUIState();
+
+            // Disable start button
             startButton.disabled = true;
             startButton.textContent = 'Running...';
 
@@ -54,20 +55,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
                     // Create progress bar container if it doesn't exist
                     if (!document.getElementById('progress-container')) {
-                        const progressContainer = document.createElement('div');
-                        progressContainer.id = 'progress-container';
-                        progressContainer.className = 'mb-4';
-                        progressContainer.innerHTML = `
-                            <div class="progress">
-                                <div id="evolution-progress" class="progress-bar" role="progressbar"
-                                     style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
-                            </div>
-                            <div id="progress-status" class="text-center mt-2">Starting evolution...</div>
-                        `;
-
-                        // Insert progress bar before generations container
-                        const generationsContainer = document.getElementById('generations-container');
-                        generationsContainer.parentNode.insertBefore(progressContainer, generationsContainer);
+                        createProgressBar();
                     }
 
                     // Start polling for updates
@@ -77,9 +65,13 @@ document.addEventListener("DOMContentLoaded", () => {
                     updateContextDisplay();  // Update context display after loading new data
                 } else {
                     console.error("Failed to run evolution:", await response.text());
+                    startButton.disabled = false;
+                    startButton.textContent = 'Start Evolution';
                 }
             } catch (error) {
                 console.error("Error running evolution:", error);
+                startButton.disabled = false;
+                startButton.textContent = 'Start Evolution';
             }
         };
     }
@@ -583,6 +575,16 @@ async function pollProgress() {
         const data = await response.json();
         console.log("Progress update:", data); // Add logging to see what's coming from the server
 
+        // Check if this is a new evolution (history is empty but is_running is true)
+        if (data.is_running && (!data.history || data.history.length === 0)) {
+            console.log("New evolution detected, resetting UI");
+            // Reset generations display but keep progress bar
+            const container = document.getElementById('generations-container');
+            if (container) {
+                container.innerHTML = '';
+            }
+        }
+
         // Update progress bar
         const progressBar = document.getElementById('evolution-progress');
         const progressStatus = document.getElementById('progress-status');
@@ -606,7 +608,7 @@ async function pollProgress() {
             renderGenerations(data.history);
         }
 
-        if (data.contexts && (!contexts || contexts.length === 0)) {
+        if (data.contexts && data.contexts.length > 0) {
             contexts = data.contexts;
             currentContextIndex = 0;
             updateContextDisplay();
@@ -832,4 +834,70 @@ function showSuccessMessage(message) {
       document.body.removeChild(successDiv);
     }
   }, 3000);
+}
+
+// Function to reset the UI state
+function resetUIState() {
+    // Clear generations container
+    const container = document.getElementById('generations-container');
+    if (container) {
+        container.innerHTML = '';
+    }
+
+    // Reset contexts
+    contexts = [];
+    currentContextIndex = 0;
+
+    // Reset context display
+    const contextDisplay = document.getElementById('contextDisplay');
+    if (contextDisplay) {
+        contextDisplay.innerHTML = '<p class="text-muted">Context will appear here when evolution starts...</p>';
+    }
+
+    // Hide context navigation
+    const contextNav = document.querySelector('.context-navigation');
+    if (contextNav) {
+        contextNav.style.display = 'none';
+    }
+
+    // Reset progress bar if it exists
+    const progressBar = document.getElementById('evolution-progress');
+    const progressStatus = document.getElementById('progress-status');
+    if (progressBar && progressStatus) {
+        progressBar.style.width = '0%';
+        progressBar.setAttribute('aria-valuenow', 0);
+        progressBar.textContent = '0%';
+        progressStatus.textContent = 'Starting evolution...';
+    } else {
+        // Create progress bar if it doesn't exist
+        createProgressBar();
+    }
+
+    // Reset evolution status
+    isEvolutionRunning = false;
+    currentEvolutionData = null;
+
+    // Disable download button
+    const downloadButton = document.getElementById('downloadButton');
+    if (downloadButton) {
+        downloadButton.disabled = true;
+    }
+}
+
+// Function to create the progress bar
+function createProgressBar() {
+    const progressContainer = document.createElement('div');
+    progressContainer.id = 'progress-container';
+    progressContainer.className = 'mb-4';
+    progressContainer.innerHTML = `
+        <div class="progress">
+            <div id="evolution-progress" class="progress-bar" role="progressbar"
+                 style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+        </div>
+        <div id="progress-status" class="text-center mt-2">Starting evolution...</div>
+    `;
+
+    // Insert progress bar before generations container
+    const generationsContainer = document.getElementById('generations-container');
+    generationsContainer.parentNode.insertBefore(progressContainer, generationsContainer);
 }

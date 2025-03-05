@@ -86,7 +86,8 @@ COMPARISON_CRITERIA = [
     "originality",
     "completeness",
     "impact",
-    "adherence to the drabble format (an actual 100 word story - not a description of a story or a review of a story)"
+    "adherence to the drabble format (an actual 100 word story - not a description of a story or a review of a story)",
+    "avoiding cliché, tropes, or overused words, characters, phrases, concepts, etc."
 ]
 
 BREED_PROMPT = """
