@@ -14,6 +14,7 @@ import json
 from pydantic import BaseModel
 from flask import jsonify
 from datetime import datetime
+import numpy as np
 
 from idea.evolution import EvolutionEngine
 from idea.models import Idea
@@ -78,7 +79,7 @@ async def start_evolution(request: Request):
     """
     Runs the complete evolution and returns the final results
     """
-    global engine
+    global engine, evolution_status
     data = await request.json()
     pop_size = int(data.get('popSize', 3))
     generations = int(data.get('generations', 2))
@@ -105,17 +106,155 @@ async def start_evolution(request: Request):
         context = engine.ideator.generate_context(context_type, idea_type)
         contexts.append(context)
 
-    engine.run_evolution()
+    # Set up evolution status
+    evolution_status = {
+        "current_generation": 0,
+        "total_generations": generations,
+        "is_running": True,
+        "history": [],
+        "contexts": contexts,
+        "progress": 0
+    }
 
-    # Convert results to JSON-serializable format
-    history = [[idea_to_dict(idea) for idea in generation]
-              for generation in engine.history]
+    # Start evolution in background task
+    asyncio.create_task(run_evolution_with_updates(engine, contexts))
 
     return JSONResponse({
         "status": "success",
-        "history": history,
+        "message": "Evolution started",
         "contexts": contexts
     })
+
+async def run_evolution_with_updates(engine, contexts):
+    """Run evolution in background with progress updates"""
+    global evolution_status, evolution_queue
+
+    try:
+        # Seed the initial population
+        print("Generating initial population (Generation 0)...")
+        engine.population = engine.ideator.seed_ideas(engine.pop_size, engine.context_type, engine.idea_type)
+
+        # Process and update each idea as it's completed
+        print("Refining initial population...")
+        for i, idea in enumerate(engine.population):
+            refined_idea = engine.critic.refine(idea, engine.idea_type)
+            formatted_idea = engine.formatter.format_idea(refined_idea, engine.idea_type)
+            engine.population[i] = formatted_idea
+
+            # Update progress
+            current_history = [[idea_to_dict(idea) for idea in engine.population[:i+1]]]
+            evolution_status = {
+                "current_generation": 0,
+                "total_generations": engine.generations,
+                "is_running": True,
+                "history": current_history,
+                "contexts": contexts,
+                "progress": (i + 1) / (engine.pop_size * (engine.generations + 1)) * 100
+            }
+
+            # Put the update in the queue and ensure it's not blocking
+            while not evolution_queue.empty():
+                try:
+                    evolution_queue.get_nowait()
+                except:
+                    break
+            await evolution_queue.put(evolution_status)
+            print(f"Updated progress: Gen 0 (Initial), Idea {i+1}/{engine.pop_size}, Progress: {evolution_status['progress']:.2f}%")
+
+            # Small delay to allow frontend to process updates
+            await asyncio.sleep(0.1)
+
+        engine.history = [engine.population.copy()]
+
+        # Run evolution for specified number of generations
+        for gen in range(engine.generations):
+            print(f"Starting generation {gen + 1}...")
+            chunk_size = 5
+            if len(engine.population) < 2*chunk_size:
+                chunk_size = len(engine.population)
+            new_population = []
+            random.shuffle(engine.population)
+
+            # Process population in chunks
+            for i in range(0, len(engine.population), chunk_size):
+                group = engine.population[i : i + chunk_size]
+                ranks = engine.critic.get_tournament_ranks(group, engine.idea_type, 10)
+                for idea_idx, rank in sorted(ranks.items(), key=lambda x: x[1]):
+                    print(f"{group[idea_idx].title} - {rank}")
+
+                for k in range(len(group)):
+                    # using tournament ranks, weighted sample from group
+                    weights = [ranks[i] for i in range(len(group))]
+                    weights = [(w - min(weights)) / (max(weights) - min(weights)) for w in weights]
+                    weights = [w / sum(weights) for w in weights]
+
+                    parents = np.random.choice(list(ranks.keys()), size=engine.breeder.parent_count, p=weights)
+                    new_idea = engine.breeder.breed(parents, engine.idea_type)
+
+                    # Format the idea and add to new population
+                    formatted_idea = engine.formatter.format_idea(new_idea, engine.idea_type)
+                    new_population.append(formatted_idea)
+
+                    # Calculate overall progress
+                    total_ideas = engine.pop_size * (engine.generations + 1)
+                    completed_ideas = engine.pop_size + (gen * engine.pop_size) + len(new_population)
+                    progress_percent = (completed_ideas / total_ideas) * 100
+
+                    # Update progress with the new idea
+                    current_history = engine.history.copy()
+                    current_gen = new_population.copy()
+
+                    # Create a copy of the history with the current generation's progress
+                    history_with_current = [[idea_to_dict(idea) for idea in gen] for gen in engine.history]
+                    history_with_current.append([idea_to_dict(idea) for idea in new_population])
+
+                    evolution_status = {
+                        "current_generation": gen + 1,
+                        "total_generations": engine.generations,
+                        "is_running": True,
+                        "history": history_with_current,
+                        "contexts": contexts,
+                        "progress": progress_percent
+                    }
+
+                    # Clear the queue before adding new update to avoid backlog
+                    while not evolution_queue.empty():
+                        try:
+                            evolution_queue.get_nowait()
+                        except:
+                            break
+                    await evolution_queue.put(evolution_status)
+                    print(f"Updated progress: Gen {gen+1}, Idea {len(new_population)}/{engine.pop_size}, Progress: {progress_percent:.2f}%")
+
+                    # Small delay to allow frontend to process updates
+                    await asyncio.sleep(0.1)
+
+            # Update population with new ideas
+            engine.population = new_population
+            engine.history.append(engine.population)
+            print(f"Generation {gen + 1} complete. Population size: {len(engine.population)}")
+
+        # Mark evolution as complete
+        evolution_status = {
+            "current_generation": engine.generations,
+            "total_generations": engine.generations,
+            "is_running": False,
+            "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
+            "contexts": contexts,
+            "progress": 100
+        }
+        await evolution_queue.put(evolution_status)
+        print("Evolution complete!")
+
+    except Exception as e:
+        import traceback
+        print(f"Error in evolution: {e}")
+        print(traceback.format_exc())
+        evolution_status = {
+            "is_running": False,
+            "error": str(e)
+        }
+        await evolution_queue.put(evolution_status)
 
 def idea_to_dict(idea: Idea) -> dict:
     """Convert an Idea object to a dictionary"""
@@ -173,8 +312,13 @@ async def get_progress():
 
     # If there's a new update in the queue, get it
     try:
-        while not evolution_queue.empty():
+        # Get the latest update from the queue without waiting
+        if not evolution_queue.empty():
             evolution_status = await evolution_queue.get()
+            gen_label = "0 (Initial)" if evolution_status.get('current_generation', 0) == 0 else evolution_status.get('current_generation', 0)
+            print(f"Progress update: Generation {gen_label}, "
+                  f"Progress: {evolution_status.get('progress', 0):.2f}%, "
+                  f"History length: {len(evolution_status.get('history', []))}")
     except Exception as e:
         print(f"Error getting queue updates: {e}")
 

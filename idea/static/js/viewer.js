@@ -52,22 +52,34 @@ document.addEventListener("DOMContentLoaded", () => {
                     currentContextIndex = 0;
                     console.log("Loaded contexts:", contexts);
 
-                    if (data.history && Array.isArray(data.history)) {
-                        renderGenerations(data.history);
-                        updateContextDisplay();  // Update context display after loading new data
-                        // Use our setup function instead of directly setting onclick
-                        setupDownloadButton(data);
-                    } else {
-                        console.error("Invalid history data:", data);
+                    // Create progress bar container if it doesn't exist
+                    if (!document.getElementById('progress-container')) {
+                        const progressContainer = document.createElement('div');
+                        progressContainer.id = 'progress-container';
+                        progressContainer.className = 'mb-4';
+                        progressContainer.innerHTML = `
+                            <div class="progress">
+                                <div id="evolution-progress" class="progress-bar" role="progressbar"
+                                     style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                            </div>
+                            <div id="progress-status" class="text-center mt-2">Starting evolution...</div>
+                        `;
+
+                        // Insert progress bar before generations container
+                        const generationsContainer = document.getElementById('generations-container');
+                        generationsContainer.parentNode.insertBefore(progressContainer, generationsContainer);
                     }
+
+                    // Start polling for updates
+                    isEvolutionRunning = true;
+                    pollProgress();
+
+                    updateContextDisplay();  // Update context display after loading new data
                 } else {
                     console.error("Failed to run evolution:", await response.text());
                 }
             } catch (error) {
                 console.error("Error running evolution:", error);
-            } finally {
-                startButton.disabled = false;
-                startButton.textContent = 'Start Evolution';
             }
         };
     }
@@ -276,26 +288,55 @@ function renderGenerations(gens) {
         return;
     }
     const container = document.getElementById('generations-container');
-    container.innerHTML = '';
 
     generations.forEach((generation, index) => {
-        const genDiv = document.createElement('div');
-        genDiv.className = 'generation-section mb-4';
+        // Check if this generation section already exists
+        let genDiv = document.getElementById(`generation-${index}`);
 
-        // Add generation header
-        const header = document.createElement('h2');
-        header.className = 'generation-title';
-        header.textContent = `Generation ${index + 1}`;
-        genDiv.appendChild(header);
+        if (!genDiv) {
+            // Create new generation section if it doesn't exist
+            genDiv = document.createElement('div');
+            genDiv.className = 'generation-section mb-4';
+            genDiv.id = `generation-${index}`;
 
-        // Add ideas container
-        const scrollContainer = document.createElement('div');
-        scrollContainer.className = 'scroll-container';
+            // Add generation header with appropriate label
+            const header = document.createElement('h2');
+            header.className = 'generation-title';
 
-        // Add idea cards
+            // Label the initial population as "Generation 0 (Initial)"
+            if (index === 0) {
+                header.textContent = `Generation 0 (Initial Population)`;
+            } else {
+                header.textContent = `Generation ${index}`;
+            }
+
+            genDiv.appendChild(header);
+
+            // Add ideas container
+            const scrollContainer = document.createElement('div');
+            scrollContainer.className = 'scroll-container';
+            scrollContainer.id = `scroll-container-${index}`;
+            genDiv.appendChild(scrollContainer);
+
+            container.appendChild(genDiv);
+        }
+
+        // Get the scroll container for this generation
+        const scrollContainer = document.getElementById(`scroll-container-${index}`);
+
+        // Process each idea in this generation
         generation.forEach((idea, ideaIndex) => {
+            // Check if this idea card already exists
+            const existingCard = document.getElementById(`idea-${index}-${ideaIndex}`);
+            if (existingCard) {
+                // Card already exists, no need to recreate it
+                return;
+            }
+
+            // Create a new card for this idea
             const card = document.createElement('div');
             card.className = 'card gen-card';
+            card.id = `idea-${index}-${ideaIndex}`;
 
             // Create a plain text preview for the card
             const plainPreview = createCardPreview(idea.proposal, 150);
@@ -317,10 +358,10 @@ function renderGenerations(gens) {
             });
 
             scrollContainer.appendChild(card);
-        });
 
-        genDiv.appendChild(scrollContainer);
-        container.appendChild(genDiv);
+            // Log that we've added a new card
+            console.log(`Added new idea card: Generation ${index}, Idea ${ideaIndex + 1}`);
+        });
     });
 }
 
@@ -535,26 +576,62 @@ loadEvolutions();
 async function pollProgress() {
     try {
         const response = await fetch('/api/progress');
-        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(`HTTP error! Status: ${response.status}`);
+        }
 
-        if (data.is_running) {
-            // Update UI with current progress
-            if (data.history && data.history.length > 0) {
-                renderGenerations(data.history);
+        const data = await response.json();
+        console.log("Progress update:", data); // Add logging to see what's coming from the server
+
+        // Update progress bar
+        const progressBar = document.getElementById('evolution-progress');
+        const progressStatus = document.getElementById('progress-status');
+
+        if (progressBar && progressStatus) {
+            const progress = data.progress || 0;
+            progressBar.style.width = `${progress}%`;
+            progressBar.setAttribute('aria-valuenow', progress);
+            progressBar.textContent = `${Math.round(progress)}%`;
+
+            if (data.current_generation === 0) {
+                progressStatus.textContent = `Generating Generation 0 (Initial Population)... (${Math.round(progress)}%)`;
+            } else {
+                progressStatus.textContent = `Generating Generation ${data.current_generation}... (${Math.round(progress)}%)`;
             }
-            if (data.contexts) {
-                contexts = data.contexts;
-                currentContextIndex = 0;
-                updateContextDisplay();
-                document.querySelector('.context-navigation').style.display = 'block';
-            }
-            // Continue polling
-            setTimeout(pollProgress, 1000);
-        } else if (data.history && data.history.length > 0) {
-            // Evolution complete - save final state and enable save button
-            currentEvolutionData = data;
+        }
+
+        // Always update UI with current progress if there's history data
+        if (data.history && data.history.length > 0) {
+            console.log("Rendering generations from progress update");
             renderGenerations(data.history);
-            document.getElementById('downloadButton').disabled = false;
+        }
+
+        if (data.contexts && (!contexts || contexts.length === 0)) {
+            contexts = data.contexts;
+            currentContextIndex = 0;
+            updateContextDisplay();
+            document.querySelector('.context-navigation').style.display = 'block';
+        }
+
+        // Continue polling if evolution is still running
+        if (data.is_running) {
+            isEvolutionRunning = true;
+            setTimeout(pollProgress, 1000); // Poll every second
+        } else {
+            // Evolution complete
+            isEvolutionRunning = false;
+
+            if (data.history && data.history.length > 0) {
+                // Save final state and enable save button
+                currentEvolutionData = data;
+                renderGenerations(data.history);
+                document.getElementById('downloadButton').disabled = false;
+            }
+
+            // Update progress status
+            if (progressStatus) {
+                progressStatus.textContent = 'Evolution complete!';
+            }
 
             // Show completion notification
             const startButton = document.getElementById('startButton');
@@ -566,6 +643,10 @@ async function pollProgress() {
         }
     } catch (error) {
         console.error('Error polling progress:', error);
+        // Continue polling even if there's an error, but only if evolution is still running
+        if (isEvolutionRunning) {
+            setTimeout(pollProgress, 2000); // Longer timeout on error
+        }
     }
 }
 

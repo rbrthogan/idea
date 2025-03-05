@@ -16,6 +16,11 @@ Despite its brevity, a drabble should tell a complete story with a beginning, mi
 
 Your story will be judge on creativity, originality, and the ability to tell a complete story in 100 words.
 
+Try to avoid common cliché "creative" words like “Echo”, “Crimson”, “Bloom”, “Shadow”, “Whisper”, “Ember”, “Ash”, “Veil”, “Legacy” etc.
+This smacks of beginning writers who are trying to be creative but are actually just imitating more seasoned writers.
+
+Try to be original and creative with your choice of words.
+
 Format your response as:
 Title: [Your creative title]
 Proposal: [Your 100-word story]"""
