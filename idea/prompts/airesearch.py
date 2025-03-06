@@ -9,7 +9,8 @@ ITEM_TYPE = "AI research proposals"
 RANDOM_WORDS_PROMPT = """Generate a list of 50 randomly chosen English words.
 When generating each new word, review what has come before
 and create a word that is as different as possible from the preceding set.
-Return the list of words as a single string, separated by spaces with no other text."""
+Return the list of words as a single string, separated by spaces with no other text in format:
+WORDS:<word1>, <word2>, <word3>, <word4>, <word5>, ..."""
 
 KEY_IDEAS_ELEMENTS_PROMPT = """You are a historian of innovation.
 Please give 5 ideas that demonstrated crucial innovation in the field of {field}.
@@ -17,7 +18,7 @@ Write a very short description of each idea, no more than 20 words.
 Finally, extract some of the key elements or concepts that are important to the idea without
 giving away the idea itself. Keep them more general and abstract.
 When finished, collect all the concepts/elements and return them as a comma separated list in the format:
-CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>"""
+CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ...."""
 
 # Idea generation prompt
 IDEA_PROMPT = """The above is some context to get you inspired.

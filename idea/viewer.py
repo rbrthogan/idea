@@ -231,13 +231,37 @@ async def get_progress():
     return JSONResponse(evolution_status)
 
 @app.post("/api/save-evolution")
-async def save_evolution(request: SaveEvolutionRequest):
+async def save_evolution(request: Request):
     """Save evolution data to file"""
     try:
-        file_path = DATA_DIR / request.filename
+        # Parse the request body manually
+        data = await request.json()
+        print(f"Received save request: {data}")
+
+        if 'data' not in data or 'filename' not in data:
+            print("Missing required fields in request")
+            return JSONResponse({
+                "status": "error",
+                "message": "Missing required fields: data or filename"
+            }, status_code=400)
+
+        evolution_data = data['data']
+        filename = data['filename']
+
+        print(f"Saving evolution data to file: {filename}")
+        if isinstance(evolution_data, dict):
+            print(f"Data keys: {evolution_data.keys()}")
+        else:
+            print(f"Data is not a dictionary: {type(evolution_data)}")
+
+        file_path = DATA_DIR / filename
+        print(f"Full file path: {file_path}")
+
         with open(file_path, "w") as f:
-            json.dump(request.data, f, indent=2)
-        return JSONResponse({"status": "success"})
+            json.dump(evolution_data, f, indent=2)
+
+        print(f"Successfully saved evolution data to {file_path}")
+        return JSONResponse({"status": "success", "file_path": str(file_path)})
     except Exception as e:
         import traceback
         print(f"Error saving evolution: {e}")

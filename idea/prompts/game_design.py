@@ -18,7 +18,8 @@ The body of the proposal should be written in markdown syntax with headings, par
 RANDOM_WORDS_PROMPT = """Generate a list of 50 randomly chosen English words.
 When generating each new word, review what has come before
 and create a word that is as different as possible from the preceding set.
-Return the list of words as a single string, separated by spaces with no other text."""
+Return the list of words as a single string, separated by spaces with no other text in format:
+WORDS:<word1>, <word2>, <word3>, <word4>, <word5>, ...."""
 
 KEY_IDEAS_ELEMENTS_PROMPT = """You are a uniquely creative game designer.
 Please give 5 simple game designs that demonstrated crucial innovation in the field of {field}.

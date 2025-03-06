@@ -76,6 +76,24 @@ document.addEventListener("DOMContentLoaded", () => {
         };
     }
 
+    // Add direct event listener to download button
+    const downloadButton = document.getElementById('downloadButton');
+    if (downloadButton) {
+        console.log("Found download button in DOMContentLoaded, adding click listener");
+        downloadButton.addEventListener('click', function() {
+            console.log("Download button clicked directly");
+            if (currentEvolutionData) {
+                console.log("Using currentEvolutionData:", currentEvolutionData);
+                downloadResults(currentEvolutionData);
+            } else {
+                console.error("No evolution data available");
+                alert("No evolution data available to save");
+            }
+        });
+    } else {
+        console.error("Download button not found in DOMContentLoaded");
+    }
+
     document.getElementById('prevContext')?.addEventListener('click', () => {
         if (currentContextIndex > 0) {
             currentContextIndex--;
@@ -89,30 +107,40 @@ document.addEventListener("DOMContentLoaded", () => {
             updateContextDisplay();
         }
     });
-
-    // Function to set up the download button properly
-    function setupDownloadButton(data) {
-        console.log("Setting up download button with data:", data);
-        const downloadButton = document.getElementById('downloadButton');
-
-        if (!downloadButton) return;
-
-        // Remove all existing event listeners by cloning
-        const newButton = downloadButton.cloneNode(true);
-        downloadButton.parentNode.replaceChild(newButton, downloadButton);
-
-        // Enable the button
-        newButton.disabled = false;
-        newButton.textContent = 'Save Results';
-
-        // Add a single click handler
-        newButton.addEventListener('click', function(event) {
-            event.preventDefault();
-            console.log("Download button clicked");
-            downloadResults(data);
-        });
-    }
 });
+
+// Function to set up the download button properly
+function setupDownloadButton(data) {
+    console.log("Setting up download button with data:", data);
+    const downloadButton = document.getElementById('downloadButton');
+
+    if (!downloadButton) {
+        console.error("Download button not found in the DOM");
+        return;
+    }
+
+    console.log("Download button found:", downloadButton);
+
+    // Remove all existing event listeners by cloning
+    const newButton = downloadButton.cloneNode(true);
+    downloadButton.parentNode.replaceChild(newButton, downloadButton);
+
+    // Store a reference to the new button
+    const updatedButton = document.getElementById('downloadButton');
+
+    // Enable the button
+    updatedButton.disabled = false;
+    updatedButton.textContent = 'Save Results';
+
+    // Add a single click handler
+    updatedButton.onclick = function(event) {
+        event.preventDefault();
+        console.log("Download button clicked, calling downloadResults with data:", data);
+        downloadResults(data);
+    };
+
+    console.log("Download button setup complete, button is now:", updatedButton);
+}
 
 // Improve the markdown rendering function with better newline handling
 function renderMarkdown(text) {
@@ -443,6 +471,7 @@ function downloadResults(data) {
 
     // Ensure we have valid data
     if (!data || (!data.history && !data.contexts)) {
+        console.error("Invalid data for saving:", data);
         alert("No data available to save");
         return;
     }
@@ -464,6 +493,18 @@ function downloadResults(data) {
         downloadButton.disabled = true;
     }
 
+    // Prepare the data for saving
+    const saveData = {
+        history: data.history || [],
+        contexts: data.contexts || [],
+        metadata: {
+            timestamp: new Date().toISOString(),
+            generations: data.total_generations || 0
+        }
+    };
+
+    console.log("Prepared save data:", saveData);
+
     // Send to server
     fetch('/api/save-evolution', {
         method: 'POST',
@@ -471,11 +512,12 @@ function downloadResults(data) {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            data: data,
+            data: saveData,
             filename: filename
         })
     })
     .then(response => {
+        console.log("Save response:", response);
         if (!response.ok) {
             throw new Error(`Save failed: ${response.status} ${response.statusText}`);
         }
@@ -627,7 +669,9 @@ async function pollProgress() {
                 // Save final state and enable save button
                 currentEvolutionData = data;
                 renderGenerations(data.history);
-                document.getElementById('downloadButton').disabled = false;
+
+                // Set up the download button
+                setupDownloadButton(data);
             }
 
             // Update progress status
@@ -877,10 +921,25 @@ function resetUIState() {
     isEvolutionRunning = false;
     currentEvolutionData = null;
 
-    // Disable download button
+    // Reset download button
     const downloadButton = document.getElementById('downloadButton');
     if (downloadButton) {
         downloadButton.disabled = true;
+        downloadButton.textContent = 'Save Results';
+
+        // Remove all event listeners by cloning
+        const newButton = downloadButton.cloneNode(true);
+        downloadButton.parentNode.replaceChild(newButton, downloadButton);
+
+        // Add a new click listener
+        document.getElementById('downloadButton').addEventListener('click', function() {
+            console.log("Download button clicked from resetUIState");
+            if (currentEvolutionData) {
+                downloadResults(currentEvolutionData);
+            } else {
+                alert("No evolution data available to save");
+            }
+        });
     }
 }
 

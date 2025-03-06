@@ -27,7 +27,8 @@ Proposal: [Your 100-word story]"""
 
 RANDOM_WORDS_PROMPT = """Generate a list of 50 English words. These words should be one of the following:
 a story telling genre, theme, character, setting, plot, technique, moral, message, style, tone.
-Return the list of words as a single string, separated by commas with no other text."""
+Return the list of words as a single string, separated by commas with no other text in format:
+WORDS:<word1>, <word2>, <word3>, <word4>, <word5>, ...."""
 
 KEY_IDEAS_ELEMENTS_PROMPT = """You are a uniquely creative writer.
 Please list 5 impactful short stories that had a lasting impact on the field of {field}.

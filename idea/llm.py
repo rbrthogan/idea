@@ -84,7 +84,9 @@ class Ideator(LLMWrapper):
         field = get_field_name(idea_type)
 
         if method == "random_words":
-            context_text = self.generate_text(prompts.RANDOM_WORDS_PROMPT, temperature=2.0)
+            text = self.generate_text(prompts.RANDOM_WORDS_PROMPT, temperature=2.0)
+            print(f"Text: {text}")
+            context_text = text.split("WORDS:")[1].strip()
         elif method == "key_ideas_elements":
             text = self.generate_text(prompts.KEY_IDEAS_ELEMENTS_PROMPT.format(field=field), temperature=2.0)
             print(f"Text: {text}")
