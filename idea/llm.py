@@ -1,12 +1,14 @@
 from abc import ABC
+import random
 import google.generativeai as genai
 import json
 from pydantic import BaseModel
 from typing import Type, Optional, Dict, Any, List
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
-
+import numpy as np
 from idea.models import Idea
+from idea.prompts.loader import get_prompts
 
 class LLMWrapper(ABC):
     """Base class for LLM interactions"""
@@ -16,11 +18,15 @@ class LLMWrapper(ABC):
                  provider: str = "google_generative_ai",
                  model_name: str = "gemini-1.5-flash",
                  prompt_template: str = "",
-                 temperature: float = 0.7):
+                 temperature: float = 0.7,
+                 agent_name: str = ""):
         self.provider = provider
         self.model_name = model_name
         self.prompt_template = prompt_template
         self.temperature = temperature
+        self.total_token_count = 0
+        self.agent_name = agent_name
+        print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}")
         self._setup_provider()
 
     def _setup_provider(self):
@@ -47,14 +53,19 @@ class LLMWrapper(ABC):
                 generation_config=config
             )
             response = model.generate_content(prompt, generation_config=config)
+            self.total_token_count += response.usage_metadata.total_token_count
+            print(f"Total tokens {self.agent_name}: {self.total_token_count}")
             return response.text if response.text else "No response."
         return "Not implemented"
 
     def _get_generation_config(self,
                              temperature: Optional[float],
                              response_schema: Optional[Type[BaseModel]] = None) -> Dict[str, Any]:
+        actual_temp = temperature if temperature is not None else self.temperature
+        print(f"{self.agent_name} using temperature: {actual_temp} (override: {temperature}, default: {self.temperature})")
+
         config = {
-            "temperature": temperature or self.temperature,
+            "temperature": actual_temp,
             "top_p": 0.95,
             "top_k": 40,
             "max_output_tokens": self.MAX_TOKENS,
@@ -66,145 +77,220 @@ class LLMWrapper(ABC):
 
 class Ideator(LLMWrapper):
     """Generates and manages ideas"""
-    RANDOM_WORDS_PROMPT = """generate a list of 50 randomly choses english words.
-    When generating each new reword, review what has come before
-    and create a word that is as different as possible from the preceding set.
-    Return the list of words as a single string, separated by spaces with no other text."""
-
-    KEY_IDEAS_ELEMENTS = """ You are a historian of innovation.
-    Please give 5 ideas that demonstrated crucial innovation in the field of {field}.
-    Write a very short description of each idea, no more than 20 words.
-    Finally, extract some of the key elements or concepts that are important to the idea without
-    giving away the idea itself. Keep them more general and abstract.
-    When finished, collect all the concepts/elements and return them as a comma separated list in the format:
-    CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>"""
-
-    AI_RESEARCH_PROMPT = """The above is some context to get you inspired.
-    Using some or none of it for inspiration,
-    suggest a promising area for novel research in AI (it can be a big idea, or a small idea, in any subdomain).
-    keep it concise and to the point but with enough detail for a researcher to critique it."""
-
-    GAME_DESIGN_PROMPT = """You are a uniquely creative game designer.
-    The above is some context to get you inspired.
-    Using some or none of it for inspiration,
-    suggest a new game design that is both interesting and fun to play.
-    With key game mechanics and controls.
-    The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
-    You should format your idea with enough specificity that a developer can implement it."""
+    agent_name = "Ideator"
 
     def __init__(self, **kwargs):
-        self.idea_field_map = {
-            "airesearch": "AI Research",
-            "game_design": "2D arcade game design"
-        }
-        super().__init__(**kwargs)
+        super().__init__(agent_name=self.agent_name, **kwargs)
 
-    def generate_context(self, method: str, field: str = None) -> str:
+    def generate_context(self, idea_type: str) -> str:
         """Generate initial context for ideation"""
-        if method == "random_words":
-            return self.generate_text(self.RANDOM_WORDS_PROMPT, temperature=1.0)
-        elif method == "key_ideas_elements":
-            text = self.generate_text(self.KEY_IDEAS_ELEMENTS.format(field=field), temperature=1.0)
-            return text.split("CONCEPTS:")[1].strip()
-        raise ValueError(f"Invalid method: {method}")
+        prompts = get_prompts(idea_type)
+
+        # Always use the CONTEXT_PROMPT regardless of method
+        text = self.generate_text(prompts.CONTEXT_PROMPT, temperature=2.0)
+        print(f"Text: {text}")
+
+        # Extract concepts from the response
+        if "CONCEPTS:" in text:
+            context_text = text.split("CONCEPTS:")[1].strip()
+        else:
+            # Fallback if the expected format is not found
+            context_text = text.strip()
+
+        # Sample 10% of the words
+        words = [word.strip() for word in context_text.split(',')]
+        return ", ".join(random.sample(words, max(1, int(len(words) * 0.1))))
 
     def get_idea_prompt(self, idea_type: str) -> str:
         """Get prompt template for specific idea type"""
-        if idea_type == "airesearch":
-            return self.AI_RESEARCH_PROMPT
-        elif idea_type == "game_design":
-            return self.GAME_DESIGN_PROMPT
-        raise ValueError(f"Invalid idea type: {idea_type}")
+        prompts = get_prompts(idea_type)
+        return prompts.IDEA_PROMPT
 
-    def seed_ideas(self, n: int, context_type: str, idea_type: str) -> List[str]:
+    def get_new_idea_prompt(self, idea_type: str) -> str:
+        """Get prompt template for generating a new idea"""
+        prompts = get_prompts(idea_type)
+        return prompts.NEW_IDEA_PROMPT
+
+    def seed_ideas(self, n: int, idea_type: str) -> List[str]:
         """Generate n initial ideas"""
         idea_prompt = self.get_idea_prompt(idea_type)
 
         ideas = []
 
         for _ in tqdm(range(n), desc="Generating ideas"):
-            context = self.generate_context(context_type, self.idea_field_map[idea_type])
+            # Generate context using the context_prompt method regardless of context_type parameter
+            context = self.generate_context(idea_type)
             print(f"Context: {context}")
             prompt = f"{context}\nInstruction: {idea_prompt}"
-            response = self.generate_text(prompt, temperature=1.0)
+            response = self.generate_text(prompt, temperature=1.5)
             ideas.append(response)
         return ideas
 
-    def generate_new_idea(self, ideas: List[str]) -> str:
+    def generate_new_idea(self, ideas: List[str], idea_type: str) -> str:
         """Generate a new idea based on existing ones"""
-        idea_str = "\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
-        prompt = f"""You are an experienced researcher and you are given a list of proposals.
-        {idea_str}
-        Considering the above ideas please propose a new idea, that could be completely new
-        and different from the ideas above or could combine ideas to create a new idea.
-        Please avoid minor refinements of the ideas above, and instead propose a new idea
-        that is a significant departure."""
+        current_ideas = "\n\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
+        prompt = self.get_new_idea_prompt(idea_type).format(current_ideas=current_ideas)
+        prompt = f"current ideas:\n{current_ideas}\n\n{prompt}"
         return self.generate_text(prompt, temperature=1.0)
 
 class Formatter(LLMWrapper):
     """Reformats unstructured ideas into a cleaner format"""
-    DEFAULT_PROMPT = """Take the following idea and rewrite it in a clear,
-    structured format: {input_text}"""
+    agent_name = "Formatter"
 
     def __init__(self, **kwargs):
-        super().__init__(prompt_template=self.DEFAULT_PROMPT, temperature=0.3, **kwargs)
+        # Use a default temperature only if not provided in kwargs
+        temp = kwargs.pop('temperature', 0.3)
+        super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
 
-    def format_idea(self, raw_idea: str) -> str:
-        prompt = self.prompt_template.format(input_text=raw_idea)
+    def format_idea(self, raw_idea: str, idea_type: str) -> str:
+        prompts = get_prompts(idea_type)
+        prompt = prompts.FORMAT_PROMPT.format(input_text=raw_idea)
         response = self.generate_text(prompt, response_schema=Idea)
         idea = Idea(**json.loads(response))
         return idea
 
 class Critic(LLMWrapper):
     """Analyzes and refines ideas"""
-    CRITIQUE_PROMPT = """You are a helpful AI that refines ideas.
-    Current Idea:
-    {idea}
-
-    Please consider the above proposal. Offer critical feedback.
-    Pointing out potential pitfalls as well as strengths.
-    No additional text, just the critique."""
-
-    REFINE_PROMPT = """Current Idea:
-    {idea}
-
-    Critique: {critique}
-
-    Please review both, consider your own opinion and create your own proposal.
-    This could be a refinement of the original proposal or a fresh take on it.
-    No additional text, just the refined idea on its own."""
+    agent_name = "Critic"
 
     def __init__(self, **kwargs):
-        super().__init__(temperature=0.4, **kwargs)
+        super().__init__(agent_name=self.agent_name, **kwargs)
 
-    def critique(self, idea: str) -> str:
+    def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
-        prompt = self.CRITIQUE_PROMPT.format(idea=idea)
+        prompts = get_prompts(idea_type)
+        prompt = prompts.CRITIQUE_PROMPT.format(idea=idea)
         return self.generate_text(prompt)
 
-    def refine(self, idea: str) -> str:
+    def refine(self, idea: str, idea_type: str) -> str:
         """Refine an idea based on critique"""
-        critique = self.critique(idea)
-        prompt = self.REFINE_PROMPT.format(
+        critique = self.critique(idea, idea_type)
+        prompts = get_prompts(idea_type)
+        prompt = prompts.REFINE_PROMPT.format(
             idea=idea,
             critique=critique
         )
         return self.generate_text(prompt)
 
-    def remove_worst_idea(self, ideas: List[str]) -> List[str]:
+    def _elo_update(self, elo_a, elo_b, winner):
+        """Update the Elo rating of an idea"""
+        k = 32
+        expected_a = 1 / (1 + 10 ** ((elo_b - elo_a) / 400))
+        expected_b = 1 / (1 + 10 ** ((elo_a - elo_b) / 400))
+
+        if winner == "A":
+            elo_a = elo_a + k * (1 - expected_a)
+            elo_b = elo_b + k * (0 - expected_b)
+        elif winner == "B":
+            elo_a = elo_a + k * (0 - expected_a)
+            elo_b = elo_b + k * (1 - expected_b)
+        else:
+            elo_a = elo_a + k * (0.5 - expected_a)
+            elo_b = elo_b + k * (0.5 - expected_b)
+
+        return elo_a, elo_b
+
+    def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int) -> dict:
+        """Get the tournament rank of an idea"""
+
+        ranks = {i: 1500 for i in range(len(ideas))}
+        for k in range(comparisons):
+            if k < len(ideas):
+                # assert that each idea is one side of the comparison at least once
+                idea_idx_a = k
+                # Create a list of valid indices excluding idea_idx_a
+                valid_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
+                idea_idx_b = np.random.choice(valid_indices, size=1)[0]
+            else:
+                idea_idx_a, idea_idx_b = np.random.choice(len(ideas), size=2, replace=False)
+            winner = self.compare_ideas(ideas[idea_idx_a].dict(), ideas[idea_idx_b].dict(), idea_type)
+            elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
+            ranks[idea_idx_a] = elo_a
+            ranks[idea_idx_b] = elo_b
+
+        return ranks
+
+    def remove_worst_idea(self, ideas: List[str], idea_type: str) -> List[str]:
         """Identify and remove the worst idea from a list"""
         idea_str = "\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
-        prompt = f"""You are an experienced reviewer and you are given a list of proposals.
-        Please review the ideas and give a once sentence pro and con for each.
-        After this, please give the idea that you think is the worst considering value, novelty, and feasibility.
-        The ideas are:
-        {idea_str}
-        Please return the idea that you think is the worst in the following format (with no other text following):
-        Worst Idea: <idea number>"""
-
+        prompts = get_prompts(idea_type)
+        prompt = prompts.REMOVE_WORST_IDEA_PROMPT.format(
+            ideas=idea_str,
+            criteria=", ".join(prompts.COMPARISON_CRITERIA)
+        )
         result = self.generate_text(prompt)
-        parsed_result = result.split("Worst Idea:")[1].strip()
-        return [ideas[i] for i in range(len(ideas)) if i != int(parsed_result) - 1]
+        parsed_result = result.split("Worst Entry:")[1].strip()
+        try:
+            idea_index = int(parsed_result) - 1
+        except ValueError:
+            print(f"Invalid proposal index: {parsed_result}")
+            idea_index = np.random.randint(0, len(ideas))
+        return [ideas[i] for i in range(len(ideas)) if i != idea_index]
+
+    def compare_ideas(self, idea_a, idea_b, idea_type: str):
+        """
+        Compare two ideas using the LLM and determine which is better.
+        Returns: "A", "B", "tie", or None if there was an error
+        """
+        prompts = get_prompts(idea_type)
+
+        # Get the item type from the prompt configuration
+        item_type = getattr(prompts, "ITEM_TYPE", "ideas")
+        criteria = prompts.COMPARISON_CRITERIA
+
+        prompt = f"""You are an expert evaluator of {item_type}. You will be presented with two {item_type}, and your task is to determine which one is better.
+
+        Idea A:
+        Title: {idea_a.get('title', 'Untitled')}
+        {idea_a.get('proposal', '')}
+
+        Idea B:
+        Title: {idea_b.get('title', 'Untitled')}
+        {idea_b.get('proposal', '')}
+
+        Evaluate both ideas based on the following criteria:
+        {", ".join(criteria)}
+
+        Criterion 1 is the most important.
+
+        After your evaluation, respond with exactly one of these three options:
+        - "Result: A" if Idea A is better
+        - "Result: B" if Idea B is better
+        - "Result: tie" if both ideas are approximately equal in quality
+
+        Your response must contain exactly one of these three phrases and nothing else.
+        """
+
+        try:
+            response = self.generate_text(prompt, temperature=0.3)
+            result = response.strip().upper()
+
+            print(f"LLM comparison response: {result}")
+
+            # More robust parsing
+            if "RESULT: A" in result:
+                return "A"
+            elif "RESULT: B" in result:
+                return "B"
+            elif "RESULT: TIE" in result:
+                return "tie"
+            elif "A" in result and "B" not in result:
+                return "A"
+            elif "B" in result and "A" not in result:
+                return "B"
+            else:
+                return "tie"
+        except Exception as e:
+            print(f"Error in compare_ideas: {e}")
+            return None  # Return None instead of "tie" on error
+
+# def Oracle(LLMWrapper):
+#     """Oracle for the evolution"""
+#     agent_name = "Oracle"
+
+#     def __init__(self, **kwargs):
+#         super().__init__(agent_name=self.agent_name, temperature=0.3, **kwargs)
+
 
 if __name__ == "__main__":
     import os
@@ -232,3 +318,25 @@ if __name__ == "__main__":
     )
 
     print(response.json())
+
+
+class Breeder(LLMWrapper):
+    """Breeds ideas"""
+    agent_name = "Breeder"
+    parent_count = 2
+
+    def __init__(self, **kwargs):
+        # Don't set temperature directly here, let it come from kwargs
+        super().__init__(agent_name=self.agent_name, **kwargs)
+
+    def breed(self, ideas: List[str], idea_type: str) -> str:
+        """Breed two ideas"""
+        prompt = self.get_breed_prompt(idea_type)
+        return self.generate_text(prompt)
+
+    def get_breed_prompt(self, idea_type: str) -> str:
+        """Get prompt template for breeding ideas"""
+        prompts = get_prompts(idea_type)
+        return prompts.BREED_PROMPT
+
+    # TODO: and a method to convert idea Phenotype to Genotype (basic components used in breeding)
