@@ -55,4 +55,3 @@ Then visit:
 
 ### BUGs to fix
 - When switching to rating tab from current evolution it always say "Not enough ideas to compare" regardless of how many there are. I have to switched to a saved evolution (which means if I didn't previously save I can't rate).
-- When horizontal scorllin

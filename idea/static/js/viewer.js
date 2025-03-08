@@ -355,11 +355,19 @@ function renderGenerations(gens) {
 
             genDiv.appendChild(header);
 
-            // Add ideas container
+            // Add ideas container with proper containment
             const scrollContainer = document.createElement('div');
             scrollContainer.className = 'scroll-container';
             scrollContainer.id = `scroll-container-${index}`;
-            genDiv.appendChild(scrollContainer);
+
+            // Add a wrapper to ensure proper containment
+            const scrollWrapper = document.createElement('div');
+            scrollWrapper.className = 'scroll-wrapper';
+            scrollWrapper.style.width = '100%';
+            scrollWrapper.style.overflow = 'hidden';
+
+            scrollWrapper.appendChild(scrollContainer);
+            genDiv.appendChild(scrollWrapper);
 
             container.appendChild(genDiv);
         }
@@ -380,6 +388,11 @@ function renderGenerations(gens) {
             const card = document.createElement('div');
             card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
+
+            // Set a fixed width to prevent stretching
+            card.style.minWidth = '280px';
+            card.style.maxWidth = '280px';
+            card.style.flex = '0 0 auto';
 
             // Create a plain text preview for the card
             const plainPreview = createCardPreview(idea.proposal, 150);

@@ -52,7 +52,12 @@ body {
 }
 
 .main-content {
-  padding: 2rem;
+  flex: 1;
+  padding: 20px;
+  margin-left: 300px; /* Match sidebar width */
+  overflow-x: hidden; /* Prevent horizontal overflow */
+  max-width: calc(100% - 300px); /* Ensure it doesn't exceed available space */
+  box-sizing: border-box;
   background-color: #f9f7ff;
 }
 
@@ -188,7 +193,9 @@ h1, h2, h3, h4, h5, h6 {
 
 /* Generation Cards */
 .generation-section {
-  margin-bottom: 3rem;
+  margin-bottom: 2rem;
+  width: 100%;
+  overflow: hidden; /* Prevent overflow */
   background-color: white;
   border-radius: var(--radius-lg);
   padding: 1.5rem;
@@ -203,13 +210,30 @@ h1, h2, h3, h4, h5, h6 {
   padding-bottom: 0.5rem;
 }
 
+/* Scroll wrapper to contain the scroll container */
+.scroll-wrapper {
+  width: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Improved scroll container styling */
 .scroll-container {
   display: flex;
   overflow-x: auto;
   padding: 1rem 0;
-  gap: 1.5rem;
-  scrollbar-width: thin;
-  scrollbar-color: var(--primary-light) var(--gray-200);
+  gap: 1rem;
+  max-width: 100%;
+  position: relative;
+  /* Prevent overflow over sidebar */
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+  scrollbar-width: thin; /* Firefox */
+  /* Ensure content doesn't overflow the container */
+  contain: content;
+  /* Add padding to ensure last card is fully visible */
+  padding-right: 20px;
 }
 
 .scroll-container::-webkit-scrollbar {
@@ -226,16 +250,17 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: 10px;
 }
 
+/* Ensure cards have a fixed width */
 .gen-card {
   min-width: 280px;
-  max-width: 350px;
-  border: none;
+  max-width: 280px;
+  flex: 0 0 auto;
+  margin-bottom: 0.5rem;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  position: relative;
+  overflow: hidden;
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
-  transition: var(--transition);
-  background: white;
-  overflow: hidden;
-  position: relative;
   animation: fadeInScale 0.5s ease-out;
 }
 
@@ -915,4 +940,21 @@ button[data-bs-toggle="collapse"] i {
 
 button[data-bs-toggle="collapse"][aria-expanded="true"] i {
   transform: rotate(180deg);
+}
+
+/* Ensure the evolution content container respects its boundaries */
+.evolution-content {
+  background: white;
+  border-radius: 4px;
+  border: 1px solid rgba(0,0,0,.125);
+  padding: 1rem;
+  overflow-x: hidden; /* Prevent horizontal overflow */
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Ensure the generations container respects boundaries */
+.generations-container {
+  width: 100%;
+  overflow: hidden;
 }
