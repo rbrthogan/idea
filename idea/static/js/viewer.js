@@ -348,9 +348,9 @@ function renderGenerations(gens) {
 
             // Label the initial population as "Generation 0 (Initial)"
             if (index === 0) {
-                header.textContent = `Generation 0 (Initial Population)`;
+                header.textContent = `Generation 1 (Initial Population)`;
             } else {
-                header.textContent = `Generation ${index}`;
+                header.textContent = `Generation ${index + 1}`;
             }
 
             genDiv.appendChild(header);
@@ -397,13 +397,20 @@ function renderGenerations(gens) {
             // Create a plain text preview for the card
             const plainPreview = createCardPreview(idea.proposal, 150);
 
+            // Add "View Context" button for initial generation cards
+            const viewContextButton = index === 0 ?
+                `<button class="btn btn-outline-secondary btn-sm view-context me-2">View Context</button>` : '';
+
             card.innerHTML = `
                 <div class="card-body">
                     <h5 class="card-title">${idea.title || 'Untitled'}</h5>
                     <div class="card-preview">
                         <p>${plainPreview}</p>
                     </div>
-                    <button class="btn btn-primary btn-sm view-idea">View Full Idea</button>
+                    <div class="card-actions">
+                        ${viewContextButton}
+                        <button class="btn btn-primary btn-sm view-idea">View Full Idea</button>
+                    </div>
                 </div>
             `;
 
@@ -412,6 +419,14 @@ function renderGenerations(gens) {
             viewButton.addEventListener('click', () => {
                 showIdeaModal(idea);
             });
+
+            // Add click handler for view context button if it exists
+            if (index === 0) {
+                const viewContextBtn = card.querySelector('.view-context');
+                viewContextBtn.addEventListener('click', () => {
+                    showContextModal();
+                });
+            }
 
             scrollContainer.appendChild(card);
 
@@ -456,8 +471,12 @@ function showIdeaModal(idea) {
 
 function updateContextDisplay() {
     const contextDisplay = document.getElementById('contextDisplay');
+    const contextContainer = document.getElementById('contextContainer');
 
     if (contexts.length > 0) {
+        // Make sure the container is visible
+        contextContainer.style.display = 'block';
+
         // Format the context text into separate items
         const contextItems = contexts[currentContextIndex]
             .split('\n')
@@ -498,6 +517,7 @@ function updateContextDisplay() {
         });
     } else {
         contextDisplay.innerHTML = '<p class="text-muted">Context will appear here when evolution starts...</p>';
+        contextContainer.style.display = 'none';
     }
 }
 
@@ -940,6 +960,12 @@ function resetUIState() {
         contextDisplay.innerHTML = '<p class="text-muted">Context will appear here when evolution starts...</p>';
     }
 
+    // Hide context container
+    const contextContainer = document.getElementById('contextContainer');
+    if (contextContainer) {
+        contextContainer.style.display = 'none';
+    }
+
     // Hide context navigation
     const contextNav = document.querySelector('.context-navigation');
     if (contextNav) {
@@ -970,21 +996,6 @@ function resetUIState() {
     const downloadButton = document.getElementById('downloadButton');
     if (downloadButton) {
         downloadButton.disabled = true;
-        downloadButton.textContent = 'Save Results';
-
-        // Remove all event listeners by cloning
-        const newButton = downloadButton.cloneNode(true);
-        downloadButton.parentNode.replaceChild(newButton, downloadButton);
-
-        // Add a new click listener
-        document.getElementById('downloadButton').addEventListener('click', function() {
-            console.log("Download button clicked from resetUIState");
-            if (currentEvolutionData) {
-                downloadResults(currentEvolutionData);
-            } else {
-                alert("No evolution data available to save");
-            }
-        });
     }
 }
 
@@ -1036,4 +1047,65 @@ function setupTemperatureSliders() {
         critic: document.getElementById('criticTemp')?.value,
         breeder: document.getElementById('breederTemp')?.value
     });
+}
+
+// Function to show the context modal
+function showContextModal() {
+    // Create modal if it doesn't exist
+    let contextModal = document.getElementById('contextModal');
+
+    if (!contextModal) {
+        // Create the modal element
+        contextModal = document.createElement('div');
+        contextModal.className = 'modal fade';
+        contextModal.id = 'contextModal';
+        contextModal.tabIndex = '-1';
+        contextModal.setAttribute('aria-labelledby', 'contextModalLabel');
+        contextModal.setAttribute('aria-hidden', 'true');
+
+        // Set up the modal HTML structure
+        contextModal.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="contextModalLabel">Initial Context</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="contextModalContent"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Add the modal to the document body
+        document.body.appendChild(contextModal);
+    }
+
+    // Get the current context
+    const contextModalContent = document.getElementById('contextModalContent');
+
+    if (contexts.length > 0) {
+        // Format the context text into separate items
+        const contextItems = contexts[currentContextIndex]
+            .split('\n')
+            .filter(item => item.trim())
+            .map(item => `<div class="context-item">${item.trim()}</div>`)
+            .join('');
+
+        contextModalContent.innerHTML = `
+            <div class="context-content">
+                ${contextItems}
+            </div>
+        `;
+    } else {
+        contextModalContent.innerHTML = '<p class="text-muted">No context available</p>';
+    }
+
+    // Initialize and show the modal
+    const modal = new bootstrap.Modal(contextModal);
+    modal.show();
 }

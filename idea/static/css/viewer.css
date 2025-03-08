@@ -193,51 +193,46 @@ h1, h2, h3, h4, h5, h6 {
 
 /* Generation Cards */
 .generation-section {
-  margin-bottom: 2rem;
-  width: 100%;
-  overflow: hidden; /* Prevent overflow */
   background-color: white;
-  border-radius: var(--radius-lg);
-  padding: 1.5rem;
-  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-md);
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--gray-200);
 }
 
 .generation-title {
-  font-size: 1.5rem;
-  margin-bottom: 1.5rem;
+  font-size: 1.2rem;
   color: var(--primary);
-  border-bottom: 2px solid var(--primary-light);
+  margin-bottom: 1.25rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--gray-200);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+}
+
+.scroll-wrapper {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+}
+
+.scroll-container {
+  display: flex;
+  gap: 1rem;
+  padding: 0.25rem;
+  overflow-x: auto;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--primary-light) var(--gray-200);
   padding-bottom: 0.5rem;
 }
 
-/* Scroll wrapper to contain the scroll container */
-.scroll-wrapper {
-  width: 100%;
-  overflow: hidden;
-  position: relative;
-}
-
-/* Improved scroll container styling */
-.scroll-container {
-  display: flex;
-  overflow-x: auto;
-  padding: 1rem 0;
-  gap: 1rem;
-  max-width: 100%;
-  position: relative;
-  /* Prevent overflow over sidebar */
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
-  scrollbar-width: thin; /* Firefox */
-  /* Ensure content doesn't overflow the container */
-  contain: content;
-  /* Add padding to ensure last card is fully visible */
-  padding-right: 20px;
-}
-
 .scroll-container::-webkit-scrollbar {
-  height: 8px;
+  height: 6px;
 }
 
 .scroll-container::-webkit-scrollbar-track {
@@ -252,16 +247,16 @@ h1, h2, h3, h4, h5, h6 {
 
 /* Ensure cards have a fixed width */
 .gen-card {
-  min-width: 280px;
-  max-width: 280px;
-  flex: 0 0 auto;
-  margin-bottom: 0.5rem;
-  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  flex: 0 0 300px;
+  min-width: 300px;
+  background: white;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  transition: var(--transition);
   position: relative;
   overflow: hidden;
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  animation: fadeInScale 0.5s ease-out;
+  border: 1px solid var(--gray-200);
+  transform: translateY(0);
 }
 
 .gen-card::before {
@@ -270,44 +265,31 @@ h1, h2, h3, h4, h5, h6 {
   top: 0;
   left: 0;
   width: 100%;
-  height: 4px;
+  height: 3px;
   background: linear-gradient(90deg, var(--primary), var(--secondary));
-  opacity: 0;
+  opacity: 0.7;
   transition: var(--transition);
 }
 
 .gen-card:hover {
-  transform: translateY(-5px);
-  box-shadow: var(--shadow-lg);
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
 }
 
 .gen-card:hover::before {
+  height: 4px;
   opacity: 1;
 }
 
 .card-body {
-  padding: 1.5rem;
+  padding: 1rem;
 }
 
 .card-title {
-  font-weight: 700;
-  margin-bottom: 1rem;
-  color: var(--gray-800);
-}
-
-.view-idea {
-  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-  color: white;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: var(--radius-sm);
-  transition: var(--transition);
-}
-
-.view-idea:hover {
-  background: linear-gradient(135deg, var(--primary-dark), var(--primary));
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-sm);
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 0.6rem;
+  color: var(--primary-dark);
 }
 
 /* Context Display */
@@ -317,7 +299,7 @@ h1, h2, h3, h4, h5, h6 {
   padding: 1.5rem;
   margin-bottom: 2rem;
   box-shadow: var(--shadow-md);
-  min-height: 200px;
+  border: 1px solid var(--gray-200);
 }
 
 .context-content {
@@ -370,29 +352,38 @@ h1, h2, h3, h4, h5, h6 {
 
 /* Modal Styling */
 .modal-content {
+  border-radius: var(--radius-md);
   border: none;
-  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
+  overflow: hidden;
 }
 
 .modal-header {
-  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-  color: white;
-  border-bottom: none;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-bottom: 1px solid var(--gray-200);
+  padding: 1rem 1.25rem;
+  background-color: var(--gray-100);
 }
 
 .modal-title {
-  font-weight: 700;
+  color: var(--primary-dark);
+  font-size: 1.1rem;
+  font-weight: 600;
 }
 
 .modal-body {
-  padding: 2rem;
+  padding: 1.25rem;
 }
 
 .modal-footer {
-  border-top: none;
-  padding: 1rem 2rem 2rem;
+  border-top: 1px solid var(--gray-200);
+  padding: 0.75rem 1.25rem;
+  background-color: var(--gray-100);
+}
+
+.modal-footer .btn {
+  font-size: 0.9rem;
+  padding: 0.4rem 1rem;
+  border-radius: var(--radius-sm);
 }
 
 /* Evolution Select */
@@ -793,10 +784,13 @@ input[type="number"]:focus {
 
 /* Add a "Read more" style for truncated content */
 .card-preview {
-  max-height: 100px;
+  max-height: 120px;
   overflow: hidden;
   position: relative;
   margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--gray-700);
 }
 
 .card-preview::after {
@@ -957,4 +951,111 @@ button[data-bs-toggle="collapse"][aria-expanded="true"] i {
 .generations-container {
   width: 100%;
   overflow: hidden;
+}
+
+.card-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+  align-items: center;
+}
+
+.view-context {
+  background-color: transparent;
+  color: var(--gray-700);
+  border: 1px solid var(--gray-300);
+  transition: var(--transition);
+  font-size: 0.85rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+}
+
+.view-context:hover {
+  background-color: var(--gray-200);
+  color: var(--primary);
+  transform: translateY(-1px);
+  border-color: var(--primary-light);
+}
+
+.view-idea {
+  display: inline-block;
+  color: white;
+  font-weight: 500;
+  text-decoration: none;
+  transition: var(--transition);
+  font-size: 0.85rem;
+  background-color: var(--primary);
+  border: none;
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius-sm);
+}
+
+.view-idea:hover {
+  background-color: var(--primary-dark);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Context Modal Styling */
+#contextModalContent {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+#contextModalContent .context-content {
+  margin-bottom: 0;
+}
+
+#contextModalContent .context-item {
+  background-color: var(--gray-100);
+  padding: 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--gray-200);
+  margin-bottom: 0.8rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+#contextModalContent .context-item:last-child {
+  margin-bottom: 0;
+}
+
+#contextModalContent .context-navigation {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 1rem;
+  border-top: 1px solid var(--gray-200);
+}
+
+#contextModalContent .context-nav-buttons {
+  display: flex;
+  gap: 0.8rem;
+  margin: 0 auto;
+}
+
+#contextModalContent .context-nav-btn {
+  padding: 0.5rem 1rem;
+  background-color: var(--gray-200);
+  color: var(--gray-700);
+  border: none;
+  border-radius: var(--radius-md);
+  transition: var(--transition);
+}
+
+#contextModalContent .context-nav-btn:hover:not([disabled]) {
+  background-color: var(--primary);
+  color: white;
+}
+
+#contextModalContent .context-nav-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#contextModalContent #contextCounter {
+  font-size: 0.9rem;
+  color: var(--gray-600);
+  font-weight: 500;
 }
