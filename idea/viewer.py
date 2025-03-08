@@ -20,7 +20,6 @@ from idea.evolution import EvolutionEngine
 from idea.models import Idea
 from idea.llm import Critic
 from idea.config import LLM_MODELS, DEFAULT_MODEL
-from idea.prompts.loader import get_field_name
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -81,14 +80,29 @@ async def start_evolution(request: Request):
     """
     global engine, evolution_status, evolution_queue
     data = await request.json()
+    print(f"Received request data: {data}")
+
     pop_size = int(data.get('popSize', 3))
     generations = int(data.get('generations', 2))
     idea_type = data.get('ideaType', 'airesearch')
     model_type = data.get('modelType', 'gemini-1.5-flash')
-    context_type = data.get('contextType', 'random_words')
+
+    # Get temperature parameters with defaults
+    try:
+        ideator_temp = float(data.get('ideatorTemp', 1.0))
+        critic_temp = float(data.get('criticTemp', 0.7))
+        breeder_temp = float(data.get('breederTemp', 1.0))
+        print(f"Parsed temperature values: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}")
+    except ValueError as e:
+        print(f"Error parsing temperature values: {e}")
+        # Use defaults if parsing fails
+        ideator_temp = 1.0
+        critic_temp = 0.7
+        breeder_temp = 1.0
 
     print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
-          f"idea_type={idea_type}, model_type={model_type}, context_type={context_type}")
+          f"idea_type={idea_type}, model_type={model_type} "
+          f"temperatures: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -96,7 +110,9 @@ async def start_evolution(request: Request):
         generations=generations,
         idea_type=idea_type,
         model_type=model_type,
-        context_type=context_type
+        ideator_temp=ideator_temp,
+        critic_temp=critic_temp,
+        breeder_temp=breeder_temp
     )
 
     # Generate contexts for each idea

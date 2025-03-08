@@ -6,10 +6,6 @@ Prompt configurations for Drabble (100-word story) idea type
 ITEM_TYPE = "stories"
 
 # Context generation prompts
-# RANDOM_WORDS_PROMPT = """Generate a list of 50 randomly chosen English words.
-# When generating each new word, review what has come before
-# and create a word that is as different as possible from the preceding set.
-# Return the list of words as a single string, separated by commas with no other text."""
 
 DRABBLE_FORMAT_PROMPT = """A drabble is a short work of fiction exactly 100 words in length (not including the title).
 Despite its brevity, a drabble should tell a complete story with a beginning, middle, and end.
@@ -25,17 +21,9 @@ Format your response as:
 Title: [Your creative title]
 Proposal: [Your 100-word story]"""
 
-RANDOM_WORDS_PROMPT = """Generate a list of 50 English words. These words should be one of the following:
+CONTEXT_PROMPT = """Generate a list of 50 English words/concepts. These words/concepts should be one of the following:
 a story telling genre, theme, character, setting, plot, technique, moral, message, style, tone.
-Return the list of words as a single string, separated by commas with no other text in format:
-WORDS:<word1>, <word2>, <word3>, <word4>, <word5>, ...."""
-
-KEY_IDEAS_ELEMENTS_PROMPT = """You are a uniquely creative writer.
-Please list 5 impactful short stories that had a lasting impact on the field of {field}.
-Write a very short description of each story, no more than 20 words.
-Finally, extract some of the key elements or concepts that are important to the story without
-giving away the story itself. Keep them more general and abstract.
-When finished, collect all the concepts/elements and return them as a comma separated list in the format:
+Return the list of words/concepts as a single string, separated by commas with no other text in format:
 CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ...."""
 
 # Idea generation prompt

@@ -11,22 +11,27 @@ class EvolutionEngine:
     def __init__(
         self,
         idea_type="airesearch",
-        context_type="random_words",
         pop_size: int = 5,
         generations: int = 3,
-        model_type: str = "gemini-1.5-flash"
+        model_type: str = "gemini-1.5-flash",
+        ideator_temp: float = 1.0,
+        critic_temp: float = 0.7,
+        breeder_temp: float = 1.0
     ):
         self.idea_type = idea_type
-        self.context_type = context_type
         self.pop_size = pop_size
         self.generations = generations
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
-        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type)
+
+        # Initialize LLM components with appropriate temperatures
+        print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}")
+        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=ideator_temp)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
-        self.critic = Critic(provider="google_generative_ai", model_name=model_type)
-        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type)
+        self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=critic_temp)
+        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=breeder_temp)
+
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
 
@@ -34,7 +39,7 @@ class EvolutionEngine:
         """Generate contexts for the initial population"""
         self.contexts = []
         for _ in range(self.pop_size):
-            context = self.ideator.generate_context(self.context_type, self.idea_type)
+            context = self.ideator.generate_context(self.idea_type)
             self.contexts.append(context)
         return self.contexts
 
@@ -48,7 +53,7 @@ class EvolutionEngine:
         try:
             # Seed the initial population
             print("Generating initial population (Generation 0)...")
-            self.population = self.ideator.seed_ideas(self.pop_size, self.context_type, self.idea_type)
+            self.population = self.ideator.seed_ideas(self.pop_size, self.idea_type)
 
             # Process and update each idea as it's completed
             print("Refining initial population...")

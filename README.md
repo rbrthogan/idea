@@ -48,4 +48,11 @@ Then visit:
 - Improve intial context generation for idea seeding - too much in common for each idea
 - Update to evolution to use the genotype/phenotype model
 - Have an evolution variant to take human ratings as input during evolution
-- TODO: add a modifier to each generations prompt based on critique feedback on overall quality of generation
+- TODO: add a modifier to each generations prompt based on critique feedback on overall quality of generation (or perhaps all history, could even show it the ranks, etc.) -- Oracle prompt. Remove worst idea and replace with new one generated from oracle prompt each generation. Track impact on evolution.
+- TODO: visualise generation history as a graph of ideas and connections between them (parents/relationships), hight the ranks etc
+- TODO: use embeddings to monitor similarity/diversity of ideas, track in UI, and maybe cull duplicates ()
+
+
+### BUGs to fix
+- When switching to rating tab from current evolution it always say "Not enough ideas to compare" regardless of how many there are. I have to switched to a saved evolution (which means if I didn't previously save I can't rate).
+- When horizontal scorllin

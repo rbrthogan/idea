@@ -8,7 +8,7 @@ from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
 import numpy as np
 from idea.models import Idea
-from idea.prompts.loader import get_prompts, get_field_name
+from idea.prompts.loader import get_prompts
 
 class LLMWrapper(ABC):
     """Base class for LLM interactions"""
@@ -26,6 +26,7 @@ class LLMWrapper(ABC):
         self.temperature = temperature
         self.total_token_count = 0
         self.agent_name = agent_name
+        print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}")
         self._setup_provider()
 
     def _setup_provider(self):
@@ -60,8 +61,11 @@ class LLMWrapper(ABC):
     def _get_generation_config(self,
                              temperature: Optional[float],
                              response_schema: Optional[Type[BaseModel]] = None) -> Dict[str, Any]:
+        actual_temp = temperature if temperature is not None else self.temperature
+        print(f"{self.agent_name} using temperature: {actual_temp} (override: {temperature}, default: {self.temperature})")
+
         config = {
-            "temperature": temperature or self.temperature,
+            "temperature": actual_temp,
             "top_p": 0.95,
             "top_k": 40,
             "max_output_tokens": self.MAX_TOKENS,
@@ -78,22 +82,22 @@ class Ideator(LLMWrapper):
     def __init__(self, **kwargs):
         super().__init__(agent_name=self.agent_name, **kwargs)
 
-    def generate_context(self, method: str, idea_type: str) -> str:
+    def generate_context(self, idea_type: str) -> str:
         """Generate initial context for ideation"""
         prompts = get_prompts(idea_type)
-        field = get_field_name(idea_type)
 
-        if method == "random_words":
-            text = self.generate_text(prompts.RANDOM_WORDS_PROMPT, temperature=2.0)
-            print(f"Text: {text}")
-            context_text = text.split("WORDS:")[1].strip()
-        elif method == "key_ideas_elements":
-            text = self.generate_text(prompts.KEY_IDEAS_ELEMENTS_PROMPT.format(field=field), temperature=2.0)
-            print(f"Text: {text}")
+        # Always use the CONTEXT_PROMPT regardless of method
+        text = self.generate_text(prompts.CONTEXT_PROMPT, temperature=2.0)
+        print(f"Text: {text}")
+
+        # Extract concepts from the response
+        if "CONCEPTS:" in text:
             context_text = text.split("CONCEPTS:")[1].strip()
         else:
-            raise ValueError(f"Invalid method: {method}")
-        #sample 10% of the words
+            # Fallback if the expected format is not found
+            context_text = text.strip()
+
+        # Sample 10% of the words
         words = [word.strip() for word in context_text.split(',')]
         return ", ".join(random.sample(words, max(1, int(len(words) * 0.1))))
 
@@ -107,14 +111,15 @@ class Ideator(LLMWrapper):
         prompts = get_prompts(idea_type)
         return prompts.NEW_IDEA_PROMPT
 
-    def seed_ideas(self, n: int, context_type: str, idea_type: str) -> List[str]:
+    def seed_ideas(self, n: int, idea_type: str) -> List[str]:
         """Generate n initial ideas"""
         idea_prompt = self.get_idea_prompt(idea_type)
 
         ideas = []
 
         for _ in tqdm(range(n), desc="Generating ideas"):
-            context = self.generate_context(context_type, idea_type)
+            # Generate context using the context_prompt method regardless of context_type parameter
+            context = self.generate_context(idea_type)
             print(f"Context: {context}")
             prompt = f"{context}\nInstruction: {idea_prompt}"
             response = self.generate_text(prompt, temperature=1.5)
@@ -133,7 +138,9 @@ class Formatter(LLMWrapper):
     agent_name = "Formatter"
 
     def __init__(self, **kwargs):
-        super().__init__(agent_name=self.agent_name, temperature=0.3, **kwargs)
+        # Use a default temperature only if not provided in kwargs
+        temp = kwargs.pop('temperature', 0.3)
+        super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
 
     def format_idea(self, raw_idea: str, idea_type: str) -> str:
         prompts = get_prompts(idea_type)
@@ -147,7 +154,7 @@ class Critic(LLMWrapper):
     agent_name = "Critic"
 
     def __init__(self, **kwargs):
-        super().__init__(agent_name=self.agent_name, temperature=0.7, **kwargs)
+        super().__init__(agent_name=self.agent_name, **kwargs)
 
     def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
@@ -277,6 +284,14 @@ class Critic(LLMWrapper):
             print(f"Error in compare_ideas: {e}")
             return None  # Return None instead of "tie" on error
 
+# def Oracle(LLMWrapper):
+#     """Oracle for the evolution"""
+#     agent_name = "Oracle"
+
+#     def __init__(self, **kwargs):
+#         super().__init__(agent_name=self.agent_name, temperature=0.3, **kwargs)
+
+
 if __name__ == "__main__":
     import os
     import google.generativeai as genai
@@ -311,7 +326,8 @@ class Breeder(LLMWrapper):
     parent_count = 2
 
     def __init__(self, **kwargs):
-        super().__init__(agent_name=self.agent_name, temperature=1.0, **kwargs)
+        # Don't set temperature directly here, let it come from kwargs
+        super().__init__(agent_name=self.agent_name, **kwargs)
 
     def breed(self, ideas: List[str], idea_type: str) -> str:
         """Breed two ideas"""

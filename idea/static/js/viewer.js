@@ -11,6 +11,9 @@ let generations = [];
 document.addEventListener("DOMContentLoaded", () => {
     console.log("viewer.js loaded!");
 
+    // Set up temperature sliders
+    setupTemperatureSliders();
+
     const startButton = document.getElementById('startButton');
     if (startButton) {
         startButton.onclick = async function() {
@@ -19,7 +22,17 @@ document.addEventListener("DOMContentLoaded", () => {
             const generations = document.getElementById('generations').value;
             const ideaType = document.getElementById('ideaType').value;
             const modelType = document.getElementById('modelType').value;
-            const contextType = document.getElementById('contextType').value;
+
+            // Get temperature values
+            const ideatorTemp = document.getElementById('ideatorTemp').value;
+            const criticTemp = document.getElementById('criticTemp').value;
+            const breederTemp = document.getElementById('breederTemp').value;
+
+            console.log("Temperature values being sent:", {
+                ideatorTemp,
+                criticTemp,
+                breederTemp
+            });
 
             // Reset UI state
             resetUIState();
@@ -29,19 +42,29 @@ document.addEventListener("DOMContentLoaded", () => {
             startButton.textContent = 'Running...';
 
             try {
-                console.log("Sending request with:", { popSize, generations, ideaType, modelType, contextType });
+                console.log("Sending request with:", {
+                    popSize, generations, ideaType, modelType,
+                    ideatorTemp, criticTemp, breederTemp
+                });
+
+                const requestBody = {
+                    popSize,
+                    generations,
+                    ideaType,
+                    modelType,
+                    ideatorTemp,
+                    criticTemp,
+                    breederTemp
+                };
+
+                console.log("Request body JSON:", JSON.stringify(requestBody));
+
                 const response = await fetch('/api/start-evolution', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({
-                        popSize,
-                        generations,
-                        ideaType,
-                        modelType,
-                        contextType
-                    })
+                    body: JSON.stringify(requestBody)
                 });
 
                 if (response.ok) {
@@ -959,4 +982,36 @@ function createProgressBar() {
     // Insert progress bar before generations container
     const generationsContainer = document.getElementById('generations-container');
     generationsContainer.parentNode.insertBefore(progressContainer, generationsContainer);
+}
+
+// Function to set up temperature sliders
+function setupTemperatureSliders() {
+    const sliders = [
+        { id: 'ideatorTemp', valueId: 'ideatorTempValue', defaultValue: 1.0 },
+        { id: 'criticTemp', valueId: 'criticTempValue', defaultValue: 0.7 },
+        { id: 'breederTemp', valueId: 'breederTempValue', defaultValue: 1.0 }
+    ];
+
+    sliders.forEach(slider => {
+        const sliderElement = document.getElementById(slider.id);
+        const valueElement = document.getElementById(slider.valueId);
+
+        if (sliderElement && valueElement) {
+            // Set initial value
+            sliderElement.value = slider.defaultValue;
+            valueElement.textContent = slider.defaultValue;
+
+            // Log when slider changes (don't add new event listeners as we're using inline handlers)
+            console.log(`Slider ${slider.id} initialized with value ${slider.defaultValue}`);
+        } else {
+            console.error(`Could not find elements for slider ${slider.id} or value display ${slider.valueId}`);
+        }
+    });
+
+    // Log initial values to verify
+    console.log("Initial temperature values:", {
+        ideator: document.getElementById('ideatorTemp')?.value,
+        critic: document.getElementById('criticTemp')?.value,
+        breeder: document.getElementById('breederTemp')?.value
+    });
 }

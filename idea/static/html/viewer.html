@@ -15,6 +15,9 @@
     rel="stylesheet"
   />
 
+  <!-- Font Awesome for icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
   <!-- Custom CSS -->
   <link rel="stylesheet" href="/static/css/viewer.css" />
 
@@ -161,13 +164,6 @@
             </select>
           </div>
           <div class="mb-3">
-            <label for="contextType" class="form-label">Context Type</label>
-            <select class="form-select" id="contextType">
-              <option value="random_words">Random Words</option>
-              <option value="key_ideas_elements">Key concepts</option>
-            </select>
-          </div>
-          <div class="mb-3">
             <label for="modelType" class="form-label">Model Type</label>
             <select class="form-select" id="modelType">              <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite</option>
               <option value="gemini-2.0-flash-001">Gemini 2.0 Flash</option>
@@ -182,6 +178,54 @@
           <div class="mb-3">
             <label for="generations" class="form-label">Number of Generations</label>
             <input type="number" class="form-control" id="generations" value="2">
+          </div>
+
+          <!-- Advanced Configuration (Temperature Controls) -->
+          <div class="mb-3">
+            <button class="btn btn-outline-secondary w-100 d-flex justify-content-between align-items-center"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#temperatureControls"
+                    aria-expanded="false"
+                    aria-controls="temperatureControls">
+              Advanced Configuration
+              <i class="fas fa-chevron-down"></i>
+            </button>
+            <div class="collapse mt-3" id="temperatureControls">
+              <div class="card card-body">
+                <h6 class="mb-3">Temperature Controls</h6>
+
+                <!-- Ideator Temperature -->
+                <div class="mb-3">
+                  <label for="ideatorTemp" class="form-label d-flex justify-content-between">
+                    <span>Ideator Temperature</span>
+                    <span id="ideatorTempValue">1.0</span>
+                  </label>
+                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="ideatorTemp" value="1.0" oninput="document.getElementById('ideatorTempValue').textContent = this.value">
+                  <small class="text-muted">Controls creativity when generating ideas</small>
+                </div>
+
+                <!-- Critic Temperature -->
+                <div class="mb-3">
+                  <label for="criticTemp" class="form-label d-flex justify-content-between">
+                    <span>Critic Temperature</span>
+                    <span id="criticTempValue">0.7</span>
+                  </label>
+                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="criticTemp" value="0.7" oninput="document.getElementById('criticTempValue').textContent = this.value">
+                  <small class="text-muted">Controls consistency in evaluating ideas</small>
+                </div>
+
+                <!-- Breeder Temperature -->
+                <div class="mb-3">
+                  <label for="breederTemp" class="form-label d-flex justify-content-between">
+                    <span>Breeder Temperature</span>
+                    <span id="breederTempValue">1.0</span>
+                  </label>
+                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="breederTemp" value="1.0" oninput="document.getElementById('breederTempValue').textContent = this.value">
+                  <small class="text-muted">Controls variation when combining ideas</small>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 

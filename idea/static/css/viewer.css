@@ -863,3 +863,56 @@ input[type="number"]:focus {
 .gen-card:last-child {
   box-shadow: 0 0 15px rgba(108, 92, 231, 0.3);
 }
+
+/* Temperature Controls */
+#temperatureControls .card-body {
+  padding: 1rem;
+  background-color: var(--gray-100);
+}
+
+#temperatureControls h6 {
+  color: var(--primary);
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.form-range {
+  height: 0.5rem;
+}
+
+.form-range::-webkit-slider-thumb {
+  background: var(--primary);
+}
+
+.form-range::-moz-range-thumb {
+  background: var(--primary);
+}
+
+.form-range::-ms-thumb {
+  background: var(--primary);
+}
+
+#temperatureControls .form-label span:last-child {
+  font-weight: 600;
+  color: var(--primary);
+  min-width: 2rem;
+  text-align: right;
+}
+
+#temperatureControls small.text-muted {
+  font-size: 0.75rem;
+  color: var(--gray-600) !important;
+}
+
+/* Collapsible button styling */
+button[data-bs-toggle="collapse"] {
+  transition: all 0.2s ease;
+}
+
+button[data-bs-toggle="collapse"] i {
+  transition: transform 0.2s ease;
+}
+
+button[data-bs-toggle="collapse"][aria-expanded="true"] i {
+  transform: rotate(180deg);
+}
