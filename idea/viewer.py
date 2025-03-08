@@ -50,6 +50,9 @@ evolution_status = {
     "history": []
 }
 
+# Store the latest evolution data for rating
+latest_evolution_data = []
+
 # Add this near other constants
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -78,14 +81,19 @@ async def start_evolution(request: Request):
     """
     Runs the complete evolution and returns the final results
     """
-    global engine, evolution_status, evolution_queue
+    global engine, evolution_status, evolution_queue, latest_evolution_data
     data = await request.json()
     print(f"Received request data: {data}")
+
+    # Clear the latest evolution data when starting a new evolution
+    latest_evolution_data = []
 
     pop_size = int(data.get('popSize', 3))
     generations = int(data.get('generations', 2))
     idea_type = data.get('ideaType', 'airesearch')
     model_type = data.get('modelType', 'gemini-1.5-flash')
+    # Use a fixed context type
+    context_type = "context_prompt"
 
     # Get temperature parameters with defaults
     try:
@@ -149,9 +157,11 @@ async def start_evolution(request: Request):
 
 async def run_evolution_task(engine):
     """Run evolution in background with progress updates"""
+    global evolution_status, evolution_queue, latest_evolution_data
+
     # Define the progress callback function
     async def progress_callback(update_data):
-        global evolution_status, evolution_queue
+        global evolution_status, evolution_queue, latest_evolution_data
 
         # Convert Idea objects to dictionaries for JSON serialization
         if 'history' in update_data and isinstance(update_data['history'], list):
@@ -159,6 +169,10 @@ async def run_evolution_task(engine):
                 [idea_to_dict(idea) for idea in generation]
                 for generation in update_data['history']
             ]
+
+            # Store the latest evolution data for rating
+            if update_data['history']:
+                latest_evolution_data = update_data['history']
 
         # Update the evolution status
         evolution_status = update_data
@@ -196,9 +210,18 @@ def api_get_generations():
     Returns a JSON array of arrays: each generation is an array of proposals.
     Each proposal is {title, proposal}.
     """
-    if engine is None:
-        return JSONResponse([])  # Return empty array if evolution hasn't started
+    global latest_evolution_data
 
+    # If engine is None, use the latest evolution data
+    if engine is None:
+        if latest_evolution_data:
+            print(f"Returning latest evolution data with {len(latest_evolution_data)} generations")
+            return JSONResponse(latest_evolution_data)
+        else:
+            print("No evolution data available")
+            return JSONResponse([])  # Return empty array if no data is available
+
+    # If engine is available, use its history
     result = []
     for generation in engine.history:
         gen_list = []
@@ -208,6 +231,10 @@ def api_get_generations():
                 "proposal": prop.proposal
             })
         result.append(gen_list)
+
+    # Store the result as the latest evolution data
+    latest_evolution_data = result
+
     return JSONResponse(result)
 
 @app.get("/api/generations/{gen_id}")

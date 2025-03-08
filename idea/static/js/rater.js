@@ -13,11 +13,30 @@ let currentRatingType = 'auto';
 
 // Fetch a random pair on load
 window.addEventListener("load", () => {
-  refreshPair();
+  // Show loading state
+  document.getElementById('titleA').textContent = "Loading ideas...";
+  document.getElementById('proposalA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
+  document.getElementById('titleB').textContent = "";
+  document.getElementById('proposalB').innerHTML = "";
+
+  // Disable voting buttons initially
+  document.querySelectorAll('.vote-btn').forEach(btn => {
+    btn.disabled = true;
+  });
+
+  // Load data
   loadEvolutions();
   loadCurrentEvolution();
   loadModels();
   toggleRatingMode('manual'); // Start in manual mode
+
+  // Set up retry mechanism for refreshPair
+  setTimeout(() => {
+    if (Object.keys(ideasDb).length < 2) {
+      console.log("No ideas loaded yet, retrying refreshPair...");
+      refreshPair();
+    }
+  }, 3000);
 });
 
 async function initializeRating(ideas) {
@@ -166,9 +185,26 @@ async function refreshPair() {
         const ideas = Object.values(ideasDb);
 
         if (ideas.length < 2) {
-            alert('Not enough ideas to compare');
+            console.log('Not enough ideas to compare, waiting for data to load...');
+
+            // Show loading message instead of alert
+            document.getElementById('titleA').textContent = "Loading ideas...";
+            document.getElementById('proposalA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
+            document.getElementById('titleB').textContent = "";
+            document.getElementById('proposalB').innerHTML = "";
+
+            // Disable voting buttons
+            document.querySelectorAll('.vote-btn').forEach(btn => {
+                btn.disabled = true;
+            });
+
             return;
         }
+
+        // Enable voting buttons
+        document.querySelectorAll('.vote-btn').forEach(btn => {
+            btn.disabled = false;
+        });
 
         // Randomly select two different ideas
         const [ideaA, ideaB] = getRandomPair(ideas);
@@ -355,11 +391,37 @@ document.addEventListener("keydown", (event) => {
 async function loadCurrentEvolution() {
     try {
         console.log("Loading current evolution...");
+
+        // First, check localStorage for current evolution data
+        const storedData = localStorage.getItem('currentEvolutionData');
+        if (storedData) {
+            try {
+                const generations = JSON.parse(storedData);
+                console.log("Loaded generations from localStorage:", generations);
+
+                if (generations && generations.length > 0) {
+                    // Flatten all generations into a single array of ideas
+                    const ideas = generations.flat().map(idea => ({
+                        ...idea,
+                        id: generateUUID(),
+                        elo: 1500
+                    }));
+                    console.log("Processed ideas from localStorage:", ideas);
+                    await initializeRating(ideas);
+                    return; // Exit early if we successfully loaded from localStorage
+                }
+            } catch (e) {
+                console.error("Error parsing localStorage data:", e);
+                // Continue to API call if localStorage parsing fails
+            }
+        }
+
+        // If localStorage doesn't have data, try the API
         const response = await fetch('/api/generations');
 
         if (response.ok) {
             const generations = await response.json();
-            console.log("Loaded generations:", generations);
+            console.log("Loaded generations from API:", generations);
 
             if (generations && generations.length > 0) {
                 // Flatten all generations into a single array of ideas
@@ -368,14 +430,23 @@ async function loadCurrentEvolution() {
                     id: generateUUID(),
                     elo: 1500
                 }));
-                console.log("Processed ideas:", ideas);
+                console.log("Processed ideas from API:", ideas);
                 await initializeRating(ideas);
+
+                // Refresh the pair now that we have ideas
+                await refreshPair();
             } else {
                 console.warn("No generations found or empty generations array");
                 document.getElementById("titleA").textContent = "No ideas to rate";
                 document.getElementById("proposalA").textContent = "Please run an evolution first or select a saved evolution.";
                 document.getElementById("titleB").textContent = "";
                 document.getElementById("proposalB").textContent = "";
+
+                // Retry after a delay if no ideas were found
+                setTimeout(() => {
+                    console.log("Retrying to load current evolution...");
+                    loadCurrentEvolution();
+                }, 2000);
             }
         } else {
             console.error("Failed to load generations:", await response.text());

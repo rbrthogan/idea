@@ -684,6 +684,9 @@ async function pollProgress() {
         if (data.history && data.history.length > 0) {
             console.log("Rendering generations from progress update");
             renderGenerations(data.history);
+
+            // Store the current evolution data in localStorage
+            localStorage.setItem('currentEvolutionData', JSON.stringify(data.history));
         }
 
         if (data.contexts && data.contexts.length > 0) {
@@ -705,6 +708,9 @@ async function pollProgress() {
                 // Save final state and enable save button
                 currentEvolutionData = data;
                 renderGenerations(data.history);
+
+                // Store the final evolution data in localStorage
+                localStorage.setItem('currentEvolutionData', JSON.stringify(data.history));
 
                 // Set up the download button
                 setupDownloadButton(data);
@@ -956,6 +962,9 @@ function resetUIState() {
     // Reset evolution status
     isEvolutionRunning = false;
     currentEvolutionData = null;
+
+    // Clear localStorage data
+    localStorage.removeItem('currentEvolutionData');
 
     // Reset download button
     const downloadButton = document.getElementById('downloadButton');

@@ -6,7 +6,7 @@ Prompt configurations for AI Research idea type
 ITEM_TYPE = "AI research proposals"
 
 # Context generation prompts
-RANDOM_WORDS_PROMPT = """Generate a list of 50 AI research concepts. These concepts should be one of the following:
+CONTEXT_PROMPT = """Generate a list of 50 AI research concepts. These concepts should be one of the following:
 a technique/method, an algorithm, an architecture, a dataset, a modality, a task, a problem/challenge, a solution, an application/use case, a future direction.
 Return the list of concepts as a single string, separated by commas with no other text in format:
 CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ...."""

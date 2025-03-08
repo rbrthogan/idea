@@ -53,5 +53,4 @@ Then visit:
 - TODO: use embeddings to monitor similarity/diversity of ideas, track in UI, and maybe cull duplicates ()
 
 
-### BUGs to fix
-- When switching to rating tab from current evolution it always say "Not enough ideas to compare" regardless of how many there are. I have to switched to a saved evolution (which means if I didn't previously save I can't rate).
+
