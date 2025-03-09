@@ -100,7 +100,10 @@ class EvolutionEngine:
                     ranks = self.critic.get_tournament_ranks(group, self.idea_type, 10)
 
                     for idea_idx, rank in sorted(ranks.items(), key=lambda x: x[1]):
-                        print(f"{group[idea_idx].title} - {rank}")
+                        # Extract title from the idea object within the dictionary
+                        idea_obj = group[idea_idx]["idea"]
+                        title = idea_obj.title if hasattr(idea_obj, 'title') else "Untitled"
+                        print(f"{title} - {rank}")
 
                     for k in range(len(group)):
                         # using tournament ranks, weighted sample from group
@@ -109,8 +112,9 @@ class EvolutionEngine:
                         weights = [w / sum(weights) for w in weights]
 
                         # Select parents and breed
-                        parents = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights)
-                        new_idea = self.breeder.breed(parents, self.idea_type)
+                        parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights)
+                        parent_ideas = [group[idx] for idx in parent_indices]
+                        new_idea = self.breeder.breed(parent_ideas, self.idea_type)
 
                         # Format the idea and add to new population
                         formatted_idea = self.formatter.format_idea(new_idea, self.idea_type)
@@ -163,7 +167,16 @@ class EvolutionEngine:
                 "error": str(e)
             })
 
-    def get_proposals_by_generation(self, generation_index: int) -> List[Idea]:
+    def get_proposals_by_generation(self, generation_index: int) -> List[Dict]:
+        """
+        Get all proposals from a specific generation
+
+        Args:
+            generation_index: The index of the generation to retrieve
+
+        Returns:
+            List of idea dictionaries with 'id' and 'idea' keys
+        """
         if generation_index < 0 or generation_index >= len(self.history):
             return []
         return self.history[generation_index]

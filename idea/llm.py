@@ -9,7 +9,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 import numpy as np
 from idea.models import Idea
 from idea.prompts.loader import get_prompts
-
+import uuid
 class LLMWrapper(ABC):
     """Base class for LLM interactions"""
     MAX_TOKENS = 8192
@@ -123,15 +123,19 @@ class Ideator(LLMWrapper):
             print(f"Context: {context}")
             prompt = f"{context}\nInstruction: {idea_prompt}"
             response = self.generate_text(prompt, temperature=1.5)
-            ideas.append(response)
+            ideas.append({"id": uuid.uuid4(), "idea": response})
         return ideas
 
     def generate_new_idea(self, ideas: List[str], idea_type: str) -> str:
         """Generate a new idea based on existing ones"""
-        current_ideas = "\n\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
+        # Extract just the idea text from each idea dictionary
+        idea_texts = [idea["idea"] for idea in ideas]
+        current_ideas = "\n\n".join([f"{i+1}. {idea_text}" for i, idea_text in enumerate(idea_texts)])
         prompt = self.get_new_idea_prompt(idea_type).format(current_ideas=current_ideas)
         prompt = f"current ideas:\n{current_ideas}\n\n{prompt}"
-        return self.generate_text(prompt, temperature=1.0)
+        response = self.generate_text(prompt, temperature=1.0)
+        # Create a new idea with a unique ID
+        return {"id": uuid.uuid4(), "idea": response}
 
 class Formatter(LLMWrapper):
     """Reformats unstructured ideas into a cleaner format"""
@@ -143,11 +147,18 @@ class Formatter(LLMWrapper):
         super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
 
     def format_idea(self, raw_idea: str, idea_type: str) -> str:
+        """Format a raw idea into a structured format"""
         prompts = get_prompts(idea_type)
-        prompt = prompts.FORMAT_PROMPT.format(input_text=raw_idea)
+        # If raw_idea is a dictionary with 'id' and 'idea' keys, extract just the idea text
+        idea_text = raw_idea["idea"] if isinstance(raw_idea, dict) and "idea" in raw_idea else raw_idea
+        prompt = prompts.FORMAT_PROMPT.format(input_text=idea_text)
         response = self.generate_text(prompt, response_schema=Idea)
-        idea = Idea(**json.loads(response))
-        return idea
+        formatted_idea = Idea(**json.loads(response))
+
+        # If the input was a dictionary with an ID, preserve that ID
+        if isinstance(raw_idea, dict) and "id" in raw_idea:
+            return {"id": raw_idea["id"], "idea": formatted_idea}
+        return formatted_idea
 
 class Critic(LLMWrapper):
     """Analyzes and refines ideas"""
@@ -159,18 +170,27 @@ class Critic(LLMWrapper):
     def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
         prompts = get_prompts(idea_type)
-        prompt = prompts.CRITIQUE_PROMPT.format(idea=idea)
+        # Extract idea text if it's a dictionary
+        idea_text = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
+        prompt = prompts.CRITIQUE_PROMPT.format(idea=idea_text)
         return self.generate_text(prompt)
 
     def refine(self, idea: str, idea_type: str) -> str:
         """Refine an idea based on critique"""
-        critique = self.critique(idea, idea_type)
+        # Extract idea text if it's a dictionary
+        idea_text = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
+        critique = self.critique(idea_text, idea_type)
         prompts = get_prompts(idea_type)
         prompt = prompts.REFINE_PROMPT.format(
-            idea=idea,
+            idea=idea_text,
             critique=critique
         )
-        return self.generate_text(prompt)
+        refined_idea = self.generate_text(prompt)
+
+        # If the input was a dictionary with an ID, preserve that ID
+        if isinstance(idea, dict) and "id" in idea:
+            return {"id": idea["id"], "idea": refined_idea}
+        return refined_idea
 
     def _elo_update(self, elo_a, elo_b, winner):
         """Update the Elo rating of an idea"""
@@ -203,7 +223,20 @@ class Critic(LLMWrapper):
                 idea_idx_b = np.random.choice(valid_indices, size=1)[0]
             else:
                 idea_idx_a, idea_idx_b = np.random.choice(len(ideas), size=2, replace=False)
-            winner = self.compare_ideas(ideas[idea_idx_a].dict(), ideas[idea_idx_b].dict(), idea_type)
+
+            # Extract idea objects for comparison
+            idea_a = ideas[idea_idx_a]
+            idea_b = ideas[idea_idx_b]
+
+            # If ideas are dictionaries with 'idea' key, extract the idea objects
+            idea_a_obj = idea_a["idea"] if isinstance(idea_a, dict) and "idea" in idea_a else idea_a
+            idea_b_obj = idea_b["idea"] if isinstance(idea_b, dict) and "idea" in idea_b else idea_b
+
+            # Convert to dict if not already
+            idea_a_dict = idea_a_obj.dict() if hasattr(idea_a_obj, 'dict') else idea_a_obj
+            idea_b_dict = idea_b_obj.dict() if hasattr(idea_b_obj, 'dict') else idea_b_obj
+
+            winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
             elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
             ranks[idea_idx_a] = elo_a
             ranks[idea_idx_b] = elo_b
@@ -212,7 +245,19 @@ class Critic(LLMWrapper):
 
     def remove_worst_idea(self, ideas: List[str], idea_type: str) -> List[str]:
         """Identify and remove the worst idea from a list"""
-        idea_str = "\n".join([f"{i+1}. {idea}" for i, idea in enumerate(ideas)])
+        # Extract idea texts for display
+        idea_texts = []
+        for idea in ideas:
+            if isinstance(idea, dict) and "idea" in idea:
+                idea_obj = idea["idea"]
+                if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'proposal'):
+                    idea_texts.append(f"{idea_obj.title}: {idea_obj.proposal}")
+                else:
+                    idea_texts.append(str(idea_obj))
+            else:
+                idea_texts.append(str(idea))
+
+        idea_str = "\n".join([f"{i+1}. {text}" for i, text in enumerate(idea_texts)])
         prompts = get_prompts(idea_type)
         prompt = prompts.REMOVE_WORST_IDEA_PROMPT.format(
             ideas=idea_str,
@@ -330,9 +375,40 @@ class Breeder(LLMWrapper):
         super().__init__(agent_name=self.agent_name, **kwargs)
 
     def breed(self, ideas: List[str], idea_type: str) -> str:
-        """Breed two ideas"""
-        prompt = self.get_breed_prompt(idea_type)
-        return self.generate_text(prompt)
+        """Breed ideas to create a new idea
+
+        Args:
+            ideas: List of parent ideas that have already been selected in the main evolution loop
+            idea_type: Type of idea to breed
+
+        Returns:
+            A new idea with a unique ID
+        """
+        prompts = get_prompts(idea_type)
+
+        # Extract idea texts from parent ideas
+        parent_texts = []
+        for parent in ideas:
+            if isinstance(parent, dict) and "idea" in parent:
+                parent_obj = parent["idea"]
+                if hasattr(parent_obj, 'title') and hasattr(parent_obj, 'proposal'):
+                    parent_texts.append(f"{parent_obj.title}: {parent_obj.proposal}")
+                else:
+                    parent_texts.append(str(parent_obj))
+            else:
+                parent_texts.append(str(parent))
+
+        # Format the parent ideas for the prompt
+        parent_str = "\n\n".join([f"Parent {i+1}:\n{text}" for i, text in enumerate(parent_texts)])
+
+        # Create the breeding prompt
+        prompt = prompts.BREED_PROMPT.format(ideas=parent_str)
+
+        # Generate the new idea
+        response = self.generate_text(prompt)
+
+        # Create a new idea with a unique ID
+        return {"id": uuid.uuid4(), "idea": response}
 
     def get_breed_prompt(self, idea_type: str) -> str:
         """Get prompt template for breeding ideas"""

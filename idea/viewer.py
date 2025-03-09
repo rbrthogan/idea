@@ -196,13 +196,49 @@ async def run_evolution_task(engine):
     # Run the evolution with progress updates
     await engine.run_evolution_with_updates(progress_callback)
 
-def idea_to_dict(idea: Idea) -> dict:
-    """Convert an Idea object to a dictionary"""
-    return {
-        "title": idea.title,
-        "proposal": idea.proposal
-    }
+def idea_to_dict(idea) -> dict:
+    """Convert an Idea object or idea dictionary to a dictionary for JSON serialization"""
+    # If idea is already a dictionary with 'id' and 'idea' keys
+    if isinstance(idea, dict) and 'id' in idea and 'idea' in idea:
+        idea_obj = idea['idea']
+        idea_id = idea['id']
 
+        # If the idea object has title and proposal attributes
+        if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'proposal'):
+            return {
+                "id": str(idea_id),
+                "title": idea_obj.title,
+                "proposal": idea_obj.proposal
+            }
+        # If the idea object is a string
+        elif isinstance(idea_obj, str):
+            return {
+                "id": str(idea_id),
+                "title": "Untitled",
+                "proposal": idea_obj
+            }
+        # If the idea object is already a dict
+        elif isinstance(idea_obj, dict):
+            result = idea_obj.copy()
+            result["id"] = str(idea_id)
+            return result
+
+    # Legacy case: idea is a direct Idea object
+    elif hasattr(idea, 'title') and hasattr(idea, 'proposal'):
+        return {
+            "title": idea.title,
+            "proposal": idea.proposal
+        }
+
+    # Fallback case: idea is a string
+    elif isinstance(idea, str):
+        return {
+            "title": "Untitled",
+            "proposal": idea
+        }
+
+    # Last resort: return the idea as is if it's a dict, or an empty dict
+    return idea if isinstance(idea, dict) else {}
 
 @app.get("/api/generations")
 def api_get_generations():
