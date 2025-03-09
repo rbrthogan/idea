@@ -1,5 +1,58 @@
 // static/js/viewer.js
 
+// Add CSS styles for lineage modal and buttons
+const lineageStyles = document.createElement('style');
+lineageStyles.textContent = `
+    .lineage-parent-cards {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 15px;
+        margin-top: 15px;
+    }
+
+    .lineage-parent-card {
+        flex: 1 1 300px;
+        max-width: 100%;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .lineage-parent-card .card-title {
+        font-size: 1rem;
+        font-weight: bold;
+        margin-bottom: 10px;
+    }
+
+    .lineage-parent-card .card-preview {
+        font-size: 0.9rem;
+        margin-bottom: 15px;
+        color: #555;
+    }
+
+    /* Ensure consistent button styling */
+    .view-lineage, .view-context {
+        width: auto;
+        min-width: 90px;
+        text-align: center;
+        font-weight: normal;
+        transition: all 0.2s ease;
+    }
+
+    /* Match hover behavior exactly */
+    .view-lineage:hover, .view-context:hover {
+        background-color: #6c757d;
+        color: white;
+    }
+
+    @media (max-width: 768px) {
+        .lineage-parent-card {
+            flex: 1 1 100%;
+        }
+    }
+`;
+document.head.appendChild(lineageStyles);
+
 let pollingInterval;
 let isEvolutionRunning = false;
 let currentContextIndex = 0;
@@ -401,6 +454,11 @@ function renderGenerations(gens) {
             const viewContextButton = index === 0 ?
                 `<button class="btn btn-outline-secondary btn-sm view-context me-2">View Context</button>` : '';
 
+            // Add "Lineage" button for non-initial generation cards
+            // Using the exact same styling as the View Context button but with shorter text
+            const viewLineageButton = index > 0 ?
+                `<button class="btn btn-outline-secondary btn-sm view-lineage me-2">Lineage</button>` : '';
+
             card.innerHTML = `
                 <div class="card-body">
                     <h5 class="card-title">${idea.title || 'Untitled'}</h5>
@@ -409,6 +467,7 @@ function renderGenerations(gens) {
                     </div>
                     <div class="card-actions">
                         ${viewContextButton}
+                        ${viewLineageButton}
                         <button class="btn btn-primary btn-sm view-idea">View Full Idea</button>
                     </div>
                 </div>
@@ -425,6 +484,14 @@ function renderGenerations(gens) {
                 const viewContextBtn = card.querySelector('.view-context');
                 viewContextBtn.addEventListener('click', () => {
                     showContextModal();
+                });
+            }
+
+            // Add click handler for view lineage button if it exists
+            if (index > 0) {
+                const viewLineageBtn = card.querySelector('.view-lineage');
+                viewLineageBtn.addEventListener('click', () => {
+                    showLineageModal(idea, index);
                 });
             }
 
@@ -461,6 +528,30 @@ function showIdeaModal(idea) {
     let modal;
     if (window.bootstrap) {
         modal = new bootstrap.Modal(modalElement);
+
+        // Add event listener to clean up when modal is hidden
+        // Use a named function so we can check if it already exists
+        const cleanupFunction = function(event) {
+            // Remove any lingering backdrop elements
+            const backdrops = document.querySelectorAll('.modal-backdrop');
+            backdrops.forEach(backdrop => {
+                backdrop.remove();
+            });
+
+            // Reset body classes that might have been added by Bootstrap
+            document.body.classList.remove('modal-open');
+            document.body.style.overflow = '';
+            document.body.style.paddingRight = '';
+        };
+
+        // We don't want to add multiple cleanup listeners
+        // First remove any existing cleanup listener
+        modalElement.removeEventListener('hidden.bs.modal', cleanupFunction);
+
+        // Then add our cleanup listener
+        // Note: This won't interfere with other named listeners like reopenLineage
+        modalElement.addEventListener('hidden.bs.modal', cleanupFunction);
+
         modal.show();
     } else {
         console.error("Bootstrap is not available. Make sure it's properly loaded.");
@@ -1105,7 +1196,215 @@ function showContextModal() {
         contextModalContent.innerHTML = '<p class="text-muted">No context available</p>';
     }
 
-    // Initialize and show the modal
-    const modal = new bootstrap.Modal(contextModal);
-    modal.show();
+    // Show the modal
+    let modal;
+    if (window.bootstrap) {
+        modal = new bootstrap.Modal(contextModal);
+
+        // Add event listener to clean up when modal is hidden
+        // Use a named function so we can check if it already exists
+        const cleanupFunction = function(event) {
+            // Remove any lingering backdrop elements
+            const backdrops = document.querySelectorAll('.modal-backdrop');
+            backdrops.forEach(backdrop => {
+                backdrop.remove();
+            });
+
+            // Reset body classes that might have been added by Bootstrap
+            document.body.classList.remove('modal-open');
+            document.body.style.overflow = '';
+            document.body.style.paddingRight = '';
+        };
+
+        // We don't want to add multiple cleanup listeners
+        // First remove any existing cleanup listener
+        contextModal.removeEventListener('hidden.bs.modal', cleanupFunction);
+
+        // Then add our cleanup listener
+        contextModal.addEventListener('hidden.bs.modal', cleanupFunction);
+
+        modal.show();
+    } else {
+        console.error("Bootstrap is not available. Make sure it's properly loaded.");
+        // Fallback for testing - just make the modal visible
+        contextModal.style.display = 'block';
+    }
+}
+
+// Function to show the lineage modal
+function showLineageModal(idea, generationIndex) {
+    console.log("Showing lineage for idea:", idea);
+
+    // Create modal if it doesn't exist
+    let lineageModal = document.getElementById('lineageModal');
+
+    if (!lineageModal) {
+        // Create the modal element
+        lineageModal = document.createElement('div');
+        lineageModal.className = 'modal fade';
+        lineageModal.id = 'lineageModal';
+        lineageModal.tabIndex = '-1';
+        lineageModal.setAttribute('aria-labelledby', 'lineageModalLabel');
+        lineageModal.setAttribute('aria-hidden', 'true');
+
+        // Set up the modal HTML structure
+        lineageModal.innerHTML = `
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="lineageModalLabel">Idea Lineage</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="lineageModalContent"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Add the modal to the document body
+        document.body.appendChild(lineageModal);
+    }
+
+    // Get the lineage modal content element
+    const lineageModalContent = document.getElementById('lineageModalContent');
+
+    // Set the modal title to include the idea title
+    document.getElementById('lineageModalLabel').textContent = `Lineage: ${idea.title || 'Untitled'}`;
+
+    // Check if the idea has parent IDs
+    if (idea.parent_ids && idea.parent_ids.length > 0) {
+        // Find parent ideas from previous generation
+        const parentGeneration = generations[generationIndex - 1];
+        const parentIdeas = [];
+
+        // Find each parent idea by ID
+        for (const parentId of idea.parent_ids) {
+            const parentIdea = parentGeneration.find(p => p.id === parentId);
+            if (parentIdea) {
+                parentIdeas.push(parentIdea);
+            }
+        }
+
+        if (parentIdeas.length > 0) {
+            // Create HTML for parent ideas
+            let parentsHtml = `
+                <div class="lineage-parents">
+                    <h6>Parent Ideas (Generation ${generationIndex}):</h6>
+                    <div class="lineage-parent-cards">
+            `;
+
+            // Add a card for each parent idea
+            parentIdeas.forEach((parent, idx) => {
+                const parentPreview = createCardPreview(parent.proposal, 100);
+                parentsHtml += `
+                    <div class="card lineage-parent-card mb-3">
+                        <div class="card-body">
+                            <h6 class="card-title">${parent.title || 'Untitled'}</h6>
+                            <div class="card-preview">
+                                <p>${parentPreview}</p>
+                            </div>
+                            <button class="btn btn-sm btn-primary view-parent-idea" data-parent-index="${idx}">
+                                View Full Idea
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            parentsHtml += `
+                    </div>
+                </div>
+            `;
+
+            lineageModalContent.innerHTML = parentsHtml;
+
+            // Add event listeners to the "View Full Idea" buttons
+            const viewParentButtons = lineageModalContent.querySelectorAll('.view-parent-idea');
+            viewParentButtons.forEach(button => {
+                button.addEventListener('click', () => {
+                    const parentIndex = button.getAttribute('data-parent-index');
+
+                    // Store the current idea and generation index for reopening the lineage modal later
+                    const currentIdea = idea;
+                    const currentGenIndex = generationIndex;
+
+                    // Close the lineage modal before showing the idea modal
+                    if (window.bootstrap) {
+                        const lineageModalInstance = bootstrap.Modal.getInstance(lineageModal);
+                        if (lineageModalInstance) {
+                            lineageModalInstance.hide();
+                        }
+                    } else {
+                        // Fallback if bootstrap is not available
+                        lineageModal.style.display = 'none';
+                    }
+
+                    // Add a small delay to ensure the modal is fully closed before opening the new one
+                    setTimeout(() => {
+                        // Get the idea modal element
+                        const ideaModalElement = document.getElementById('ideaModal');
+
+                        // Add one-time event listener to reopen lineage modal when idea modal is closed
+                        const reopenLineage = function() {
+                            // Remove this event listener to prevent multiple reopenings
+                            ideaModalElement.removeEventListener('hidden.bs.modal', reopenLineage);
+
+                            // Reopen the lineage modal with a small delay
+                            setTimeout(() => {
+                                showLineageModal(currentIdea, currentGenIndex);
+                            }, 150);
+                        };
+
+                        // Add the event listener
+                        ideaModalElement.addEventListener('hidden.bs.modal', reopenLineage);
+
+                        // Show the idea modal
+                        showIdeaModal(parentIdeas[parentIndex]);
+                    }, 150);
+                });
+            });
+        } else {
+            lineageModalContent.innerHTML = `<p>Could not find parent ideas for this idea.</p>`;
+        }
+    } else {
+        lineageModalContent.innerHTML = `<p>This idea has no recorded parent ideas.</p>`;
+    }
+
+    // Show the modal
+    let modal;
+    if (window.bootstrap) {
+        modal = new bootstrap.Modal(lineageModal);
+
+        // Add event listener to clean up when modal is hidden
+        // Use a named function so we can check if it already exists
+        const cleanupFunction = function(event) {
+            // Remove any lingering backdrop elements
+            const backdrops = document.querySelectorAll('.modal-backdrop');
+            backdrops.forEach(backdrop => {
+                backdrop.remove();
+            });
+
+            // Reset body classes that might have been added by Bootstrap
+            document.body.classList.remove('modal-open');
+            document.body.style.overflow = '';
+            document.body.style.paddingRight = '';
+        };
+
+        // We don't want to add multiple cleanup listeners
+        // First remove any existing cleanup listener
+        lineageModal.removeEventListener('hidden.bs.modal', cleanupFunction);
+
+        // Then add our cleanup listener
+        lineageModal.addEventListener('hidden.bs.modal', cleanupFunction);
+
+        modal.show();
+    } else {
+        console.error("Bootstrap is not available. Make sure it's properly loaded.");
+        // Fallback for testing - just make the modal visible
+        lineageModal.style.display = 'block';
+    }
 }

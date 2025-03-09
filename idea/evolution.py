@@ -108,11 +108,13 @@ class EvolutionEngine:
                     for k in range(len(group)):
                         # using tournament ranks, weighted sample from group
                         weights = [ranks[i] for i in range(len(group))]
+                        # normalize weights to be between 0 and 1
+                        # Note: this shift will cause the lowest ranked idea to have a weight of 0, eliminating it from selection
                         weights = [(w - min(weights)) / (max(weights) - min(weights)) for w in weights]
                         weights = [w / sum(weights) for w in weights]
 
                         # Select parents and breed
-                        parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights)
+                        parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights, replace=False)
                         parent_ideas = [group[idx] for idx in parent_indices]
                         new_idea = self.breeder.breed(parent_ideas, self.idea_type)
 

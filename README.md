@@ -59,3 +59,4 @@ Then visit:
 - initial context display is same for each idea
 - current evolution gets wipe from viewer display after going to rate and returning
 - change numbering of generations to be 0-indexed (initial generation is 0)
+- seems that parent selection is allowing 2 of the same parent to be selected
