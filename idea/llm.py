@@ -123,7 +123,7 @@ class Ideator(LLMWrapper):
             print(f"Context: {context}")
             prompt = f"{context}\nInstruction: {idea_prompt}"
             response = self.generate_text(prompt, temperature=1.5)
-            ideas.append({"id": uuid.uuid4(), "idea": response})
+            ideas.append({"id": uuid.uuid4(), "idea": response, "parent_ids": []})
         return ideas
 
     def generate_new_idea(self, ideas: List[str], idea_type: str) -> str:
@@ -134,8 +134,8 @@ class Ideator(LLMWrapper):
         prompt = self.get_new_idea_prompt(idea_type).format(current_ideas=current_ideas)
         prompt = f"current ideas:\n{current_ideas}\n\n{prompt}"
         response = self.generate_text(prompt, temperature=1.0)
-        # Create a new idea with a unique ID
-        return {"id": uuid.uuid4(), "idea": response}
+        # Create a new idea with a unique ID and empty parent_ids list
+        return {"id": uuid.uuid4(), "idea": response, "parent_ids": []}
 
 class Formatter(LLMWrapper):
     """Reformats unstructured ideas into a cleaner format"""
@@ -155,9 +155,15 @@ class Formatter(LLMWrapper):
         response = self.generate_text(prompt, response_schema=Idea)
         formatted_idea = Idea(**json.loads(response))
 
-        # If the input was a dictionary with an ID, preserve that ID
+        # If the input was a dictionary with an ID, preserve that ID and parent_ids
         if isinstance(raw_idea, dict) and "id" in raw_idea:
-            return {"id": raw_idea["id"], "idea": formatted_idea}
+            result = {"id": raw_idea["id"], "idea": formatted_idea}
+            # Preserve parent_ids if they exist
+            if "parent_ids" in raw_idea:
+                result["parent_ids"] = raw_idea["parent_ids"]
+            else:
+                result["parent_ids"] = []
+            return result
         return formatted_idea
 
 class Critic(LLMWrapper):
@@ -187,9 +193,15 @@ class Critic(LLMWrapper):
         )
         refined_idea = self.generate_text(prompt)
 
-        # If the input was a dictionary with an ID, preserve that ID
+        # If the input was a dictionary with an ID, preserve that ID and parent_ids
         if isinstance(idea, dict) and "id" in idea:
-            return {"id": idea["id"], "idea": refined_idea}
+            result = {"id": idea["id"], "idea": refined_idea}
+            # Preserve parent_ids if they exist
+            if "parent_ids" in idea:
+                result["parent_ids"] = idea["parent_ids"]
+            else:
+                result["parent_ids"] = []
+            return result
         return refined_idea
 
     def _elo_update(self, elo_a, elo_b, winner):
@@ -382,13 +394,20 @@ class Breeder(LLMWrapper):
             idea_type: Type of idea to breed
 
         Returns:
-            A new idea with a unique ID
+            A new idea with a unique ID and parent IDs
         """
         prompts = get_prompts(idea_type)
 
-        # Extract idea texts from parent ideas
+        # Extract idea texts from parent ideas and collect parent IDs
         parent_texts = []
+        parent_ids = []
+
         for parent in ideas:
+            # Extract parent ID
+            if isinstance(parent, dict) and "id" in parent:
+                parent_ids.append(str(parent["id"]))
+
+            # Extract parent text
             if isinstance(parent, dict) and "idea" in parent:
                 parent_obj = parent["idea"]
                 if hasattr(parent_obj, 'title') and hasattr(parent_obj, 'proposal'):
@@ -407,8 +426,8 @@ class Breeder(LLMWrapper):
         # Generate the new idea
         response = self.generate_text(prompt)
 
-        # Create a new idea with a unique ID
-        return {"id": uuid.uuid4(), "idea": response}
+        # Create a new idea with a unique ID and parent IDs
+        return {"id": uuid.uuid4(), "idea": response, "parent_ids": parent_ids}
 
     def get_breed_prompt(self, idea_type: str) -> str:
         """Get prompt template for breeding ideas"""

@@ -203,38 +203,46 @@ def idea_to_dict(idea) -> dict:
         idea_obj = idea['idea']
         idea_id = idea['id']
 
+        # Get parent IDs if they exist
+        parent_ids = idea.get('parent_ids', [])
+
         # If the idea object has title and proposal attributes
         if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'proposal'):
             return {
                 "id": str(idea_id),
                 "title": idea_obj.title,
-                "proposal": idea_obj.proposal
+                "proposal": idea_obj.proposal,
+                "parent_ids": parent_ids
             }
         # If the idea object is a string
         elif isinstance(idea_obj, str):
             return {
                 "id": str(idea_id),
                 "title": "Untitled",
-                "proposal": idea_obj
+                "proposal": idea_obj,
+                "parent_ids": parent_ids
             }
         # If the idea object is already a dict
         elif isinstance(idea_obj, dict):
             result = idea_obj.copy()
             result["id"] = str(idea_id)
+            result["parent_ids"] = parent_ids
             return result
 
     # Legacy case: idea is a direct Idea object
     elif hasattr(idea, 'title') and hasattr(idea, 'proposal'):
         return {
             "title": idea.title,
-            "proposal": idea.proposal
+            "proposal": idea.proposal,
+            "parent_ids": []
         }
 
     # Fallback case: idea is a string
     elif isinstance(idea, str):
         return {
             "title": "Untitled",
-            "proposal": idea
+            "proposal": idea,
+            "parent_ids": []
         }
 
     # Last resort: return the idea as is if it's a dict, or an empty dict
