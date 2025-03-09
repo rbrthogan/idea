@@ -52,6 +52,8 @@ Then visit:
 - TODO: visualise generation history as a graph of ideas and connections between them (parents/relationships), highlight the ranks etc
 - TODO: use embeddings to monitor similarity/diversity of ideas, track in UI, and maybe cull duplicates ()
 - TODO: styling needs work
+- TODO: add "matches" column to rankings view to indicate how many comparisons each idea had
+- TODO: appears to be an issue with the results of auto rankings, possible only last 5 matches are being used?
 
 
 ### Bugs

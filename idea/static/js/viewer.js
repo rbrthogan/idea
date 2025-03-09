@@ -45,6 +45,45 @@ lineageStyles.textContent = `
         color: white;
     }
 
+    /* Lineage section styling */
+    .lineage-section {
+        border-bottom: 1px solid #eee;
+        padding-bottom: 20px;
+    }
+
+    .lineage-section:last-child {
+        border-bottom: none;
+    }
+
+    .lineage-generation-title {
+        font-weight: bold;
+        color: #495057;
+        margin-bottom: 15px;
+        padding-left: 10px;
+        border-left: 4px solid #6c757d;
+    }
+
+    /* Different border colors for different generations */
+    .lineage-section:nth-child(1) .lineage-generation-title {
+        border-left-color: #007bff;
+    }
+
+    .lineage-section:nth-child(2) .lineage-generation-title {
+        border-left-color: #6610f2;
+    }
+
+    .lineage-section:nth-child(3) .lineage-generation-title {
+        border-left-color: #6f42c1;
+    }
+
+    .lineage-section:nth-child(4) .lineage-generation-title {
+        border-left-color: #e83e8c;
+    }
+
+    .lineage-section:nth-child(5) .lineage-generation-title {
+        border-left-color: #dc3545;
+    }
+
     @media (max-width: 768px) {
         .lineage-parent-card {
             flex: 1 1 100%;
@@ -1275,58 +1314,148 @@ function showLineageModal(idea, generationIndex) {
     // Set the modal title to include the idea title
     document.getElementById('lineageModalLabel').textContent = `Lineage: ${idea.title || 'Untitled'}`;
 
+    // Function to recursively find ancestors
+    function findAncestors(currentIdea, currentGenIndex, processedIds = new Set()) {
+        // Base case: if we're at generation 0 or the idea has no parents, return empty array
+        if (currentGenIndex <= 0 || !currentIdea.parent_ids || currentIdea.parent_ids.length === 0) {
+            return [];
+        }
+
+        const parentGeneration = generations[currentGenIndex - 1];
+        const ancestors = [];
+
+        // Find direct parents
+        for (const parentId of currentIdea.parent_ids) {
+            // Skip if we've already processed this parent
+            if (processedIds.has(parentId)) {
+                continue;
+            }
+
+            const parentIdea = parentGeneration.find(p => p.id === parentId);
+            if (parentIdea) {
+                // Add this parent with its generation info
+                ancestors.push({
+                    idea: parentIdea,
+                    generation: currentGenIndex - 1
+                });
+
+                // Mark this parent as processed to avoid duplicates in recursive calls
+                processedIds.add(parentId);
+
+                // Recursively find this parent's ancestors, passing the updated processedIds
+                const parentAncestors = findAncestors(parentIdea, currentGenIndex - 1, processedIds);
+                ancestors.push(...parentAncestors);
+            }
+        }
+
+        return ancestors;
+    }
+
+    // Get all ancestors organized by generation
+    function getAncestorsByGeneration(currentIdea, currentGenIndex) {
+        const allAncestors = findAncestors(currentIdea, currentGenIndex);
+        const ancestorsByGen = {};
+
+        // Track all ancestor IDs to avoid duplicates
+        const processedIds = new Set();
+
+        // Add direct parent IDs to processed set to avoid duplication
+        if (currentIdea.parent_ids) {
+            currentIdea.parent_ids.forEach(id => processedIds.add(id));
+        }
+
+        // Group ancestors by generation, avoiding duplicates
+        for (const ancestor of allAncestors) {
+            // Skip if we've already processed this ancestor or if it's a direct parent
+            if (processedIds.has(ancestor.idea.id)) {
+                continue;
+            }
+
+            // Mark this ancestor as processed
+            processedIds.add(ancestor.idea.id);
+
+            // Add to the appropriate generation group
+            if (!ancestorsByGen[ancestor.generation]) {
+                ancestorsByGen[ancestor.generation] = [];
+            }
+            ancestorsByGen[ancestor.generation].push(ancestor.idea);
+        }
+
+        return ancestorsByGen;
+    }
+
     // Check if the idea has parent IDs
     if (idea.parent_ids && idea.parent_ids.length > 0) {
-        // Find parent ideas from previous generation
+        // Get all ancestors organized by generation
+        const ancestorsByGeneration = getAncestorsByGeneration(idea, generationIndex);
+
+        // Find direct parents from the previous generation
         const parentGeneration = generations[generationIndex - 1];
-        const parentIdeas = [];
+        const directParents = [];
 
         // Find each parent idea by ID
         for (const parentId of idea.parent_ids) {
             const parentIdea = parentGeneration.find(p => p.id === parentId);
             if (parentIdea) {
-                parentIdeas.push(parentIdea);
+                directParents.push(parentIdea);
             }
         }
 
-        if (parentIdeas.length > 0) {
-            // Create HTML for parent ideas
-            let parentsHtml = `
-                <div class="lineage-parents">
-                    <h6>Parent Ideas (Generation ${generationIndex}):</h6>
-                    <div class="lineage-parent-cards">
-            `;
+        if (directParents.length > 0 || Object.keys(ancestorsByGeneration).length > 0) {
+            let lineageHtml = '';
 
-            // Add a card for each parent idea
-            parentIdeas.forEach((parent, idx) => {
-                const parentPreview = createCardPreview(parent.proposal, 100);
-                parentsHtml += `
-                    <div class="card lineage-parent-card mb-3">
-                        <div class="card-body">
-                            <h6 class="card-title">${parent.title || 'Untitled'}</h6>
-                            <div class="card-preview">
-                                <p>${parentPreview}</p>
-                            </div>
-                            <button class="btn btn-sm btn-primary view-parent-idea" data-parent-index="${idx}">
-                                View Full Idea
-                            </button>
+            // Add direct parents section
+            if (directParents.length > 0) {
+                lineageHtml += `
+                    <div class="lineage-section mb-4">
+                        <h6 class="lineage-generation-title">Direct Parents (Generation ${generationIndex})</h6>
+                        <div class="lineage-parent-cards">
+                `;
+
+                // Add a card for each direct parent
+                directParents.forEach((parent, idx) => {
+                    const parentPreview = createCardPreview(parent.proposal, 100);
+                    lineageHtml += createAncestorCard(parent, idx, 'direct-parent');
+                });
+
+                lineageHtml += `
                         </div>
                     </div>
                 `;
-            });
+            }
 
-            parentsHtml += `
+            // Add sections for each generation of ancestors
+            const generationNumbers = Object.keys(ancestorsByGeneration).sort((a, b) => b - a); // Sort in descending order
+
+            for (const genNumber of generationNumbers) {
+                const ancestors = ancestorsByGeneration[genNumber];
+
+                lineageHtml += `
+                    <div class="lineage-section mb-4">
+                        <h6 class="lineage-generation-title">Earlier Ancestors (Generation ${parseInt(genNumber) + 1})</h6>
+                        <div class="lineage-parent-cards">
+                `;
+
+                // Add a card for each ancestor in this generation
+                ancestors.forEach((ancestor, idx) => {
+                    lineageHtml += createAncestorCard(ancestor, idx, `ancestor-gen-${genNumber}`);
+                });
+
+                lineageHtml += `
+                        </div>
                     </div>
-                </div>
-            `;
+                `;
+            }
 
-            lineageModalContent.innerHTML = parentsHtml;
+            lineageModalContent.innerHTML = lineageHtml;
 
-            // Add event listeners to the "View Full Idea" buttons
-            const viewParentButtons = lineageModalContent.querySelectorAll('.view-parent-idea');
-            viewParentButtons.forEach(button => {
+            // Add event listeners to all "View Full Idea" buttons
+            const viewButtons = lineageModalContent.querySelectorAll('.view-ancestor-idea');
+            viewButtons.forEach(button => {
                 button.addEventListener('click', () => {
-                    const parentIndex = button.getAttribute('data-parent-index');
+                    const genIndex = button.getAttribute('data-gen-index');
+                    const ideaIndex = button.getAttribute('data-idea-index');
+                    const ancestorType = button.getAttribute('data-ancestor-type');
 
                     // Store the current idea and generation index for reopening the lineage modal later
                     const currentIdea = idea;
@@ -1362,8 +1491,17 @@ function showLineageModal(idea, generationIndex) {
                         // Add the event listener
                         ideaModalElement.addEventListener('hidden.bs.modal', reopenLineage);
 
+                        // Determine which ancestor to show
+                        let ancestorIdea;
+                        if (ancestorType === 'direct-parent') {
+                            ancestorIdea = directParents[ideaIndex];
+                        } else {
+                            const genNumber = ancestorType.split('-').pop();
+                            ancestorIdea = ancestorsByGeneration[genNumber][ideaIndex];
+                        }
+
                         // Show the idea modal
-                        showIdeaModal(parentIdeas[parentIndex]);
+                        showIdeaModal(ancestorIdea);
                     }, 150);
                 });
             });
@@ -1407,4 +1545,24 @@ function showLineageModal(idea, generationIndex) {
         // Fallback for testing - just make the modal visible
         lineageModal.style.display = 'block';
     }
+}
+
+// Helper function to create an ancestor card
+function createAncestorCard(ancestor, index, ancestorType) {
+    const preview = createCardPreview(ancestor.proposal, 100);
+    return `
+        <div class="card lineage-parent-card mb-3">
+            <div class="card-body">
+                <h6 class="card-title">${ancestor.title || 'Untitled'}</h6>
+                <div class="card-preview">
+                    <p>${preview}</p>
+                </div>
+                <button class="btn btn-sm btn-primary view-ancestor-idea"
+                    data-idea-index="${index}"
+                    data-ancestor-type="${ancestorType}">
+                    View Full Idea
+                </button>
+            </div>
+        </div>
+    `;
 }
