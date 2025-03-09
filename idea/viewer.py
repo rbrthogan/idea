@@ -92,14 +92,12 @@ async def start_evolution(request: Request):
     generations = int(data.get('generations', 2))
     idea_type = data.get('ideaType', 'airesearch')
     model_type = data.get('modelType', 'gemini-1.5-flash')
-    # Use a fixed context type
-    context_type = "context_prompt"
 
     # Get temperature parameters with defaults
     try:
-        ideator_temp = float(data.get('ideatorTemp', 1.0))
-        critic_temp = float(data.get('criticTemp', 0.7))
-        breeder_temp = float(data.get('breederTemp', 1.0))
+        ideator_temp = float(data.get('ideatorTemp', 2.0))
+        critic_temp = float(data.get('criticTemp', 1.5))
+        breeder_temp = float(data.get('breederTemp', 2.0))
         print(f"Parsed temperature values: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}")
     except ValueError as e:
         print(f"Error parsing temperature values: {e}")

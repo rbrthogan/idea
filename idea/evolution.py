@@ -14,9 +14,9 @@ class EvolutionEngine:
         pop_size: int = 5,
         generations: int = 3,
         model_type: str = "gemini-1.5-flash",
-        ideator_temp: float = 1.0,
-        critic_temp: float = 0.7,
-        breeder_temp: float = 1.0
+        ideator_temp: float = 2.0,
+        critic_temp: float = 1.5,
+        breeder_temp: float = 2.0
     ):
         self.idea_type = idea_type
         self.pop_size = pop_size

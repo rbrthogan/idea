@@ -1150,9 +1150,9 @@ function createProgressBar() {
 // Function to set up temperature sliders
 function setupTemperatureSliders() {
     const sliders = [
-        { id: 'ideatorTemp', valueId: 'ideatorTempValue', defaultValue: 1.0 },
-        { id: 'criticTemp', valueId: 'criticTempValue', defaultValue: 0.7 },
-        { id: 'breederTemp', valueId: 'breederTempValue', defaultValue: 1.0 }
+        { id: 'ideatorTemp', valueId: 'ideatorTempValue', defaultValue: 2.0 },
+        { id: 'criticTemp', valueId: 'criticTempValue', defaultValue: 1.5 },
+        { id: 'breederTemp', valueId: 'breederTempValue', defaultValue: 2.0 }
     ];
 
     sliders.forEach(slider => {
