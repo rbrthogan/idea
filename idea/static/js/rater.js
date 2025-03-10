@@ -251,7 +251,7 @@ async function vote(outcome) {
         const result = await response.json();
         console.log('Rating submitted:', result);
 
-        // Update local ELO ratings for manual ratings
+        // Update local ELO ratings and match counts for manual ratings
         if (result.updated_elos) {
             Object.entries(result.updated_elos).forEach(([id, elo]) => {
                 if (ideasDb[id]) {
@@ -268,6 +268,24 @@ async function vote(outcome) {
             });
         }
 
+        // Update match counts if provided by the server
+        if (result.updated_match_counts) {
+            Object.entries(result.updated_match_counts).forEach(([id, counts]) => {
+                if (ideasDb[id]) {
+                    ideasDb[id].match_count = counts.total;
+                    ideasDb[id].manual_match_count = counts.manual;
+                    ideasDb[id].auto_match_count = counts.auto;
+                    console.log(`Updated match counts for idea ${id}: total=${counts.total}, manual=${counts.manual}, auto=${counts.auto}`);
+                }
+            });
+        } else {
+            // Fallback to incrementing match counts locally if not provided by the server
+            currentPair.forEach(idea => {
+                ideasDb[idea.id].match_count = (ideasDb[idea.id].match_count || 0) + 1;
+                ideasDb[idea.id].manual_match_count = (ideasDb[idea.id].manual_match_count || 0) + 1;
+            });
+        }
+
         // Get next pair
         await refreshPair();
     } catch (error) {
@@ -276,7 +294,7 @@ async function vote(outcome) {
     }
 }
 
-// Update the showRanking function to include the chart
+// Update the showRanking function to support different rating types
 async function showRanking() {
     try {
         // Hide the idea comparison view
@@ -286,41 +304,51 @@ async function showRanking() {
         const resultsSection = document.getElementById('autoRatingResults');
         resultsSection.style.display = 'block';
         document.getElementById('ratingProgress').style.display = 'none';
-        document.getElementById('ratingStats').innerHTML = '<p>Current manual ratings</p>';
 
-        // Get all ideas and sort by ELO
-        const ideas = Object.values(ideasDb).sort((a, b) => b.elo - a.elo);
+        // Get all ideas
+        const ideas = Object.values(ideasDb);
 
-        // Store ideas in a global variable for modal access
-        window.rankedIdeas = ideas;
+        // Calculate total match counts for each type
+        const totalMatches = ideas.reduce((sum, idea) => sum + (idea.match_count || 0), 0);
+        const totalAutoMatches = ideas.reduce((sum, idea) => sum + (idea.auto_match_count || 0), 0);
+        const totalManualMatches = ideas.reduce((sum, idea) => sum + (idea.manual_match_count || 0), 0);
 
-        // Show rankings with clickable rows
-        const rankingsTable = document.getElementById('rankingsTable');
-        rankingsTable.innerHTML = ''; // Clear existing content
-
-        ideas.forEach((idea, index) => {
-            const row = document.createElement('tr');
-            row.className = 'idea-row';
-            row.dataset.ideaIndex = index;
-            row.style.cursor = 'pointer';
-
-            row.innerHTML = `
-                <td>${index + 1}</td>
-                <td>${idea.title || 'Untitled'}</td>
-                <td>${idea.elo}</td>
-                <td>${idea.generation || '?'}</td>
-            `;
-
-            // Add click event to show the idea details
-            row.addEventListener('click', function() {
-                showIdeaDetails(index);
+        // Sort ideas based on rating type
+        if (currentRatingType === 'auto') {
+            ideas.sort((a, b) => {
+                const aRating = a.ratings?.auto || a.elo || 1500;
+                const bRating = b.ratings?.auto || b.elo || 1500;
+                return bRating - aRating;
             });
+            document.getElementById('ratingStats').innerHTML = `
+                <p>Auto ratings (LLM-based)</p>
+                <p>Total auto comparisons: ${totalAutoMatches / 2}</p>
+            `;
+        } else if (currentRatingType === 'manual') {
+            ideas.sort((a, b) => {
+                const aRating = a.ratings?.manual || 1500;
+                const bRating = b.ratings?.manual || 1500;
+                return bRating - aRating;
+            });
+            document.getElementById('ratingStats').innerHTML = `
+                <p>Manual ratings (human-based)</p>
+                <p>Total manual comparisons: ${totalManualMatches / 2}</p>
+            `;
+        } else if (currentRatingType === 'diff') {
+            // Sort by absolute difference between auto and manual
+            ideas.sort((a, b) => {
+                const aDiff = Math.abs((a.ratings?.auto || 1500) - (a.ratings?.manual || 1500));
+                const bDiff = Math.abs((b.ratings?.auto || 1500) - (b.ratings?.manual || 1500));
+                return bDiff - aDiff;
+            });
+            document.getElementById('ratingStats').innerHTML = `
+                <p>Difference between auto and manual ratings</p>
+                <p>Total comparisons: ${totalMatches / 2} (Auto: ${totalAutoMatches / 2}, Manual: ${totalManualMatches / 2})</p>
+            `;
+        }
 
-            rankingsTable.appendChild(row);
-        });
-
-        // After populating the rankings table, create the chart
-        createEloChart(ideas, currentRatingType);
+        // Update the rankings table with the sorted ideas
+        updateRankingsTable(ideas);
     } catch (error) {
         console.error('Error showing ranking:', error);
     }
@@ -525,6 +553,35 @@ async function loadModels() {
     }
 }
 
+// Helper function to update the progress bar
+function updateProgressBar(percent) {
+    const roundedPercent = Math.round(percent);
+    const percentStr = `${roundedPercent}%`;
+    console.log(`Updating progress bar to ${percentStr}`);
+
+    const progressBar = document.getElementById('ratingProgress');
+    if (!progressBar) {
+        console.error("Progress bar element not found!");
+        return;
+    }
+
+    // Debug the current state
+    console.log(`Before update - width: ${progressBar.style.width}, aria-valuenow: ${progressBar.getAttribute('aria-valuenow')}`);
+
+    // Ensure the progress bar is visible
+    progressBar.style.display = 'block';
+
+    // Update the width with !important to override any conflicting styles
+    progressBar.style.cssText = `width: ${percentStr} !important; transition: width 0.3s ease;`;
+    progressBar.setAttribute('aria-valuenow', roundedPercent);
+
+    // Force a reflow to ensure the browser updates the progress bar
+    void progressBar.offsetHeight;
+
+    // Debug the updated state
+    console.log(`After update - width: ${progressBar.style.width}, aria-valuenow: ${progressBar.getAttribute('aria-valuenow')}`);
+}
+
 // Update the auto-rating event listener to include clickable ideas and generation info
 document.getElementById('startAutoRating').addEventListener('click', async function() {
     const numComparisons = parseInt(document.getElementById('numComparisons').value);
@@ -545,7 +602,25 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
     // Show results section and reset
     const resultsSection = document.getElementById('autoRatingResults');
     resultsSection.style.display = 'block';
-    document.getElementById('ratingProgress').style.width = '0%';
+
+    console.log("Initializing progress bar for auto-rating");
+
+    // Get the progress bar element and ensure it's properly reset
+    const progressBar = document.getElementById('ratingProgress');
+    if (progressBar) {
+        // Reset the progress bar to 0% with a clean slate
+        progressBar.style.cssText = 'width: 0% !important; transition: width 0.3s ease;';
+        progressBar.setAttribute('aria-valuenow', '0');
+        progressBar.style.display = 'block';
+
+        // Force a reflow to ensure the browser updates the progress bar
+        void progressBar.offsetHeight;
+
+        console.log("Progress bar initialized to 0%");
+    } else {
+        console.error("Progress bar element not found during initialization!");
+    }
+
     document.getElementById('ratingStats').innerHTML = 'Processing...';
     document.getElementById('rankingsTable').innerHTML = '';
 
@@ -554,7 +629,9 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
         const chunkSize = 5;
         const chunks = Math.ceil(numComparisons / chunkSize);
         let completedComparisons = 0;
+        let totalCompletedComparisons = 0;
         let allResults = [];
+        let finalIdeas = [];
 
         for (let i = 0; i < chunks; i++) {
             // Calculate how many comparisons to do in this chunk
@@ -570,7 +647,7 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
                     numComparisons: comparisonsInChunk,
                     evolutionId: evolutionId,
                     modelId: modelId,
-                    skipSave: (i < chunks - 1) // Only save on the last chunk
+                    skipSave: false // Always save to ensure match counts are tracked properly
                 })
             });
 
@@ -581,59 +658,157 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
             const data = await response.json();
 
             // Add results from this chunk
-            allResults = allResults.concat(data.results);
-            completedComparisons += data.results.length;
+            allResults = allResults.concat(data.results || []);
 
-            // Update progress bar
-            const progressPercent = (completedComparisons / numComparisons) * 100;
-            document.getElementById('ratingProgress').style.width = `${progressPercent}%`;
+            // Track new comparisons completed in this chunk
+            const newComparisons = data.new_comparisons || data.results?.length || 0;
+            completedComparisons += newComparisons;
+
+            // Get the total completed comparisons (including previous ones)
+            totalCompletedComparisons = data.completed_comparisons || completedComparisons;
+
+            // Store the latest ideas data
+            finalIdeas = data.ideas || [];
+
+            // Update the local ideasDb with the latest data from the server
+            finalIdeas.forEach(idea => {
+                if (idea.id && ideasDb[idea.id]) {
+                    // Update the existing idea in the database with the latest data
+                    ideasDb[idea.id].elo = idea.elo;
+                    ideasDb[idea.id].ratings = idea.ratings;
+                    ideasDb[idea.id].match_count = idea.match_count || 0;
+                    ideasDb[idea.id].auto_match_count = idea.auto_match_count || 0;
+                    ideasDb[idea.id].manual_match_count = idea.manual_match_count || 0;
+                }
+            });
+
+            // Update progress bar - based on our requested comparisons
+            const progressPercent = Math.min(100, (completedComparisons / numComparisons) * 100);
+            updateProgressBar(progressPercent);
 
             // Update stats during processing
             const stats = document.getElementById('ratingStats');
             stats.innerHTML = `
                 <p>Progress: ${completedComparisons}/${numComparisons} comparisons</p>
+                <p>Total comparisons completed: ${totalCompletedComparisons}</p>
                 <p>A wins: ${allResults.filter(r => r.outcome === 'A').length}</p>
                 <p>B wins: ${allResults.filter(r => r.outcome === 'B').length}</p>
                 <p>Ties: ${allResults.filter(r => r.outcome === 'tie').length}</p>
             `;
 
-            // If this is the last chunk, show the final rankings with enhanced table
-            if (i === chunks - 1) {
-                // Show rankings with clickable rows and generation info
-                const rankingsTable = document.getElementById('rankingsTable');
-                rankingsTable.innerHTML = ''; // Clear existing content
-
-                // Store ideas in a global variable for modal access
-                window.rankedIdeas = data.ideas;
-
-                data.ideas.forEach((idea, index) => {
-                    const row = document.createElement('tr');
-                    row.className = 'idea-row';
-                    row.dataset.ideaIndex = index;
-                    row.style.cursor = 'pointer';
-
-                    row.innerHTML = `
-                        <td>${index + 1}</td>
-                        <td>${idea.title || 'Untitled'}</td>
-                        <td>${idea.elo}</td>
-                        <td>Gen ${idea.generation || '?'}</td>
-                    `;
-
-                    // Add click event to show the idea details
-                    row.addEventListener('click', function() {
-                        showIdeaDetails(index);
-                    });
-
-                    rankingsTable.appendChild(row);
-                });
-            }
+            // Update the rankings table after each chunk to show progress
+            updateRankingsTable(finalIdeas);
         }
 
+        // Final update to ensure everything is in sync
+        // Update the local ideasDb with the final data
+        finalIdeas.forEach(idea => {
+            if (idea.id && ideasDb[idea.id]) {
+                // Update the existing idea in the database with the latest data
+                ideasDb[idea.id].elo = idea.elo;
+                ideasDb[idea.id].ratings = idea.ratings;
+                ideasDb[idea.id].match_count = idea.match_count || 0;
+                ideasDb[idea.id].auto_match_count = idea.auto_match_count || 0;
+                ideasDb[idea.id].manual_match_count = idea.manual_match_count || 0;
+            }
+        });
+
+        // Update the rankings table with the final data
+        updateRankingsTable(finalIdeas);
+
+        // Ensure progress bar shows 100% at the end
+        console.log("Setting final progress to 100%");
+        updateProgressBar(100);
+
+        // Add a small delay to ensure the UI updates
+        await new Promise(resolve => setTimeout(resolve, 300));
+
+        // Update final stats
+        const stats = document.getElementById('ratingStats');
+        stats.innerHTML = `
+            <p>Completed: ${completedComparisons}/${numComparisons} comparisons</p>
+            <p>Total comparisons completed: ${totalCompletedComparisons}</p>
+            <p>A wins: ${allResults.filter(r => r.outcome === 'A').length}</p>
+            <p>B wins: ${allResults.filter(r => r.outcome === 'B').length}</p>
+            <p>Ties: ${allResults.filter(r => r.outcome === 'tie').length}</p>
+        `;
+
     } catch (error) {
-        console.error('Error during auto rating:', error);
-        document.getElementById('ratingStats').innerHTML = `Error: ${error.message}`;
+        console.error('Error during auto-rating:', error);
+        document.getElementById('ratingStats').innerHTML = `<p class="text-danger">Error: ${error.message}</p>`;
     }
 });
+
+// Helper function to update the rankings table
+function updateRankingsTable(ideas) {
+    // Show rankings with clickable rows and generation info
+    const rankingsTable = document.getElementById('rankingsTable');
+    rankingsTable.innerHTML = ''; // Clear existing content
+
+    // Store ideas in a global variable for modal access
+    window.rankedIdeas = ideas;
+
+    ideas.forEach((idea, index) => {
+        const row = document.createElement('tr');
+        row.className = 'idea-row';
+        row.dataset.ideaIndex = index;
+        row.style.cursor = 'pointer';
+
+        // Get the appropriate rating values
+        const autoRating = idea.ratings?.auto || idea.elo || 1500;
+        const manualRating = idea.ratings?.manual || 1500;
+        const diffRating = autoRating - manualRating;
+
+        // Get the appropriate match count based on the current rating type
+        let matchCount = 0;
+        if (currentRatingType === 'auto') {
+            matchCount = idea.auto_match_count || 0;
+
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${idea.title || 'Untitled'}</td>
+                <td>${autoRating}</td>
+                <td>${matchCount}</td>
+                <td>Gen ${idea.generation || '?'}</td>
+            `;
+        } else if (currentRatingType === 'manual') {
+            matchCount = idea.manual_match_count || 0;
+
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${idea.title || 'Untitled'}</td>
+                <td>${manualRating}</td>
+                <td>${matchCount}</td>
+                <td>Gen ${idea.generation || '?'}</td>
+            `;
+        } else {
+            // For 'diff' or any other type, use the total match count
+            matchCount = idea.match_count || 0;
+
+            // Add color coding for diff
+            const diffClass = diffRating > 0 ? 'text-success' : (diffRating < 0 ? 'text-danger' : '');
+            const diffSign = diffRating > 0 ? '+' : '';
+
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${idea.title || 'Untitled'}</td>
+                <td class="${diffClass}">${diffSign}${diffRating} (A:${autoRating}/M:${manualRating})</td>
+                <td>${matchCount}</td>
+                <td>Gen ${idea.generation || '?'}</td>
+            `;
+        }
+
+        // Add click event to show the idea details
+        row.addEventListener('click', function() {
+            showIdeaDetails(index);
+        });
+
+        rankingsTable.appendChild(row);
+    });
+
+    // Create the ELO chart
+    createEloChart(ideas, currentRatingType);
+}
 
 // Add this function to show idea details in a modal
 function showIdeaDetails(ideaIndex) {
@@ -701,106 +876,13 @@ function toggleRatingType(type) {
 
     // If we're viewing rankings, refresh them with the new type
     if (document.getElementById('autoRatingResults').style.display === 'block') {
-        showRanking();
-    }
-}
-
-// Update the showRanking function to support different rating types
-async function showRanking() {
-    try {
-        // Hide the idea comparison view
-        document.querySelector('.ideas-container').style.display = 'none';
-
-        // Show results section and reset
-        const resultsSection = document.getElementById('autoRatingResults');
-        resultsSection.style.display = 'block';
-        document.getElementById('ratingProgress').style.display = 'none';
-
-        // Get all ideas
-        const ideas = Object.values(ideasDb);
-
-        // Sort ideas based on rating type
-        if (currentRatingType === 'auto') {
-            ideas.sort((a, b) => {
-                const aRating = a.ratings?.auto || a.elo || 1500;
-                const bRating = b.ratings?.auto || b.elo || 1500;
-                return bRating - aRating;
-            });
-            document.getElementById('ratingStats').innerHTML = '<p>Auto ratings (LLM-based)</p>';
-        } else if (currentRatingType === 'manual') {
-            ideas.sort((a, b) => {
-                const aRating = a.ratings?.manual || 1500;
-                const bRating = b.ratings?.manual || 1500;
-                return bRating - aRating;
-            });
-            document.getElementById('ratingStats').innerHTML = '<p>Manual ratings (human-based)</p>';
-        } else if (currentRatingType === 'diff') {
-            // Sort by absolute difference between auto and manual
-            ideas.sort((a, b) => {
-                const aDiff = Math.abs((a.ratings?.auto || 1500) - (a.ratings?.manual || 1500));
-                const bDiff = Math.abs((b.ratings?.auto || 1500) - (b.ratings?.manual || 1500));
-                return bDiff - aDiff;
-            });
-            document.getElementById('ratingStats').innerHTML = '<p>Difference between auto and manual ratings</p>';
+        // Update the rankings table without reloading everything
+        if (window.rankedIdeas) {
+            console.log(`Refreshing rankings table with rating type: ${type}`);
+            updateRankingsTable(window.rankedIdeas);
+        } else {
+            showRanking();
         }
-
-        // Store ideas in a global variable for modal access
-        window.rankedIdeas = ideas;
-
-        // Show rankings with clickable rows
-        const rankingsTable = document.getElementById('rankingsTable');
-        rankingsTable.innerHTML = ''; // Clear existing content
-
-        ideas.forEach((idea, index) => {
-            const row = document.createElement('tr');
-            row.className = 'idea-row';
-            row.dataset.ideaIndex = index;
-            row.style.cursor = 'pointer';
-
-            // Get the appropriate rating values
-            const autoRating = idea.ratings?.auto || idea.elo || 1500;
-            const manualRating = idea.ratings?.manual || 1500;
-            const diffRating = autoRating - manualRating;
-
-            if (currentRatingType === 'auto') {
-                row.innerHTML = `
-                    <td>${index + 1}</td>
-                    <td>${idea.title || 'Untitled'}</td>
-                    <td>${autoRating}</td>
-                    <td>Gen ${idea.generation || '?'}</td>
-                `;
-            } else if (currentRatingType === 'manual') {
-                row.innerHTML = `
-                    <td>${index + 1}</td>
-                    <td>${idea.title || 'Untitled'}</td>
-                    <td>${manualRating}</td>
-                    <td>Gen ${idea.generation || '?'}</td>
-                `;
-            } else if (currentRatingType === 'diff') {
-                // Add color coding for diff
-                const diffClass = diffRating > 0 ? 'text-success' : (diffRating < 0 ? 'text-danger' : '');
-                const diffSign = diffRating > 0 ? '+' : '';
-
-                row.innerHTML = `
-                    <td>${index + 1}</td>
-                    <td>${idea.title || 'Untitled'}</td>
-                    <td class="${diffClass}">${diffSign}${diffRating} (A:${autoRating}/M:${manualRating})</td>
-                    <td>Gen ${idea.generation || '?'}</td>
-                `;
-            }
-
-            // Add click event to show the idea details
-            row.addEventListener('click', function() {
-                showIdeaDetails(index);
-            });
-
-            rankingsTable.appendChild(row);
-        });
-
-        // Create the ELO chart
-        createEloChart(ideas, currentRatingType);
-    } catch (error) {
-        console.error('Error showing ranking:', error);
     }
 }
 
@@ -813,7 +895,7 @@ async function resetRatings(type) {
         return;
     }
 
-    if (!confirm(`Are you sure you want to reset ${type} ratings to their default value (1500)?`)) {
+    if (!confirm(`Are you sure you want to reset ${type} ratings to their default value (1500) and clear all match counts?`)) {
         return;
     }
 
@@ -830,7 +912,7 @@ async function resetRatings(type) {
         });
 
         if (!response.ok) {
-            throw new Error('Failed to reset ratings');
+            throw new Error('Failed to reset ratings and match counts');
         }
 
         const data = await response.json();
@@ -846,7 +928,7 @@ async function resetRatings(type) {
             showRanking();
         }
     } catch (error) {
-        console.error('Error resetting ratings:', error);
+        console.error('Error resetting ratings and match counts:', error);
         alert('Error: ' + error.message);
     }
 }
@@ -932,6 +1014,11 @@ async function loadEvolution(evolutionId) {
 
                 // Ensure backward compatibility
                 idea.elo = idea.ratings.auto;
+
+                // Ensure match count properties exist
+                idea.match_count = idea.match_count || 0;
+                idea.auto_match_count = idea.auto_match_count || 0;
+                idea.manual_match_count = idea.manual_match_count || 0;
 
                 allIdeas.push(idea);
             });

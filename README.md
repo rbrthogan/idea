@@ -52,8 +52,7 @@ Then visit:
 - TODO: visualise generation history as a graph of ideas and connections between them (parents/relationships), highlight the ranks etc
 - TODO: use embeddings to monitor similarity/diversity of ideas, track in UI, and maybe cull duplicates ()
 - TODO: styling needs work
-- TODO: add "matches" column to rankings view to indicate how many comparisons each idea had
-- TODO: appears to be an issue with the results of auto rankings, possible only last 5 matches are being used?
+- TODO: update "start auto rating" button state when in progress
 
 
 ### Bugs
@@ -61,4 +60,3 @@ Then visit:
 - initial context display is same for each idea
 - current evolution gets wipe from viewer display after going to rate and returning
 - change numbering of generations to be 0-indexed (initial generation is 0)
-- seems that parent selection is allowing 2 of the same parent to be selected

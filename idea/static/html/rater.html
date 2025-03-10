@@ -196,7 +196,7 @@
 
                 <!-- Reset Controls -->
                 <div class="mb-3">
-                  <label class="form-label">Reset Ratings</label>
+                  <label class="form-label">Reset Ratings & Match Counts</label>
                   <div class="btn-group w-100" role="group">
                     <button onclick="resetRatings('auto')" class="btn btn-outline-danger">Reset Auto</button>
                     <button onclick="resetRatings('manual')" class="btn btn-outline-danger">Reset Manual</button>
@@ -206,8 +206,12 @@
               </div>
               <div class="card-body">
                 <h6>Progress:</h6>
-                <div class="progress mb-2">
-                  <div class="progress-bar" id="ratingProgress" role="progressbar" style="width: 0%"></div>
+                <div class="progress mb-2" style="height: 20px; background-color: #e9ecef;">
+                  <div class="progress-bar bg-primary" id="ratingProgress" role="progressbar"
+                       style="width: 0%; transition: width 0.3s ease; height: 100%;"
+                       aria-valuenow="0"
+                       aria-valuemin="0"
+                       aria-valuemax="100"></div>
                 </div>
                 <div id="ratingStats"></div>
 
@@ -218,6 +222,7 @@
                       <th>Rank</th>
                       <th>Idea</th>
                       <th>Elo</th>
+                      <th>Matches</th>
                       <th>Generation</th>
                     </tr>
                   </thead>

@@ -210,7 +210,10 @@ def idea_to_dict(idea) -> dict:
                 "id": str(idea_id),
                 "title": idea_obj.title,
                 "proposal": idea_obj.proposal,
-                "parent_ids": parent_ids
+                "parent_ids": parent_ids,
+                "match_count": idea.get('match_count', 0),
+                "auto_match_count": idea.get('auto_match_count', 0),
+                "manual_match_count": idea.get('manual_match_count', 0)
             }
         # If the idea object is a string
         elif isinstance(idea_obj, str):
@@ -218,13 +221,19 @@ def idea_to_dict(idea) -> dict:
                 "id": str(idea_id),
                 "title": "Untitled",
                 "proposal": idea_obj,
-                "parent_ids": parent_ids
+                "parent_ids": parent_ids,
+                "match_count": idea.get('match_count', 0),
+                "auto_match_count": idea.get('auto_match_count', 0),
+                "manual_match_count": idea.get('manual_match_count', 0)
             }
         # If the idea object is already a dict
         elif isinstance(idea_obj, dict):
             result = idea_obj.copy()
             result["id"] = str(idea_id)
             result["parent_ids"] = parent_ids
+            result["match_count"] = idea.get('match_count', 0)
+            result["auto_match_count"] = idea.get('auto_match_count', 0)
+            result["manual_match_count"] = idea.get('manual_match_count', 0)
             return result
 
     # Legacy case: idea is a direct Idea object
@@ -232,7 +241,10 @@ def idea_to_dict(idea) -> dict:
         return {
             "title": idea.title,
             "proposal": idea.proposal,
-            "parent_ids": []
+            "parent_ids": [],
+            "match_count": getattr(idea, 'match_count', 0),
+            "auto_match_count": getattr(idea, 'auto_match_count', 0),
+            "manual_match_count": getattr(idea, 'manual_match_count', 0)
         }
 
     # Fallback case: idea is a string
@@ -240,7 +252,8 @@ def idea_to_dict(idea) -> dict:
         return {
             "title": "Untitled",
             "proposal": idea,
-            "parent_ids": []
+            "parent_ids": [],
+            "match_count": 0
         }
 
     # Last resort: return the idea as is if it's a dict, or an empty dict
@@ -440,6 +453,32 @@ async def submit_rating(request: Request):
             old_elo = idea_b['ratings']
             idea_b['ratings'] = {'auto': old_elo, 'manual': old_elo}
 
+        # Initialize match counts if not present
+        if 'match_count' not in idea_a:
+            idea_a['match_count'] = 0
+        if 'match_count' not in idea_b:
+            idea_b['match_count'] = 0
+
+        # Initialize manual match counts if not present
+        if 'manual_match_count' not in idea_a:
+            idea_a['manual_match_count'] = 0
+        if 'manual_match_count' not in idea_b:
+            idea_b['manual_match_count'] = 0
+
+        # Initialize auto match counts if not present
+        if 'auto_match_count' not in idea_a:
+            idea_a['auto_match_count'] = 0
+        if 'auto_match_count' not in idea_b:
+            idea_b['auto_match_count'] = 0
+
+        # Increment match counts
+        idea_a['match_count'] += 1
+        idea_b['match_count'] += 1
+
+        # Increment manual match counts specifically
+        idea_a['manual_match_count'] += 1
+        idea_b['manual_match_count'] += 1
+
         # Convert outcome to numeric value
         if outcome == "A":
             outcome_value = 1
@@ -466,6 +505,18 @@ async def submit_rating(request: Request):
             'updated_elos': {
                 idea_a_id: idea_a['ratings']['manual'],
                 idea_b_id: idea_b['ratings']['manual']
+            },
+            'updated_match_counts': {
+                idea_a_id: {
+                    'total': idea_a['match_count'],
+                    'manual': idea_a['manual_match_count'],
+                    'auto': idea_a['auto_match_count']
+                },
+                idea_b_id: {
+                    'total': idea_b['match_count'],
+                    'manual': idea_b['manual_match_count'],
+                    'auto': idea_b['auto_match_count']
+                }
             }
         })
 
@@ -536,6 +587,18 @@ async def auto_rate(request: Request):
                 elif 'manual' not in idea['ratings']:
                     idea['ratings']['manual'] = 1500
 
+                # Initialize match count if not present
+                if 'match_count' not in idea:
+                    idea['match_count'] = 0
+
+                # Initialize auto_match_count if not present
+                if 'auto_match_count' not in idea:
+                    idea['auto_match_count'] = 0
+
+                # Initialize manual_match_count if not present
+                if 'manual_match_count' not in idea:
+                    idea['manual_match_count'] = 0
+
                 # For backward compatibility
                 idea['elo'] = idea['ratings']['auto']
 
@@ -556,6 +619,17 @@ async def auto_rate(request: Request):
 
         # Perform the requested number of comparisons
         results = []
+        total_comparisons_completed = 0
+
+        # First, count existing match counts to track total comparisons
+        for idea in all_ideas:
+            total_comparisons_completed += idea.get('match_count', 0)
+
+        # Divide by 2 since each comparison involves 2 ideas
+        total_comparisons_completed = total_comparisons_completed // 2
+
+        print(f"Starting with {total_comparisons_completed} existing comparisons")
+
         for i in range(num_comparisons):
             print(f"Comparison {i+1}/{num_comparisons}")
 
@@ -572,6 +646,14 @@ async def auto_rate(request: Request):
             if winner is None:
                 print("Skipping this comparison due to an error")
                 continue
+
+            # Increment match counts
+            idea_a['match_count'] += 1
+            idea_b['match_count'] += 1
+
+            # Increment auto match counts specifically
+            idea_a['auto_match_count'] += 1
+            idea_b['auto_match_count'] += 1
 
             # Convert to outcome format (1 = A wins, 0 = B wins, 0.5 = tie)
             if winner == "A":
@@ -598,11 +680,15 @@ async def auto_rate(request: Request):
                 gen_idx, idea_idx = idea_map[idea_a['id']]
                 evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_a['ratings']
                 evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_a['elo']
+                evolution_data['history'][gen_idx][idea_idx]['match_count'] = idea_a['match_count']
+                evolution_data['history'][gen_idx][idea_idx]['auto_match_count'] = idea_a['auto_match_count']
 
             if idea_b['id'] in idea_map:
                 gen_idx, idea_idx = idea_map[idea_b['id']]
                 evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_b['ratings']
                 evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_b['elo']
+                evolution_data['history'][gen_idx][idea_idx]['match_count'] = idea_b['match_count']
+                evolution_data['history'][gen_idx][idea_idx]['auto_match_count'] = idea_b['auto_match_count']
 
             # Record the result
             results.append({
@@ -613,11 +699,14 @@ async def auto_rate(request: Request):
                 'new_elo_b': idea_b['ratings']['auto']
             })
 
-            # Save after every 5 comparisons to ensure progress is not lost
-            if (i + 1) % 5 == 0 and not skip_save:
+            # Save after every comparison to ensure match counts are properly tracked
+            if not skip_save:
                 with open(file_path, 'w') as f:
                     json.dump(evolution_data, f, indent=2)
-                print(f"Saved progress after {i + 1} comparisons")
+
+                # Only log every 5 comparisons to reduce console output
+                if (i + 1) % 5 == 0:
+                    print(f"Saved progress after {i + 1} comparisons")
 
         print(f"Completed {len(results)} comparisons")
 
@@ -627,10 +716,15 @@ async def auto_rate(request: Request):
                 json.dump(evolution_data, f, indent=2)
 
         # Return the results with sorted ideas including generation info
+        # Calculate total comparisons (existing + new)
+        total_comparisons = total_comparisons_completed + len(results)
+
         return JSONResponse({
             'status': 'success',
             'results': results,
-            'ideas': sorted(all_ideas, key=lambda x: x['ratings']['auto'], reverse=True)
+            'ideas': sorted(all_ideas, key=lambda x: x['ratings']['auto'], reverse=True),
+            'completed_comparisons': total_comparisons,
+            'new_comparisons': len(results)
         })
 
     except Exception as e:
@@ -680,9 +774,22 @@ async def reset_ratings(request: Request):
                 if rating_type == 'all' or rating_type == 'auto':
                     idea['ratings']['auto'] = 1500
                     idea['elo'] = 1500  # For backward compatibility
+                    # Reset auto match count
+                    idea['auto_match_count'] = 0
 
                 if rating_type == 'all' or rating_type == 'manual':
                     idea['ratings']['manual'] = 1500
+                    # Reset manual match count
+                    idea['manual_match_count'] = 0
+
+                # Reset total match count if resetting all
+                if rating_type == 'all':
+                    idea['match_count'] = 0
+                # Update total match count if resetting one type
+                elif rating_type == 'auto' and 'manual_match_count' in idea:
+                    idea['match_count'] = idea.get('manual_match_count', 0)
+                elif rating_type == 'manual' and 'auto_match_count' in idea:
+                    idea['match_count'] = idea.get('auto_match_count', 0)
 
         # Save the updated data
         with open(file_path, 'w') as f:
@@ -690,7 +797,7 @@ async def reset_ratings(request: Request):
 
         return JSONResponse({
             'status': 'success',
-            'message': f'{rating_type.capitalize()} ratings reset successfully'
+            'message': f'{rating_type.capitalize()} ratings and match counts reset successfully'
         })
 
     except Exception as e:
