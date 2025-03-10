@@ -94,7 +94,7 @@ class EvolutionEngine:
                 # Adjust tournament size if population is too small
                 actual_tournament_size = self.tournament_size
                 if len(self.population) < 2 * actual_tournament_size:
-                    actual_tournament_size = max(2, len(self.population) // 2)
+                    actual_tournament_size = max(3, len(self.population) // 2)
                     print(f"Adjusting tournament size to {actual_tournament_size} due to small population")
 
                 new_population = []
@@ -162,7 +162,8 @@ class EvolutionEngine:
                 "is_running": False,
                 "history": self.history,
                 "contexts": self.contexts,
-                "progress": 100
+                "progress": 100,
+                "token_counts": self.get_total_token_count()
             })
             print("Evolution complete!")
 
@@ -188,3 +189,100 @@ class EvolutionEngine:
         if generation_index < 0 or generation_index >= len(self.history):
             return []
         return self.history[generation_index]
+
+    def get_total_token_count(self):
+        """Get the total token count from all LLM components with cost calculation"""
+        # Get input and output tokens from each component
+        ideator_input = getattr(self.ideator, 'input_token_count', 0)
+        ideator_output = getattr(self.ideator, 'output_token_count', 0)
+        formatter_input = getattr(self.formatter, 'input_token_count', 0)
+        formatter_output = getattr(self.formatter, 'output_token_count', 0)
+        critic_input = getattr(self.critic, 'input_token_count', 0)
+        critic_output = getattr(self.critic, 'output_token_count', 0)
+        breeder_input = getattr(self.breeder, 'input_token_count', 0)
+        breeder_output = getattr(self.breeder, 'output_token_count', 0)
+
+        # Calculate totals
+        total_input = ideator_input + formatter_input + critic_input + breeder_input
+        total_output = ideator_output + formatter_output + critic_output + breeder_output
+        total = total_input + total_output
+
+        # Get pricing information from config
+        from idea.config import model_prices_per_million_tokens
+
+        # Get model names for each agent
+        ideator_model = getattr(self.ideator, 'model_name', 'gemini-1.5-flash')
+        formatter_model = getattr(self.formatter, 'model_name', 'gemini-1.5-flash')
+        critic_model = getattr(self.critic, 'model_name', 'gemini-1.5-flash')
+        breeder_model = getattr(self.breeder, 'model_name', 'gemini-1.5-flash')
+
+        # Default pricing if model not found in config
+        default_price = {"input": 0.1, "output": 0.4}
+
+        # Get pricing for each model
+        ideator_pricing = model_prices_per_million_tokens.get(ideator_model, default_price)
+        formatter_pricing = model_prices_per_million_tokens.get(formatter_model, default_price)
+        critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
+        breeder_pricing = model_prices_per_million_tokens.get(breeder_model, default_price)
+
+        # Calculate cost for each component
+        ideator_input_cost = (ideator_pricing["input"] * ideator_input) / 1_000_000
+        ideator_output_cost = (ideator_pricing["output"] * ideator_output) / 1_000_000
+        formatter_input_cost = (formatter_pricing["input"] * formatter_input) / 1_000_000
+        formatter_output_cost = (formatter_pricing["output"] * formatter_output) / 1_000_000
+        critic_input_cost = (critic_pricing["input"] * critic_input) / 1_000_000
+        critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
+        breeder_input_cost = (breeder_pricing["input"] * breeder_input) / 1_000_000
+        breeder_output_cost = (breeder_pricing["output"] * breeder_output) / 1_000_000
+
+        # Calculate total costs
+        total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost
+        total_output_cost = ideator_output_cost + formatter_output_cost + critic_output_cost + breeder_output_cost
+        total_cost = total_input_cost + total_output_cost
+
+        token_data = {
+            'ideator': {
+                'total': self.ideator.total_token_count,
+                'input': ideator_input,
+                'output': ideator_output,
+                'model': ideator_model,
+                'cost': ideator_input_cost + ideator_output_cost
+            },
+            'formatter': {
+                'total': self.formatter.total_token_count,
+                'input': formatter_input,
+                'output': formatter_output,
+                'model': formatter_model,
+                'cost': formatter_input_cost + formatter_output_cost
+            },
+            'critic': {
+                'total': self.critic.total_token_count,
+                'input': critic_input,
+                'output': critic_output,
+                'model': critic_model,
+                'cost': critic_input_cost + critic_output_cost
+            },
+            'breeder': {
+                'total': self.breeder.total_token_count,
+                'input': breeder_input,
+                'output': breeder_output,
+                'model': breeder_model,
+                'cost': breeder_input_cost + breeder_output_cost
+            },
+            'total': total,
+            'total_input': total_input,
+            'total_output': total_output,
+            'cost': {
+                'input_cost': total_input_cost,
+                'output_cost': total_output_cost,
+                'total_cost': total_cost,
+                'currency': 'USD'
+            },
+            'models': {
+                'ideator': ideator_model,
+                'formatter': formatter_model,
+                'critic': critic_model,
+                'breeder': breeder_model
+            }
+        }
+        return token_data

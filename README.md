@@ -50,6 +50,7 @@ Then visit:
 - TODO: use embeddings to monitor similarity/diversity of ideas, track in UI, and maybe cull duplicates ()
 - TODO: styling needs work
 - TODO: update "start auto rating" button state when in progress
+- TODO: comparison prompt is in the evolution.py file, should be in a prompts folder
 
 
 ### Bugs

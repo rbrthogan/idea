@@ -186,6 +186,13 @@ async def run_evolution_task(engine):
             if update_data['history']:
                 latest_evolution_data = update_data['history']
 
+        # If evolution is complete, add token counts
+        if update_data.get('is_running') is False and 'error' not in update_data:
+            # Get token counts from the engine
+            if hasattr(engine, 'get_total_token_count'):
+                update_data['token_counts'] = engine.get_total_token_count()
+                print(f"Evolution complete. Total tokens: {update_data['token_counts']['total']}")
+
         # Update the evolution status
         evolution_status = update_data
 

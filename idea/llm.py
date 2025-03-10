@@ -25,6 +25,8 @@ class LLMWrapper(ABC):
         self.prompt_template = prompt_template
         self.temperature = temperature
         self.total_token_count = 0
+        self.input_token_count = 0
+        self.output_token_count = 0
         self.agent_name = agent_name
         print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}")
         self._setup_provider()
@@ -53,8 +55,23 @@ class LLMWrapper(ABC):
                 generation_config=config
             )
             response = model.generate_content(prompt, generation_config=config)
+
+            # Track total tokens
             self.total_token_count += response.usage_metadata.total_token_count
-            print(f"Total tokens {self.agent_name}: {self.total_token_count}")
+
+            # Try to get input and output tokens if available
+            try:
+                if hasattr(response.usage_metadata, 'prompt_token_count'):
+                    self.input_token_count += response.usage_metadata.prompt_token_count
+                if hasattr(response.usage_metadata, 'candidates_token_count'):
+                    self.output_token_count += response.usage_metadata.candidates_token_count
+            except AttributeError:
+                # If detailed token counts aren't available, estimate based on total
+                # Assuming a typical 1:4 ratio of input:output tokens
+                self.input_token_count += int(response.usage_metadata.total_token_count * 0.2)
+                self.output_token_count += int(response.usage_metadata.total_token_count * 0.8)
+
+            print(f"Total tokens {self.agent_name}: {self.total_token_count} (Input: {self.input_token_count}, Output: {self.output_token_count})")
             return response.text if response.text else "No response."
         return "Not implemented"
 

@@ -865,6 +865,11 @@ async function pollProgress() {
 
                 // Set up the download button
                 setupDownloadButton(data);
+
+                // Display token counts if available
+                if (data.token_counts) {
+                    displayTokenCounts(data.token_counts);
+                }
             }
 
             // Update progress status
@@ -1127,6 +1132,12 @@ function resetUIState() {
     const downloadButton = document.getElementById('downloadButton');
     if (downloadButton) {
         downloadButton.disabled = true;
+    }
+
+    // Remove token counts container if it exists
+    const tokenCountsContainer = document.getElementById('token-counts-container');
+    if (tokenCountsContainer && tokenCountsContainer.parentNode) {
+        tokenCountsContainer.parentNode.removeChild(tokenCountsContainer);
     }
 }
 
@@ -1579,4 +1590,307 @@ function createAncestorCard(ancestor, index, ancestorType) {
             </div>
         </div>
     `;
+}
+
+// Function to display token counts
+function displayTokenCounts(tokenCounts) {
+    console.log("Displaying token counts:", tokenCounts);
+
+    // Create or get the token counts container
+    let tokenCountsContainer = document.getElementById('token-counts-container');
+
+    if (!tokenCountsContainer) {
+        // Create the container if it doesn't exist
+        tokenCountsContainer = document.createElement('div');
+        tokenCountsContainer.id = 'token-counts-container';
+        tokenCountsContainer.className = 'card mt-4';
+
+        // Insert it after the progress container
+        const progressContainer = document.getElementById('progress-container');
+        if (progressContainer && progressContainer.parentNode) {
+            progressContainer.parentNode.insertBefore(tokenCountsContainer, progressContainer.nextSibling);
+        } else {
+            // Fallback: insert before generations container
+            const generationsContainer = document.getElementById('generations-container');
+            if (generationsContainer && generationsContainer.parentNode) {
+                generationsContainer.parentNode.insertBefore(tokenCountsContainer, generationsContainer);
+            }
+        }
+    }
+
+    // Get cost information
+    const totalCost = tokenCounts.cost.total_cost.toFixed(4);
+    const totalTokens = tokenCounts.total.toLocaleString();
+
+    // Store the token data for the modal
+    tokenCountsContainer.dataset.tokenCounts = JSON.stringify(tokenCounts);
+
+    // Update the container content with a simple cost display
+    tokenCountsContainer.innerHTML = `
+        <div class="card-body d-flex justify-content-between align-items-center p-3">
+            <div>
+                <h6 class="mb-0">Cost: <strong>$${totalCost}</strong></h6>
+                <small class="text-muted">${totalTokens} tokens</small>
+            </div>
+            <button id="token-details-btn" class="btn btn-sm btn-outline-primary">
+                <i class="fas fa-info-circle"></i> Details
+            </button>
+        </div>
+    `;
+
+    // Add event listener to the details button
+    document.getElementById('token-details-btn').addEventListener('click', function() {
+        showTokenDetailsModal(tokenCounts);
+    });
+}
+
+// Function to show the token details modal
+function showTokenDetailsModal(tokenCounts) {
+    // Format the token counts
+    const totalTokens = tokenCounts.total.toLocaleString();
+    const totalInputTokens = tokenCounts.total_input.toLocaleString();
+    const totalOutputTokens = tokenCounts.total_output.toLocaleString();
+
+    // Component totals
+    const ideatorTotal = tokenCounts.ideator.total.toLocaleString();
+    const formatterTotal = tokenCounts.formatter.total.toLocaleString();
+    const criticTotal = tokenCounts.critic.total.toLocaleString();
+    const breederTotal = tokenCounts.breeder.total.toLocaleString();
+
+    // Component input/output
+    const ideatorInput = tokenCounts.ideator.input.toLocaleString();
+    const ideatorOutput = tokenCounts.ideator.output.toLocaleString();
+    const formatterInput = tokenCounts.formatter.input.toLocaleString();
+    const formatterOutput = tokenCounts.formatter.output.toLocaleString();
+    const criticInput = tokenCounts.critic.input.toLocaleString();
+    const criticOutput = tokenCounts.critic.output.toLocaleString();
+    const breederInput = tokenCounts.breeder.input.toLocaleString();
+    const breederOutput = tokenCounts.breeder.output.toLocaleString();
+
+    // Component models
+    const ideatorModel = tokenCounts.ideator.model;
+    const formatterModel = tokenCounts.formatter.model;
+    const criticModel = tokenCounts.critic.model;
+    const breederModel = tokenCounts.breeder.model;
+
+    // Component costs
+    const ideatorCost = tokenCounts.ideator.cost.toFixed(4);
+    const formatterCost = tokenCounts.formatter.cost.toFixed(4);
+    const criticCost = tokenCounts.critic.cost.toFixed(4);
+    const breederCost = tokenCounts.breeder.cost.toFixed(4);
+
+    // Get cost information
+    const costInfo = tokenCounts.cost;
+    const totalCost = costInfo.total_cost.toFixed(4);
+    const inputCost = costInfo.input_cost.toFixed(4);
+    const outputCost = costInfo.output_cost.toFixed(4);
+
+    // Create modal container if it doesn't exist
+    let modalContainer = document.getElementById('token-details-modal');
+    if (!modalContainer) {
+        modalContainer = document.createElement('div');
+        modalContainer.id = 'token-details-modal';
+        modalContainer.className = 'modal fade';
+        modalContainer.tabIndex = '-1';
+        modalContainer.setAttribute('aria-labelledby', 'tokenDetailsModalLabel');
+        modalContainer.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(modalContainer);
+    }
+
+    // Set modal content
+    modalContainer.innerHTML = `
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="tokenDetailsModalLabel">Token Usage Details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="card mb-3">
+                                <div class="card-body">
+                                    <h6>Total Tokens: <span class="text-primary">${totalTokens}</span></h6>
+                                    <div class="d-flex justify-content-between">
+                                        <span>Input: <span class="text-info">${totalInputTokens}</span></span>
+                                        <span>Output: <span class="text-success">${totalOutputTokens}</span></span>
+                                    </div>
+                                    <hr>
+                                    <h6>Cost Breakdown:</h6>
+                                    <p class="mb-1">Total cost: <strong>$${totalCost}</strong></p>
+                                    <div class="small text-muted">
+                                        <div>Input: $${inputCost}</div>
+                                        <div>Output: $${outputCost}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <h6>Component Breakdown:</h6>
+                            <ul class="list-group">
+                                <li class="list-group-item">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span>Ideator <span class="badge bg-secondary">${ideatorModel}</span></span>
+                                        <span class="badge bg-primary rounded-pill">${ideatorTotal}</span>
+                                    </div>
+                                    <div class="small text-muted mt-1">
+                                        <span>Input: ${ideatorInput}</span> |
+                                        <span>Output: ${ideatorOutput}</span> |
+                                        <span>Cost: $${ideatorCost}</span>
+                                    </div>
+                                </li>
+                                <li class="list-group-item">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span>Formatter <span class="badge bg-secondary">${formatterModel}</span></span>
+                                        <span class="badge bg-primary rounded-pill">${formatterTotal}</span>
+                                    </div>
+                                    <div class="small text-muted mt-1">
+                                        <span>Input: ${formatterInput}</span> |
+                                        <span>Output: ${formatterOutput}</span> |
+                                        <span>Cost: $${formatterCost}</span>
+                                    </div>
+                                </li>
+                                <li class="list-group-item">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span>Critic <span class="badge bg-secondary">${criticModel}</span></span>
+                                        <span class="badge bg-primary rounded-pill">${criticTotal}</span>
+                                    </div>
+                                    <div class="small text-muted mt-1">
+                                        <span>Input: ${criticInput}</span> |
+                                        <span>Output: ${criticOutput}</span> |
+                                        <span>Cost: $${criticCost}</span>
+                                    </div>
+                                </li>
+                                <li class="list-group-item">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span>Breeder <span class="badge bg-secondary">${breederModel}</span></span>
+                                        <span class="badge bg-primary rounded-pill">${breederTotal}</span>
+                                    </div>
+                                    <div class="small text-muted mt-1">
+                                        <span>Input: ${breederInput}</span> |
+                                        <span>Output: ${breederOutput}</span> |
+                                        <span>Cost: $${breederCost}</span>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-4">
+                                <canvas id="tokenPieChart" width="400" height="250"></canvas>
+                            </div>
+                            <div>
+                                <canvas id="tokenBarChart" width="400" height="250"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Initialize the modal
+    const modal = new bootstrap.Modal(modalContainer);
+    modal.show();
+
+    // Create charts after the modal is shown
+    modalContainer.addEventListener('shown.bs.modal', function () {
+        // Create a pie chart for token distribution by component
+        const pieCtx = document.getElementById('tokenPieChart').getContext('2d');
+        new Chart(pieCtx, {
+            type: 'pie',
+            data: {
+                labels: ['Ideator', 'Formatter', 'Critic', 'Breeder'],
+                datasets: [{
+                    data: [
+                        tokenCounts.ideator.total,
+                        tokenCounts.formatter.total,
+                        tokenCounts.critic.total,
+                        tokenCounts.breeder.total
+                    ],
+                    backgroundColor: [
+                        'rgba(54, 162, 235, 0.7)',
+                        'rgba(75, 192, 192, 0.7)',
+                        'rgba(255, 99, 132, 0.7)',
+                        'rgba(255, 206, 86, 0.7)'
+                    ],
+                    borderColor: [
+                        'rgba(54, 162, 235, 1)',
+                        'rgba(75, 192, 192, 1)',
+                        'rgba(255, 99, 132, 1)',
+                        'rgba(255, 206, 86, 1)'
+                    ],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                    },
+                    title: {
+                        display: true,
+                        text: 'Token Distribution by Component'
+                    }
+                }
+            }
+        });
+
+        // Create a bar chart for input vs output tokens
+        const barCtx = document.getElementById('tokenBarChart').getContext('2d');
+        new Chart(barCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Ideator', 'Formatter', 'Critic', 'Breeder'],
+                datasets: [
+                    {
+                        label: 'Input Tokens',
+                        data: [
+                            tokenCounts.ideator.input,
+                            tokenCounts.formatter.input,
+                            tokenCounts.critic.input,
+                            tokenCounts.breeder.input
+                        ],
+                        backgroundColor: 'rgba(54, 162, 235, 0.7)',
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        borderWidth: 1
+                    },
+                    {
+                        label: 'Output Tokens',
+                        data: [
+                            tokenCounts.ideator.output,
+                            tokenCounts.formatter.output,
+                            tokenCounts.critic.output,
+                            tokenCounts.breeder.output
+                        ],
+                        backgroundColor: 'rgba(75, 192, 192, 0.7)',
+                        borderColor: 'rgba(75, 192, 192, 1)',
+                        borderWidth: 1
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                    },
+                    title: {
+                        display: true,
+                        text: 'Input vs Output Tokens'
+                    }
+                },
+                scales: {
+                    x: {
+                        stacked: false
+                    },
+                    y: {
+                        stacked: false
+                    }
+                }
+            }
+        });
+    });
 }

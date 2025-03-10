@@ -65,9 +65,6 @@ You are an experienced ai researcher and you are given the above research propos
 These proposals received good feedback but were unable to be selected for funding. Your task it to create a new proposal that is better.
 This can be a combination of the best elements of the existing proposals, a refinement of the existing proposals or a completely new one that you were inspired to create.
 
-Importantly you will be judged on originality of the new propos so need to make sure you bring something new to the table.
+Importantly you will be judged on originality of the new proposal so need to make sure you bring something new to the table.
 Think outside the box and be creative.
-
-Format your response as:
-Title: [Your creative title]
-Proposal: [Your 100-word story]"""
+"""

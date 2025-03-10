@@ -18,3 +18,10 @@ TASK_TYPES = [
     {"id": "game_design", "name": "Game Design"},
     {"id": "drabble", "name": "Drabble (100-word story)"}
 ]
+
+model_prices_per_million_tokens = {
+    "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.3},
+    "gemini-2.0-flash": {"input": 0.1, "output": 0.4},
+    "gemini-2.0-pro-exp-02-05": {"input": 0.0, "output": 0.0},
+    "gemini-2.0-flash-thinking-exp-01-21": {"input": 0.0, "output": 0.0}
+}
