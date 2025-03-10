@@ -587,6 +587,7 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
     const numComparisons = parseInt(document.getElementById('numComparisons').value);
     const evolutionId = document.getElementById('evolutionSelect').value;
     const modelId = document.getElementById('modelSelect').value;
+    const eloRange = parseInt(document.getElementById('eloRange').value || 100);
 
     if (!evolutionId) {
         alert('Please select an evolution first');
@@ -647,6 +648,7 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
                     numComparisons: comparisonsInChunk,
                     evolutionId: evolutionId,
                     modelId: modelId,
+                    eloRange: eloRange,
                     skipSave: false // Always save to ensure match counts are tracked properly
                 })
             });

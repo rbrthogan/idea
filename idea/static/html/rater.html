@@ -139,6 +139,11 @@
                 <input type="number" class="form-control" id="numComparisons" value="10" min="1" max="100">
               </div>
               <div class="mb-3">
+                <label for="eloRange" class="form-label">ELO Matching Range (±)</label>
+                <input type="number" class="form-control" id="eloRange" value="100" min="0" max="500">
+                <small class="form-text text-muted">Ideas will be matched with others within this ELO range for more efficient comparisons</small>
+              </div>
+              <div class="mb-3">
                 <label for="modelSelect" class="form-label">Model</label>
                 <select id="modelSelect" class="form-select">
                   <!-- Models will be populated here -->

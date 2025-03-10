@@ -536,11 +536,13 @@ async def auto_rate(request: Request):
         evolution_id = data.get('evolutionId')
         model_id = data.get('modelId', DEFAULT_MODEL)
         skip_save = data.get('skipSave', False)
+        elo_range = int(data.get('eloRange', 100))  # Get ELO range from request, default to 100
 
         # Get idea_type from the request or use a default
         idea_type = data.get('ideaType', 'airesearch')
 
         print(f"Starting auto-rating for evolution {evolution_id} with {num_comparisons} comparisons using model {model_id}")
+        print(f"Using ELO range of ±{elo_range} for matching ideas")
 
         # Load the evolution data
         file_path = DATA_DIR / f"{evolution_id}.json"
@@ -630,13 +632,134 @@ async def auto_rate(request: Request):
 
         print(f"Starting with {total_comparisons_completed} existing comparisons")
 
+        # Maximum ELO difference for matching ideas - use the value from the request
+        max_elo_diff = elo_range
+
+        # Track failed attempts to find suitable pairs
+        failed_attempts = 0
+        max_failed_attempts = 50  # Maximum number of attempts before relaxing constraints
+
         for i in range(num_comparisons):
             print(f"Comparison {i+1}/{num_comparisons}")
 
-            # Randomly select two different ideas
-            idea_a, idea_b = random.sample(all_ideas, 2)
+            # Try to find a pair of ideas with similar ELO ratings
+            found_suitable_pair = False
+            current_max_elo_diff = max_elo_diff
 
-            print(f"Comparing idea {idea_a.get('id')} vs {idea_b.get('id')}")
+            # Sort ideas by match count (ascending) to prioritize less-rated ideas
+            sorted_ideas = sorted(all_ideas, key=lambda x: x.get('auto_match_count', 0))
+
+            # Take the bottom 50% of ideas (those with fewer matches)
+            candidate_pool_size = max(2, len(sorted_ideas) // 2)
+            candidate_pool = sorted_ideas[:candidate_pool_size]
+
+            print(f"Selected candidate pool of {len(candidate_pool)} ideas with fewest matches")
+
+            while not found_suitable_pair:
+                # If we've tried too many times, gradually relax the ELO difference constraint
+                if failed_attempts >= max_failed_attempts:
+                    current_max_elo_diff = current_max_elo_diff * 1.5  # Increase by 50%
+                    print(f"Relaxing ELO difference constraint to ±{current_max_elo_diff} after {failed_attempts} failed attempts")
+
+                    # Also expand the candidate pool if we're still struggling
+                    candidate_pool_size = min(len(sorted_ideas), candidate_pool_size + len(sorted_ideas) // 4)
+                    candidate_pool = sorted_ideas[:candidate_pool_size]
+                    print(f"Expanded candidate pool to {len(candidate_pool)} ideas")
+
+                    failed_attempts = 0  # Reset counter after relaxing
+
+                # Try to select from the candidate pool first
+                if len(candidate_pool) >= 2:
+                    try:
+                        # Select first idea from candidate pool (with fewest matches)
+                        idea_a = candidate_pool[0]
+
+                        # Find ideas within ELO range
+                        elo_a = idea_a['ratings']['auto']
+                        compatible_ideas = [
+                            idea for idea in all_ideas
+                            if idea['id'] != idea_a['id'] and
+                            abs(idea['ratings']['auto'] - elo_a) <= current_max_elo_diff
+                        ]
+
+                        if compatible_ideas:
+                            # Select a random compatible idea
+                            idea_b = random.choice(compatible_ideas)
+                            # Define elo_b here to ensure it's always set
+                            elo_b = idea_b['ratings']['auto']
+                            found_suitable_pair = True
+                        else:
+                            # If no compatible ideas, remove idea_a from candidate pool and try again
+                            candidate_pool.remove(idea_a)
+                            failed_attempts += 1
+                    except Exception as e:
+                        print(f"Error selecting from candidate pool: {e}")
+                        # Fallback to random selection
+                        idea_a, idea_b = random.sample(all_ideas, 2)
+                        elo_a = idea_a['ratings']['auto']
+                        elo_b = idea_b['ratings']['auto']
+                        failed_attempts += 1
+                else:
+                    try:
+                        # Fallback to random selection if candidate pool is depleted
+                        idea_a, idea_b = random.sample(all_ideas, 2)
+
+                        # Get their auto ELO ratings
+                        elo_a = idea_a['ratings']['auto']
+                        elo_b = idea_b['ratings']['auto']
+
+                        # Check if they're within the allowed ELO difference
+                        if abs(elo_a - elo_b) <= current_max_elo_diff:
+                            found_suitable_pair = True
+                            print(f"Found suitable pair with ELO difference: {abs(elo_a - elo_b)}")
+                        else:
+                            failed_attempts += 1
+                    except Exception as e:
+                        print(f"Error in random selection: {e}")
+                        # Just pick any two ideas as a last resort
+                        idea_a, idea_b = random.sample(all_ideas, 2)
+                        elo_a = idea_a['ratings']['auto']
+                        elo_b = idea_b['ratings']['auto']
+                        failed_attempts += 1
+
+                # If we've tried too many times, just use any random pair
+                if failed_attempts >= max_failed_attempts * 2:
+                    try:
+                        idea_a, idea_b = random.sample(all_ideas, 2)
+                        elo_a = idea_a['ratings']['auto']
+                        elo_b = idea_b['ratings']['auto']
+                        print(f"Using random pair with ELO difference {abs(elo_a - elo_b)} after {failed_attempts} failed attempts")
+                        found_suitable_pair = True
+                    except Exception as e:
+                        print(f"Error in last resort selection: {e}")
+                        # Absolute last resort - just pick the first two ideas
+                        idea_a = all_ideas[0]
+                        idea_b = all_ideas[1] if len(all_ideas) > 1 else all_ideas[0]
+                        elo_a = idea_a['ratings']['auto']
+                        elo_b = idea_b['ratings']['auto']
+                        found_suitable_pair = True
+
+            # Ensure elo_a and elo_b are defined
+            if 'elo_a' not in locals():
+                # Ensure idea_a has a proper ratings structure
+                if 'ratings' not in idea_a:
+                    idea_a['ratings'] = {'auto': 1500, 'manual': 1500}
+                elif 'auto' not in idea_a['ratings']:
+                    idea_a['ratings']['auto'] = 1500
+                elo_a = idea_a['ratings']['auto']
+
+            if 'elo_b' not in locals():
+                # Ensure idea_b has a proper ratings structure
+                if 'ratings' not in idea_b:
+                    idea_b['ratings'] = {'auto': 1500, 'manual': 1500}
+                elif 'auto' not in idea_b['ratings']:
+                    idea_b['ratings']['auto'] = 1500
+                elo_b = idea_b['ratings']['auto']
+
+            # Log match counts for transparency
+            match_count_a = idea_a.get('auto_match_count', 0)
+            match_count_b = idea_b.get('auto_match_count', 0)
+            print(f"Comparing idea {idea_a.get('id')} (ELO: {elo_a}, Matches: {match_count_a}) vs {idea_b.get('id')} (ELO: {elo_b}, Matches: {match_count_b})")
 
             # Use the critic to determine the winner - pass the idea_type parameter
             winner = critic.compare_ideas(idea_a, idea_b, idea_type)
@@ -729,11 +852,13 @@ async def auto_rate(request: Request):
 
     except Exception as e:
         import traceback
+        error_details = traceback.format_exc()
         print(f"Error in auto-rate: {e}")
-        print(traceback.format_exc())
+        print(error_details)
         return JSONResponse({
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'details': error_details
         }, status_code=500)
 
 @app.get("/api/models")

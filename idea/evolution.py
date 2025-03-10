@@ -97,7 +97,7 @@ class EvolutionEngine:
                 # Process population in chunks
                 for i in range(0, len(self.population), chunk_size):
                     group = self.population[i : i + chunk_size]
-                    ranks = self.critic.get_tournament_ranks(group, self.idea_type, 10)
+                    ranks = self.critic.get_tournament_ranks(group, self.idea_type, 20)
 
                     for idea_idx, rank in sorted(ranks.items(), key=lambda x: x[1]):
                         # Extract title from the idea object within the dictionary

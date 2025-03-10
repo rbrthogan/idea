@@ -225,14 +225,19 @@ class Critic(LLMWrapper):
     def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int) -> dict:
         """Get the tournament rank of an idea"""
 
+        max_elo_diff = 100
         ranks = {i: 1500 for i in range(len(ideas))}
         for k in range(comparisons):
             if k < len(ideas):
                 # assert that each idea is one side of the comparison at least once
                 idea_idx_a = k
-                # Create a list of valid indices excluding idea_idx_a
-                valid_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
-                idea_idx_b = np.random.choice(valid_indices, size=1)[0]
+                # Create a list of valid indices excluding idea_idx_a and ensure the difference is within max_elo_diff
+                other_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
+                valid_indices = [idx for idx in other_indices if abs(ranks[idx] - ranks[idea_idx_a]) <= max_elo_diff]
+                if len(valid_indices) == 0:
+                    idea_idx_b = np.random.choice(other_indices, size=1)[0]
+                else:
+                    idea_idx_b = np.random.choice(valid_indices, size=1)[0]
             else:
                 idea_idx_a, idea_idx_b = np.random.choice(len(ideas), size=2, replace=False)
 
