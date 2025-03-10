@@ -43,9 +43,6 @@ Then visit:
 
 
 # TODO
-- Tune temperatures for each (context generation for example should be high) - optionally leave idea generation temp as configurable in UI
-- For rankings, ensure each idea is one side of the comparison
-- Improve intial context generation for idea seeding - too much in common for each idea
 - Update to evolution to use the genotype/phenotype model
 - Have an evolution variant to take human ratings as input during evolution
 - TODO: add a modifier to each generations prompt based on critique feedback on overall quality of generation (or perhaps all history, could even show it the ranks, etc.) -- Oracle prompt. Remove worst idea and replace with new one generated from oracle prompt each generation. Track impact on evolution.
@@ -57,6 +54,5 @@ Then visit:
 
 ### Bugs
 - manual rating without saving
-- initial context display is same for each idea
 - current evolution gets wipe from viewer display after going to rate and returning
 - change numbering of generations to be 0-indexed (initial generation is 0)

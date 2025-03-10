@@ -522,7 +522,8 @@ function renderGenerations(gens) {
             if (index === 0) {
                 const viewContextBtn = card.querySelector('.view-context');
                 viewContextBtn.addEventListener('click', () => {
-                    showContextModal();
+                    // Pass the idea index to show the correct context
+                    showContextModal(ideaIndex);
                 });
             }
 
@@ -1180,7 +1181,9 @@ function setupTemperatureSliders() {
 }
 
 // Function to show the context modal
-function showContextModal() {
+function showContextModal(ideaIndex) {
+    console.log(`showContextModal called with ideaIndex: ${ideaIndex}, contexts:`, contexts);
+
     // Create modal if it doesn't exist
     let contextModal = document.getElementById('contextModal');
 
@@ -1219,8 +1222,18 @@ function showContextModal() {
     const contextModalContent = document.getElementById('contextModalContent');
 
     if (contexts.length > 0) {
+        // Use the provided ideaIndex if available, otherwise use currentContextIndex
+        const contextIndex = (ideaIndex !== undefined && ideaIndex < contexts.length) ?
+                            ideaIndex : currentContextIndex;
+
+        console.log(`Using contextIndex: ${contextIndex}, context: "${contexts[contextIndex]}"`);
+
+        // Update the modal title to show which context we're viewing
+        const modalTitle = document.getElementById('contextModalLabel');
+        modalTitle.textContent = `Initial Context for Idea ${contextIndex + 1}`;
+
         // Format the context text into separate items
-        const contextItems = contexts[currentContextIndex]
+        const contextItems = contexts[contextIndex]
             .split('\n')
             .filter(item => item.trim())
             .map(item => `<div class="context-item">${item.trim()}</div>`)
@@ -1232,6 +1245,7 @@ function showContextModal() {
             </div>
         `;
     } else {
+        console.warn('No contexts available');
         contextModalContent.innerHTML = '<p class="text-muted">No context available</p>';
     }
 
