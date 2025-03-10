@@ -16,11 +16,15 @@ class EvolutionEngine:
         model_type: str = "gemini-1.5-flash",
         ideator_temp: float = 2.0,
         critic_temp: float = 1.5,
-        breeder_temp: float = 2.0
+        breeder_temp: float = 2.0,
+        tournament_size: int = 5,
+        tournament_comparisons: int = 20
     ):
         self.idea_type = idea_type
         self.pop_size = pop_size
         self.generations = generations
+        self.tournament_size = tournament_size
+        self.tournament_comparisons = tournament_comparisons
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
@@ -87,17 +91,19 @@ class EvolutionEngine:
             for gen in range(self.generations):
                 print(f"Starting generation {gen + 1}...")
 
-                chunk_size = 5
-                if len(self.population) < 2*chunk_size:
-                    chunk_size = len(self.population)
+                # Adjust tournament size if population is too small
+                actual_tournament_size = self.tournament_size
+                if len(self.population) < 2 * actual_tournament_size:
+                    actual_tournament_size = max(2, len(self.population) // 2)
+                    print(f"Adjusting tournament size to {actual_tournament_size} due to small population")
 
                 new_population = []
                 random.shuffle(self.population)
 
                 # Process population in chunks
-                for i in range(0, len(self.population), chunk_size):
-                    group = self.population[i : i + chunk_size]
-                    ranks = self.critic.get_tournament_ranks(group, self.idea_type, 20)
+                for i in range(0, len(self.population), actual_tournament_size):
+                    group = self.population[i : i + actual_tournament_size]
+                    ranks = self.critic.get_tournament_ranks(group, self.idea_type, self.tournament_comparisons)
 
                     for idea_idx, rank in sorted(ranks.items(), key=lambda x: x[1]):
                         # Extract title from the idea object within the dictionary

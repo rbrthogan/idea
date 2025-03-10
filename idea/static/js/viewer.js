@@ -110,21 +110,33 @@ document.addEventListener("DOMContentLoaded", () => {
     if (startButton) {
         startButton.onclick = async function() {
             console.log("Starting evolution...");
-            const popSize = document.getElementById('popSize').value;
-            const generations = document.getElementById('generations').value;
+            const popSize = parseInt(document.getElementById('popSize').value);
+            const generations = parseInt(document.getElementById('generations').value);
             const ideaType = document.getElementById('ideaType').value;
             const modelType = document.getElementById('modelType').value;
 
             // Get temperature values
-            const ideatorTemp = document.getElementById('ideatorTemp').value;
-            const criticTemp = document.getElementById('criticTemp').value;
-            const breederTemp = document.getElementById('breederTemp').value;
+            const ideatorTemp = parseFloat(document.getElementById('ideatorTemp').value);
+            const criticTemp = parseFloat(document.getElementById('criticTemp').value);
+            const breederTemp = parseFloat(document.getElementById('breederTemp').value);
 
-            console.log("Temperature values being sent:", {
+            // Get tournament values
+            const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
+            const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
+
+            const requestBody = {
+                popSize,
+                generations,
+                ideaType,
+                modelType,
                 ideatorTemp,
                 criticTemp,
-                breederTemp
-            });
+                breederTemp,
+                tournamentSize,
+                tournamentComparisons
+            };
+
+            console.log("Request body JSON:", JSON.stringify(requestBody));
 
             // Reset UI state
             resetUIState();
@@ -138,18 +150,6 @@ document.addEventListener("DOMContentLoaded", () => {
                     popSize, generations, ideaType, modelType,
                     ideatorTemp, criticTemp, breederTemp
                 });
-
-                const requestBody = {
-                    popSize,
-                    generations,
-                    ideaType,
-                    modelType,
-                    ideatorTemp,
-                    criticTemp,
-                    breederTemp
-                };
-
-                console.log("Request body JSON:", JSON.stringify(requestBody));
 
                 const response = await fetch('/api/start-evolution', {
                     method: 'POST',

@@ -106,9 +106,21 @@ async def start_evolution(request: Request):
         critic_temp = 0.7
         breeder_temp = 1.0
 
+    # Get tournament parameters with defaults
+    try:
+        tournament_size = int(data.get('tournamentSize', 5))
+        tournament_comparisons = int(data.get('tournamentComparisons', 20))
+        print(f"Parsed tournament values: size={tournament_size}, comparisons={tournament_comparisons}")
+    except ValueError as e:
+        print(f"Error parsing tournament values: {e}")
+        # Use defaults if parsing fails
+        tournament_size = 5
+        tournament_comparisons = 20
+
     print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
-          f"idea_type={idea_type}, model_type={model_type} "
-          f"temperatures: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}")
+          f"idea_type={idea_type}, model_type={model_type}, "
+          f"temperatures: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}, "
+          f"tournament: size={tournament_size}, comparisons={tournament_comparisons}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -118,7 +130,9 @@ async def start_evolution(request: Request):
         model_type=model_type,
         ideator_temp=ideator_temp,
         critic_temp=critic_temp,
-        breeder_temp=breeder_temp
+        breeder_temp=breeder_temp,
+        tournament_size=tournament_size,
+        tournament_comparisons=tournament_comparisons
     )
 
     # Generate contexts for each idea
