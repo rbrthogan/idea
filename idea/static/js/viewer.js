@@ -1136,8 +1136,8 @@ function resetUIState() {
 
     // Remove token counts container if it exists
     const tokenCountsContainer = document.getElementById('token-counts-container');
-    if (tokenCountsContainer && tokenCountsContainer.parentNode) {
-        tokenCountsContainer.parentNode.removeChild(tokenCountsContainer);
+    if (tokenCountsContainer) {
+        tokenCountsContainer.innerHTML = '';
     }
 }
 
