@@ -51,6 +51,7 @@ Then visit:
 - TODO: styling needs work
 - TODO: update "start auto rating" button state when in progress
 - TODO: comparison prompt is in the evolution.py file, should be in a prompts folder
+- TODO: add costs for auto rating
 
 
 ### Bugs
