@@ -1,31 +1,15 @@
 /* Modern UI styling for the Idea Evolution Viewer */
 
 :root {
-  /* New Pastel Palette */
-  --bg-main: #F7F7FF; /* Very light lavender/off-white */
-  --bg-card: #FFFFFF;
-  --primary: #A092E1; /* Soft lavender */
-  --primary-light: #C4B9EF; /* Lighter lavender */
-  --primary-dark: #7D6BB9; /* Darker lavender */
-  --secondary: #78C2AD; /* Muted teal */
-  --secondary-light: #A0D4C4; /* Lighter teal */
-  --accent: #F4A27E; /* Soft coral/peach */
-  --text-dark: #4A4A4A; /* Dark grey for main text */
-  --text-medium: #777777; /* Medium grey for secondary text */
-  --text-light: #FFFFFF; /* For text on dark backgrounds */
-  --border-color: #E8E8F0; /* Soft light grey for borders */
-  --border-input: #D8D8E0; /* Slightly darker for input borders */
-
-  /* Shadows - make them softer */
-  --shadow-color-soft: rgba(125, 107, 185, 0.08); /* Subtle lavender-ish shadow */
-  --shadow-sm: 0 2px 4px var(--shadow-color-soft);
-  --shadow-md: 0 5px 10px var(--shadow-color-soft);
-  --shadow-lg: 0 10px 20px var(--shadow-color-soft);
-
-  /* Existing variables (some might be replaced or unused) */
-  --dark: var(--text-dark); /* map old dark to new text-dark */
-  --light: var(--bg-main); /* map old light to new bg-main */
-  --gray-100: #f8f9fa; /* Keep for compatibility if needed, but prefer new vars */
+  --primary: #6c5ce7;
+  --primary-light: #a29bfe;
+  --primary-dark: #4834d4;
+  --secondary: #fd79a8;
+  --secondary-light: #fab1c9;
+  --accent: #00cec9;
+  --dark: #2d3436;
+  --light: #f8f9fa;
+  --gray-100: #f8f9fa;
   --gray-200: #e9ecef;
   --gray-300: #dee2e6;
   --gray-400: #ced4da;
@@ -34,17 +18,19 @@
   --gray-700: #495057;
   --gray-800: #343a40;
   --gray-900: #212529;
-
-  --transition: all 0.25s ease-in-out;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+  --transition: all 0.3s ease;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
 }
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  color: var(--text-dark);
-  background-color: var(--bg-main);
+  color: var(--gray-800);
+  background-color: #f9f7ff;
   line-height: 1.6;
   margin: 0;
   padding: 0;
@@ -56,29 +42,28 @@ body {
 }
 
 .sidebar {
-  background: var(--primary); /* Solid soft lavender */
-  color: var(--text-light);
+  background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+  color: white;
   min-height: 100vh;
   padding: 1.5rem;
-  box-shadow: var(--shadow-md); /* Softer shadow */
+  box-shadow: var(--shadow-lg);
   position: sticky;
   top: 0;
-  border-right: 1px solid var(--primary-dark); /* Subtle border */
 }
 
 .main-content {
   flex: 1;
-  padding: 25px;
+  padding: 20px;
   margin-left: 300px; /* Match sidebar width */
   overflow-x: hidden; /* Prevent horizontal overflow */
   max-width: calc(100% - 300px); /* Ensure it doesn't exceed available space */
   box-sizing: border-box;
-  background-color: var(--bg-main);
+  background-color: #f9f7ff;
 }
 
 /* Headers */
 h1, h2, h3, h4, h5, h6 {
-  font-weight: 600; /* Slightly less bold */
+  font-weight: 700;
   margin-bottom: 1rem;
   color: var(--primary-dark);
 }
@@ -86,21 +71,23 @@ h1, h2, h3, h4, h5, h6 {
 .page-title {
   font-size: 2.2rem;
   margin-bottom: 1.5rem;
-  color: var(--primary-dark); /* Simpler color, no gradient */
+  background: linear-gradient(90deg, var(--primary), var(--secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
   text-align: center;
   padding: 1rem 0;
 }
 
-/* Controls Section in Sidebar */
+/* Controls Section */
 .controls-header {
   font-size: 1.2rem;
-  color: var(--text-light); /* Text on primary background */
+  color: white;
   margin-bottom: 1.5rem;
   padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--primary-light); /* Lighter border */
+  border-bottom: 2px solid rgba(255, 255, 255, 0.2);
 }
 
-/* Tabs in Sidebar */
+/* Tabs */
 .nav-tabs {
   border: none;
   margin-bottom: 1.5rem;
@@ -108,54 +95,44 @@ h1, h2, h3, h4, h5, h6 {
 
 .nav-tabs .nav-link {
   border: none;
-  background-color: transparent; /* Make them blend with sidebar */
-  color: var(--primary-light); /* Lighter text for inactive tabs */
-  border-radius: var(--radius-md);
-  padding: 0.75rem 1.2rem;
-  font-weight: 500;
+  background-color: var(--gray-200);
+  color: var(--gray-700);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  padding: 0.75rem 1.5rem;
+  font-weight: 600;
   transition: var(--transition);
-  margin-right: 0.5rem; /* Spacing between tabs */
 }
 
 .nav-tabs .nav-link:hover {
-  background-color: var(--primary-dark); /* Darker lavender on hover */
-  color: var(--text-light);
-  transform: translateY(-2px);
+  background-color: var(--primary-light);
+  color: white;
+  transform: translateY(-3px);
 }
 
 .nav-tabs .nav-link.active {
-  background-color: var(--text-light); /* Active tab stands out with light background */
-  color: var(--primary-dark); /* Text color for active tab */
-  box-shadow: var(--shadow-sm);
+  background-color: var(--primary);
+  color: white;
+  box-shadow: var(--shadow-md);
 }
 
-/* Form Controls in Sidebar */
+/* Form Controls */
 .form-label {
-  color: var(--primary-light); /* Lighter label color on dark sidebar */
-  font-weight: 500;
+  color: var(--primary-dark);
+  font-weight: 600;
   margin-bottom: 0.5rem;
 }
 
 .form-control, .form-select {
   border-radius: var(--radius-md);
-  border: 1px solid var(--primary-light); /* Border matching sidebar accents */
+  border: 2px solid var(--gray-300);
   padding: 0.75rem 1rem;
   transition: var(--transition);
-  background-color: var(--primary-dark); /* Darker background for inputs on sidebar */
-  color: var(--text-light); /* Light text for inputs */
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.1);
-}
-
-.form-control::placeholder, .form-select::placeholder {
-  color: var(--primary-light);
-  opacity: 0.7;
+  background-color: rgba(255, 255, 255, 0.9);
 }
 
 .form-control:focus, .form-select:focus {
-  border-color: var(--text-light); /* Focus with white border */
-  background-color: var(--primary-dark);
-  box-shadow: 0 0 0 3px var(--primary-light_alpha, rgba(196, 185, 239, 0.35)); /* Softer focus shadow */
-  color: var(--text-light);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(108, 92, 231, 0.25);
 }
 
 .form-group {
@@ -170,7 +147,6 @@ h1, h2, h3, h4, h5, h6 {
   transition: var(--transition);
   border: none;
   box-shadow: var(--shadow-sm);
-  text-transform: none; /* Keep text as is */
 }
 
 .btn:hover {
@@ -179,33 +155,27 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .btn:active {
-  transform: translateY(0px);
-  box-shadow: var(--shadow-sm);
+  transform: translateY(1px);
 }
 
-/* Primary Button (e.g., Start Evolution) - use primary lavender */
 .btn-primary {
-  background-color: var(--primary);
-  color: var(--text-light);
+  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+  color: white;
 }
 
 .btn-primary:hover {
-  background-color: var(--primary-dark);
-  color: var(--text-light);
+  background: linear-gradient(135deg, var(--primary-dark), var(--primary));
 }
 
-/* Secondary Button (e.g., Save Results) - use accent color or muted teal */
 .btn-secondary {
-  background-color: var(--secondary); /* Muted teal */
-  color: var(--text-light);
+  background: linear-gradient(135deg, var(--secondary), #e84393);
+  color: white;
 }
 
 .btn-secondary:hover {
-  background-color: var(--secondary-light); /* Slightly lighter teal */
-  color: var(--text-dark); /* Dark text on lighter teal for contrast */
+  background: linear-gradient(135deg, #e84393, var(--secondary));
 }
 
-/* Outline Buttons */
 .btn-outline-primary {
   border: 2px solid var(--primary);
   color: var(--primary);
@@ -214,21 +184,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .btn-outline-primary:hover {
   background-color: var(--primary);
-  color: var(--text-light);
-}
-
-/* Link-style buttons or less prominent actions */
-.btn-link-style {
-    background: none;
-    border: none;
-    color: var(--primary);
-    padding: 0.5rem 1rem;
-    text-decoration: none;
-}
-.btn-link-style:hover {
-    color: var(--primary-dark);
-    text-decoration: underline;
-    background-color: var(--primary-light_alpha, rgba(196, 185, 239, 0.1));
+  color: white;
 }
 
 .btn-block {
@@ -237,20 +193,20 @@ h1, h2, h3, h4, h5, h6 {
 
 /* Generation Cards */
 .generation-section {
-  background-color: var(--bg-card); /* White cards */
-  border-radius: var(--radius-lg); /* Softer, larger radius */
-  padding: 1.5rem; /* Increased padding */
-  margin-bottom: 2rem; /* More space between sections */
-  box-shadow: var(--shadow-md); /* Softer shadow */
-  border: 1px solid var(--border-color); /* Softer border */
+  background-color: white;
+  border-radius: var(--radius-md);
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--gray-200);
 }
 
 .generation-title {
-  font-size: 1.3rem; /* Slightly larger */
-  color: var(--primary-dark); /* Use dark lavender */
-  margin-bottom: 1.5rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--border-color); /* Softer border */
+  font-size: 1.2rem;
+  color: var(--primary);
+  margin-bottom: 1.25rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--gray-200);
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -260,41 +216,39 @@ h1, h2, h3, h4, h5, h6 {
 .scroll-wrapper {
   position: relative;
   overflow: hidden;
-  border-radius: var(--radius-md); /* Match card radius */
+  border-radius: var(--radius-sm);
 }
 
 .scroll-container {
   display: flex;
-  gap: 1.25rem; /* Slightly more gap */
-  padding: 0.5rem; /* Padding around cards */
+  gap: 1rem;
+  padding: 0.25rem;
   overflow-x: auto;
   scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
-  scrollbar-width: thin; /* Thinner scrollbar */
-  scrollbar-color: var(--primary-light) var(--bg-main); /* Lavender thumb, main bg track */
-  padding-bottom: 1rem; /* Space for scrollbar */
+  scrollbar-width: thin;
+  scrollbar-color: var(--primary-light) var(--gray-200);
+  padding-bottom: 0.5rem;
 }
 
 .scroll-container::-webkit-scrollbar {
-  height: 8px; /* Slightly thicker for better grab with pastel */
-  width: 8px;
+  height: 6px;
 }
 
 .scroll-container::-webkit-scrollbar-track {
-  background: var(--bg-main);
-  border-radius: var(--radius-sm);
+  background: var(--gray-200);
+  border-radius: 10px;
 }
 
 .scroll-container::-webkit-scrollbar-thumb {
   background-color: var(--primary-light);
-  border-radius: var(--radius-sm);
-  border: 2px solid var(--bg-main); /* Border around thumb for definition */
+  border-radius: 10px;
 }
 
-/* Card specific styles */
+/* Ensure cards have a fixed width */
 .gen-card {
-  flex: 0 0 280px; /* Keep width, can adjust if needed */
-  min-width: 280px;
+  flex: 0 0 300px;
+  min-width: 300px;
   background: white;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-sm);
