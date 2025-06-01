@@ -444,16 +444,16 @@ function renderGenerations(gens) {
 
             // Label the initial population as "Generation 0 (Initial)"
             if (index === 0) {
-                header.textContent = `Generation 1 (Initial Population)`;
+                header.textContent = `Generation 0 (Initial Population)`;
             } else {
-                header.textContent = `Generation ${index + 1}`;
+                header.textContent = `Generation ${index}`;
             }
 
             // Add collapse toggle button
             const toggleButton = document.createElement('button');
             toggleButton.className = 'generation-toggle';
             toggleButton.setAttribute('aria-expanded', 'true');
-            toggleButton.setAttribute('aria-label', `Toggle Generation ${index + 1}`);
+            toggleButton.setAttribute('aria-label', `Toggle Generation ${index}`);
             toggleButton.onclick = () => toggleGeneration(index);
             toggleButton.innerHTML = '<i class="fas fa-chevron-up"></i>';
 

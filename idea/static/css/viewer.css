@@ -171,11 +171,13 @@ h1, h2, h3, h4, h5, h6 {
   font-weight: 800;
 }
 
+/* OLD STYLES REMOVED - NOW HANDLED BY NEW APP HEADER DESIGN
 .app-header h1, .app-header h2 {
   color: var(--primary-dark);
   font-weight: 700;
   margin: 0;
 }
+*/
 
 /* Controls Section */
 .controls-header {
@@ -1163,6 +1165,7 @@ button[data-bs-toggle="collapse"][aria-expanded="true"] i {
 }
 
 /* Additional Enhancements */
+/* OLD APP-LOGO STYLES REMOVED - NOW HANDLED BY NEW DESIGN
 .app-logo {
   filter: drop-shadow(0 2px 4px rgba(139, 124, 246, 0.1));
   transition: var(--transition);
@@ -1172,6 +1175,7 @@ button[data-bs-toggle="collapse"][aria-expanded="true"] i {
 .app-logo:hover {
   transform: scale(1.05);
 }
+*/
 
 .nav-section {
   margin-bottom: 20px;
@@ -1205,4 +1209,140 @@ body::before {
     radial-gradient(circle at 75% 75%, rgba(244, 114, 182, 0.02) 0%, transparent 50%);
   pointer-events: none;
   z-index: -1;
+}
+
+/* App Header Redesign - Professional Layout */
+
+/* Controls Panel Header - Clean and Simple */
+.app-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 24px;
+  padding: 0;
+  position: relative;
+}
+
+.controls-panel .app-header {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 20px;
+  padding: 0;
+  margin: 0 0 24px 0;
+  background: none;
+  border-radius: 0;
+  position: relative;
+  overflow: visible;
+}
+
+.controls-panel .app-header::before {
+  display: none;
+}
+
+.controls-panel .app-header h2 {
+  color: var(--text-secondary);
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  position: relative;
+  z-index: 1;
+}
+
+.controls-panel .app-logo {
+  display: none; /* Hide logo in controls panel for cleaner look */
+}
+
+/* Main Header - Elegant and Prominent */
+.main-content .app-header {
+  flex-direction: row;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 32px;
+  padding: 24px 0;
+  border-bottom: 1px solid var(--border-soft);
+  position: relative;
+}
+
+.main-content .app-header::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 80px;
+  height: 3px;
+  background: var(--primary);
+  border-radius: var(--radius-sm);
+}
+
+.main-content .app-logo {
+  max-height: 48px;
+  width: auto;
+  filter: drop-shadow(0 4px 12px rgba(139, 124, 246, 0.15));
+  transition: var(--transition);
+}
+
+.main-content .app-logo:hover {
+  transform: scale(1.02) translateY(-1px);
+  filter: drop-shadow(0 6px 16px rgba(139, 124, 246, 0.2));
+}
+
+.main-content .app-header h1 {
+  color: var(--text-primary);
+  font-size: 2.25rem;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+/* Enhanced sidebar toggle positioning for new header */
+.controls-panel .sidebar-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  background: var(--primary);
+  color: white;
+  border: 1px solid var(--primary);
+}
+
+.controls-panel .sidebar-toggle:hover {
+  background: var(--primary-dark);
+  color: white;
+  transform: translateY(-1px);
+}
+
+/* Responsive adjustments for new headers */
+@media (max-width: 768px) {
+  .main-content .app-header h1 {
+    font-size: 1.75rem;
+  }
+
+  .main-content .app-logo {
+    max-height: 40px;
+  }
+
+  .controls-panel .app-header {
+    margin: 0 0 20px 0;
+    padding: 0;
+  }
+}
+
+@media (max-width: 576px) {
+  .main-content .app-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 20px 0;
+  }
+
+  .main-content .app-header h1 {
+    font-size: 1.5rem;
+  }
+
+  .main-content .app-logo {
+    max-height: 36px;
+  }
 }
