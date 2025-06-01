@@ -7,8 +7,8 @@ created_date: "2024-01-15"
 metadata:
   item_type: "game designs"
 
-# Special design requirements for this prompt type
-design_requirements: |
+# Special requirements for this template type
+special_requirements: |
   The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
   The game complexity should similar in level to classic games like Breakout, Snake, Tetris, Pong, Pac-Man, Space Invaders, Frogger, Minesweeper, Tic Tac Toe, 2048, Wordle etc.
   Avoid being derivative of these but limit the ambition to the level of complexity of these games.
@@ -29,7 +29,7 @@ prompts:
     suggest a new game design that is both interesting and fun to play.
     With key game mechanics and controls.
 
-    {design_requirements}
+    {requirements}
 
   new_idea: |
     You are a uniquely creative game designer.
@@ -39,7 +39,7 @@ prompts:
     Please avoid minor refinements of the ideas above, and instead propose a new idea
     that is a significant departure.
 
-    {design_requirements}
+    {requirements}
 
   format: |
     Take the following idea and rewrite it in a clear,
@@ -65,7 +65,7 @@ prompts:
     This could be a refinement of the original proposal or a fresh take on it.
     No additional text, just the refined idea on its own.
 
-    {design_requirements}
+    {requirements}
 
   breed: |
     {ideas}
@@ -77,7 +77,7 @@ prompts:
     Importantly you will be judged on originality of the new design so need to make sure you bring something new to the table.
     Think outside the box and be creative.
 
-    {design_requirements}
+    {requirements}
 
 comparison_criteria:
   - "originality and creativity"

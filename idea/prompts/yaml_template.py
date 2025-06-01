@@ -31,27 +31,41 @@ class YAMLTemplateWrapper:
         self.REFINE_PROMPT = self._interpolate_prompt(self.template.prompts.refine)
         self.BREED_PROMPT = self._interpolate_prompt(self.template.prompts.breed)
 
-        # Optional template-specific attributes
-        if self.template.format_requirements:
-            self.DRABBLE_FORMAT_PROMPT = self.template.format_requirements  # Legacy name for drabble
-            self.FORMAT_REQUIREMENTS = self.template.format_requirements
+        # Unified special requirements with legacy compatibility
+        requirements = self.template.requirements
+        if requirements:
+            self.SPECIAL_REQUIREMENTS = requirements
 
-        if self.template.design_requirements:
-            self.DESIGN_REQUIREMENTS = self.template.design_requirements
+            # Legacy compatibility attributes
+            if self.template.format_requirements:
+                self.DRABBLE_FORMAT_PROMPT = requirements  # Legacy name for drabble
+                self.FORMAT_REQUIREMENTS = requirements
+            elif self.template.design_requirements:
+                self.DESIGN_REQUIREMENTS = requirements
+            else:
+                # For new templates using special_requirements
+                self.FORMAT_REQUIREMENTS = requirements
+                self.DESIGN_REQUIREMENTS = requirements
 
     def _interpolate_prompt(self, prompt_text: str) -> str:
         """
         Interpolate template-specific requirements into prompt text
+        Supports both new {requirements} placeholder and legacy {format_requirements}/{design_requirements}
         """
         result = prompt_text
+        requirements = self.template.requirements
 
-        # Interpolate format requirements if they exist and are referenced
-        if self.template.format_requirements and '{format_requirements}' in result:
-            result = result.replace('{format_requirements}', self.template.format_requirements)
+        if requirements:
+            # Handle new unified placeholder
+            if '{requirements}' in result:
+                result = result.replace('{requirements}', requirements)
 
-        # Interpolate design requirements if they exist and are referenced
-        if self.template.design_requirements and '{design_requirements}' in result:
-            result = result.replace('{design_requirements}', self.template.design_requirements)
+            # Handle legacy placeholders for backward compatibility
+            if '{format_requirements}' in result:
+                result = result.replace('{format_requirements}', requirements)
+
+            if '{design_requirements}' in result:
+                result = result.replace('{design_requirements}', requirements)
 
         return result
 

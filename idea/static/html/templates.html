@@ -274,7 +274,7 @@
                     </div>
                     <div class="nav-buttons mt-2">
                         <a href="/templates" class="btn btn-primary w-100">
-                            <i class="fas fa-file-alt"></i> Templates
+                            <i class="fas fa-file-alt"></i> Manage Templates
                         </a>
                     </div>
                 </div>
@@ -428,21 +428,16 @@
                                    placeholder="e.g., 'research ideas', 'business plans', 'stories'">
                         </div>
 
-                        <!-- Optional Requirements -->
-                        <div class="row mb-4">
-                            <div class="col-md-6">
-                                <label for="formatRequirements" class="form-label">
-                                    <i class="fas fa-text-width me-1"></i>Format Requirements (Optional)
-                                </label>
-                                <textarea class="form-control" id="formatRequirements" rows="3"
-                                          placeholder="Special formatting requirements"></textarea>
-                            </div>
-                            <div class="col-md-6">
-                                <label for="designRequirements" class="form-label">
-                                    <i class="fas fa-drafting-compass me-1"></i>Design Requirements (Optional)
-                                </label>
-                                <textarea class="form-control" id="designRequirements" rows="3"
-                                          placeholder="Special design requirements"></textarea>
+                        <!-- Special Requirements -->
+                        <div class="mb-4">
+                            <label for="specialRequirements" class="form-label">
+                                <i class="fas fa-exclamation-circle me-1"></i>Special Requirements (Optional)
+                            </label>
+                            <textarea class="form-control" id="specialRequirements" rows="4"
+                                      placeholder="Special requirements that will be included in your prompts using {requirements} placeholder. For example: word count limits, formatting requirements, design constraints, etc."></textarea>
+                            <div class="form-text">
+                                <strong>Tip:</strong> These requirements will be automatically inserted into your prompts wherever you use the <code>{requirements}</code> placeholder.
+                                Use this for template-specific constraints like "exactly 100 words" or "browser-game complexity level".
                             </div>
                         </div>
 

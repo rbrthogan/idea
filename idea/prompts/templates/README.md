@@ -16,14 +16,11 @@ created_date: "2024-01-15"  # YYYY-MM-DD format
 metadata:
   item_type: "Type of items generated (e.g., 'stories', 'game designs')"
 
-# Optional template-specific requirements
-format_requirements: |
-  Special formatting requirements that can be interpolated into prompts
-  using {format_requirements} placeholder
-
-design_requirements: |
-  Special design requirements that can be interpolated into prompts
-  using {design_requirements} placeholder
+# Special requirements for this template type (optional)
+special_requirements: |
+  Special constraints, formatting rules, or requirements for this template.
+  These will be automatically inserted into prompts using {requirements} placeholder.
+  For example: word count limits, complexity constraints, formatting rules, etc.
 
 prompts:
   context: |
@@ -31,10 +28,11 @@ prompts:
 
   idea: |
     Prompt for generating initial ideas
-    Can reference {format_requirements} or {design_requirements}
+    Can reference {requirements} for template-specific constraints
 
   new_idea: |
     Prompt for generating new ideas from existing ones
+    Can reference {requirements} for template-specific constraints
 
   format: |
     Prompt for formatting raw ideas
@@ -47,10 +45,12 @@ prompts:
   refine: |
     Prompt for refining ideas based on critique
     Must include {idea} and {critique} placeholders
+    Can reference {requirements} for template-specific constraints
 
   breed: |
     Prompt for breeding/combining ideas
     Must include {ideas} placeholder
+    Can reference {requirements} for template-specific constraints
 
 comparison_criteria:
   - "First criterion (most important)"
@@ -66,10 +66,12 @@ comparison_criteria:
 
 ## Creating New Templates
 
-1. Copy an existing template as a starting point
-2. Modify the metadata and prompts for your domain
-3. Test your template using the validation tools
-4. Save with a descriptive filename (e.g., `business_ideas.yaml`)
+1. Use the Template Manager UI at `/templates` for an easy visual interface
+2. Or copy an existing template as a starting point
+3. Modify the metadata and prompts for your domain
+4. Use the `special_requirements` field for template-specific constraints
+5. Test your template using the validation tools
+6. Save with a descriptive filename (e.g., `business_ideas.yaml`)
 
 ## Validation
 
@@ -89,8 +91,22 @@ Templates are automatically validated when loaded. The system checks for:
 - `{ideas}` in breed prompts
 
 ### Optional Placeholders
-- `{format_requirements}` - Interpolates format_requirements field
-- `{design_requirements}` - Interpolates design_requirements field
+- `{requirements}` - Interpolates the special_requirements field (recommended for new templates)
+
+### Legacy Placeholders (still supported)
+- `{format_requirements}` - For backward compatibility with older templates
+- `{design_requirements}` - For backward compatibility with older templates
+
+## Special Requirements
+
+The `special_requirements` field is the unified way to specify template-specific constraints. Examples:
+
+- **Story templates**: "Must be exactly 100 words with a complete narrative arc"
+- **Game templates**: "Should be implementable as a simple browser game"
+- **Business templates**: "Focus on B2B SaaS solutions with clear revenue models"
+- **Research templates**: "Should include methodology, expected outcomes, and feasibility assessment"
+
+Use the `{requirements}` placeholder in your prompts to automatically include these constraints.
 
 ## Using Templates
 
@@ -106,10 +122,13 @@ Templates are automatically loaded by the system when available. The loader will
 To contribute a new template:
 
 1. Create your YAML template following the structure above
-2. Test it thoroughly with the validation system
-3. Submit a pull request with your template
-4. Include examples of the types of ideas it generates
+2. Use the Template Manager UI for easy creation and testing
+3. Test it thoroughly with the validation system
+4. Submit a pull request with your template
+5. Include examples of the types of ideas it generates
 
 ## Backward Compatibility
 
 The YAML system is fully backward compatible with existing Python prompt modules. The system will automatically use YAML templates when available, but fall back to Python modules for existing functionality.
+
+Legacy templates using `format_requirements` and `design_requirements` will continue to work, but new templates should use the unified `special_requirements` field with the `{requirements}` placeholder for clarity.

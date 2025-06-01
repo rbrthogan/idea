@@ -36,9 +36,34 @@ class PromptTemplate(BaseModel):
     prompts: PromptSet = Field(..., description="Set of prompts")
     comparison_criteria: List[str] = Field(..., description="Criteria for comparing generated ideas")
 
-    # Optional fields for template-specific requirements
-    format_requirements: Optional[str] = Field(None, description="Special format requirements")
-    design_requirements: Optional[str] = Field(None, description="Special design requirements")
+    # Unified special requirements field (replaces format_requirements and design_requirements)
+    special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")
+
+    # Legacy fields for backward compatibility - will be deprecated
+    format_requirements: Optional[str] = Field(None, description="Legacy: use special_requirements instead")
+    design_requirements: Optional[str] = Field(None, description="Legacy: use special_requirements instead")
+
+    def __init__(self, **data):
+        """Initialize template with special requirements migration"""
+        # Auto-migrate from legacy fields to special_requirements
+        if 'special_requirements' not in data or data['special_requirements'] is None:
+            if data.get('format_requirements'):
+                data['special_requirements'] = data['format_requirements']
+            elif data.get('design_requirements'):
+                data['special_requirements'] = data['design_requirements']
+
+        super().__init__(**data)
+
+    @property
+    def requirements(self) -> Optional[str]:
+        """Get the special requirements, handling legacy compatibility"""
+        if self.special_requirements:
+            return self.special_requirements
+        elif self.format_requirements:
+            return self.format_requirements
+        elif self.design_requirements:
+            return self.design_requirements
+        return None
 
     @validator('version')
     def validate_version(cls, v):
@@ -123,15 +148,10 @@ class TemplateValidator:
             warnings.append("Breed prompt missing {ideas} placeholder")
 
         # Check for template-specific requirements interpolation
-        if template.format_requirements:
+        if template.requirements:
             for prompt_name, prompt_text in prompts_dict.items():
-                if '{format_requirements}' in prompt_text and not template.format_requirements:
-                    warnings.append(f"{prompt_name} references format_requirements but it's not defined")
-
-        if template.design_requirements:
-            for prompt_name, prompt_text in prompts_dict.items():
-                if '{design_requirements}' in prompt_text and not template.design_requirements:
-                    warnings.append(f"{prompt_name} references design_requirements but it's not defined")
+                if '{requirements}' in prompt_text and not template.requirements:
+                    warnings.append(f"{prompt_name} references requirements but it's not defined")
 
         return warnings
 

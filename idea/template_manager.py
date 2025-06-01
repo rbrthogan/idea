@@ -28,8 +28,7 @@ class TemplateCreateRequest(BaseModel):
     description: str = Field(..., description="Template description")
     author: str = Field(default="User", description="Template author")
     item_type: str = Field(..., description="Type of items generated")
-    format_requirements: Optional[str] = Field(None, description="Special format requirements")
-    design_requirements: Optional[str] = Field(None, description="Special design requirements")
+    special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")
     context_prompt: str = Field(..., description="Context generation prompt")
     idea_prompt: str = Field(..., description="Idea generation prompt")
     new_idea_prompt: str = Field(..., description="New idea generation prompt")
@@ -46,8 +45,7 @@ class TemplateUpdateRequest(BaseModel):
     description: Optional[str] = None
     author: Optional[str] = None
     item_type: Optional[str] = None
-    format_requirements: Optional[str] = None
-    design_requirements: Optional[str] = None
+    special_requirements: Optional[str] = None
     context_prompt: Optional[str] = None
     idea_prompt: Optional[str] = None
     new_idea_prompt: Optional[str] = None
@@ -69,17 +67,21 @@ def get_template_starter() -> Dict[str, Any]:
         "metadata": {
             "item_type": "custom ideas"
         },
+        "special_requirements": "Add any special constraints, formatting rules, or requirements here.\n"
+                              "These will be inserted into your prompts wherever you use {requirements}.\n"
+                              "For example: 'Must be exactly 100 words' or 'Should be implementable as a browser game'.",
         "prompts": {
             "context": "Generate a list of 50 concepts relevant to the domain. These concepts should include:\n"
                       "techniques, methods, objects, themes, styles, or approaches.\n"
                       "Return the list as: CONCEPTS:<concept1>, <concept2>, <concept3>...",
             "idea": "Using the above context for inspiration, generate a creative and innovative idea.\n"
                    "Keep it detailed enough to be useful but concise enough to be clear.\n"
-                   "Format your response with a clear title and detailed proposal.",
+                   "\n{requirements}",
             "new_idea": "You are given the preceding list of ideas.\n"
                        "Considering these ideas, propose a new idea that could be completely new\n"
                        "or could combine elements from the existing ideas.\n"
-                       "Please avoid minor refinements and create something that is a significant departure.",
+                       "Please avoid minor refinements and create something that is a significant departure.\n"
+                       "\n{requirements}",
             "format": "Take the following idea and rewrite it in a clear, structured format.\n"
                      "Ensure it has a compelling title and well-organized content: {input_text}",
             "critique": "You are an expert evaluator reviewing the following idea:\n"
@@ -88,14 +90,16 @@ def get_template_starter() -> Dict[str, Any]:
                        "If the idea lacks clarity, detail, or originality, suggest specific improvements.\n"
                        "No additional text, just the critique.",
             "refine": "Current Idea:\n{idea}\n\nCritique: {critique}\n\n"
-                     "Please review both the idea and critique, then create an improved version.\n"
+                     "Please review both the idea and critique, then create your own improved version.\n"
                      "This could be a refinement of the original or a fresh take on it.\n"
-                     "No additional text, just the refined idea.",
+                     "No additional text, just the refined idea.\n"
+                     "\n{requirements}",
             "breed": "{ideas}\n\n"
                     "You are presented with the above ideas and asked to create a new one.\n"
                     "This can be a combination of existing ideas or something completely new that they inspired.\n"
                     "Focus on originality and bringing something new to the table.\n"
-                    "Think outside the box and be creative."
+                    "Think outside the box and be creative.\n"
+                    "\n{requirements}"
         },
         "comparison_criteria": [
             "originality and creativity",
@@ -210,10 +214,8 @@ async def create_template(request: TemplateCreateRequest):
         }
 
         # Add optional requirements
-        if request.format_requirements:
-            template_data["format_requirements"] = request.format_requirements
-        if request.design_requirements:
-            template_data["design_requirements"] = request.design_requirements
+        if request.special_requirements:
+            template_data["special_requirements"] = request.special_requirements
 
         # Validate template before saving
         try:
@@ -285,17 +287,11 @@ async def update_template(template_id: str, request: TemplateUpdateRequest):
             template_data["comparison_criteria"] = request.comparison_criteria
 
         # Update optional requirements
-        if request.format_requirements is not None:
-            if request.format_requirements:
-                template_data["format_requirements"] = request.format_requirements
-            elif "format_requirements" in template_data:
-                del template_data["format_requirements"]
-
-        if request.design_requirements is not None:
-            if request.design_requirements:
-                template_data["design_requirements"] = request.design_requirements
-            elif "design_requirements" in template_data:
-                del template_data["design_requirements"]
+        if request.special_requirements is not None:
+            if request.special_requirements:
+                template_data["special_requirements"] = request.special_requirements
+            elif "special_requirements" in template_data:
+                del template_data["special_requirements"]
 
         # Validate updated template
         try:

@@ -7,8 +7,8 @@ created_date: "2024-01-15"
 metadata:
   item_type: "stories"
 
-# Special format requirements for this prompt type
-format_requirements: |
+# Special requirements for this template type
+special_requirements: |
   A drabble is a short work of fiction exactly 100 words in length (not including the title).
   Despite its brevity, a drabble should tell a complete story with a beginning, middle, and end.
 
@@ -35,7 +35,7 @@ prompts:
 
     Write a drabble - a complete story in exactly 100 words.
 
-    {format_requirements}
+    {requirements}
 
   new_idea: |
     You are a uniquely creative writer and you are given the preceeding list of drabbles.
@@ -44,7 +44,7 @@ prompts:
     Please avoid minor refinements and instead write something that is a significant departure.
     Your story will be judge on creativity, originality, and the ability to tell a complete story in 100 words.
 
-    {format_requirements}
+    {requirements}
 
   format: |
     Take the following drabble and rewrite it in a clear,
@@ -75,7 +75,7 @@ prompts:
     Write the drabble itself.
     No additional text, just the refined drabble on its own.
 
-    {format_requirements}
+    {requirements}
 
   breed: |
     {ideas}
@@ -86,7 +86,7 @@ prompts:
     Importantly you will be judged on originality of the new story so need to make sure you bring something new to the table.
     Think outside the box and be creative.
 
-    {format_requirements}
+    {requirements}
 
 comparison_criteria:
   - "creativity"

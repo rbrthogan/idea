@@ -297,17 +297,13 @@ function displayTemplateDetails(template, validation) {
             </div>
         </div>
 
-        ${template.format_requirements ? `
+        ${template.special_requirements ? `
             <div class="prompt-section p-3 mb-4">
-                <h6 class="mb-3"><i class="fas fa-text-width me-2"></i>Format Requirements</h6>
-                <pre class="mb-0" style="white-space: pre-wrap; font-size: 0.9rem;">${template.format_requirements}</pre>
-            </div>
-        ` : ''}
-
-        ${template.design_requirements ? `
-            <div class="prompt-section p-3 mb-4">
-                <h6 class="mb-3"><i class="fas fa-drafting-compass me-2"></i>Design Requirements</h6>
-                <pre class="mb-0" style="white-space: pre-wrap; font-size: 0.9rem;">${template.design_requirements}</pre>
+                <h6 class="mb-3"><i class="fas fa-exclamation-circle me-2"></i>Special Requirements</h6>
+                <pre class="mb-0" style="white-space: pre-wrap; font-size: 0.9rem;">${template.special_requirements}</pre>
+                <div class="form-text mt-2">
+                    <strong>Usage:</strong> These requirements are automatically inserted into prompts using the <code>{requirements}</code> placeholder.
+                </div>
             </div>
         ` : ''}
 
@@ -482,8 +478,12 @@ function populateForm(template) {
     document.getElementById('templateDescription').value = template.description || '';
     document.getElementById('templateAuthor').value = template.author || 'User';
     document.getElementById('templateItemType').value = template.metadata?.item_type || '';
-    document.getElementById('formatRequirements').value = template.format_requirements || '';
-    document.getElementById('designRequirements').value = template.design_requirements || '';
+
+    // Handle special requirements (with backward compatibility)
+    const specialRequirements = template.special_requirements ||
+                                template.format_requirements ||
+                                template.design_requirements || '';
+    document.getElementById('specialRequirements').value = specialRequirements;
 
     document.getElementById('contextPrompt').value = template.prompts?.context || '';
     document.getElementById('ideaPrompt').value = template.prompts?.idea || '';
@@ -564,8 +564,7 @@ async function saveTemplate() {
             description: document.getElementById('templateDescription').value,
             author: document.getElementById('templateAuthor').value,
             item_type: document.getElementById('templateItemType').value,
-            format_requirements: document.getElementById('formatRequirements').value || null,
-            design_requirements: document.getElementById('designRequirements').value || null,
+            special_requirements: document.getElementById('specialRequirements').value,
             context_prompt: document.getElementById('contextPrompt').value,
             idea_prompt: document.getElementById('ideaPrompt').value,
             new_idea_prompt: document.getElementById('newIdeaPrompt').value,
