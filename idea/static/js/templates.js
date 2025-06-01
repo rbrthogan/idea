@@ -479,11 +479,8 @@ function populateForm(template) {
     document.getElementById('templateAuthor').value = template.author || 'User';
     document.getElementById('templateItemType').value = template.metadata?.item_type || '';
 
-    // Handle special requirements (with backward compatibility)
-    const specialRequirements = template.special_requirements ||
-                                template.format_requirements ||
-                                template.design_requirements || '';
-    document.getElementById('specialRequirements').value = specialRequirements;
+    // Handle special requirements
+    document.getElementById('specialRequirements').value = template.special_requirements || '';
 
     document.getElementById('contextPrompt').value = template.prompts?.context || '';
     document.getElementById('ideaPrompt').value = template.prompts?.idea || '';

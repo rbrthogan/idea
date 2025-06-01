@@ -91,15 +91,11 @@ Templates are automatically validated when loaded. The system checks for:
 - `{ideas}` in breed prompts
 
 ### Optional Placeholders
-- `{requirements}` - Interpolates the special_requirements field (recommended for new templates)
-
-### Legacy Placeholders (still supported)
-- `{format_requirements}` - For backward compatibility with older templates
-- `{design_requirements}` - For backward compatibility with older templates
+- `{requirements}` - Interpolates the special_requirements field
 
 ## Special Requirements
 
-The `special_requirements` field is the unified way to specify template-specific constraints. Examples:
+The `special_requirements` field is used to specify template-specific constraints. Examples:
 
 - **Story templates**: "Must be exactly 100 words with a complete narrative arc"
 - **Game templates**: "Should be implementable as a simple browser game"
@@ -130,5 +126,3 @@ To contribute a new template:
 ## Backward Compatibility
 
 The YAML system is fully backward compatible with existing Python prompt modules. The system will automatically use YAML templates when available, but fall back to Python modules for existing functionality.
-
-Legacy templates using `format_requirements` and `design_requirements` will continue to work, but new templates should use the unified `special_requirements` field with the `{requirements}` placeholder for clarity.

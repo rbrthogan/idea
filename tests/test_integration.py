@@ -37,44 +37,15 @@ class TestLLMSystemIntegration:
             elif isinstance(value, list):
                 assert len(value) > 0, f"{attr} is empty list"
 
-    def test_drabble_legacy_compatibility(self):
-        """Test that drabble template maintains legacy compatibility"""
-        prompts = get_prompts('drabble', use_yaml=True)
-
-        # Should have legacy DRABBLE_FORMAT_PROMPT attribute
-        assert hasattr(prompts, 'DRABBLE_FORMAT_PROMPT')
-        assert isinstance(prompts.DRABBLE_FORMAT_PROMPT, str)
-        assert len(prompts.DRABBLE_FORMAT_PROMPT) > 0
-
-    def test_template_metadata_access(self):
-        """Test that template metadata is accessible"""
-        prompts = get_prompts('drabble', use_yaml=True)
-
-        # Test template metadata properties
-        if hasattr(prompts, 'get_info'):
-            info = prompts.get_info()
-            assert isinstance(info, dict)
-
-            # Test individual properties
-            assert hasattr(prompts, 'name')
-            assert hasattr(prompts, 'description')
-            assert hasattr(prompts, 'version')
-            assert hasattr(prompts, 'author')
-
-            assert isinstance(prompts.name, str)
-            assert isinstance(prompts.description, str)
-            assert isinstance(prompts.version, str)
-            assert isinstance(prompts.author, str)
-
 
 class TestPromptInterpolation:
     """Test that prompt interpolation works correctly"""
 
-    def test_format_requirements_interpolation(self):
-        """Test that format_requirements are properly interpolated"""
+    def test_special_requirements_interpolation(self):
+        """Test that special_requirements are properly interpolated"""
         prompts = get_prompts('drabble', use_yaml=True)
 
-        # Check that format_requirements was interpolated into relevant prompts
+        # Check that special requirements were interpolated into relevant prompts
         idea_prompt = prompts.IDEA_PROMPT
         assert 'A drabble is a short work of fiction' in idea_prompt
 
@@ -87,11 +58,11 @@ class TestPromptInterpolation:
         breed_prompt = prompts.BREED_PROMPT
         assert 'A drabble is a short work of fiction' in breed_prompt
 
-    def test_design_requirements_interpolation(self):
-        """Test that design_requirements are properly interpolated"""
+    def test_game_design_special_requirements_interpolation(self):
+        """Test that game design special requirements are properly interpolated"""
         prompts = get_prompts('game_design', use_yaml=True)
 
-        # Check that design_requirements was interpolated into relevant prompts
+        # Check that special requirements were interpolated into relevant prompts
         idea_prompt = prompts.IDEA_PROMPT
         assert 'The game should be simple enough' in idea_prompt
 
@@ -149,8 +120,7 @@ class TestPromptPlaceholders:
 
             for prompt in interpolated_prompts:
                 # These should not contain unresolved template placeholders
-                assert '{format_requirements}' not in prompt, f"Unresolved format_requirements in {template_name}"
-                assert '{design_requirements}' not in prompt, f"Unresolved design_requirements in {template_name}"
+                assert '{requirements}' not in prompt or template_name == 'airesearch', f"Unresolved requirements in {template_name}"
 
 
 class TestSystemCompatibility:

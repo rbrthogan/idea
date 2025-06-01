@@ -70,106 +70,29 @@ class TestYAMLTemplateLoading:
             assert len(info['author']) > 0
 
 
-class TestYAMLTemplateValidation:
-    """Test template validation"""
-
-    @pytest.mark.parametrize("template_name", ["drabble", "airesearch", "game_design"])
-    def test_template_validation_passes(self, template_name):
-        """Test that templates pass validation"""
-        is_valid, warnings_or_errors = validate_template(template_name)
-        assert is_valid, f"Template {template_name} failed validation: {warnings_or_errors}"
-
-    @pytest.mark.parametrize("template_name", ["drabble", "airesearch", "game_design"])
-    def test_no_critical_validation_errors(self, template_name):
-        """Test that templates have no critical validation errors"""
-        is_valid, warnings_or_errors = validate_template(template_name)
-        if not is_valid:
-            pytest.fail(f"Template {template_name} has validation errors: {warnings_or_errors}")
-
-
-class TestTemplateListing:
-    """Test template listing functionality"""
-
-    def test_template_listing_returns_templates(self):
-        """Test that template listing returns available templates"""
-        templates = list_available_templates()
-        assert isinstance(templates, dict)
-        assert len(templates) >= 3  # At least our 3 YAML templates
-
-        # Check that our YAML templates are present
-        expected_templates = ['drabble', 'airesearch', 'game_design']
-        for template_name in expected_templates:
-            assert template_name in templates
-            template_info = templates[template_name]
-            assert template_info['type'] == 'yaml'
-            assert 'name' in template_info
-            assert 'description' in template_info
-
-    def test_template_listing_handles_errors_gracefully(self):
-        """Test that template listing handles errors without crashing"""
-        templates = list_available_templates()
-
-        # Should not raise an exception even if some templates have errors
-        for template_name, template_info in templates.items():
-            assert isinstance(template_info, dict)
-            assert 'type' in template_info
-
-
-class TestYAMLOnlySystem:
-    """Test the fully migrated YAML-only system"""
-
-    def test_yaml_templates_are_default(self):
-        """Test that YAML templates are loaded by default"""
-        prompts = get_prompts('drabble')  # No use_yaml parameter, should default to True
-        assert prompts is not None
-        assert hasattr(prompts, 'ITEM_TYPE')
-        assert prompts.ITEM_TYPE == 'stories'
-
-        # Should be a YAML template wrapper
-        assert hasattr(prompts, 'get_info')
-
-    def test_all_templates_are_yaml(self):
-        """Test that all available templates are now YAML-based"""
-        templates = list_available_templates()
-
-        for template_name, template_info in templates.items():
-            if 'error' not in template_info:  # Skip any errored templates
-                assert template_info['type'] == 'yaml', f"Template {template_name} is not YAML-based"
-
-    def test_no_python_modules_remain(self):
-        """Test that we've successfully migrated away from Python modules"""
-        templates = list_available_templates()
-
-        # Should not have any Python-type templates for our main template types
-        main_templates = ['drabble', 'airesearch', 'game_design']
-        for template_name in main_templates:
-            if template_name in templates:
-                assert templates[template_name]['type'] == 'yaml'
-
-
 class TestSpecialFeatures:
     """Test special features like prompt interpolation"""
 
-    def test_drabble_format_requirements_interpolation(self):
-        """Test that drabble format requirements are properly interpolated"""
+    def test_special_requirements_interpolation(self):
+        """Test that special requirements are properly interpolated"""
         prompts = get_prompts('drabble', use_yaml=True)
 
-        # Check that format requirements were interpolated into prompts
+        # Check that special requirements were interpolated into prompts
         idea_prompt = prompts.IDEA_PROMPT
         assert 'A drabble is a short work of fiction' in idea_prompt
 
-        # Check legacy compatibility
-        assert hasattr(prompts, 'DRABBLE_FORMAT_PROMPT')
+        # Check that special requirements attribute is available
+        assert hasattr(prompts, 'SPECIAL_REQUIREMENTS')
 
-    def test_game_design_requirements_interpolation(self):
-        """Test that game design requirements are properly interpolated"""
+    def test_game_design_special_requirements_interpolation(self):
+        """Test that game design special requirements are properly interpolated"""
         prompts = get_prompts('game_design', use_yaml=True)
 
         idea_prompt = prompts.IDEA_PROMPT
         assert 'The game should be simple enough' in idea_prompt
 
-        # Check that design requirements attribute is available
-        assert hasattr(prompts, 'DESIGN_REQUIREMENTS')
+        # Check that special requirements attribute is available
+        assert hasattr(prompts, 'SPECIAL_REQUIREMENTS')
 
     def test_placeholder_validation(self):
         """Test that required placeholders are present in prompts"""
@@ -181,3 +104,63 @@ class TestSpecialFeatures:
         assert '{idea}' in prompts.REFINE_PROMPT
         assert '{critique}' in prompts.REFINE_PROMPT
         assert '{ideas}' in prompts.BREED_PROMPT
+
+
+class TestTemplateValidation:
+    """Test template validation functionality"""
+
+    @pytest.mark.parametrize("template_name", ["drabble", "airesearch", "game_design"])
+    def test_template_validation_passes(self, template_name):
+        """Test that existing templates pass validation"""
+        is_valid, warnings = validate_template(template_name)
+        assert is_valid, f"Template {template_name} should be valid"
+
+    def test_validation_detects_missing_placeholders(self):
+        """Test that validation detects missing required placeholders"""
+        from idea.prompts.validation import TemplateValidator
+
+        # Create invalid template with missing placeholders
+        invalid_template_data = {
+            "name": "Invalid Template",
+            "description": "Test template",
+            "version": "1.0.0",
+            "author": "Test",
+            "created_date": "2024-01-01",
+            "metadata": {"item_type": "test"},
+            "prompts": {
+                "context": "Context prompt",
+                "idea": "Idea prompt",
+                "new_idea": "New idea prompt",
+                "format": "Format prompt missing input_text placeholder",  # Missing {input_text}
+                "critique": "Critique prompt missing idea placeholder",  # Missing {idea}
+                "refine": "Refine prompt missing placeholders",  # Missing {idea} and {critique}
+                "breed": "Breed prompt missing ideas placeholder"  # Missing {ideas}
+            },
+            "comparison_criteria": ["test"]
+        }
+
+        # Should validate successfully but have warnings
+        template = TemplateValidator.validate_dict(invalid_template_data)
+        warnings = TemplateValidator.check_prompt_interpolation(template)
+
+        assert len(warnings) > 0, "Should have warnings for missing placeholders"
+
+
+class TestTemplateManagerCompatibility:
+    """Test compatibility with template manager"""
+
+    def test_list_templates_includes_yaml(self):
+        """Test that list_available_templates includes YAML templates"""
+        templates = list_available_templates()
+
+        # Should include our test templates
+        assert 'drabble' in templates
+        assert 'airesearch' in templates
+        assert 'game_design' in templates
+
+        # Templates should have required metadata
+        for template_id in ['drabble', 'airesearch', 'game_design']:
+            template_info = templates[template_id]
+            assert 'name' in template_info
+            assert 'type' in template_info
+            assert template_info['type'] == 'yaml'

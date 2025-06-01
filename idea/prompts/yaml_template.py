@@ -31,41 +31,18 @@ class YAMLTemplateWrapper:
         self.REFINE_PROMPT = self._interpolate_prompt(self.template.prompts.refine)
         self.BREED_PROMPT = self._interpolate_prompt(self.template.prompts.breed)
 
-        # Unified special requirements with legacy compatibility
-        requirements = self.template.requirements
-        if requirements:
-            self.SPECIAL_REQUIREMENTS = requirements
-
-            # Legacy compatibility attributes
-            if self.template.format_requirements:
-                self.DRABBLE_FORMAT_PROMPT = requirements  # Legacy name for drabble
-                self.FORMAT_REQUIREMENTS = requirements
-            elif self.template.design_requirements:
-                self.DESIGN_REQUIREMENTS = requirements
-            else:
-                # For new templates using special_requirements
-                self.FORMAT_REQUIREMENTS = requirements
-                self.DESIGN_REQUIREMENTS = requirements
+        # Special requirements
+        if self.template.special_requirements:
+            self.SPECIAL_REQUIREMENTS = self.template.special_requirements
 
     def _interpolate_prompt(self, prompt_text: str) -> str:
         """
         Interpolate template-specific requirements into prompt text
-        Supports both new {requirements} placeholder and legacy {format_requirements}/{design_requirements}
         """
         result = prompt_text
-        requirements = self.template.requirements
 
-        if requirements:
-            # Handle new unified placeholder
-            if '{requirements}' in result:
-                result = result.replace('{requirements}', requirements)
-
-            # Handle legacy placeholders for backward compatibility
-            if '{format_requirements}' in result:
-                result = result.replace('{format_requirements}', requirements)
-
-            if '{design_requirements}' in result:
-                result = result.replace('{design_requirements}', requirements)
+        if self.template.special_requirements and '{requirements}' in result:
+            result = result.replace('{requirements}', self.template.special_requirements)
 
         return result
 
