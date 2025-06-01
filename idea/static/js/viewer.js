@@ -434,7 +434,11 @@ function renderGenerations(gens) {
             genDiv.className = 'generation-section mb-4';
             genDiv.id = `generation-${index}`;
 
-            // Add generation header with appropriate label
+            // Create generation header with toggle functionality
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'generation-header';
+
+            // Add generation title
             const header = document.createElement('h2');
             header.className = 'generation-title';
 
@@ -445,9 +449,23 @@ function renderGenerations(gens) {
                 header.textContent = `Generation ${index + 1}`;
             }
 
-            genDiv.appendChild(header);
+            // Add collapse toggle button
+            const toggleButton = document.createElement('button');
+            toggleButton.className = 'generation-toggle';
+            toggleButton.setAttribute('aria-expanded', 'true');
+            toggleButton.setAttribute('aria-label', `Toggle Generation ${index + 1}`);
+            toggleButton.onclick = () => toggleGeneration(index);
+            toggleButton.innerHTML = '<i class="fas fa-chevron-up"></i>';
+
+            headerDiv.appendChild(header);
+            headerDiv.appendChild(toggleButton);
+            genDiv.appendChild(headerDiv);
 
             // Add ideas container with proper containment
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'generation-content';
+            contentDiv.id = `generation-content-${index}`;
+
             const scrollContainer = document.createElement('div');
             scrollContainer.className = 'scroll-container';
             scrollContainer.id = `scroll-container-${index}`;
@@ -455,11 +473,13 @@ function renderGenerations(gens) {
             // Add a wrapper to ensure proper containment
             const scrollWrapper = document.createElement('div');
             scrollWrapper.className = 'scroll-wrapper';
+            scrollWrapper.id = `scroll-wrapper-${index}`;
             scrollWrapper.style.width = '100%';
-            scrollWrapper.style.overflow = 'hidden';
+            scrollWrapper.style.overflow = 'auto';
 
             scrollWrapper.appendChild(scrollContainer);
-            genDiv.appendChild(scrollWrapper);
+            contentDiv.appendChild(scrollWrapper);
+            genDiv.appendChild(contentDiv);
 
             container.appendChild(genDiv);
         }
@@ -481,11 +501,6 @@ function renderGenerations(gens) {
             card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
 
-            // Set a fixed width to prevent stretching
-            card.style.minWidth = '280px';
-            card.style.maxWidth = '280px';
-            card.style.flex = '0 0 auto';
-
             // Create a plain text preview for the card
             const plainPreview = createCardPreview(idea.proposal, 150);
 
@@ -501,7 +516,7 @@ function renderGenerations(gens) {
             card.innerHTML = `
                 <div class="card-body">
                     <h5 class="card-title">${idea.title || 'Untitled'}</h5>
-                    <div class="card-preview">
+                    <div class="card-text">
                         <p>${plainPreview}</p>
                     </div>
                     <div class="card-actions">
@@ -540,7 +555,46 @@ function renderGenerations(gens) {
             // Log that we've added a new card
             console.log(`Added new idea card: Generation ${index}, Idea ${ideaIndex + 1}`);
         });
+
+        // After all cards are added, check if scrolling is needed
+        setTimeout(() => {
+            checkScrollOverflow(index);
+        }, 100);
     });
+}
+
+// Function to check if content overflows and needs scrolling
+function checkScrollOverflow(generationIndex) {
+    const scrollWrapper = document.getElementById(`scroll-wrapper-${generationIndex}`);
+    if (scrollWrapper) {
+        const hasOverflow = scrollWrapper.scrollHeight > scrollWrapper.clientHeight;
+
+        // Add or remove attribute to control scroll indicator visibility
+        if (hasOverflow) {
+            scrollWrapper.removeAttribute('data-no-scroll');
+        } else {
+            scrollWrapper.setAttribute('data-no-scroll', 'true');
+        }
+
+        console.log(`Generation ${generationIndex}: Overflow = ${hasOverflow}, ScrollHeight = ${scrollWrapper.scrollHeight}, ClientHeight = ${scrollWrapper.clientHeight}`);
+    }
+}
+
+// Add the toggleGeneration function
+function toggleGeneration(generationId) {
+    const content = document.getElementById(`generation-content-${generationId}`);
+    const button = document.querySelector(`#generation-${generationId} .generation-toggle`);
+    const icon = button.querySelector('i');
+
+    if (content.style.display === 'none') {
+        content.style.display = 'block';
+        icon.className = 'fas fa-chevron-up';
+        button.setAttribute('aria-expanded', 'true');
+    } else {
+        content.style.display = 'none';
+        icon.className = 'fas fa-chevron-down';
+        button.setAttribute('aria-expanded', 'false');
+    }
 }
 
 // Update the showIdeaModal function to ensure the modal is properly initialized
