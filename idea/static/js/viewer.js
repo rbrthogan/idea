@@ -100,8 +100,60 @@ let currentEvolutionId = null;
 let currentEvolutionData = null;
 let generations = [];
 
+/**
+ * Load available templates and populate the idea type dropdown
+ */
+async function loadTemplateTypes() {
+    try {
+        const response = await fetch('/api/template-types');
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            const ideaTypeSelect = document.getElementById('ideaType');
+            ideaTypeSelect.innerHTML = ''; // Clear existing options
+
+            data.templates.forEach(template => {
+                const option = document.createElement('option');
+                option.value = template.id;
+                option.textContent = template.name;
+                if (template.description) {
+                    option.title = template.description;
+                }
+                ideaTypeSelect.appendChild(option);
+            });
+
+            // Set default selection to first template
+            if (data.templates.length > 0) {
+                ideaTypeSelect.value = data.templates[0].id;
+            }
+        } else {
+            console.error('Error loading template types:', data.message);
+            // Fall back to hardcoded options if API fails
+            populateFallbackTemplates();
+        }
+    } catch (error) {
+        console.error('Error loading template types:', error);
+        populateFallbackTemplates();
+    }
+}
+
+/**
+ * Fallback template population if API fails
+ */
+function populateFallbackTemplates() {
+    const ideaTypeSelect = document.getElementById('ideaType');
+    ideaTypeSelect.innerHTML = `
+        <option value="airesearch">AI Research</option>
+        <option value="game_design">Game Design</option>
+        <option value="drabble">Drabble (100-word story)</option>
+    `;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     console.log("viewer.js loaded!");
+
+    // Load available templates
+    loadTemplateTypes();
 
     // Set up temperature sliders
     setupTemperatureSliders();

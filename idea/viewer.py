@@ -20,6 +20,8 @@ from idea.evolution import EvolutionEngine
 from idea.models import Idea
 from idea.llm import Critic
 from idea.config import LLM_MODELS, DEFAULT_MODEL
+from idea.template_manager import router as template_router
+from idea.prompts.loader import list_available_templates
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -31,6 +33,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include template management routes
+app.include_router(template_router)
 
 # Mount static folder with custom config
 app.mount("/static", StaticFiles(directory="idea/static"), name="static")
@@ -75,6 +80,40 @@ def serve_viewer(request: Request):
 def serve_rater(request: Request):
     """Serves the rater page"""
     return templates.TemplateResponse("rater.html", {"request": request})
+
+@app.get("/templates")
+def serve_template_manager(request: Request):
+    """Serves the template management page"""
+    return templates.TemplateResponse("templates.html", {"request": request})
+
+@app.get("/api/template-types")
+async def get_template_types():
+    """Get available template types for the evolution UI dropdown"""
+    try:
+        templates = list_available_templates()
+
+        # Format for dropdown
+        template_types = []
+        for template_id, template_info in templates.items():
+            if template_info.get('type') == 'yaml' and 'error' not in template_info:
+                template_types.append({
+                    "id": template_id,
+                    "name": template_info.get('name', template_id.replace('_', ' ').title()),
+                    "description": template_info.get('description', '')
+                })
+
+        # Sort by name
+        template_types.sort(key=lambda x: x['name'])
+
+        return JSONResponse({
+            "status": "success",
+            "templates": template_types
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
 
 @app.post("/api/start-evolution")
 async def start_evolution(request: Request):
