@@ -1,0 +1,86 @@
+name: "Game Design"
+description: "Generate creative browser game design concepts"
+version: "1.0.0"
+author: "Original Idea App"
+created_date: "2024-01-15"
+
+metadata:
+  item_type: "game designs"
+
+# Special design requirements for this prompt type
+design_requirements: |
+  The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
+  The game complexity should similar in level to classic games like Breakout, Snake, Tetris, Pong, Pac-Man, Space Invaders, Frogger, Minesweeper, Tic Tac Toe, 2048, Wordle etc.
+  Avoid being derivative of these but limit the ambition to the level of complexity of these games.
+  You should format your idea with enough specificity that a developer can implement it.
+  The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate
+
+prompts:
+  context: |
+    Generate a list of 50 game design concepts. These concepts should be one of the following:
+    a genre, a game style, a game mechanic, a game object, a game art concept, a gameplay loop, a goal/objective, a narrative/theme, a game world
+    Return the list of concepts as a single string, separated by commas with no other text in format:
+    CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
+
+  idea: |
+    You are a uniquely creative game designer.
+    The above is some context to get you inspired.
+    Using some or none of it for inspiration,
+    suggest a new game design that is both interesting and fun to play.
+    With key game mechanics and controls.
+
+    {design_requirements}
+
+  new_idea: |
+    You are a uniquely creative game designer.
+    You are given the preceeding list of game designs.
+    Considering the above ideas please propose a new idea, that could be completely new
+    and different from the ideas above or could combine ideas to create a new idea.
+    Please avoid minor refinements of the ideas above, and instead propose a new idea
+    that is a significant departure.
+
+    {design_requirements}
+
+  format: |
+    Take the following idea and rewrite it in a clear,
+    structured format. The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate: {input_text}
+
+  critique: |
+    You are a helpful AI that refines ideas.
+    Current Idea:
+    {idea}
+
+    Please consider the above proposal. Offer critical feedback.
+    Pointing out potential pitfalls as well as strengths. If the idea doesn't have a clear structure,
+    or sufficient detail, please suggest how to improve it and ask for elaboration of specific points of interest.
+    No additional text, just the critique.
+
+  refine: |
+    Current Idea:
+    {idea}
+
+    Critique: {critique}
+
+    Please review both, consider your own opinion and create your own proposal.
+    This could be a refinement of the original proposal or a fresh take on it.
+    No additional text, just the refined idea on its own.
+
+    {design_requirements}
+
+  breed: |
+    {ideas}
+    You are an experienced game designer and you are given the above game designs.
+    These designs received good feedback but the studio leadership passed on selecting them for development.
+    Your task it to create a new design that is better, that will be more likely to be selected for development.
+    This can be a combination of the best elements of the existing designs, a refinement of the existing designs or a completely new one that you were inspired to create.
+
+    Importantly you will be judged on originality of the new design so need to make sure you bring something new to the table.
+    Think outside the box and be creative.
+
+    {design_requirements}
+
+comparison_criteria:
+  - "originality and creativity"
+  - "simplicity"
+  - "fun factor"
+  - "feasibility for simple standard browser implementation"
