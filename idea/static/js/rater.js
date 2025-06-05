@@ -39,7 +39,7 @@ window.addEventListener("load", () => {
   }, 3000);
 });
 
-async function initializeRating(ideas) {
+async function initializeRating(ideas, shouldRefreshPair = true) {
     // Reset state
     ideasDb = {};
 
@@ -54,7 +54,9 @@ async function initializeRating(ideas) {
         ideasDb[idea.id] = idea;
     });
 
-    await refreshPair();
+    if (shouldRefreshPair) {
+        await refreshPair();
+    }
 }
 
 // Add the markdown rendering function from viewer.js
@@ -434,9 +436,10 @@ async function loadCurrentEvolution() {
                         id: generateUUID(),
                         elo: 1500
                     }));
-                    console.log("Processed ideas from localStorage:", ideas);
-                    await initializeRating(ideas);
-                    return; // Exit early if we successfully loaded from localStorage
+                                    console.log("Processed ideas from localStorage:", ideas);
+                await initializeRating(ideas, false);
+                await refreshPair(); // Ensure refreshPair is called
+                return; // Exit early if we successfully loaded from localStorage
                 }
             } catch (e) {
                 console.error("Error parsing localStorage data:", e);
@@ -459,7 +462,7 @@ async function loadCurrentEvolution() {
                     elo: 1500
                 }));
                 console.log("Processed ideas from API:", ideas);
-                await initializeRating(ideas);
+                await initializeRating(ideas, false);
 
                 // Refresh the pair now that we have ideas
                 await refreshPair();
@@ -503,24 +506,58 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
     const evolutionId = e.target.value;
     currentEvolutionId = evolutionId;
 
-    if (evolutionId) {
-        const response = await fetch(`/api/evolution/${evolutionId}`);
-        if (response.ok) {
-            const data = await response.json();
-            if (data.data && data.data.history) {
-                // Flatten all generations into a single array of ideas
-                const ideas = data.data.history.flat().map(idea => ({
-                    ...idea,
-                    id: idea.id || generateUUID()
-                }));
-                await initializeRating(ideas);
+    // Show loading state
+    document.getElementById('titleA').textContent = "Loading ideas...";
+    document.getElementById('contentA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
+    document.getElementById('titleB').textContent = "";
+    document.getElementById('contentB').innerHTML = "";
+
+    // Disable voting buttons while loading
+    document.querySelectorAll('.vote-btn').forEach(btn => {
+        btn.disabled = true;
+    });
+
+    try {
+        if (evolutionId) {
+            console.log(`Loading evolution ${evolutionId}...`);
+            const response = await fetch(`/api/evolution/${evolutionId}`);
+            if (response.ok) {
+                const data = await response.json();
+                console.log('Loaded evolution data:', data);
+
+                if (data.data && data.data.history) {
+                    // Flatten all generations into a single array of ideas
+                    const ideas = data.data.history.flat().map((idea, index) => ({
+                        ...idea,
+                        id: idea.id || generateUUID(),
+                        elo: idea.elo || idea.ratings?.auto || 1500,
+                        // Add generation info if not present
+                        generation: idea.generation || Math.floor(index / (data.data.history[0]?.length || 1)) + 1
+                    }));
+                    console.log('Processed ideas:', ideas);
+
+                    await initializeRating(ideas, false);
+                    // IMPORTANT: Call refreshPair after initialization
+                    await refreshPair();
+                } else {
+                    console.error('Invalid evolution data structure:', data);
+                    document.getElementById('titleA').textContent = "No ideas found";
+                    document.getElementById('contentA').innerHTML = "<p>This evolution contains no ideas to rate.</p>";
+                }
+            } else {
+                console.error('Failed to load evolution:', await response.text());
+                document.getElementById('titleA').textContent = "Error loading evolution";
+                document.getElementById('contentA').innerHTML = "<p>Failed to load the selected evolution. Please try again.</p>";
             }
         } else {
-            console.error('Failed to load evolution:', await response.text());
+            // Load current evolution
+            console.log('Loading current evolution...');
+            await loadCurrentEvolution();
         }
-    } else {
-        // Load current evolution
-        await loadCurrentEvolution();
+    } catch (error) {
+        console.error('Error in evolution selector:', error);
+        document.getElementById('titleA').textContent = "Error";
+        document.getElementById('contentA').innerHTML = "<p>An error occurred while loading the evolution. Please try again.</p>";
     }
 });
 
