@@ -36,7 +36,7 @@ prompts:
 
   new_idea: |
     You are a uniquely creative game designer.
-    You are given the preceeding list of game designs.
+    You are given the preceding list of game designs.
     Considering the above ideas please propose a new idea, that could be completely new
     and different from the ideas above or could combine ideas to create a new idea.
     Please avoid minor refinements of the ideas above, and instead propose a new idea

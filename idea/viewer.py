@@ -1,4 +1,4 @@
-# main.py
+# viewer.py
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +12,6 @@ import random
 from pathlib import Path
 import json
 from pydantic import BaseModel
-from flask import jsonify
 from datetime import datetime
 import numpy as np
 
@@ -994,4 +993,6 @@ async def reset_ratings(request: Request):
 
 # Run the server
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run(
+        "idea.viewer:app", host="127.0.0.1", port=8000, reload=True
+    )

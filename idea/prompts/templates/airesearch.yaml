@@ -29,7 +29,7 @@ prompts:
     {requirements}
 
   new_idea: |
-    You are an experienced researcher and you are given the preceeding list of proposals.
+    You are an experienced researcher and you are given the preceding list of proposals.
     Considering the above ideas please propose a new idea, that could be completely new
     and different from the ideas above or could combine ideas to create a new idea.
     Please avoid minor refinements of the ideas above, and instead propose a new idea

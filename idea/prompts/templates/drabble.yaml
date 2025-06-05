@@ -38,7 +38,7 @@ prompts:
     {requirements}
 
   new_idea: |
-    You are a uniquely creative writer and you are given the preceeding list of drabbles.
+    You are a uniquely creative writer and you are given the preceding list of drabbles.
     With the above stories as inspiration, please propose a new drabble that could be completely new
     and different from those above or could combine ideas from those above to create a new story.
     Please avoid minor refinements and instead write something that is a significant departure.

@@ -144,6 +144,11 @@ class TestTemplateValidation:
         warnings = TemplateValidator.check_prompt_interpolation(template)
 
         assert len(warnings) > 0, "Should have warnings for missing placeholders"
+        assert "Format prompt missing {input_text} placeholder" in warnings
+        assert "Critique prompt missing {idea} placeholder" in warnings
+        assert "Refine prompt missing {idea} placeholder" in warnings
+        assert "Refine prompt missing {critique} placeholder" in warnings
+        assert "Breed prompt missing {ideas} placeholder" in warnings
 
 
 class TestTemplateManagerCompatibility:
