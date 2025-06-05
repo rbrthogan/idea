@@ -554,7 +554,7 @@ function renderGenerations(gens) {
             card.id = `idea-${index}-${ideaIndex}`;
 
             // Create a plain text preview for the card
-            const plainPreview = createCardPreview(idea.proposal, 150);
+            const plainPreview = createCardPreview(idea.content, 150);
 
             // Add "View Context" button for initial generation cards
             const viewContextButton = index === 0 ?
@@ -661,10 +661,10 @@ function showIdeaModal(idea) {
     const modalContent = document.getElementById('ideaModalContent');
 
     // For debugging
-    console.log("Rendering markdown for:", idea.proposal);
+    console.log("Rendering markdown for:", idea.content);
 
     // Set the content
-    const renderedContent = renderMarkdown(idea.proposal || '');
+    const renderedContent = renderMarkdown(idea.content || '');
     modalContent.innerHTML = renderedContent;
 
     // For debugging
@@ -1545,7 +1545,7 @@ function showLineageModal(idea, generationIndex) {
 
                 // Add a card for each direct parent
                 directParents.forEach((parent, idx) => {
-                    const parentPreview = createCardPreview(parent.proposal, 100);
+                    const parentPreview = createCardPreview(parent.content, 100);
                     lineageHtml += createAncestorCard(parent, idx, 'direct-parent');
                 });
 
@@ -1680,7 +1680,7 @@ function showLineageModal(idea, generationIndex) {
 
 // Helper function to create an ancestor card
 function createAncestorCard(ancestor, index, ancestorType) {
-    const preview = createCardPreview(ancestor.proposal, 100);
+    const preview = createCardPreview(ancestor.content, 100);
     return `
         <div class="card lineage-parent-card mb-3">
             <div class="card-body">

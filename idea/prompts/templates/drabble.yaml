@@ -21,7 +21,7 @@ special_requirements: |
 
   Format your response as:
   Title: [Your creative title]
-  Proposal: [Your 100-word story]
+  Content: [Your 100-word story]
 
 prompts:
   context: |
@@ -47,8 +47,9 @@ prompts:
     {requirements}
 
   format: |
-    Take the following drabble and rewrite it in a clear,
-    structured format. With a title denoted by [Title:], and the story proposal denoted by [Proposal:]: {input_text}
+    Please take this drabble and return it unchanged in the requested JSON format:
+
+    {input_text}
 
   critique: |
     You are a professor of creative writing that reviewing drabble assignments.

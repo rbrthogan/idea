@@ -4,10 +4,10 @@ from datetime import datetime
 
 class Idea(BaseModel):
     """
-    Represents a single proposal.
+    Represents a single idea.
     """
     title: str  # optional
-    proposal: str
+    content: str
 
     # You can include more fields if needed, e.g. metrics, iteration history, etc.
 
@@ -20,7 +20,7 @@ class FlattenedIdea(BaseModel):
     generation_index: int
     idea_index: int
     title: str
-    proposal: str
+    content: str
     elo: float
 
 class RatingResult(BaseModel):

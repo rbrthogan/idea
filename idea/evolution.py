@@ -13,7 +13,7 @@ class EvolutionEngine:
         idea_type="airesearch",
         pop_size: int = 5,
         generations: int = 3,
-        model_type: str = "gemini-1.5-flash",
+        model_type: str = "gemini-2.0-flash",
         ideator_temp: float = 2.0,
         critic_temp: float = 1.5,
         breeder_temp: float = 2.0,
@@ -176,9 +176,9 @@ class EvolutionEngine:
                 "error": str(e)
             })
 
-    def get_proposals_by_generation(self, generation_index: int) -> List[Dict]:
+    def get_ideas_by_generation(self, generation_index: int) -> List[Dict]:
         """
-        Get all proposals from a specific generation
+        Get all ideas from a specific generation
 
         Args:
             generation_index: The index of the generation to retrieve
@@ -211,10 +211,10 @@ class EvolutionEngine:
         from idea.config import model_prices_per_million_tokens
 
         # Get model names for each agent
-        ideator_model = getattr(self.ideator, 'model_name', 'gemini-1.5-flash')
-        formatter_model = getattr(self.formatter, 'model_name', 'gemini-1.5-flash')
-        critic_model = getattr(self.critic, 'model_name', 'gemini-1.5-flash')
-        breeder_model = getattr(self.breeder, 'model_name', 'gemini-1.5-flash')
+        ideator_model = getattr(self.ideator, 'model_name', 'gemini-2.0-flash')
+        formatter_model = getattr(self.formatter, 'model_name', 'gemini-2.0-flash')
+        critic_model = getattr(self.critic, 'model_name', 'gemini-2.0-flash')
+        breeder_model = getattr(self.breeder, 'model_name', 'gemini-2.0-flash')
 
         # Default pricing if model not found in config
         default_price = {"input": 0.1, "output": 0.4}

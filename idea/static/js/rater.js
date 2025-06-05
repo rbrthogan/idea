@@ -15,9 +15,9 @@ let currentRatingType = 'auto';
 window.addEventListener("load", () => {
   // Show loading state
   document.getElementById('titleA').textContent = "Loading ideas...";
-  document.getElementById('proposalA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
+  document.getElementById('contentA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
   document.getElementById('titleB').textContent = "";
-  document.getElementById('proposalB').innerHTML = "";
+  document.getElementById('contentB').innerHTML = "";
 
   // Disable voting buttons initially
   document.querySelectorAll('.vote-btn').forEach(btn => {
@@ -189,9 +189,9 @@ async function refreshPair() {
 
             // Show loading message instead of alert
             document.getElementById('titleA').textContent = "Loading ideas...";
-            document.getElementById('proposalA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
+            document.getElementById('contentA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
             document.getElementById('titleB').textContent = "";
-            document.getElementById('proposalB').innerHTML = "";
+            document.getElementById('contentB').innerHTML = "";
 
             // Disable voting buttons
             document.querySelectorAll('.vote-btn').forEach(btn => {
@@ -214,8 +214,8 @@ async function refreshPair() {
         document.getElementById('titleA').textContent = ideaA.title || 'Untitled';
         document.getElementById('titleB').textContent = ideaB.title || 'Untitled';
 
-        document.getElementById('proposalA').innerHTML = renderMarkdown(ideaA.proposal || '');
-        document.getElementById('proposalB').innerHTML = renderMarkdown(ideaB.proposal || '');
+        document.getElementById('contentA').innerHTML = renderMarkdown(ideaA.content || '');
+        document.getElementById('contentB').innerHTML = renderMarkdown(ideaB.content || '');
 
         // Show the comparison view
         document.querySelector('.ideas-container').style.display = 'flex';
@@ -466,9 +466,9 @@ async function loadCurrentEvolution() {
             } else {
                 console.warn("No generations found or empty generations array");
                 document.getElementById("titleA").textContent = "No ideas to rate";
-                document.getElementById("proposalA").textContent = "Please run an evolution first or select a saved evolution.";
+                document.getElementById("contentA").textContent = "Please run an evolution first or select a saved evolution.";
                 document.getElementById("titleB").textContent = "";
-                document.getElementById("proposalB").textContent = "";
+                document.getElementById("contentB").textContent = "";
 
                 // Retry after a delay if no ideas were found
                 setTimeout(() => {
@@ -833,8 +833,8 @@ function showIdeaDetails(ideaIndex) {
                 <p><strong>Generation:</strong> ${idea.generation || '?'}</p>
                 <p><strong>ELO Rating:</strong> ${idea.elo}</p>
                 <hr>
-                <div class="idea-proposal">
-                    ${renderMarkdown(idea.proposal || '')}
+                <div class="idea-content">
+                    ${renderMarkdown(idea.content || '')}
                 </div>
             </div>
         </div>
@@ -965,8 +965,8 @@ function showIdeaDetails(ideaIndex) {
                 <p><strong>Manual Rating:</strong> ${manualRating}</p>
                 <p><strong>Difference:</strong> <span class="${diffClass}">${diffSign}${diffRating}</span></p>
                 <hr>
-                <div class="idea-proposal">
-                    ${renderMarkdown(idea.proposal || '')}
+                <div class="idea-content">
+                    ${renderMarkdown(idea.content || '')}
                 </div>
             </div>
         </div>
