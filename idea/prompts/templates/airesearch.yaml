@@ -72,7 +72,7 @@ prompts:
 
     Importantly you will be judged on originality of the new proposal so need to make sure you bring something new to the table.
     Think outside the box and be creative.
-    
+
     {requirements}
 
   comparison_prompt: |
@@ -80,11 +80,11 @@ prompts:
 
     Idea A:
     Title: {idea_a_title}
-    {idea_a_proposal}
+    {idea_a_content}
 
     Idea B:
     Title: {idea_b_title}
-    {idea_b_proposal}
+    {idea_b_content}
 
     Evaluate both ideas based on the following criteria:
     {criteria}

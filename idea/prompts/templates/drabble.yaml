@@ -94,11 +94,11 @@ prompts:
 
     Idea A:
     Title: {idea_a_title}
-    {idea_a_proposal}
+    {idea_a_content}
 
     Idea B:
     Title: {idea_b_title}
-    {idea_b_proposal}
+    {idea_b_content}
 
     Evaluate both ideas based on the following criteria:
     {criteria}
