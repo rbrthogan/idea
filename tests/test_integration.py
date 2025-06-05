@@ -24,7 +24,7 @@ class TestLLMSystemIntegration:
         required_attrs = [
             'ITEM_TYPE', 'CONTEXT_PROMPT', 'IDEA_PROMPT', 'NEW_IDEA_PROMPT',
             'FORMAT_PROMPT', 'CRITIQUE_PROMPT', 'REFINE_PROMPT', 'BREED_PROMPT',
-            'COMPARISON_CRITERIA'
+            'COMPARISON_CRITERIA', 'COMPARISON_PROMPT'
         ]
 
         for attr in required_attrs:

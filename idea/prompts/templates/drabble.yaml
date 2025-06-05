@@ -88,6 +88,29 @@ prompts:
 
     {requirements}
 
+  comparison_prompt: |
+    You are an expert evaluator of {item_type}. You will be presented with two {item_type}, and your task is to determine which one is better.
+
+    Idea A:
+    Title: {idea_a_title}
+    {idea_a_proposal}
+
+    Idea B:
+    Title: {idea_b_title}
+    {idea_b_proposal}
+
+    Evaluate both ideas based on the following criteria:
+    {criteria}
+
+    Criterion 1 is the most important.
+
+    After your evaluation, respond with exactly one of these three options:
+    - "Result: A" if Idea A is better
+    - "Result: B" if Idea B is better
+    - "Result: tie" if both ideas are approximately equal in quality
+
+    Your response must contain exactly one of these three phrases and nothing else.
+
 comparison_criteria:
   - "creativity"
   - "originality"

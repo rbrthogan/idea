@@ -22,6 +22,8 @@ class PromptSet(BaseModel):
     critique: str = Field(..., description="Prompt for critiquing ideas")
     refine: str = Field(..., description="Prompt for refining ideas based on critique")
     breed: str = Field(..., description="Prompt for breeding/combining ideas")
+    # Optional comparison prompt stored under prompts
+    comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas")
 
 
 class PromptTemplate(BaseModel):
@@ -35,6 +37,8 @@ class PromptTemplate(BaseModel):
     metadata: PromptMetadata = Field(..., description="Template metadata")
     prompts: PromptSet = Field(..., description="Set of prompts")
     comparison_criteria: List[str] = Field(..., description="Criteria for comparing generated ideas")
+    # Optional comparison prompt at root level for backward compatibility
+    comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas")
 
     # Special requirements for this template type
     special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")

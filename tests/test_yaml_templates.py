@@ -10,6 +10,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from idea.prompts.loader import get_prompts, list_available_templates, validate_template
+from idea.prompts.validation import TemplateValidator
+from idea.prompts.yaml_template import YAMLTemplateWrapper
+import yaml
 
 
 class TestYAMLTemplateLoading:
@@ -22,6 +25,7 @@ class TestYAMLTemplateLoading:
         assert prompts is not None
         assert hasattr(prompts, 'ITEM_TYPE')
         assert hasattr(prompts, 'COMPARISON_CRITERIA')
+        assert hasattr(prompts, 'COMPARISON_PROMPT')
 
     @pytest.mark.parametrize("template_name", ["drabble", "airesearch", "game_design"])
     def test_required_prompts_available(self, template_name):
@@ -30,7 +34,8 @@ class TestYAMLTemplateLoading:
 
         required_prompts = [
             'CONTEXT_PROMPT', 'IDEA_PROMPT', 'NEW_IDEA_PROMPT',
-            'FORMAT_PROMPT', 'CRITIQUE_PROMPT', 'REFINE_PROMPT', 'BREED_PROMPT'
+            'FORMAT_PROMPT', 'CRITIQUE_PROMPT', 'REFINE_PROMPT', 'BREED_PROMPT',
+            'COMPARISON_PROMPT'
         ]
 
         for prompt_name in required_prompts:
@@ -169,3 +174,17 @@ class TestTemplateManagerCompatibility:
             assert 'name' in template_info
             assert 'type' in template_info
             assert template_info['type'] == 'yaml'
+
+    def test_missing_comparison_prompt_uses_default(self, tmp_path):
+        """Templates without comparison_prompt should still load with a default"""
+        template_path = Path('idea/prompts/templates/drabble.yaml')
+        data = yaml.safe_load(template_path.read_text())
+        if 'comparison_prompt' in data.get('prompts', {}):
+            del data['prompts']['comparison_prompt']
+
+        template = TemplateValidator.validate_dict(data)
+        wrapper = YAMLTemplateWrapper(template)
+
+        assert hasattr(wrapper, 'COMPARISON_PROMPT')
+        assert isinstance(wrapper.COMPARISON_PROMPT, str)
+        assert len(wrapper.COMPARISON_PROMPT) > 0

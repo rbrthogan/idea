@@ -317,28 +317,35 @@ class Critic(LLMWrapper):
         item_type = getattr(prompts, "ITEM_TYPE", "ideas")
         criteria = prompts.COMPARISON_CRITERIA
 
-        prompt = f"""You are an expert evaluator of {item_type}. You will be presented with two {item_type}, and your task is to determine which one is better.
+        if hasattr(prompts, 'COMPARISON_PROMPT'):
+            prompt_template = prompts.COMPARISON_PROMPT
+        else:
+            prompt_template = (
+                "You are an expert evaluator of {item_type}. You will be presented with two {item_type}, and your task is to determine which one is better.\n\n"
+                "Idea A:\n"
+                "Title: {idea_a_title}\n"
+                "{idea_a_proposal}\n\n"
+                "Idea B:\n"
+                "Title: {idea_b_title}\n"
+                "{idea_b_proposal}\n\n"
+                "Evaluate both ideas based on the following criteria:\n"
+                "{criteria}\n\n"
+                "Criterion 1 is the most important.\n\n"
+                "After your evaluation, respond with exactly one of these three options:\n"
+                "- \"Result: A\" if Idea A is better\n"
+                "- \"Result: B\" if Idea B is better\n"
+                "- \"Result: tie\" if both ideas are approximately equal in quality\n\n"
+                "Your response must contain exactly one of these three phrases and nothing else."
+            )
 
-        Idea A:
-        Title: {idea_a.get('title', 'Untitled')}
-        {idea_a.get('proposal', '')}
-
-        Idea B:
-        Title: {idea_b.get('title', 'Untitled')}
-        {idea_b.get('proposal', '')}
-
-        Evaluate both ideas based on the following criteria:
-        {", ".join(criteria)}
-
-        Criterion 1 is the most important.
-
-        After your evaluation, respond with exactly one of these three options:
-        - "Result: A" if Idea A is better
-        - "Result: B" if Idea B is better
-        - "Result: tie" if both ideas are approximately equal in quality
-
-        Your response must contain exactly one of these three phrases and nothing else.
-        """
+        prompt = prompt_template.format(
+            item_type=item_type,
+            criteria=", ".join(criteria),
+            idea_a_title=idea_a.get('title', 'Untitled'),
+            idea_a_proposal=idea_a.get('proposal', ''),
+            idea_b_title=idea_b.get('title', 'Untitled'),
+            idea_b_proposal=idea_b.get('proposal', '')
+        )
 
         try:
             response = self.generate_text(prompt, temperature=0.3)
