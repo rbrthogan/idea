@@ -16,7 +16,7 @@ class LLMWrapper(ABC):
 
     def __init__(self,
                  provider: str = "google_generative_ai",
-                 model_name: str = "gemini-1.5-flash",
+                 model_name: str = "gemini-2.0-flash",
                  prompt_template: str = "",
                  temperature: float = 0.7,
                  agent_name: str = ""):
@@ -90,6 +90,7 @@ class LLMWrapper(ABC):
         if response_schema:
             config["response_schema"] = response_schema
             config["response_mime_type"] = "application/json"
+        print(f"Generation config: {config}")
         return config
 
 class Ideator(LLMWrapper):
@@ -160,7 +161,7 @@ class Formatter(LLMWrapper):
 
     def __init__(self, **kwargs):
         # Use a default temperature only if not provided in kwargs
-        temp = kwargs.pop('temperature', 0.3)
+        temp = kwargs.pop('temperature', 1.0)
         super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
 
     def format_idea(self, raw_idea: str, idea_type: str) -> str:
@@ -168,7 +169,9 @@ class Formatter(LLMWrapper):
         prompts = get_prompts(idea_type)
         # If raw_idea is a dictionary with 'id' and 'idea' keys, extract just the idea text
         idea_text = raw_idea["idea"] if isinstance(raw_idea, dict) and "idea" in raw_idea else raw_idea
+        print(f"Formatting idea:\n {idea_text}")
         prompt = prompts.FORMAT_PROMPT.format(input_text=idea_text)
+        print(f"Prompt:\n {prompt}")
         response = self.generate_text(prompt, response_schema=Idea)
         formatted_idea = Idea(**json.loads(response))
 
@@ -284,8 +287,8 @@ class Critic(LLMWrapper):
         for idea in ideas:
             if isinstance(idea, dict) and "idea" in idea:
                 idea_obj = idea["idea"]
-                if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'proposal'):
-                    idea_texts.append(f"{idea_obj.title}: {idea_obj.proposal}")
+                if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'content'):
+                    idea_texts.append(f"{idea_obj.title}: {idea_obj.content}")
                 else:
                     idea_texts.append(str(idea_obj))
             else:
@@ -302,7 +305,7 @@ class Critic(LLMWrapper):
         try:
             idea_index = int(parsed_result) - 1
         except ValueError:
-            print(f"Invalid proposal index: {parsed_result}")
+            print(f"Invalid content index: {parsed_result}")
             idea_index = np.random.randint(0, len(ideas))
         return [ideas[i] for i in range(len(ideas)) if i != idea_index]
 
@@ -321,11 +324,11 @@ class Critic(LLMWrapper):
 
         Idea A:
         Title: {idea_a.get('title', 'Untitled')}
-        {idea_a.get('proposal', '')}
+        {idea_a.get('content', '')}
 
         Idea B:
         Title: {idea_b.get('title', 'Untitled')}
-        {idea_b.get('proposal', '')}
+        {idea_b.get('content', '')}
 
         Evaluate both ideas based on the following criteria:
         {", ".join(criteria)}
@@ -432,8 +435,8 @@ class Breeder(LLMWrapper):
             # Extract parent text
             if isinstance(parent, dict) and "idea" in parent:
                 parent_obj = parent["idea"]
-                if hasattr(parent_obj, 'title') and hasattr(parent_obj, 'proposal'):
-                    parent_texts.append(f"{parent_obj.title}: {parent_obj.proposal}")
+                if hasattr(parent_obj, 'title') and hasattr(parent_obj, 'content'):
+                    parent_texts.append(f"{parent_obj.title}: {parent_obj.content}")
                 else:
                     parent_texts.append(str(parent_obj))
             else:

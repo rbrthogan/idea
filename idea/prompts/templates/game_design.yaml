@@ -13,7 +13,10 @@ special_requirements: |
   The game complexity should similar in level to classic games like Breakout, Snake, Tetris, Pong, Pac-Man, Space Invaders, Frogger, Minesweeper, Tic Tac Toe, 2048, Wordle etc.
   Avoid being derivative of these but limit the ambition to the level of complexity of these games.
   You should format your idea with enough specificity that a developer can implement it.
-  The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate
+  The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate.
+  Also please include a title, returning:
+  Title: [Your creative title]
+  Content: [Your game design]
 
 prompts:
   context: |
@@ -42,8 +45,9 @@ prompts:
     {requirements}
 
   format: |
-    Take the following idea and rewrite it in a clear,
-    structured format. The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate: {input_text}
+    Please take this drabble and return it unchanged in the requested JSON format:
+    
+    {input_text}
 
   critique: |
     You are a helpful AI that refines ideas.

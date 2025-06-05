@@ -130,7 +130,7 @@ async def start_evolution(request: Request):
     pop_size = int(data.get('popSize', 3))
     generations = int(data.get('generations', 2))
     idea_type = data.get('ideaType', 'airesearch')
-    model_type = data.get('modelType', 'gemini-1.5-flash')
+    model_type = data.get('modelType', 'gemini-2.0-flash-lite')
 
     # Get temperature parameters with defaults
     try:
@@ -264,12 +264,12 @@ def idea_to_dict(idea) -> dict:
         # Get parent IDs if they exist
         parent_ids = idea.get('parent_ids', [])
 
-        # If the idea object has title and proposal attributes
-        if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'proposal'):
+        # If the idea object has title and content attributes
+        if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'content'):
             return {
                 "id": str(idea_id),
                 "title": idea_obj.title,
-                "proposal": idea_obj.proposal,
+                "content": idea_obj.content,
                 "parent_ids": parent_ids,
                 "match_count": idea.get('match_count', 0),
                 "auto_match_count": idea.get('auto_match_count', 0),
@@ -280,7 +280,7 @@ def idea_to_dict(idea) -> dict:
             return {
                 "id": str(idea_id),
                 "title": "Untitled",
-                "proposal": idea_obj,
+                "content": idea_obj,
                 "parent_ids": parent_ids,
                 "match_count": idea.get('match_count', 0),
                 "auto_match_count": idea.get('auto_match_count', 0),
@@ -297,10 +297,10 @@ def idea_to_dict(idea) -> dict:
             return result
 
     # Legacy case: idea is a direct Idea object
-    elif hasattr(idea, 'title') and hasattr(idea, 'proposal'):
+    elif hasattr(idea, 'title') and hasattr(idea, 'content'):
         return {
             "title": idea.title,
-            "proposal": idea.proposal,
+            "content": idea.content,
             "parent_ids": [],
             "match_count": getattr(idea, 'match_count', 0),
             "auto_match_count": getattr(idea, 'auto_match_count', 0),
@@ -311,7 +311,7 @@ def idea_to_dict(idea) -> dict:
     elif isinstance(idea, str):
         return {
             "title": "Untitled",
-            "proposal": idea,
+            "content": idea,
             "parent_ids": [],
             "match_count": 0
         }
@@ -322,8 +322,8 @@ def idea_to_dict(idea) -> dict:
 @app.get("/api/generations")
 def api_get_generations():
     """
-    Returns a JSON array of arrays: each generation is an array of proposals.
-    Each proposal is {title, proposal}.
+    Returns a JSON array of arrays: each generation is an array of ideas.
+    Each idea is {title, content}.
     """
     global latest_evolution_data
 
@@ -343,7 +343,7 @@ def api_get_generations():
         for prop in generation:
             gen_list.append({
                 "title": prop.title,
-                "proposal": prop.proposal
+                "content": prop.content
             })
         result.append(gen_list)
 
@@ -355,12 +355,12 @@ def api_get_generations():
 @app.get("/api/generations/{gen_id}")
 def api_get_generation(gen_id: int):
     """
-    Returns proposals for a specific generation.
+    Returns ideas for a specific generation.
     """
-    proposals = engine.get_proposals_by_generation(gen_id)
-    if not proposals:
+    ideas = engine.get_ideas_by_generation(gen_id)
+    if not ideas:
         return JSONResponse({"error": "Invalid generation index."}, status_code=404)
-    output = [{"title": p.title, "proposal": p.proposal} for p in proposals]
+    output = [{"title": i.title, "content": i.content} for i in ideas]
     return JSONResponse(output)
 
 @app.get("/test-static")
