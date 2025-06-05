@@ -158,6 +158,12 @@ document.addEventListener("DOMContentLoaded", () => {
     // Set up temperature sliders
     setupTemperatureSliders();
 
+    // Load evolutions dropdown
+    loadEvolutions();
+
+    // Try to restore current evolution from localStorage
+    restoreCurrentEvolution();
+
     const startButton = document.getElementById('startButton');
     if (startButton) {
         startButton.onclick = async function() {
@@ -275,6 +281,51 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 });
+
+// Function to restore current evolution from localStorage
+async function restoreCurrentEvolution() {
+    try {
+        console.log("Attempting to restore current evolution from localStorage...");
+
+        // Check localStorage for current evolution data
+        const storedData = localStorage.getItem('currentEvolutionData');
+        if (storedData) {
+            try {
+                const generationsData = JSON.parse(storedData);
+                console.log("Found evolution data in localStorage:", generationsData);
+
+                if (generationsData && generationsData.length > 0) {
+                    // Render the generations
+                    renderGenerations(generationsData);
+
+                    // Set up currentEvolutionData for download functionality
+                    currentEvolutionData = {
+                        history: generationsData,
+                        contexts: contexts
+                    };
+
+                    // Enable download button
+                    const downloadButton = document.getElementById('downloadButton');
+                    if (downloadButton) {
+                        downloadButton.disabled = false;
+                        setupDownloadButton(currentEvolutionData);
+                    }
+
+                    console.log("Successfully restored current evolution from localStorage");
+                    return true;
+                }
+            } catch (e) {
+                console.error("Error parsing localStorage evolution data:", e);
+            }
+        }
+
+        console.log("No current evolution data found in localStorage");
+        return false;
+    } catch (error) {
+        console.error('Error restoring current evolution:', error);
+        return false;
+    }
+}
 
 // Function to set up the download button properly
 function setupDownloadButton(data) {
@@ -883,12 +934,18 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
             console.error('Failed to load evolution:', await response.text());
         }
     } else {
-        // Clear display for current evolution
-        document.getElementById('generations-container').innerHTML = '';
-        document.getElementById('contextDisplay').innerHTML =
-            '<p class="text-muted">Context will appear here when evolution starts...</p>';
-        document.querySelector('.context-navigation').style.display = 'none';
-        document.getElementById('downloadButton').disabled = true;
+        // Load current evolution from localStorage when "Current Evolution" is selected
+        console.log('Loading current evolution from localStorage...');
+        const restored = await restoreCurrentEvolution();
+
+        if (!restored) {
+            // Clear display if no current evolution available
+            document.getElementById('generations-container').innerHTML = '';
+            document.getElementById('contextDisplay').innerHTML =
+                '<p class="text-muted">Context will appear here when evolution starts...</p>';
+            document.querySelector('.context-navigation').style.display = 'none';
+            document.getElementById('downloadButton').disabled = true;
+        }
     }
 });
 
@@ -896,9 +953,6 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
 async function loadCurrentEvolution() {
     // ... existing code ...
 }
-
-// Call this when page loads
-loadEvolutions();
 
 async function pollProgress() {
     try {
