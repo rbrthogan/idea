@@ -45,6 +45,9 @@ templates = Jinja2Templates(directory="idea/static/html")
 # Global engine instance
 engine = None
 
+# Flag indicating whether the API key is available
+API_KEY_MISSING = os.getenv("GEMINI_API_KEY") in (None, "")
+
 # Global queue for evolution updates
 evolution_queue = Queue()
 evolution_status = {
@@ -73,17 +76,17 @@ class SaveEvolutionRequest(BaseModel):
 @app.get("/")
 def serve_viewer(request: Request):
     """Serves the viewer page"""
-    return templates.TemplateResponse("viewer.html", {"request": request})
+    return templates.TemplateResponse("viewer.html", {"request": request, "api_key_missing": API_KEY_MISSING})
 
 @app.get("/rate")
 def serve_rater(request: Request):
     """Serves the rater page"""
-    return templates.TemplateResponse("rater.html", {"request": request})
+    return templates.TemplateResponse("rater.html", {"request": request, "api_key_missing": API_KEY_MISSING})
 
 @app.get("/templates")
 def serve_template_manager(request: Request):
     """Serves the template management page"""
-    return templates.TemplateResponse("templates.html", {"request": request})
+    return templates.TemplateResponse("templates.html", {"request": request, "api_key_missing": API_KEY_MISSING})
 
 @app.get("/api/template-types")
 async def get_template_types():
@@ -120,6 +123,13 @@ async def start_evolution(request: Request):
     Runs the complete evolution and returns the final results
     """
     global engine, evolution_status, evolution_queue, latest_evolution_data
+
+    if API_KEY_MISSING:
+        return JSONResponse(
+            {"status": "error", "message": "GEMINI_API_KEY not configured"},
+            status_code=400,
+        )
+
     data = await request.json()
     print(f"Received request data: {data}")
 

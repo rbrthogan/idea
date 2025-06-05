@@ -1,5 +1,6 @@
 from abc import ABC
 import random
+import os
 import google.generativeai as genai
 import json
 from pydantic import BaseModel
@@ -35,7 +36,8 @@ class LLMWrapper(ABC):
         if self.provider == "google_generative_ai":
             if genai is None:
                 raise ImportError("google.generativeai is not installed")
-            genai.configure(api_key=None)
+            api_key = os.environ.get("GEMINI_API_KEY")
+            genai.configure(api_key=api_key)
         # Add other providers here
 
     @retry(

@@ -7,11 +7,11 @@ from idea.models import Idea
 
 
 def test_idea_to_dict_from_model():
-    idea = Idea(title="Title", proposal="Proposal")
+    idea = Idea(title="Title", content="Proposal")
     result = idea_to_dict(idea)
     assert result == {
         "title": "Title",
-        "proposal": "Proposal",
+        "content": "Proposal",
         "parent_ids": [],
         "match_count": 0,
         "auto_match_count": 0,
@@ -20,7 +20,7 @@ def test_idea_to_dict_from_model():
 
 
 def test_idea_to_dict_from_dict_with_model():
-    idea = Idea(title="T", proposal="P")
+    idea = Idea(title="T", content="P")
     input_data = {
         "id": 123,
         "idea": idea,
@@ -33,7 +33,7 @@ def test_idea_to_dict_from_dict_with_model():
     assert result == {
         "id": "123",
         "title": "T",
-        "proposal": "P",
+        "content": "P",
         "parent_ids": [1, 2],
         "match_count": 1,
         "auto_match_count": 2,
@@ -50,7 +50,7 @@ def test_idea_to_dict_from_dict_with_string():
     assert result == {
         "id": "5",
         "title": "Untitled",
-        "proposal": "raw idea",
+        "content": "raw idea",
         "parent_ids": [],
         "match_count": 0,
         "auto_match_count": 0,
@@ -61,14 +61,14 @@ def test_idea_to_dict_from_dict_with_string():
 def test_idea_to_dict_from_dict_with_dict():
     input_data = {
         "id": 1,
-        "idea": {"title": "A", "proposal": "B"},
+        "idea": {"title": "A", "content": "B"},
         "match_count": 9,
     }
     result = idea_to_dict(input_data)
     assert result == {
         "id": "1",
         "title": "A",
-        "proposal": "B",
+        "content": "B",
         "parent_ids": [],
         "match_count": 9,
         "auto_match_count": 0,
@@ -80,7 +80,7 @@ def test_idea_to_dict_from_string():
     result = idea_to_dict("hello")
     assert result == {
         "title": "Untitled",
-        "proposal": "hello",
+        "content": "hello",
         "parent_ids": [],
         "match_count": 0,
     }

@@ -252,6 +252,14 @@
     </style>
 </head>
 <body>
+    {% if api_key_missing %}
+    <div class="alert alert-warning text-center mb-0" role="alert">
+        GEMINI_API_KEY environment variable is not set. The app will not work without it.
+    </div>
+    <script>window.apiKeyMissing = true;</script>
+    {% else %}
+    <script>window.apiKeyMissing = false;</script>
+    {% endif %}
     <div class="container-fluid">
         <div class="layout-container">
             <!-- Unified sidebar matching viewer.html -->
