@@ -114,6 +114,14 @@
   </style>
 </head>
 <body>
+  {% if api_key_missing %}
+  <div class="alert alert-warning text-center mb-0" role="alert">
+    GEMINI_API_KEY environment variable is not set. The app will not work without it.
+  </div>
+  <script>window.apiKeyMissing = true;</script>
+  {% else %}
+  <script>window.apiKeyMissing = false;</script>
+  {% endif %}
   <div class="container-fluid">
     <div class="layout-container">
       <!-- Fixed side panel for controls -->
@@ -250,7 +258,7 @@
 
         <!-- Action Buttons -->
         <div class="controls-section">
-          <button class="btn btn-primary w-100 mb-2" id="startButton">Start Evolution</button>
+          <button class="btn btn-primary w-100 mb-2" id="startButton" {% if api_key_missing %}disabled{% endif %}>Start Evolution</button>
           <button class="btn btn-secondary w-100" id="downloadButton" disabled>Save Results</button>
         </div>
       </div>
