@@ -1,8 +1,7 @@
 # TODO
 
 ## Features
-- TODO: deprecate the hard coded comparison prompt, use the one in the prompts folder
-
+-
 ## Research Ideas
 - Update to evolution to use the genotype/phenotype model
 - Have an evolution variant to take human ratings as input during evolution
