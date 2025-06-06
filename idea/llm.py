@@ -106,8 +106,8 @@ class Ideator(LLMWrapper):
         """Generate initial context for ideation"""
         prompts = get_prompts(idea_type)
 
-        # Always use the CONTEXT_PROMPT regardless of method
-        text = self.generate_text(prompts.CONTEXT_PROMPT, temperature=2.0)
+        # Use the configured temperature unless explicitly overridden
+        text = self.generate_text(prompts.CONTEXT_PROMPT)
         print(f"Text: {text}")
 
         # Extract concepts from the response
@@ -142,7 +142,7 @@ class Ideator(LLMWrapper):
             context = self.generate_context(idea_type)
             print(f"Context: {context}")
             prompt = f"{context}\nInstruction: {idea_prompt}"
-            response = self.generate_text(prompt, temperature=1.5)
+            response = self.generate_text(prompt)
             ideas.append({"id": uuid.uuid4(), "idea": response, "parent_ids": []})
         return ideas
 
@@ -153,7 +153,7 @@ class Ideator(LLMWrapper):
         current_ideas = "\n\n".join([f"{i+1}. {idea_text}" for i, idea_text in enumerate(idea_texts)])
         prompt = self.get_new_idea_prompt(idea_type).format(current_ideas=current_ideas)
         prompt = f"current ideas:\n{current_ideas}\n\n{prompt}"
-        response = self.generate_text(prompt, temperature=1.0)
+        response = self.generate_text(prompt)
         # Create a new idea with a unique ID and empty parent_ids list
         return {"id": uuid.uuid4(), "idea": response, "parent_ids": []}
 
@@ -336,7 +336,8 @@ class Critic(LLMWrapper):
         )
 
         try:
-            response = self.generate_text(prompt, temperature=0.3)
+            # Use the configured temperature for comparisons
+            response = self.generate_text(prompt)
             result = response.strip().upper()
 
             print(f"LLM comparison response: {result}")
