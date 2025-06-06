@@ -322,26 +322,9 @@ class Critic(LLMWrapper):
         item_type = getattr(prompts, "ITEM_TYPE", "ideas")
         criteria = prompts.COMPARISON_CRITERIA
 
-        if hasattr(prompts, 'COMPARISON_PROMPT'):
-            prompt_template = prompts.COMPARISON_PROMPT
-        else:
-            prompt_template = (
-                "You are an expert evaluator of {item_type}. You will be presented with two {item_type}, and your task is to determine which one is better.\n\n"
-                "Idea A:\n"
-                "Title: {idea_a_title}\n"
-                "{idea_a_content}\n\n"
-                "Idea B:\n"
-                "Title: {idea_b_title}\n"
-                "{idea_b_content}\n\n"
-                "Evaluate both ideas based on the following criteria:\n"
-                "{criteria}\n\n"
-                "Criterion 1 is the most important.\n\n"
-                "After your evaluation, respond with exactly one of these three options:\n"
-                "- \"Result: A\" if Idea A is better\n"
-                "- \"Result: B\" if Idea B is better\n"
-                "- \"Result: tie\" if both ideas are approximately equal in quality\n\n"
-                "Your response must contain exactly one of these three phrases and nothing else."
-            )
+        # The comparison prompt is now provided directly by the template
+        # loader (YAMLTemplateWrapper ensures a default is available).
+        prompt_template = prompts.COMPARISON_PROMPT
 
         prompt = prompt_template.format(
             item_type=item_type,
