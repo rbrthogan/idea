@@ -4,6 +4,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from idea.evolution import EvolutionEngine
 from idea.config import model_prices_per_million_tokens
+from idea.config import LLM_MODELS
 
 
 class DummyAgent:
@@ -44,3 +45,17 @@ def test_get_total_token_count():
     )
 
     assert abs(result["cost"]["total_cost"] - expected_total_cost) < 1e-9
+
+    # Ensure estimates exist for all configured models and are calculated using
+    # the overall token totals
+    total_inp = result["total_input"]
+    total_out = result["total_output"]
+    for model in LLM_MODELS:
+        model_id = model["id"]
+        assert model_id in result["estimates"]
+        pricing = model_prices_per_million_tokens.get(model_id)
+        expected = (
+            pricing["input"] * total_inp / 1_000_000
+            + pricing["output"] * total_out / 1_000_000
+        )
+        assert abs(result["estimates"][model_id]["cost"] - expected) < 1e-9

@@ -932,6 +932,21 @@ async def auto_rate(request: Request):
             critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
             total_cost = critic_input_cost + critic_output_cost
 
+            # Also estimate total cost for each available model using the critic
+            # token counts so users can compare pricing.
+            from idea.config import LLM_MODELS
+
+            estimates = {}
+            for model in LLM_MODELS:
+                model_id = model['id']
+                model_name = model.get('name', model_id)
+                pricing = model_prices_per_million_tokens.get(model_id, default_price)
+                est_cost = (
+                    pricing['input'] * critic_input / 1_000_000
+                    + pricing['output'] * critic_output / 1_000_000
+                )
+                estimates[model_id] = {'name': model_name, 'cost': est_cost}
+
             return {
                 'critic': {
                     'total': critic_total,
@@ -951,7 +966,8 @@ async def auto_rate(request: Request):
                 },
                 'models': {
                     'critic': critic_model
-                }
+                },
+                'estimates': estimates
             }
 
         # Get cost information
