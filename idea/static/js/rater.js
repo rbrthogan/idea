@@ -670,6 +670,7 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
         let totalCompletedComparisons = 0;
         let allResults = [];
         let finalIdeas = [];
+        let finalTokenCounts = null;
 
         for (let i = 0; i < chunks; i++) {
             // Calculate how many comparisons to do in this chunk
@@ -708,6 +709,11 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
 
             // Store the latest ideas data
             finalIdeas = data.ideas || [];
+
+            // Store token counts from the final response (only from the last chunk)
+            if (data.token_counts) {
+                finalTokenCounts = data.token_counts;
+            }
 
             // Update the local ideasDb with the latest data from the server
             finalIdeas.forEach(idea => {
@@ -762,15 +768,40 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
         // Add a small delay to ensure the UI updates
         await new Promise(resolve => setTimeout(resolve, 300));
 
-        // Update final stats
+        // Update final stats including cost information
         const stats = document.getElementById('ratingStats');
-        stats.innerHTML = `
+        let statsHtml = `
             <p>Completed: ${completedComparisons}/${numComparisons} comparisons</p>
             <p>Total comparisons completed: ${totalCompletedComparisons}</p>
             <p>A wins: ${allResults.filter(r => r.outcome === 'A').length}</p>
             <p>B wins: ${allResults.filter(r => r.outcome === 'B').length}</p>
             <p>Ties: ${allResults.filter(r => r.outcome === 'tie').length}</p>
         `;
+
+        // Add cost information if available
+        if (finalTokenCounts) {
+            const totalCost = finalTokenCounts.cost.total_cost.toFixed(4);
+            const totalTokens = finalTokenCounts.total.toLocaleString();
+
+            statsHtml += `
+                <hr>
+                <p><strong>Auto-rating Cost: $${totalCost}</strong></p>
+                <p>Tokens used: ${totalTokens}</p>
+                <button id="autorating-cost-details-btn" class="btn btn-sm btn-outline-primary">
+                    <i class="fas fa-info-circle"></i> Cost Details
+                </button>
+            `;
+        }
+
+        stats.innerHTML = statsHtml;
+
+        // Add event listener for cost details button if it exists
+        const costDetailsBtn = document.getElementById('autorating-cost-details-btn');
+        if (costDetailsBtn && finalTokenCounts) {
+            costDetailsBtn.addEventListener('click', function() {
+                showAutoratingCostModal(finalTokenCounts);
+            });
+        }
 
     } catch (error) {
         console.error('Error during auto-rating:', error);
@@ -923,6 +954,176 @@ function toggleRatingType(type) {
             showRanking();
         }
     }
+}
+
+// Function to show autorating cost details modal
+function showAutoratingCostModal(tokenCounts) {
+    // Format the token counts
+    const totalTokens = tokenCounts.total.toLocaleString();
+    const totalInputTokens = tokenCounts.total_input.toLocaleString();
+    const totalOutputTokens = tokenCounts.total_output.toLocaleString();
+
+    // Component totals and details for critic
+    const criticTotal = tokenCounts.critic.total.toLocaleString();
+    const criticInput = tokenCounts.critic.input.toLocaleString();
+    const criticOutput = tokenCounts.critic.output.toLocaleString();
+    const criticModel = tokenCounts.critic.model;
+    const criticCost = tokenCounts.critic.cost.toFixed(4);
+
+    // Get cost information
+    const costInfo = tokenCounts.cost;
+    const totalCost = costInfo.total_cost.toFixed(4);
+    const inputCost = costInfo.input_cost.toFixed(4);
+    const outputCost = costInfo.output_cost.toFixed(4);
+
+    // Create modal container if it doesn't exist
+    let modalContainer = document.getElementById('autorating-cost-modal');
+    if (!modalContainer) {
+        modalContainer = document.createElement('div');
+        modalContainer.id = 'autorating-cost-modal';
+        modalContainer.className = 'modal fade';
+        modalContainer.tabIndex = '-1';
+        modalContainer.setAttribute('aria-labelledby', 'autoratingCostModalLabel');
+        modalContainer.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(modalContainer);
+    }
+
+    // Set modal content
+    modalContainer.innerHTML = `
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="autoratingCostModalLabel">Auto-rating Cost Details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="card mb-3">
+                                <div class="card-body">
+                                    <h6>Total Tokens: <span class="text-primary">${totalTokens}</span></h6>
+                                    <div class="d-flex justify-content-between">
+                                        <span>Input: <span class="text-info">${totalInputTokens}</span></span>
+                                        <span>Output: <span class="text-success">${totalOutputTokens}</span></span>
+                                    </div>
+                                    <hr>
+                                    <h6>Cost Breakdown:</h6>
+                                    <p class="mb-1">Total cost: <strong>$${totalCost}</strong></p>
+                                    <div class="small text-muted">
+                                        <div>Input: $${inputCost}</div>
+                                        <div>Output: $${outputCost}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <h6>Component Breakdown:</h6>
+                            <ul class="list-group">
+                                <li class="list-group-item">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span>Critic <span class="badge bg-secondary">${criticModel}</span></span>
+                                        <span class="badge bg-primary rounded-pill">${criticTotal}</span>
+                                    </div>
+                                    <div class="small text-muted mt-1">
+                                        <span>Input: ${criticInput}</span> |
+                                        <span>Output: ${criticOutput}</span> |
+                                        <span>Cost: $${criticCost}</span>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-4">
+                                <canvas id="autoratingTokenPieChart" width="400" height="250"></canvas>
+                            </div>
+                            <div>
+                                <canvas id="autoratingTokenBarChart" width="400" height="250"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Initialize the modal
+    const modal = new bootstrap.Modal(modalContainer);
+    modal.show();
+
+    // Create charts after the modal is shown
+    modalContainer.addEventListener('shown.bs.modal', function () {
+        // For autorating, we only have the critic component, so create simpler charts
+
+        // Create a pie chart for input vs output tokens
+        const pieCtx = document.getElementById('autoratingTokenPieChart').getContext('2d');
+        new Chart(pieCtx, {
+            type: 'pie',
+            data: {
+                labels: ['Input Tokens', 'Output Tokens'],
+                datasets: [{
+                    data: [
+                        tokenCounts.total_input,
+                        tokenCounts.total_output
+                    ],
+                    backgroundColor: [
+                        '#36a2eb',
+                        '#4bc0c0'
+                    ]
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Token Distribution (Input vs Output)'
+                    },
+                    legend: {
+                        position: 'bottom'
+                    }
+                }
+            }
+        });
+
+        // Create a bar chart for costs
+        const barCtx = document.getElementById('autoratingTokenBarChart').getContext('2d');
+        new Chart(barCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Input Cost', 'Output Cost', 'Total Cost'],
+                datasets: [{
+                    label: 'Cost (USD)',
+                    data: [
+                        parseFloat(inputCost),
+                        parseFloat(outputCost),
+                        parseFloat(totalCost)
+                    ],
+                    backgroundColor: ['#36a2eb', '#4bc0c0', '#ff9f40']
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Cost Breakdown'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return '$' + value.toFixed(4);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }, { once: true });
 }
 
 // Add function to reset ratings

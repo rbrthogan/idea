@@ -907,6 +907,56 @@ async def auto_rate(request: Request):
             with open(file_path, 'w') as f:
                 json.dump(evolution_data, f, indent=2)
 
+        # Calculate costs similar to evolution module
+        def get_autorating_costs(critic_agent):
+            """Get the cost information for autorating"""
+            # Get token counts from the critic agent
+            critic_input = getattr(critic_agent, 'input_token_count', 0)
+            critic_output = getattr(critic_agent, 'output_token_count', 0)
+            critic_total = getattr(critic_agent, 'total_token_count', 0)
+
+            # Get pricing information from config
+            from idea.config import model_prices_per_million_tokens
+
+            # Get model name for the critic
+            critic_model = getattr(critic_agent, 'model_name', 'gemini-2.0-flash')
+
+            # Default pricing if model not found in config
+            default_price = {"input": 0.1, "output": 0.4}
+
+            # Get pricing for the model
+            critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
+
+            # Calculate cost for critic
+            critic_input_cost = (critic_pricing["input"] * critic_input) / 1_000_000
+            critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
+            total_cost = critic_input_cost + critic_output_cost
+
+            return {
+                'critic': {
+                    'total': critic_total,
+                    'input': critic_input,
+                    'output': critic_output,
+                    'model': critic_model,
+                    'cost': total_cost
+                },
+                'total': critic_total,
+                'total_input': critic_input,
+                'total_output': critic_output,
+                'cost': {
+                    'input_cost': critic_input_cost,
+                    'output_cost': critic_output_cost,
+                    'total_cost': total_cost,
+                    'currency': 'USD'
+                },
+                'models': {
+                    'critic': critic_model
+                }
+            }
+
+        # Get cost information
+        cost_info = get_autorating_costs(critic)
+
         # Return the results with sorted ideas including generation info
         # Calculate total comparisons (existing + new)
         total_comparisons = total_comparisons_completed + len(results)
@@ -916,7 +966,8 @@ async def auto_rate(request: Request):
             'results': results,
             'ideas': sorted(all_ideas, key=lambda x: x['ratings']['auto'], reverse=True),
             'completed_comparisons': total_comparisons,
-            'new_comparisons': len(results)
+            'new_comparisons': len(results),
+            'token_counts': cost_info
         })
 
     except Exception as e:

@@ -1934,11 +1934,14 @@ function showTokenDetailsModal(tokenCounts) {
                             </ul>
                         </div>
                         <div class="col-md-6">
-                            <div class="mb-4">
-                                <canvas id="tokenPieChart" width="400" height="250"></canvas>
+                            <div class="mb-3">
+                                <canvas id="tokenPieChart" width="400" height="200"></canvas>
+                            </div>
+                            <div class="mb-3">
+                                <canvas id="tokenBarChart" width="400" height="200"></canvas>
                             </div>
                             <div>
-                                <canvas id="tokenBarChart" width="400" height="250"></canvas>
+                                <canvas id="tokenCostChart" width="400" height="200"></canvas>
                             </div>
                         </div>
                     </div>
@@ -1998,56 +2001,96 @@ function showTokenDetailsModal(tokenCounts) {
             }
         });
 
-        // Create a bar chart for input vs output tokens
+        // Create a bar chart for costs by component
         const barCtx = document.getElementById('tokenBarChart').getContext('2d');
         new Chart(barCtx, {
             type: 'bar',
             data: {
                 labels: ['Ideator', 'Formatter', 'Critic', 'Breeder'],
-                datasets: [
-                    {
-                        label: 'Input Tokens',
-                        data: [
-                            tokenCounts.ideator.input,
-                            tokenCounts.formatter.input,
-                            tokenCounts.critic.input,
-                            tokenCounts.breeder.input
-                        ],
-                        backgroundColor: 'rgba(54, 162, 235, 0.7)',
-                        borderColor: 'rgba(54, 162, 235, 1)',
-                        borderWidth: 1
-                    },
-                    {
-                        label: 'Output Tokens',
-                        data: [
-                            tokenCounts.ideator.output,
-                            tokenCounts.formatter.output,
-                            tokenCounts.critic.output,
-                            tokenCounts.breeder.output
-                        ],
-                        backgroundColor: 'rgba(75, 192, 192, 0.7)',
-                        borderColor: 'rgba(75, 192, 192, 1)',
-                        borderWidth: 1
-                    }
-                ]
+                datasets: [{
+                    label: 'Cost (USD)',
+                    data: [
+                        parseFloat(ideatorCost),
+                        parseFloat(formatterCost),
+                        parseFloat(criticCost),
+                        parseFloat(breederCost)
+                    ],
+                    backgroundColor: [
+                        'rgba(54, 162, 235, 0.7)',
+                        'rgba(75, 192, 192, 0.7)',
+                        'rgba(255, 99, 132, 0.7)',
+                        'rgba(255, 206, 86, 0.7)'
+                    ],
+                    borderColor: [
+                        'rgba(54, 162, 235, 1)',
+                        'rgba(75, 192, 192, 1)',
+                        'rgba(255, 99, 132, 1)',
+                        'rgba(255, 206, 86, 1)'
+                    ],
+                    borderWidth: 1
+                }]
             },
             options: {
                 responsive: true,
                 plugins: {
-                    legend: {
-                        position: 'bottom',
-                    },
                     title: {
                         display: true,
-                        text: 'Input vs Output Tokens'
+                        text: 'Cost Breakdown by Component'
+                    },
+                    legend: {
+                        position: 'bottom'
                     }
                 },
                 scales: {
-                    x: {
-                        stacked: false
-                    },
                     y: {
-                        stacked: false
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return '$' + value.toFixed(4);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Create a third chart for input vs output cost breakdown
+        const costCtx = document.getElementById('tokenCostChart').getContext('2d');
+        new Chart(costCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Input Cost', 'Output Cost', 'Total Cost'],
+                datasets: [{
+                    label: 'Cost (USD)',
+                    data: [
+                        parseFloat(inputCost),
+                        parseFloat(outputCost),
+                        parseFloat(totalCost)
+                    ],
+                    backgroundColor: ['#36a2eb', '#4bc0c0', '#ff9f40'],
+                    borderColor: ['#36a2eb', '#4bc0c0', '#ff9f40'],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Input vs Output Cost'
+                    },
+                    legend: {
+                        position: 'bottom'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return '$' + value.toFixed(4);
+                            }
+                        }
                     }
                 }
             }
