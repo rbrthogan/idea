@@ -10,6 +10,7 @@ let currentPair = null;
 let currentEvolutionId = null;
 let ideasDb = {};
 let currentRatingType = 'auto';
+let autoRatingInProgress = false;
 
 // Fetch a random pair on load
 window.addEventListener("load", () => {
@@ -620,7 +621,12 @@ function updateProgressBar(percent) {
 }
 
 // Update the auto-rating event listener to include clickable ideas and generation info
-document.getElementById('startAutoRating').addEventListener('click', async function() {
+const startAutoRatingBtn = document.getElementById('startAutoRating');
+startAutoRatingBtn.addEventListener('click', async function() {
+    if (autoRatingInProgress) {
+        return; // prevent multiple simultaneous runs
+    }
+
     const numComparisons = parseInt(document.getElementById('numComparisons').value);
     const evolutionId = document.getElementById('evolutionSelect').value;
     const modelId = document.getElementById('modelSelect').value;
@@ -630,6 +636,10 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
         alert('Please select an evolution first');
         return;
     }
+
+    autoRatingInProgress = true;
+    startAutoRatingBtn.disabled = true;
+    startAutoRatingBtn.textContent = 'Auto Rating...';
 
     // Hide the idea comparison view
     document.querySelector('.ideas-container').style.display = 'none';
@@ -806,6 +816,10 @@ document.getElementById('startAutoRating').addEventListener('click', async funct
     } catch (error) {
         console.error('Error during auto-rating:', error);
         document.getElementById('ratingStats').innerHTML = `<p class="text-danger">Error: ${error.message}</p>`;
+    } finally {
+        startAutoRatingBtn.textContent = 'Start Auto Rating';
+        startAutoRatingBtn.disabled = false;
+        autoRatingInProgress = false;
     }
 });
 
