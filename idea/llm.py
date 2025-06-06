@@ -146,17 +146,6 @@ class Ideator(LLMWrapper):
             ideas.append({"id": uuid.uuid4(), "idea": response, "parent_ids": []})
         return ideas
 
-    def generate_new_idea(self, ideas: List[str], idea_type: str) -> str:
-        """Generate a new idea based on existing ones"""
-        # Extract just the idea text from each idea dictionary
-        idea_texts = [idea["idea"] for idea in ideas]
-        current_ideas = "\n\n".join([f"{i+1}. {idea_text}" for i, idea_text in enumerate(idea_texts)])
-        prompt = self.get_new_idea_prompt(idea_type).format(current_ideas=current_ideas)
-        prompt = f"current ideas:\n{current_ideas}\n\n{prompt}"
-        response = self.generate_text(prompt)
-        # Create a new idea with a unique ID and empty parent_ids list
-        return {"id": uuid.uuid4(), "idea": response, "parent_ids": []}
-
 class Formatter(LLMWrapper):
     """Reformats unstructured ideas into a cleaner format"""
     agent_name = "Formatter"
@@ -282,34 +271,6 @@ class Critic(LLMWrapper):
 
         return ranks
 
-    def remove_worst_idea(self, ideas: List[str], idea_type: str) -> List[str]:
-        """Identify and remove the worst idea from a list"""
-        # Extract idea texts for display
-        idea_texts = []
-        for idea in ideas:
-            if isinstance(idea, dict) and "idea" in idea:
-                idea_obj = idea["idea"]
-                if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'content'):
-                    idea_texts.append(f"{idea_obj.title}: {idea_obj.content}")
-                else:
-                    idea_texts.append(str(idea_obj))
-            else:
-                idea_texts.append(str(idea))
-
-        idea_str = "\n".join([f"{i+1}. {text}" for i, text in enumerate(idea_texts)])
-        prompts = get_prompts(idea_type)
-        prompt = prompts.REMOVE_WORST_IDEA_PROMPT.format(
-            ideas=idea_str,
-            criteria=", ".join(prompts.COMPARISON_CRITERIA)
-        )
-        result = self.generate_text(prompt)
-        parsed_result = result.split("Worst Entry:")[1].strip()
-        try:
-            idea_index = int(parsed_result) - 1
-        except ValueError:
-            print(f"Invalid content index: {parsed_result}")
-            idea_index = np.random.randint(0, len(ideas))
-        return [ideas[i] for i in range(len(ideas)) if i != idea_index]
 
     def compare_ideas(self, idea_a, idea_b, idea_type: str):
         """
@@ -446,10 +407,5 @@ class Breeder(LLMWrapper):
 
         # Create a new idea with a unique ID and parent IDs
         return {"id": uuid.uuid4(), "idea": response, "parent_ids": parent_ids}
-
-    def get_breed_prompt(self, idea_type: str) -> str:
-        """Get prompt template for breeding ideas"""
-        prompts = get_prompts(idea_type)
-        return prompts.BREED_PROMPT
 
     # TODO: and a method to convert idea Phenotype to Genotype (basic components used in breeding)

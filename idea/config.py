@@ -12,12 +12,6 @@ LLM_MODELS = [
 # Default model
 DEFAULT_MODEL = "gemini-2.0-flash-lite"
 
-# Task types
-TASK_TYPES = [
-    {"id": "airesearch", "name": "AI Research"},
-    {"id": "game_design", "name": "Game Design"},
-    {"id": "drabble", "name": "Drabble (100-word story)"}
-]
 
 model_prices_per_million_tokens = {
     "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.3},
