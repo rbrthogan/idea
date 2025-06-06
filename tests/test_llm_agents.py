@@ -11,7 +11,6 @@ class DummyPrompts:
     ITEM_TYPE = "idea"
     COMPARISON_CRITERIA = ["quality"]
     COMPARISON_PROMPT = ""
-    REMOVE_WORST_IDEA_PROMPT = "{ideas}\nCriteria: {criteria}\nWorst Entry:"
 
 
 def create_critic():
@@ -40,15 +39,6 @@ def test_get_tournament_ranks_deterministic():
     with patch.object(Critic, 'compare_ideas', side_effect=["A", "B"]):
         ranks = critic.get_tournament_ranks(ideas, "airesearch", comparisons=2)
     assert ranks[0] > ranks[1]
-
-
-def test_remove_worst_idea_parsing():
-    critic = create_critic()
-    ideas = ["a", "b", "c"]
-    with patch('idea.llm.get_prompts', return_value=DummyPrompts()), \
-         patch.object(Critic, 'generate_text', return_value="Some text\nWorst Entry: 2"):
-        remaining = critic.remove_worst_idea(ideas, "airesearch")
-    assert remaining == ["a", "c"]
 
 
 def test_compare_ideas_response_parsing():

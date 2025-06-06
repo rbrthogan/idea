@@ -147,19 +147,3 @@ def validate_template(idea_type: str) -> tuple[bool, list]:
             return False, [f"Failed to import: {e}"]
 
 
-def get_template_info(idea_type: str) -> Optional[dict]:
-    """Get detailed information about a specific template"""
-    try:
-        prompts = get_prompts(idea_type)
-        if hasattr(prompts, 'get_info'):
-            return prompts.get_info()
-        else:
-            # Python module
-            return {
-                'name': idea_type.replace('_', ' ').title(),
-                'description': getattr(prompts, '__doc__', '').strip() or f"Python module for {idea_type}",
-                'item_type': getattr(prompts, 'ITEM_TYPE', 'Unknown'),
-                'type': 'python'
-            }
-    except Exception:
-        return None

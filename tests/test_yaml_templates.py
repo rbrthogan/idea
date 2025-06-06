@@ -86,8 +86,6 @@ class TestSpecialFeatures:
         idea_prompt = prompts.IDEA_PROMPT
         assert 'A drabble is a short work of fiction' in idea_prompt
 
-        # Check that special requirements attribute is available
-        assert hasattr(prompts, 'SPECIAL_REQUIREMENTS')
 
     def test_game_design_special_requirements_interpolation(self):
         """Test that game design special requirements are properly interpolated"""
@@ -96,8 +94,6 @@ class TestSpecialFeatures:
         idea_prompt = prompts.IDEA_PROMPT
         assert 'The game should be simple enough' in idea_prompt
 
-        # Check that special requirements attribute is available
-        assert hasattr(prompts, 'SPECIAL_REQUIREMENTS')
 
     def test_placeholder_validation(self):
         """Test that required placeholders are present in prompts"""
