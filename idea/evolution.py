@@ -285,4 +285,22 @@ class EvolutionEngine:
                 'breeder': breeder_model
             }
         }
+
+        # Calculate estimated total cost for each available model using the
+        # overall token counts. This gives users a rough idea of what the
+        # evolution would have cost if a different model had been selected.
+        from idea.config import LLM_MODELS
+
+        estimates = {}
+        for model in LLM_MODELS:
+            model_id = model['id']
+            model_name = model.get('name', model_id)
+            pricing = model_prices_per_million_tokens.get(model_id, default_price)
+            est_cost = (
+                pricing['input'] * total_input / 1_000_000
+                + pricing['output'] * total_output / 1_000_000
+            )
+            estimates[model_id] = {'name': model_name, 'cost': est_cost}
+
+        token_data['estimates'] = estimates
         return token_data
