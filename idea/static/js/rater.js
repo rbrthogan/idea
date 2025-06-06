@@ -990,6 +990,14 @@ function showAutoratingCostModal(tokenCounts) {
     const inputCost = costInfo.input_cost.toFixed(4);
     const outputCost = costInfo.output_cost.toFixed(4);
 
+    // Prepare alternative cost estimates using the critic token counts
+    let estimatesList = '';
+    if (tokenCounts.estimates) {
+        estimatesList = Object.values(tokenCounts.estimates).map(e => {
+            return `<li class="list-group-item d-flex justify-content-between align-items-center">${e.name}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
+        }).join('');
+    }
+
     // Create modal container if it doesn't exist
     let modalContainer = document.getElementById('autorating-cost-modal');
     if (!modalContainer) {
@@ -1027,6 +1035,11 @@ function showAutoratingCostModal(tokenCounts) {
                                         <div>Input: $${inputCost}</div>
                                         <div>Output: $${outputCost}</div>
                                     </div>
+                                    <hr>
+                                    <h6>Other Model Estimates:</h6>
+                                    <ul class="list-group mb-3 small">
+                                        ${estimatesList}
+                                    </ul>
                                 </div>
                             </div>
 
