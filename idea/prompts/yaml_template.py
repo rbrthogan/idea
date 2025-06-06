@@ -58,9 +58,6 @@ class YAMLTemplateWrapper:
 
         self.COMPARISON_PROMPT = self._interpolate_prompt(comparison_prompt)
 
-        # Special requirements
-        if self.template.special_requirements:
-            self.SPECIAL_REQUIREMENTS = self.template.special_requirements
 
     def _interpolate_prompt(self, prompt_text: str) -> str:
         """
