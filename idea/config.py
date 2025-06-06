@@ -6,7 +6,9 @@ LLM_MODELS = [
     {"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite (Fast + Cheap)"},
     {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash (Fast)"},
     {"id": "gemini-2.0-pro-exp-02-05", "name": "Gemini 2.0 Pro (Experimental)"},
-    {"id": "gemini-2.0-flash-thinking-exp-01-21", "name": "Gemini 2.0 Flash Thinking (Experimental)"}
+    {"id": "gemini-2.0-flash-thinking-exp-01-21", "name": "Gemini 2.0 Flash Thinking (Experimental)"},
+    {"id": "gemini-2.5-flash-preview-05-20", "name": "Gemini 2.5 Flash"},
+    {"id": "gemini-2.5-pro-preview-05-06", "name": "Gemini 2.5 Pro"}
 ]
 
 # Default model
@@ -17,5 +19,7 @@ model_prices_per_million_tokens = {
     "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.3},
     "gemini-2.0-flash": {"input": 0.1, "output": 0.4},
     "gemini-2.0-pro-exp-02-05": {"input": 0.0, "output": 0.0},
-    "gemini-2.0-flash-thinking-exp-01-21": {"input": 0.0, "output": 0.0}
+    "gemini-2.0-flash-thinking-exp-01-21": {"input": 0.0, "output": 0.0},
+    "gemini-2.5-flash-preview-05-20": {"input": 0.15, "output": 3.5},
+    "gemini-2.5-pro-preview-05-06": {"input": 2.25, "output": 10.0}
 }
