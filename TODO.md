@@ -1,8 +1,7 @@
 # TODO
 
 ## Features
-- TODO: update "start auto rating" button state when in progress
-- TODO: comparison prompt is in the evolution.py file, should be in a prompts folder
+- TODO: deprecate the hard coded comparison prompt, use the one in the prompts folder
 
 ## Research Ideas
 - Update to evolution to use the genotype/phenotype model
