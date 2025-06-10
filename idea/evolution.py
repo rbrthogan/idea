@@ -116,8 +116,9 @@ class EvolutionEngine:
                         weights = [ranks[i] for i in range(len(group))]
                         # normalize weights to be between 0 and 1
                         # Note: this shift will cause the lowest ranked idea to have a weight of 0, eliminating it from selection
-                        weights = [(w - min(weights)) / (max(weights) - min(weights)) for w in weights]
-                        weights = [w / sum(weights) for w in weights]
+                        weights = [(w - min(weights)) / (max(weights) - min(weights)) + 1e-6 for w in weights]
+                        weights = [(w / sum(weights)) for w in weights]
+
 
                         # Select parents and breed
                         parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights, replace=False)
