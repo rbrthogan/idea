@@ -99,6 +99,7 @@ let contexts = [];
 let currentEvolutionId = null;
 let currentEvolutionData = null;
 let generations = [];
+let currentModalIdea = null;
 
 /**
  * Load available templates and populate the idea type dropdown
@@ -265,6 +266,15 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     } else {
         console.error("Download button not found in DOMContentLoaded");
+    }
+
+    const copyButton = document.getElementById('copyIdeaButton');
+    if (copyButton) {
+        copyButton.addEventListener('click', () => {
+            if (!currentModalIdea) return;
+            const text = `${currentModalIdea.title || ''}\n\n${currentModalIdea.content || ''}`;
+            navigator.clipboard.writeText(text).catch(err => console.error('Copy failed', err));
+        });
     }
 
     document.getElementById('prevContext')?.addEventListener('click', () => {
@@ -704,6 +714,9 @@ function toggleGeneration(generationId) {
 function showIdeaModal(idea) {
     // Get the modal element
     const modalElement = document.getElementById('ideaModal');
+
+    // Store the idea for clipboard copying
+    currentModalIdea = idea;
 
     // Set the title
     document.getElementById('ideaModalLabel').textContent = idea.title || 'Untitled';
