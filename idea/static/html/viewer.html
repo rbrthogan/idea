@@ -327,7 +327,12 @@
       <div class="modal-content">
         <div class="modal-header">
           <h5 class="modal-title" id="ideaModalLabel">Idea Title</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          <div class="d-flex align-items-start ms-auto">
+            <button type="button" id="copyIdeaButton" class="btn btn-outline-secondary btn-sm me-2" title="Copy raw markdown">
+              <i class="fa-regular fa-copy"></i>
+            </button>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
         </div>
         <div class="modal-body">
           <div id="ideaModalContent" class="idea-content"></div>

@@ -11,6 +11,7 @@ let currentEvolutionId = null;
 let ideasDb = {};
 let currentRatingType = 'auto';
 let autoRatingInProgress = false;
+let currentModalIdea = null;
 
 // Fetch a random pair on load
 window.addEventListener("load", () => {
@@ -902,6 +903,7 @@ function showIdeaDetails(ideaIndex) {
     }
 
     const idea = window.rankedIdeas[ideaIndex];
+    currentModalIdea = idea;
 
     // Set modal title
     document.getElementById('ideaModalLabel').textContent = idea.title || 'Untitled';
@@ -933,6 +935,15 @@ document.addEventListener('DOMContentLoaded', function() {
     const returnButton = document.getElementById('returnToComparison');
     if (returnButton) {
         returnButton.addEventListener('click', showComparisonView);
+    }
+
+    const copyButton = document.getElementById('copyIdeaButton');
+    if (copyButton) {
+        copyButton.addEventListener('click', () => {
+            if (!currentModalIdea) return;
+            const text = `${currentModalIdea.title || ''}\n\n${currentModalIdea.content || ''}`;
+            navigator.clipboard.writeText(text).catch(err => console.error('Copy failed', err));
+        });
     }
 });
 
@@ -1208,6 +1219,7 @@ function showIdeaDetails(ideaIndex) {
     }
 
     const idea = window.rankedIdeas[ideaIndex];
+    currentModalIdea = idea;
 
     // Get the rating values
     const autoRating = idea.ratings?.auto || idea.elo || 1500;

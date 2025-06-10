@@ -146,6 +146,7 @@ class Ideator(LLMWrapper):
             ideas.append({"id": uuid.uuid4(), "idea": response, "parent_ids": []})
         return ideas
 
+
 class Formatter(LLMWrapper):
     """Reformats unstructured ideas into a cleaner format"""
     agent_name = "Formatter"

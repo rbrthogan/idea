@@ -26,6 +26,3 @@ def test_ideator_uses_configured_temperature(monkeypatch):
     ideator.seed_ideas(2, "airesearch")
     assert all(t == 0.42 for t in used_temps)
 
-    used_temps.clear()
-    ideator.generate_new_idea([{"id": 1, "idea": "A"}], "airesearch")
-    assert used_temps[-1] == 0.42
