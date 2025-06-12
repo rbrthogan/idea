@@ -22,8 +22,8 @@ class PromptSet(BaseModel):
     critique: str = Field(..., description="Prompt for critiquing ideas")
     refine: str = Field(..., description="Prompt for refining ideas based on critique")
     breed: str = Field(..., description="Prompt for breeding/combining ideas")
-    # Optional comparison prompt stored under prompts
-    comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas")
+    # Optional comparison prompt - will be generated dynamically if not provided
+    comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas (optional - auto-generated)")
 
 
 class PromptTemplate(BaseModel):
@@ -38,7 +38,7 @@ class PromptTemplate(BaseModel):
     prompts: PromptSet = Field(..., description="Set of prompts")
     comparison_criteria: List[str] = Field(..., description="Criteria for comparing generated ideas")
     # Optional comparison prompt at root level for backward compatibility
-    comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas")
+    comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas (optional - auto-generated)")
 
     # Special requirements for this template type
     special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")
@@ -128,7 +128,7 @@ class TemplateValidator:
         # Check for template-specific requirements interpolation
         if template.special_requirements:
             for prompt_name, prompt_text in prompts_dict.items():
-                if '{requirements}' in prompt_text and not template.special_requirements:
+                if prompt_text and '{requirements}' in prompt_text and not template.special_requirements:
                     warnings.append(f"{prompt_name} references requirements but it's not defined")
 
         return warnings

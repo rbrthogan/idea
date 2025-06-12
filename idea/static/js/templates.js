@@ -31,6 +31,17 @@ function hideLoadingState() {
 }
 
 /**
+ * Determine if a template is a core template based on its metadata
+ */
+function isCoreTemplate(templateId, templateInfo) {
+    // A template is considered core if:
+    // 1. It's authored by "Original Idea App"
+    // 2. It's one of the original templates that shipped with the system
+    return templateInfo.author === 'Original Idea App' ||
+           ['drabble', 'airesearch', 'game_design'].includes(templateId);
+}
+
+/**
  * Load and display all templates with enhanced UX
  */
 async function loadTemplates() {
@@ -65,33 +76,40 @@ async function loadTemplates() {
  * Display templates with enhanced styling and animations
  */
 function displayTemplates(templates) {
+    const filteredTemplates = filterAndSearchTemplates(templates);
     const grid = document.getElementById('templatesGrid');
     grid.innerHTML = '';
-
-    const filteredTemplates = filterAndSearchTemplates(templates);
 
     if (Object.keys(filteredTemplates).length === 0) {
         showEmptyState();
         return;
     }
 
-    document.getElementById('emptyState').style.display = 'none';
+    hideLoadingState();
+    hideEmptyState();
 
-    const coreTemplates = ['drabble', 'airesearch', 'game_design'];
     let cardIndex = 0;
+    const totalTemplates = Object.keys(templates).length;
+    let coreCount = 0;
+    let customCount = 0;
 
     for (const [templateId, templateInfo] of Object.entries(filteredTemplates)) {
-        if (templateInfo.error) {
-            continue; // Skip errored templates
+        if (templateInfo.error) continue;
+
+        const isCore = isCoreTemplate(templateId, templateInfo);
+
+        if (isCore) {
+            coreCount++;
+        } else {
+            customCount++;
         }
 
-        const isCore = coreTemplates.includes(templateId);
-        const cardClass = isCore ? 'core-template' : 'custom-template';
-        const badgeClass = isCore ? 'bg-success' : 'bg-secondary';
-
         const card = document.createElement('div');
-        card.className = 'col-lg-4 col-md-6 mb-4';
+        card.className = 'col-md-6 col-lg-4 mb-4';
         card.style.animationDelay = `${cardIndex * 0.1}s`;
+
+        const cardClass = isCore ? 'core-template' : 'custom-template';
+        const badgeClass = isCore ? 'bg-success' : 'bg-primary';
 
         card.innerHTML = `
             <div class="card template-card h-100 ${cardClass}">
@@ -135,6 +153,11 @@ function displayTemplates(templates) {
         grid.appendChild(card);
         cardIndex++;
     }
+
+    // Update stats
+    document.getElementById('totalCount').textContent = totalTemplates;
+    document.getElementById('coreCount').textContent = coreCount;
+    document.getElementById('customCount').textContent = customCount;
 }
 
 /**
@@ -142,12 +165,11 @@ function displayTemplates(templates) {
  */
 function filterAndSearchTemplates(templates) {
     let filtered = {};
-    const coreTemplates = ['drabble', 'airesearch', 'game_design'];
 
     for (const [templateId, templateInfo] of Object.entries(templates)) {
         if (templateInfo.error) continue;
 
-        const isCore = coreTemplates.includes(templateId);
+        const isCore = isCoreTemplate(templateId, templateInfo);
 
         // Apply filter
         if (currentFilter === 'core' && !isCore) continue;
@@ -182,10 +204,16 @@ function showEmptyState() {
 }
 
 /**
+ * Hide empty state
+ */
+function hideEmptyState() {
+    document.getElementById('emptyState').style.display = 'none';
+}
+
+/**
  * Update statistics
  */
 function updateStatistics() {
-    const coreTemplates = ['drabble', 'airesearch', 'game_design'];
     let totalCount = 0;
     let coreCount = 0;
     let customCount = 0;
@@ -194,7 +222,7 @@ function updateStatistics() {
         if (templateInfo.error) continue;
 
         totalCount++;
-        if (coreTemplates.includes(templateId)) {
+        if (isCoreTemplate(templateId, templateInfo)) {
             coreCount++;
         } else {
             customCount++;

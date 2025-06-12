@@ -143,11 +143,26 @@ async function loadTemplateTypes() {
  */
 function populateFallbackTemplates() {
     const ideaTypeSelect = document.getElementById('ideaType');
+
+    // Instead of hardcoded templates, try to populate with basic core templates
+    // If this also fails, at least we have some options
     ideaTypeSelect.innerHTML = `
-        <option value="airesearch">AI Research</option>
-        <option value="game_design">Game Design</option>
-        <option value="drabble">Drabble (100-word story)</option>
+        <option value="">Loading templates...</option>
     `;
+
+    // Try once more after a short delay
+    setTimeout(() => {
+        loadTemplateTypes();
+    }, 1000);
+
+    // If that fails too, show a basic message
+    setTimeout(() => {
+        if (ideaTypeSelect.options.length <= 1) {
+            ideaTypeSelect.innerHTML = `
+                <option value="">No templates available - check Template Manager</option>
+            `;
+        }
+    }, 3000);
 }
 
 document.addEventListener("DOMContentLoaded", () => {

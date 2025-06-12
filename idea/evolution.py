@@ -4,13 +4,28 @@ import numpy as np
 import asyncio
 from idea.models import Idea
 from idea.llm import Ideator, Formatter, Critic, Breeder
+from idea.prompts.loader import list_available_templates
 from tqdm import tqdm
+
+
+def get_default_template_id():
+    """Get the first available template ID as default"""
+    try:
+        templates = list_available_templates()
+        # Find the first template without errors
+        for template_id, template_info in templates.items():
+            if 'error' not in template_info:
+                return template_id
+        # Fallback to airesearch if nothing else works
+        return 'airesearch'
+    except:
+        return 'airesearch'
 
 
 class EvolutionEngine:
     def __init__(
         self,
-        idea_type="airesearch",
+        idea_type=None,
         pop_size: int = 5,
         generations: int = 3,
         model_type: str = "gemini-2.0-flash",
@@ -20,7 +35,7 @@ class EvolutionEngine:
         tournament_size: int = 5,
         tournament_comparisons: int = 20
     ):
-        self.idea_type = idea_type
+        self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
         self.generations = generations
         self.tournament_size = tournament_size

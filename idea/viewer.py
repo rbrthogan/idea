@@ -94,14 +94,17 @@ async def get_template_types():
     try:
         templates = list_available_templates()
 
-        # Format for dropdown
+        # Format for dropdown - include both YAML and Python templates
         template_types = []
         for template_id, template_info in templates.items():
-            if template_info.get('type') == 'yaml' and 'error' not in template_info:
+            # Include templates that don't have errors
+            if 'error' not in template_info:
                 template_types.append({
                     "id": template_id,
                     "name": template_info.get('name', template_id.replace('_', ' ').title()),
-                    "description": template_info.get('description', '')
+                    "description": template_info.get('description', ''),
+                    "type": template_info.get('type', 'unknown'),
+                    "author": template_info.get('author', 'Unknown')
                 })
 
         # Sort by name
@@ -116,6 +119,19 @@ async def get_template_types():
             "status": "error",
             "message": str(e)
         }, status_code=500)
+
+def get_default_template_id():
+    """Get the first available template ID as default"""
+    try:
+        templates = list_available_templates()
+        # Find the first template without errors
+        for template_id, template_info in templates.items():
+            if 'error' not in template_info:
+                return template_id
+        # Fallback to airesearch if nothing else works
+        return 'airesearch'
+    except:
+        return 'airesearch'
 
 @app.post("/api/start-evolution")
 async def start_evolution(request: Request):
@@ -138,7 +154,7 @@ async def start_evolution(request: Request):
 
     pop_size = int(data.get('popSize', 3))
     generations = int(data.get('generations', 2))
-    idea_type = data.get('ideaType', 'airesearch')
+    idea_type = data.get('ideaType', get_default_template_id())
     model_type = data.get('modelType', 'gemini-2.0-flash-lite')
 
     # Get temperature parameters with defaults
@@ -608,7 +624,7 @@ async def auto_rate(request: Request):
         elo_range = int(data.get('eloRange', 100))  # Get ELO range from request, default to 100
 
         # Get idea_type from the request or use a default
-        idea_type = data.get('ideaType', 'airesearch')
+        idea_type = data.get('ideaType', get_default_template_id())
 
         print(f"Starting auto-rating for evolution {evolution_id} with {num_comparisons} comparisons using model {model_id}")
         print(f"Using ELO range of ±{elo_range} for matching ideas")
@@ -624,7 +640,7 @@ async def auto_rate(request: Request):
 
         # Try to extract idea_type from the evolution data if not provided in request
         if 'idea_type' in evolution_data and not idea_type:
-            idea_type = evolution_data.get('idea_type', 'airesearch')
+            idea_type = evolution_data.get('idea_type', get_default_template_id())
 
         # Create a mapping from idea ID to its location in the evolution_data structure
         idea_map = {}

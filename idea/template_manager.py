@@ -36,7 +36,6 @@ class TemplateCreateRequest(BaseModel):
     critique_prompt: str = Field(..., description="Critique prompt")
     refine_prompt: str = Field(..., description="Refine prompt")
     breed_prompt: str = Field(..., description="Breed prompt")
-    comparison_prompt: Optional[str] = Field(None, description="Idea comparison prompt")
     comparison_criteria: List[str] = Field(..., description="Comparison criteria")
 
 
@@ -54,7 +53,6 @@ class TemplateUpdateRequest(BaseModel):
     critique_prompt: Optional[str] = None
     refine_prompt: Optional[str] = None
     breed_prompt: Optional[str] = None
-    comparison_prompt: Optional[str] = None
     comparison_criteria: Optional[List[str]] = None
 
 
@@ -102,23 +100,7 @@ def get_template_starter() -> Dict[str, Any]:
                     "Focus on originality and bringing something new to the table.\n"
                     "Think outside the box and be creative.\n"
                     "\n{requirements}",
-            "comparison_prompt": (
-                "You are an expert evaluator of {item_type}. You will be presented with two {item_type}, and your task is to determine which one is better.\n\n"
-                "Idea A:\n"
-                "Title: {idea_a_title}\n"
-                "{idea_a_content}\n\n"
-                "Idea B:\n"
-                "Title: {idea_b_title}\n"
-                "{idea_b_content}\n\n"
-                "Evaluate both ideas based on the following criteria:\n"
-                "{criteria}\n\n"
-                "Criterion 1 is the most important.\n\n"
-                "After your evaluation, respond with exactly one of these three options:\n"
-                "- \"Result: A\" if Idea A is better\n"
-                "- \"Result: B\" if Idea B is better\n"
-                "- \"Result: tie\" if both ideas are approximately equal in quality\n\n"
-                "Your response must contain exactly one of these three phrases and nothing else."
-            )
+
         },
         "comparison_criteria": [
             "originality and creativity",
@@ -227,8 +209,7 @@ async def create_template(request: TemplateCreateRequest):
                 "format": request.format_prompt,
                 "critique": request.critique_prompt,
                 "refine": request.refine_prompt,
-                "breed": request.breed_prompt,
-                "comparison_prompt": request.comparison_prompt
+                "breed": request.breed_prompt
             },
             "comparison_criteria": request.comparison_criteria
         }
@@ -301,10 +282,6 @@ async def update_template(template_id: str, request: TemplateUpdateRequest):
             template_data["prompts"]["refine"] = request.refine_prompt
         if request.breed_prompt is not None:
             template_data["prompts"]["breed"] = request.breed_prompt
-        if request.comparison_prompt is not None:
-            template_data["prompts"]["comparison_prompt"] = request.comparison_prompt
-
-        # Update criteria
         if request.comparison_criteria is not None:
             template_data["comparison_criteria"] = request.comparison_criteria
 
@@ -342,6 +319,24 @@ async def update_template(template_id: str, request: TemplateUpdateRequest):
         }, status_code=500)
 
 
+def get_core_templates() -> set:
+    """
+    Dynamically determine core templates based on their metadata or location.
+    Core templates are those that come with the system by default.
+    """
+    core_templates = set()
+    templates = list_available_templates()
+
+    for template_id, template_info in templates.items():
+        # Consider templates as core if they have "Original Idea App" as author
+        # or if they're in the standard templates that ship with the system
+        if (template_info.get('author') == 'Original Idea App' or
+            template_id in {'drabble', 'airesearch', 'game_design'}):
+            core_templates.add(template_id)
+
+    return core_templates
+
+
 @router.delete("/{template_id}")
 async def delete_template(template_id: str):
     """Delete a template"""
@@ -352,7 +347,7 @@ async def delete_template(template_id: str):
             raise HTTPException(status_code=404, detail="Template not found")
 
         # Don't allow deletion of core templates
-        core_templates = {"drabble", "airesearch", "game_design"}
+        core_templates = get_core_templates()
         if template_id in core_templates:
             return JSONResponse({
                 "status": "error",
