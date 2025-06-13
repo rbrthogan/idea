@@ -17,3 +17,4 @@
 
 ## Bugs
 - Fix oracle replacement mode (idea doesn't get replaced, oracle idea is lost)
+- Oracle not appearing in cost estimate - check if it's getting counted properly
