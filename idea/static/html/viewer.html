@@ -176,7 +176,7 @@
               <option value="gemini-2.0-pro-exp-02-05">Gemini 2.0 Pro Exp</option>
               <option value="gemini-2.0-flash-thinking-exp-01-21">Gemini 2.0 Flash Thinking (01-21)</option>
               <option value="gemini-2.5-flash-preview-05-20">Gemini 2.5 Flash</option>
-              <option value="gemini-2.5-pro-preview-05-06">Gemini 2.5 Pro</option>
+              <option value="gemini-2.5-pro-preview-06-05">Gemini 2.5 Pro</option>
             </select>
           </div>
           <div class="mb-3">
@@ -253,6 +253,29 @@
                   </label>
                   <input type="range" class="form-range" min="5" max="50" step="5" id="tournamentComparisons" value="20" oninput="document.getElementById('tournamentComparisonsValue').textContent = this.value">
                   <small class="text-muted">Number of comparisons to run in each tournament</small>
+                </div>
+
+                <h6 class="mb-3 mt-4">Breeding Method</h6>
+
+                <!-- Genotype Breeding Toggle -->
+                <div class="mb-3">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="useGenotypeBreeding">
+                    <label class="form-check-label" for="useGenotypeBreeding">
+                      Use Genotype-Based Breeding
+                    </label>
+                  </div>
+                  <small class="text-muted">Enable genetic crossover at the fundamental element level for improved diversity</small>
+                </div>
+
+                <!-- Genotype Encoder Temperature (only shown when genotype breeding is enabled) -->
+                <div class="mb-3" id="genotypeEncoderTempContainer" style="display: none;">
+                  <label for="genotypeEncoderTemp" class="form-label d-flex justify-content-between">
+                    <span>Genotype Encoder Temperature</span>
+                    <span id="genotypeEncoderTempValue">1.2</span>
+                  </label>
+                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="genotypeEncoderTemp" value="1.2" oninput="document.getElementById('genotypeEncoderTempValue').textContent = this.value">
+                  <small class="text-muted">Controls creativity when encoding/decoding genotypes</small>
                 </div>
               </div>
             </div>

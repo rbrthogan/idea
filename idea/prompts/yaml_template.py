@@ -71,6 +71,11 @@ class YAMLTemplateWrapper:
         self.REFINE_PROMPT = self._interpolate_prompt(self.template.prompts.refine)
         self.BREED_PROMPT = self._interpolate_prompt(self.template.prompts.breed)
 
+        # Genotype prompts - now required in all templates
+        self.GENOTYPE_ENCODE_PROMPT = self.template.prompts.genotype_encode
+        self.GENOTYPE_DECODE_PROMPT = self.template.prompts.genotype_decode
+        self.GENOTYPE_CROSSOVER_PROMPT = self.template.prompts.genotype_crossover
+
         # Generate comparison prompt dynamically from criteria
         self.COMPARISON_PROMPT = generate_comparison_prompt(
             self.ITEM_TYPE,

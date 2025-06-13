@@ -3,7 +3,7 @@ import random
 import numpy as np
 import asyncio
 from idea.models import Idea
-from idea.llm import Ideator, Formatter, Critic, Breeder
+from idea.llm import Ideator, Formatter, Critic, Breeder, GenotypeEncoder
 from idea.prompts.loader import list_available_templates
 from tqdm import tqdm
 
@@ -33,23 +33,35 @@ class EvolutionEngine:
         critic_temp: float = 1.5,
         breeder_temp: float = 2.0,
         tournament_size: int = 5,
-        tournament_comparisons: int = 20
+        tournament_comparisons: int = 20,
+        use_genotype_breeding: bool = False,
+        genotype_encoder_temp: float = 1.2
     ):
         self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
         self.generations = generations
         self.tournament_size = tournament_size
         self.tournament_comparisons = tournament_comparisons
+        self.use_genotype_breeding = use_genotype_breeding
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
 
         # Initialize LLM components with appropriate temperatures
         print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}")
+        if use_genotype_breeding:
+            print(f"Genotype breeding enabled with GenotypeEncoder temperature: {genotype_encoder_temp}")
+
         self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=ideator_temp)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
         self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=critic_temp)
         self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=breeder_temp)
+
+        # Initialize genotype encoder if genotype breeding is enabled
+        if use_genotype_breeding:
+            self.genotype_encoder = GenotypeEncoder(provider="google_generative_ai", model_name=model_type, temperature=genotype_encoder_temp)
+        else:
+            self.genotype_encoder = None
 
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
@@ -232,7 +244,7 @@ class EvolutionEngine:
                         # Select parents and breed
                         parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights, replace=False)
                         parent_ideas = [group[idx] for idx in parent_indices]
-                        new_idea = self.breeder.breed(parent_ideas, self.idea_type)
+                        new_idea = self.breeder.breed(parent_ideas, self.idea_type, self.use_genotype_breeding, self.genotype_encoder)
 
                         # Format the idea and add to new population
                         formatted_idea = self.formatter.format_idea(new_idea, self.idea_type)
@@ -312,10 +324,12 @@ class EvolutionEngine:
         critic_output = getattr(self.critic, 'output_token_count', 0)
         breeder_input = getattr(self.breeder, 'input_token_count', 0)
         breeder_output = getattr(self.breeder, 'output_token_count', 0)
+        genotype_encoder_input = getattr(self.genotype_encoder, 'input_token_count', 0) if self.genotype_encoder else 0
+        genotype_encoder_output = getattr(self.genotype_encoder, 'output_token_count', 0) if self.genotype_encoder else 0
 
         # Calculate totals
-        total_input = ideator_input + formatter_input + critic_input + breeder_input
-        total_output = ideator_output + formatter_output + critic_output + breeder_output
+        total_input = ideator_input + formatter_input + critic_input + breeder_input + genotype_encoder_input
+        total_output = ideator_output + formatter_output + critic_output + breeder_output + genotype_encoder_output
         total = total_input + total_output
 
         # Get pricing information from config
@@ -326,6 +340,7 @@ class EvolutionEngine:
         formatter_model = getattr(self.formatter, 'model_name', 'gemini-2.0-flash')
         critic_model = getattr(self.critic, 'model_name', 'gemini-2.0-flash')
         breeder_model = getattr(self.breeder, 'model_name', 'gemini-2.0-flash')
+        genotype_encoder_model = getattr(self.genotype_encoder, 'model_name', 'gemini-2.0-flash') if self.genotype_encoder else None
 
         # Default pricing if model not found in config
         default_price = {"input": 0.1, "output": 0.4}
@@ -335,6 +350,7 @@ class EvolutionEngine:
         formatter_pricing = model_prices_per_million_tokens.get(formatter_model, default_price)
         critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
         breeder_pricing = model_prices_per_million_tokens.get(breeder_model, default_price)
+        genotype_encoder_pricing = model_prices_per_million_tokens.get(genotype_encoder_model, default_price) if genotype_encoder_model else default_price
 
         # Calculate cost for each component
         ideator_input_cost = (ideator_pricing["input"] * ideator_input) / 1_000_000
@@ -345,10 +361,12 @@ class EvolutionEngine:
         critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
         breeder_input_cost = (breeder_pricing["input"] * breeder_input) / 1_000_000
         breeder_output_cost = (breeder_pricing["output"] * breeder_output) / 1_000_000
+        genotype_encoder_input_cost = (genotype_encoder_pricing["input"] * genotype_encoder_input) / 1_000_000 if self.genotype_encoder else 0
+        genotype_encoder_output_cost = (genotype_encoder_pricing["output"] * genotype_encoder_output) / 1_000_000 if self.genotype_encoder else 0
 
         # Calculate total costs
-        total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost
-        total_output_cost = ideator_output_cost + formatter_output_cost + critic_output_cost + breeder_output_cost
+        total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost + genotype_encoder_input_cost
+        total_output_cost = ideator_output_cost + formatter_output_cost + critic_output_cost + breeder_output_cost + genotype_encoder_output_cost
         total_cost = total_input_cost + total_output_cost
 
         token_data = {
@@ -396,6 +414,17 @@ class EvolutionEngine:
                 'breeder': breeder_model
             }
         }
+
+        # Add genotype encoder data if enabled
+        if self.genotype_encoder:
+            token_data['genotype_encoder'] = {
+                'total': self.genotype_encoder.total_token_count,
+                'input': genotype_encoder_input,
+                'output': genotype_encoder_output,
+                'model': genotype_encoder_model,
+                'cost': genotype_encoder_input_cost + genotype_encoder_output_cost
+            }
+            token_data['models']['genotype_encoder'] = genotype_encoder_model
 
         # Calculate estimated total cost for each available model using the
         # overall token counts. This gives users a rough idea of what the

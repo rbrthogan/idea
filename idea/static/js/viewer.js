@@ -200,6 +200,10 @@ document.addEventListener("DOMContentLoaded", () => {
             const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
             const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
 
+            // Get genotype breeding values
+            const useGenotypeBreeding = document.getElementById('useGenotypeBreeding').checked;
+            const genotypeEncoderTemp = parseFloat(document.getElementById('genotypeEncoderTemp').value);
+
             const requestBody = {
                 popSize,
                 generations,
@@ -209,7 +213,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 criticTemp,
                 breederTemp,
                 tournamentSize,
-                tournamentComparisons
+                tournamentComparisons,
+                useGenotypeBreeding,
+                genotypeEncoderTemp
             };
 
             console.log("Request body JSON:", JSON.stringify(requestBody));
@@ -344,6 +350,22 @@ document.addEventListener("DOMContentLoaded", () => {
             updateContextDisplay();
         }
     });
+
+    // Add event listener for genotype breeding toggle
+    const genotypeToggle = document.getElementById('useGenotypeBreeding');
+    const genotypeEncoderTempContainer = document.getElementById('genotypeEncoderTempContainer');
+
+    if (genotypeToggle && genotypeEncoderTempContainer) {
+        genotypeToggle.addEventListener('change', function() {
+            if (this.checked) {
+                genotypeEncoderTempContainer.style.display = 'block';
+                console.log("Genotype breeding enabled");
+            } else {
+                genotypeEncoderTempContainer.style.display = 'none';
+                console.log("Genotype breeding disabled");
+            }
+        });
+    }
 });
 
 // Function to restore current evolution from localStorage

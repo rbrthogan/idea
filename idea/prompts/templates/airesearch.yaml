@@ -77,6 +77,62 @@ prompts:
 
 # Note: Comparison prompt is now generated dynamically from comparison_criteria
 
+  genotype_encode: |
+    You are an expert at analyzing AI research proposals and extracting their fundamental building blocks. Your task is to convert a full research proposal into its basic genetic elements (genotype).
+
+    For AI research proposals, the genotype should capture the essential components:
+    - Core AI technique/method (e.g., "neural networks", "reinforcement learning", "transformer architecture")
+    - Problem domain (e.g., "natural language processing", "computer vision", "robotics")
+    - Key innovation/contribution (e.g., "attention mechanism", "few-shot learning", "multimodal fusion")
+    - Application area (e.g., "medical diagnosis", "autonomous driving", "scientific discovery")
+    - Technical approach (e.g., "supervised learning", "self-supervised", "adversarial training")
+    - Evaluation method (e.g., "benchmark datasets", "human evaluation", "simulation")
+
+    Extract only the most fundamental elements - strip away elaboration, examples, and implementation details. Think of it as the "research DNA" of the proposal.
+
+    Format the genotype as a condensed list of these basic elements, separated by semicolons.
+
+    Example:
+    Input: "A novel transformer architecture for multi-modal medical image analysis that combines CT and MRI scans to improve diagnostic accuracy for neurological conditions using attention-based fusion mechanisms"
+    Output: "transformer architecture; multi-modal learning; medical imaging; CT scans; MRI scans; attention fusion; neurological diagnosis; diagnostic accuracy"
+
+    Research proposal to encode:
+    {idea_content}
+
+    Genotype:
+
+  genotype_decode: |
+    You are an expert AI researcher who can develop complete research proposals from basic genetic elements. Your task is to convert a genotype (basic elements) into a comprehensive, well-structured AI research proposal.
+
+    The genotype contains the essential building blocks. Your job is to:
+    - Expand these elements into a coherent, detailed research proposal
+    - Add technical depth, methodology, and implementation details
+    - Structure it with clear problem statement, approach, and expected outcomes
+    - Ensure it's feasible and addresses a meaningful research question
+    - Maintain scientific rigor while adding context and elaboration
+
+    Create a comprehensive research proposal that naturally incorporates all the genotype elements with proper academic structure and technical detail.
+
+    Genotype elements: {genotype}
+
+    Generate a full, detailed AI research proposal based on these elements:
+
+  genotype_crossover: |
+    You are a senior AI researcher performing genetic crossover on research proposal genotypes. Your task is to combine multiple parent genotypes to create a new, innovative research direction.
+
+    Crossover rules for AI research:
+    - Select the most promising techniques and methods from each parent
+    - Combine problem domains in novel ways to create interdisciplinary approaches
+    - Merge innovations to create hybrid or synergistic solutions
+    - Ensure technical coherence while maximizing research novelty
+    - Consider how different AI techniques can complement each other
+    - Maintain scientific feasibility while pushing boundaries
+
+    Parent genotypes:
+    {parent_genotypes}
+
+    Create a new research genotype by intelligently combining and potentially extending these elements. Focus on creating technically sound but innovative combinations that could lead to breakthrough research:
+
 comparison_criteria:
   - "originality and novelty"
   - "potential impact and significance"

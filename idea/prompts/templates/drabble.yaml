@@ -91,6 +91,65 @@ prompts:
 
 # Note: Comparison prompt is now generated dynamically from comparison_criteria
 
+  genotype_encode: |
+    You are an expert literary analyst skilled at deconstructing stories into their fundamental narrative DNA. Your task is to convert a complete drabble (100-word story) into its basic genetic elements (genotype).
+
+    For drabbles, the genotype should capture the essential storytelling components:
+    - Genre/style (e.g., "science fiction", "horror", "slice of life", "magical realism", "noir")
+    - Central conflict (e.g., "internal struggle", "person vs nature", "moral dilemma", "time pressure")
+    - Character archetype (e.g., "reluctant hero", "wise elder", "lost child", "conflicted professional")
+    - Setting/atmosphere (e.g., "urban decay", "isolated wilderness", "domestic space", "dystopian future")
+    - Narrative technique (e.g., "twist ending", "stream of consciousness", "dialogue-driven", "unreliable narrator")
+    - Emotional core (e.g., "loss and acceptance", "fear and courage", "love and sacrifice", "guilt and redemption")
+    - Thematic element (e.g., "identity", "mortality", "connection", "transformation", "memory")
+
+    Extract only the most fundamental narrative elements - strip away specific plot details, character names, and setting specifics. Think of it as the "story DNA" of the drabble.
+
+    Format the genotype as a condensed list of these basic elements, separated by semicolons.
+
+    Example:
+    Input: "Sarah's fingers trembled as she opened the letter. Twenty years later, and Mom's handwriting still made her heart race. 'I forgive you,' it read. But Mom had been dead for five years. Sarah laughed through tears, finally understanding. The letter was in her own handwriting—a message from her younger self, hidden and forgotten until now. Sometimes forgiveness comes from the most unexpected places."
+    Output: "psychological realism; guilt and redemption; mother-daughter relationship; domestic setting; twist ending; self-forgiveness; time/memory; epistolary element"
+
+    Drabble to encode:
+    {idea_content}
+
+    Genotype:
+
+  genotype_decode: |
+    You are a masterful creative writer who can craft complete stories from basic narrative elements. Your task is to convert a genotype (basic elements) into a complete, compelling 100-word drabble.
+
+    The genotype contains the essential storytelling building blocks. Your job is to:
+    - Weave these elements into a complete narrative arc with beginning, middle, and end
+    - Create specific characters, dialogue, and concrete details
+    - Build a vivid setting and atmosphere
+    - Ensure the story is exactly 100 words (not including title)
+    - Make it emotionally impactful and memorable
+    - Avoid clichés and overused tropes while incorporating the genetic elements naturally
+
+    Create a complete drabble that naturally incorporates all the genotype elements while telling a compelling, original story.
+
+    Genotype elements: {genotype}
+
+    Generate a complete, exactly 100-word drabble based on these elements:
+
+  genotype_crossover: |
+    You are an innovative creative writer performing genetic crossover on story genotypes. Your task is to combine multiple parent genotypes to create a new, compelling narrative direction.
+
+    Crossover rules for drabbles:
+    - Blend the most powerful emotional and thematic elements from each parent
+    - Combine genres and techniques in unexpected but coherent ways
+    - Merge character archetypes and conflicts to create complex dynamics
+    - Ensure the resulting combination maintains narrative coherence
+    - Maximize originality while avoiding genre confusion
+    - Create synergistic combinations where elements enhance each other
+    - Focus on emotional impact and thematic depth
+
+    Parent genotypes:
+    {parent_genotypes}
+
+    Create a new narrative genotype by intelligently combining and potentially transforming these elements. Focus on creating emotionally resonant combinations that could result in a powerful, original drabble:
+
 comparison_criteria:
   - "creativity"
   - "originality"
