@@ -14,6 +14,13 @@ LLM_MODELS = [
 # Default model
 DEFAULT_MODEL = "gemini-2.0-flash-lite"
 
+# Oracle configuration
+ORACLE_MODES = [
+    {"id": "add", "name": "Add New Idea (Grow Population)"},
+    {"id": "replace", "name": "Replace Least Diverse Idea"}
+]
+
+DEFAULT_ORACLE_MODE = "add"
 
 model_prices_per_million_tokens = {
     "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.3},

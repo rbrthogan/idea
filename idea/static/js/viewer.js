@@ -139,6 +139,49 @@ async function loadTemplateTypes() {
 }
 
 /**
+ * Load available Oracle modes and populate the Oracle mode dropdown
+ */
+async function loadOracleModes() {
+    try {
+        const response = await fetch('/api/oracle-modes');
+        const data = await response.json();
+
+        if (data.status === 'success' || (data.modes && data.modes.length > 0)) {
+            const oracleModeSelect = document.getElementById('oracleMode');
+            if (oracleModeSelect) {
+                oracleModeSelect.innerHTML = ''; // Clear existing options
+
+                data.modes.forEach(mode => {
+                    const option = document.createElement('option');
+                    option.value = mode.id;
+                    option.textContent = mode.name;
+                    oracleModeSelect.appendChild(option);
+                });
+
+                // Set default selection
+                if (data.default) {
+                    oracleModeSelect.value = data.default;
+                } else if (data.modes.length > 0) {
+                    oracleModeSelect.value = data.modes[0].id;
+                }
+            }
+        } else {
+            console.error('Error loading Oracle modes:', data.message || 'No modes found');
+        }
+    } catch (error) {
+        console.error('Error loading Oracle modes:', error);
+        // Fallback to hardcoded options if API fails
+        const oracleModeSelect = document.getElementById('oracleMode');
+        if (oracleModeSelect && oracleModeSelect.children.length === 0) {
+            oracleModeSelect.innerHTML = `
+                <option value="add">Add New Idea (Grow Population)</option>
+                <option value="replace">Replace Least Diverse Idea</option>
+            `;
+        }
+    }
+}
+
+/**
  * Fallback template population if API fails
  */
 function populateFallbackTemplates() {
@@ -170,6 +213,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Load available templates
     loadTemplateTypes();
+
+    // Load available Oracle modes
+    loadOracleModes();
 
     // Set up temperature sliders
     setupTemperatureSliders();
@@ -204,6 +250,11 @@ document.addEventListener("DOMContentLoaded", () => {
             const useGenotypeBreeding = document.getElementById('useGenotypeBreeding').checked;
             const genotypeEncoderTemp = parseFloat(document.getElementById('genotypeEncoderTemp').value);
 
+            // Get Oracle values
+            const useOracle = document.getElementById('useOracle').checked;
+            const oracleMode = document.getElementById('oracleMode').value;
+            const oracleTemp = parseFloat(document.getElementById('oracleTemp').value);
+
             const requestBody = {
                 popSize,
                 generations,
@@ -215,7 +266,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 tournamentSize,
                 tournamentComparisons,
                 useGenotypeBreeding,
-                genotypeEncoderTemp
+                genotypeEncoderTemp,
+                useOracle,
+                oracleMode,
+                oracleTemp
             };
 
             console.log("Request body JSON:", JSON.stringify(requestBody));
@@ -363,6 +417,25 @@ document.addEventListener("DOMContentLoaded", () => {
             } else {
                 genotypeEncoderTempContainer.style.display = 'none';
                 console.log("Genotype breeding disabled");
+            }
+        });
+    }
+
+    // Add event listener for Oracle toggle
+    const oracleToggle = document.getElementById('useOracle');
+    const oracleModeContainer = document.getElementById('oracleModeContainer');
+    const oracleTempContainer = document.getElementById('oracleTempContainer');
+
+    if (oracleToggle && oracleModeContainer && oracleTempContainer) {
+        oracleToggle.addEventListener('change', function() {
+            if (this.checked) {
+                oracleModeContainer.style.display = 'block';
+                oracleTempContainer.style.display = 'block';
+                console.log("Oracle diversity agent enabled");
+            } else {
+                oracleModeContainer.style.display = 'none';
+                oracleTempContainer.style.display = 'none';
+                console.log("Oracle diversity agent disabled");
             }
         });
     }
@@ -697,10 +770,12 @@ function renderGenerations(gens) {
             const viewContextButton = index === 0 ?
                 `<button class="btn btn-outline-secondary btn-sm view-context me-2">View Context</button>` : '';
 
-            // Add "Lineage" button for non-initial generation cards
-            // Using the exact same styling as the View Context button but with shorter text
+            // Add "Lineage" or "Oracle Analysis" button for non-initial generation cards
+            // Check if this is an Oracle-generated idea to show appropriate button text
+            const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
+            const buttonText = isOracleIdea ? 'Oracle Analysis' : 'Lineage';
             const viewLineageButton = index > 0 ?
-                `<button class="btn btn-outline-secondary btn-sm view-lineage me-2">Lineage</button>` : '';
+                `<button class="btn btn-outline-secondary btn-sm view-lineage me-2">${buttonText}</button>` : '';
 
             card.innerHTML = `
                 <div class="card-body">
@@ -1583,7 +1658,7 @@ function showContextModal(ideaIndex) {
     }
 }
 
-// Function to show the lineage modal
+// Function to show the lineage modal (or Oracle analysis for Oracle-generated ideas)
 function showLineageModal(idea, generationIndex) {
     console.log("Showing lineage for idea:", idea);
 
@@ -1624,7 +1699,42 @@ function showLineageModal(idea, generationIndex) {
     // Get the lineage modal content element
     const lineageModalContent = document.getElementById('lineageModalContent');
 
-    // Set the modal title to include the idea title
+    // Check if this is an Oracle-generated idea
+    if (idea.oracle_generated && idea.oracle_analysis) {
+        // Show Oracle analysis instead of lineage
+        document.getElementById('lineageModalLabel').textContent = `Oracle Analysis: ${idea.title || 'Untitled'}`;
+
+        const analysisHtml = `
+            <div class="oracle-analysis-section">
+                <div class="alert alert-info mb-3">
+                    <h6><i class="fas fa-eye"></i> Oracle Diversity Analysis</h6>
+                    <p class="mb-0">This idea was generated by the Oracle agent to increase population diversity by identifying and addressing overused patterns.</p>
+                </div>
+                <div class="oracle-analysis-content">
+                    <h6>Analysis & Recommendations:</h6>
+                    <div class="analysis-text" style="white-space: pre-wrap; line-height: 1.6; background-color: #f8f9fa; padding: 1rem; border-radius: 0.375rem; border-left: 4px solid #0d6efd;">
+                        ${idea.oracle_analysis}
+                    </div>
+                </div>
+            </div>
+        `;
+
+        lineageModalContent.innerHTML = analysisHtml;
+
+        // Show the modal
+        let modal;
+        if (window.bootstrap) {
+            modal = new bootstrap.Modal(lineageModal);
+        } else {
+            // Fallback if bootstrap is not available
+            lineageModal.style.display = 'block';
+        }
+        modal.show();
+
+        return; // Exit early for Oracle ideas
+    }
+
+    // For regular ideas, set the modal title to include the idea title
     document.getElementById('lineageModalLabel').textContent = `Lineage: ${idea.title || 'Untitled'}`;
 
     // Function to recursively find ancestors

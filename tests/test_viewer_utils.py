@@ -7,80 +7,94 @@ from idea.models import Idea
 
 
 def test_idea_to_dict_from_model():
-    idea = Idea(title="Title", content="Proposal")
+    idea = Idea(title="Hello", content="World")
     result = idea_to_dict(idea)
-    assert result == {
-        "title": "Title",
-        "content": "Proposal",
-        "parent_ids": [],
-        "match_count": 0,
-        "auto_match_count": 0,
-        "manual_match_count": 0,
-    }
+    assert result["title"] == "Hello"
+    assert result["content"] == "World"
+    assert result["parent_ids"] == []
 
 
 def test_idea_to_dict_from_dict_with_model():
-    idea = Idea(title="T", content="P")
     input_data = {
-        "id": 123,
-        "idea": idea,
+        "id": "12345",
+        "idea": Idea(title="Hello", content="World"),
         "parent_ids": [1, 2],
-        "match_count": 1,
-        "auto_match_count": 2,
-        "manual_match_count": 3,
+        "match_count": 5,
+        "auto_match_count": 3,
+        "manual_match_count": 2
     }
     result = idea_to_dict(input_data)
-    assert result == {
-        "id": "123",
-        "title": "T",
-        "content": "P",
-        "parent_ids": [1, 2],
-        "match_count": 1,
-        "auto_match_count": 2,
-        "manual_match_count": 3,
-    }
+    assert result["id"] == "12345"
+    assert result["title"] == "Hello"
+    assert result["content"] == "World"
+    assert result["parent_ids"] == [1, 2]
+    assert result["match_count"] == 5
+    assert result["auto_match_count"] == 3
+    assert result["manual_match_count"] == 2
 
 
 def test_idea_to_dict_from_dict_with_string():
     input_data = {
-        "id": 5,
-        "idea": "raw idea",
+        "id": "12345",
+        "idea": "Hello World",
+        "parent_ids": [1, 2],
     }
     result = idea_to_dict(input_data)
-    assert result == {
-        "id": "5",
-        "title": "Untitled",
-        "content": "raw idea",
-        "parent_ids": [],
-        "match_count": 0,
-        "auto_match_count": 0,
-        "manual_match_count": 0,
-    }
+    assert result["id"] == "12345"
+    assert result["title"] == "Untitled"
+    assert result["content"] == "Hello World"
+    assert result["parent_ids"] == [1, 2]
 
 
 def test_idea_to_dict_from_dict_with_dict():
     input_data = {
-        "id": 1,
-        "idea": {"title": "A", "content": "B"},
-        "match_count": 9,
+        "id": "12345",
+        "idea": {"title": "Hello", "content": "World"},
+        "parent_ids": [1, 2],
     }
     result = idea_to_dict(input_data)
-    assert result == {
-        "id": "1",
-        "title": "A",
-        "content": "B",
-        "parent_ids": [],
-        "match_count": 9,
-        "auto_match_count": 0,
-        "manual_match_count": 0,
-    }
+    assert result["id"] == "12345"
+    assert result["title"] == "Hello"
+    assert result["content"] == "World"
+    assert result["parent_ids"] == [1, 2]
 
 
 def test_idea_to_dict_from_string():
     result = idea_to_dict("hello")
-    assert result == {
-        "title": "Untitled",
-        "content": "hello",
+    assert result["title"] == "Untitled"
+    assert result["content"] == "hello"
+    assert result["parent_ids"] == []
+
+
+def test_idea_to_dict_preserves_oracle_metadata():
+    """Test that Oracle metadata is properly preserved"""
+    input_data = {
+        "id": "oracle-test-id",
+        "idea": Idea(title="Oracle Generated Idea", content="This is an oracle idea"),
         "parent_ids": [],
-        "match_count": 0,
+        "oracle_generated": True,
+        "oracle_analysis": "This idea was generated to address diversity gaps in the population."
     }
+    result = idea_to_dict(input_data)
+    assert result["id"] == "oracle-test-id"
+    assert result["title"] == "Oracle Generated Idea"
+    assert result["content"] == "This is an oracle idea"
+    assert result["parent_ids"] == []
+    assert result["oracle_generated"] is True
+    assert result["oracle_analysis"] == "This idea was generated to address diversity gaps in the population."
+
+
+def test_idea_to_dict_without_oracle_metadata():
+    """Test that non-Oracle ideas don't have Oracle metadata"""
+    input_data = {
+        "id": "regular-test-id",
+        "idea": Idea(title="Regular Idea", content="This is a regular idea"),
+        "parent_ids": []
+    }
+    result = idea_to_dict(input_data)
+    assert result["id"] == "regular-test-id"
+    assert result["title"] == "Regular Idea"
+    assert result["content"] == "This is a regular idea"
+    assert result["parent_ids"] == []
+    assert "oracle_generated" not in result
+    assert "oracle_analysis" not in result

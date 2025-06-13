@@ -277,6 +277,39 @@
                   <input type="range" class="form-range" min="0" max="2" step="0.1" id="genotypeEncoderTemp" value="1.2" oninput="document.getElementById('genotypeEncoderTempValue').textContent = this.value">
                   <small class="text-muted">Controls creativity when encoding/decoding genotypes</small>
                 </div>
+
+                <h6 class="mb-3 mt-4">Oracle Diversity Enhancement</h6>
+
+                <!-- Oracle Toggle -->
+                <div class="mb-3">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="useOracle">
+                    <label class="form-check-label" for="useOracle">
+                      Enable Oracle Diversity Agent
+                    </label>
+                  </div>
+                  <small class="text-muted">Expensive agent that analyzes all previous generations to introduce diversity and avoid convergence</small>
+                </div>
+
+                <!-- Oracle Mode Selection (only shown when Oracle is enabled) -->
+                <div class="mb-3" id="oracleModeContainer" style="display: none;">
+                  <label for="oracleMode" class="form-label">Oracle Mode</label>
+                  <select class="form-select" id="oracleMode">
+                    <option value="add">Add New Idea (Grow Population)</option>
+                    <option value="replace">Replace Least Diverse Idea</option>
+                  </select>
+                  <small class="text-muted">Choose whether Oracle adds new ideas or replaces existing ones</small>
+                </div>
+
+                <!-- Oracle Temperature (only shown when Oracle is enabled) -->
+                <div class="mb-3" id="oracleTempContainer" style="display: none;">
+                  <label for="oracleTemp" class="form-label d-flex justify-content-between">
+                    <span>Oracle Temperature</span>
+                    <span id="oracleTempValue">1.8</span>
+                  </label>
+                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="oracleTemp" value="1.8" oninput="document.getElementById('oracleTempValue').textContent = this.value">
+                  <small class="text-muted">Controls creativity when generating diverse ideas (higher = more creative)</small>
+                </div>
               </div>
             </div>
           </div>

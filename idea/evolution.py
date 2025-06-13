@@ -3,7 +3,7 @@ import random
 import numpy as np
 import asyncio
 from idea.models import Idea
-from idea.llm import Ideator, Formatter, Critic, Breeder, GenotypeEncoder
+from idea.llm import Ideator, Formatter, Critic, Breeder, GenotypeEncoder, Oracle
 from idea.prompts.loader import list_available_templates
 from tqdm import tqdm
 
@@ -35,7 +35,10 @@ class EvolutionEngine:
         tournament_size: int = 5,
         tournament_comparisons: int = 20,
         use_genotype_breeding: bool = False,
-        genotype_encoder_temp: float = 1.2
+        genotype_encoder_temp: float = 1.2,
+        use_oracle: bool = False,
+        oracle_mode: str = "add",
+        oracle_temp: float = 1.8
     ):
         self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
@@ -43,6 +46,8 @@ class EvolutionEngine:
         self.tournament_size = tournament_size
         self.tournament_comparisons = tournament_comparisons
         self.use_genotype_breeding = use_genotype_breeding
+        self.use_oracle = use_oracle
+        self.oracle_mode = oracle_mode
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
@@ -51,6 +56,8 @@ class EvolutionEngine:
         print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}")
         if use_genotype_breeding:
             print(f"Genotype breeding enabled with GenotypeEncoder temperature: {genotype_encoder_temp}")
+        if use_oracle:
+            print(f"Oracle enabled with mode: {oracle_mode}, temperature: {oracle_temp}")
 
         self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=ideator_temp)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
@@ -62,6 +69,12 @@ class EvolutionEngine:
             self.genotype_encoder = GenotypeEncoder(provider="google_generative_ai", model_name=model_type, temperature=genotype_encoder_temp)
         else:
             self.genotype_encoder = None
+
+        # Initialize Oracle if enabled
+        if use_oracle:
+            self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=oracle_temp)
+        else:
+            self.oracle = None
 
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
@@ -177,7 +190,12 @@ class EvolutionEngine:
                 new_population = []
                 random.shuffle(self.population)
 
-                # Process population in chunks
+                # Generate exactly as many new ideas as the current population size (preserving Oracle additions)
+                current_pop_size = len(self.population)
+                print(f"Generating {current_pop_size} new ideas for next generation")
+
+                # Process population in chunks for breeding, but generate exactly current_pop_size ideas
+                ideas_generated = 0
                 for i in range(0, len(self.population), actual_tournament_size):
                     # Check for stop request during generation processing
                     if self.stop_requested:
@@ -196,7 +214,7 @@ class EvolutionEngine:
                             "history": self.history,
                             "contexts": self.contexts,
                             "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
-                            "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{self.pop_size} ideas)",
+                            "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
                             "token_counts": self.get_total_token_count()
                         })
                         return
@@ -210,7 +228,8 @@ class EvolutionEngine:
                         title = idea_obj.title if hasattr(idea_obj, 'title') else "Untitled"
                         print(f"{title} - {rank}")
 
-                    for k in range(len(group)):
+                    # Generate ideas from this group until we reach current_pop_size total
+                    while ideas_generated < current_pop_size:
                         # Check for stop request during breeding
                         if self.stop_requested:
                             self.is_stopped = True
@@ -228,7 +247,7 @@ class EvolutionEngine:
                                 "history": self.history,
                                 "contexts": self.contexts,
                                 "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
-                                "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{self.pop_size} ideas)",
+                                "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
                                 "token_counts": self.get_total_token_count()
                             })
                             return
@@ -237,9 +256,13 @@ class EvolutionEngine:
                         weights = [ranks[i] for i in range(len(group))]
                         # normalize weights to be between 0 and 1
                         # Note: this shift will cause the lowest ranked idea to have a weight of 0, eliminating it from selection
-                        weights = [(w - min(weights)) / (max(weights) - min(weights)) + 1e-6 for w in weights]
-                        weights = [(w / sum(weights)) for w in weights]
-
+                        weight_range = max(weights) - min(weights)
+                        if weight_range == 0:
+                            # All weights are the same, use uniform distribution
+                            weights = [1.0 / len(weights) for _ in weights]
+                        else:
+                            weights = [(w - min(weights)) / weight_range + 1e-6 for w in weights]
+                            weights = [(w / sum(weights)) for w in weights]
 
                         # Select parents and breed
                         parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights, replace=False)
@@ -249,6 +272,7 @@ class EvolutionEngine:
                         # Format the idea and add to new population
                         formatted_idea = self.formatter.format_idea(new_idea, self.idea_type)
                         new_population.append(formatted_idea)
+                        ideas_generated += 1
 
                         # Calculate overall progress
                         total_ideas = self.pop_size * (self.generations + 1)
@@ -272,10 +296,76 @@ class EvolutionEngine:
                         # Small delay to allow frontend to process updates and check for stop
                         await asyncio.sleep(0.1)
 
+                        # Break out of group processing if we've generated enough ideas
+                        if ideas_generated >= current_pop_size:
+                            break
+
                 # Update population with new ideas
                 self.population = new_population
                 self.history.append(self.population)
                 print(f"Generation {gen + 1} complete. Population size: {len(self.population)}")
+
+                # Apply Oracle for diversity enhancement (if enabled)
+                if self.use_oracle and self.oracle:
+                    try:
+                        print(f"Oracle analyzing population for diversity enhancement...")
+                        print(f"Population size before Oracle: {len(self.population)}")
+                        print(f"Oracle mode: {self.oracle_mode}")
+                        print(f"History generations: {len(self.history)}")
+
+                        oracle_result = self.oracle.analyze_and_diversify(
+                            self.history, self.population, self.idea_type, self.oracle_mode
+                        )
+
+                        print(f"Oracle result: {oracle_result}")
+
+                        if oracle_result["action"] == "add":
+                            # Add new diverse idea to population
+                            oracle_idea = oracle_result["new_idea"]
+                            print(f"Oracle generating new idea: {oracle_idea}")
+                            formatted_oracle_idea = self.formatter.format_idea(oracle_idea, self.idea_type)
+
+                            # Ensure Oracle metadata is preserved after formatting
+                            if not formatted_oracle_idea.get("oracle_generated", False):
+                                print("WARNING: Oracle metadata lost during formatting! Restoring...")
+                                formatted_oracle_idea["oracle_generated"] = True
+                                formatted_oracle_idea["oracle_analysis"] = oracle_idea.get("oracle_analysis", "Oracle analysis was lost during formatting")
+
+                            self.population.append(formatted_oracle_idea)
+                            print(f"Oracle added new diverse idea. Population size now: {len(self.population)}")
+                            print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
+
+                        elif oracle_result["action"] == "replace":
+                            # Replace existing idea with more diverse one
+                            replace_idx = oracle_result["replace_index"]
+                            oracle_idea = oracle_result["new_idea"]
+                            formatted_oracle_idea = self.formatter.format_idea(oracle_idea, self.idea_type)
+
+                            # Ensure Oracle metadata is preserved after formatting
+                            if not formatted_oracle_idea.get("oracle_generated", False):
+                                print("WARNING: Oracle metadata lost during formatting! Restoring...")
+                                formatted_oracle_idea["oracle_generated"] = True
+                                formatted_oracle_idea["oracle_analysis"] = oracle_idea.get("oracle_analysis", "Oracle analysis was lost during formatting")
+
+                            old_idea = self.population[replace_idx]
+                            old_title = "Unknown"
+                            if isinstance(old_idea, dict) and "idea" in old_idea:
+                                idea_obj = old_idea["idea"]
+                                if hasattr(idea_obj, 'title'):
+                                    old_title = idea_obj.title
+
+                            self.population[replace_idx] = formatted_oracle_idea
+                            print(f"Oracle replaced idea '{old_title}' at index {replace_idx} with more diverse alternative")
+                            print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
+
+                        # Update the history with Oracle's changes
+                        self.history[-1] = self.population.copy()
+                        print(f"Updated history with Oracle changes. Final population size: {len(self.population)}")
+
+                    except Exception as e:
+                        print(f"Oracle failed with error: {e}. Continuing without Oracle enhancement.")
+                        import traceback
+                        traceback.print_exc()
 
             # Mark evolution as complete (only if not stopped)
             if not self.stop_requested:
@@ -326,10 +416,12 @@ class EvolutionEngine:
         breeder_output = getattr(self.breeder, 'output_token_count', 0)
         genotype_encoder_input = getattr(self.genotype_encoder, 'input_token_count', 0) if self.genotype_encoder else 0
         genotype_encoder_output = getattr(self.genotype_encoder, 'output_token_count', 0) if self.genotype_encoder else 0
+        oracle_input = getattr(self.oracle, 'input_token_count', 0) if self.oracle else 0
+        oracle_output = getattr(self.oracle, 'output_token_count', 0) if self.oracle else 0
 
         # Calculate totals
-        total_input = ideator_input + formatter_input + critic_input + breeder_input + genotype_encoder_input
-        total_output = ideator_output + formatter_output + critic_output + breeder_output + genotype_encoder_output
+        total_input = ideator_input + formatter_input + critic_input + breeder_input + genotype_encoder_input + oracle_input
+        total_output = ideator_output + formatter_output + critic_output + breeder_output + genotype_encoder_output + oracle_output
         total = total_input + total_output
 
         # Get pricing information from config
@@ -341,6 +433,7 @@ class EvolutionEngine:
         critic_model = getattr(self.critic, 'model_name', 'gemini-2.0-flash')
         breeder_model = getattr(self.breeder, 'model_name', 'gemini-2.0-flash')
         genotype_encoder_model = getattr(self.genotype_encoder, 'model_name', 'gemini-2.0-flash') if self.genotype_encoder else None
+        oracle_model = getattr(self.oracle, 'model_name', 'gemini-2.0-flash') if self.oracle else None
 
         # Default pricing if model not found in config
         default_price = {"input": 0.1, "output": 0.4}
@@ -351,6 +444,7 @@ class EvolutionEngine:
         critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
         breeder_pricing = model_prices_per_million_tokens.get(breeder_model, default_price)
         genotype_encoder_pricing = model_prices_per_million_tokens.get(genotype_encoder_model, default_price) if genotype_encoder_model else default_price
+        oracle_pricing = model_prices_per_million_tokens.get(oracle_model, default_price) if oracle_model else default_price
 
         # Calculate cost for each component
         ideator_input_cost = (ideator_pricing["input"] * ideator_input) / 1_000_000
@@ -363,10 +457,12 @@ class EvolutionEngine:
         breeder_output_cost = (breeder_pricing["output"] * breeder_output) / 1_000_000
         genotype_encoder_input_cost = (genotype_encoder_pricing["input"] * genotype_encoder_input) / 1_000_000 if self.genotype_encoder else 0
         genotype_encoder_output_cost = (genotype_encoder_pricing["output"] * genotype_encoder_output) / 1_000_000 if self.genotype_encoder else 0
+        oracle_input_cost = (oracle_pricing["input"] * oracle_input) / 1_000_000 if self.oracle else 0
+        oracle_output_cost = (oracle_pricing["output"] * oracle_output) / 1_000_000 if self.oracle else 0
 
         # Calculate total costs
-        total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost + genotype_encoder_input_cost
-        total_output_cost = ideator_output_cost + formatter_output_cost + critic_output_cost + breeder_output_cost + genotype_encoder_output_cost
+        total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost + genotype_encoder_input_cost + oracle_input_cost
+        total_output_cost = ideator_output_cost + formatter_output_cost + critic_output_cost + breeder_output_cost + genotype_encoder_output_cost + oracle_output_cost
         total_cost = total_input_cost + total_output_cost
 
         token_data = {
@@ -425,6 +521,17 @@ class EvolutionEngine:
                 'cost': genotype_encoder_input_cost + genotype_encoder_output_cost
             }
             token_data['models']['genotype_encoder'] = genotype_encoder_model
+
+        # Add Oracle data if enabled
+        if self.oracle:
+            token_data['oracle'] = {
+                'total': self.oracle.total_token_count,
+                'input': oracle_input,
+                'output': oracle_output,
+                'model': oracle_model,
+                'cost': oracle_input_cost + oracle_output_cost
+            }
+            token_data['models']['oracle'] = oracle_model
 
         # Calculate estimated total cost for each available model using the
         # overall token counts. This gives users a rough idea of what the

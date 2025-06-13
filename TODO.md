@@ -16,4 +16,4 @@
 - Split evolution population into multiple "islands" of ideas, which are evolved independently with only rare opportunity for cross-island communication.
 
 ## Bugs
--
+- Fix oracle replacement mode (idea doesn't get replaced, oracle idea is lost)

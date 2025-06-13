@@ -191,11 +191,23 @@ async def start_evolution(request: Request):
         # Use defaults if parsing fails
         genotype_encoder_temp = 1.2
 
+    # Get Oracle parameters with defaults
+    use_oracle = data.get('useOracle', False)
+    oracle_mode = data.get('oracleMode', 'add')
+    try:
+        oracle_temp = float(data.get('oracleTemp', 1.8))
+        print(f"Parsed Oracle values: use_oracle={use_oracle}, oracle_mode={oracle_mode}, oracle_temp={oracle_temp}")
+    except ValueError as e:
+        print(f"Error parsing Oracle values: {e}")
+        # Use defaults if parsing fails
+        oracle_temp = 1.8
+
     print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
           f"idea_type={idea_type}, model_type={model_type}, "
           f"temperatures: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}, "
           f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"genotype_breeding={use_genotype_breeding}, genotype_encoder_temp={genotype_encoder_temp}")
+          f"genotype_breeding={use_genotype_breeding}, genotype_encoder_temp={genotype_encoder_temp}, "
+          f"oracle={use_oracle}, oracle_mode={oracle_mode}, oracle_temp={oracle_temp}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -209,7 +221,10 @@ async def start_evolution(request: Request):
         tournament_size=tournament_size,
         tournament_comparisons=tournament_comparisons,
         use_genotype_breeding=use_genotype_breeding,
-        genotype_encoder_temp=genotype_encoder_temp
+        genotype_encoder_temp=genotype_encoder_temp,
+        use_oracle=use_oracle,
+        oracle_mode=oracle_mode,
+        oracle_temp=oracle_temp
     )
 
     # Generate contexts for each idea
@@ -323,9 +338,13 @@ def idea_to_dict(idea) -> dict:
         # Get parent IDs if they exist
         parent_ids = idea.get('parent_ids', [])
 
+        # Get Oracle metadata if it exists
+        oracle_generated = idea.get('oracle_generated', False)
+        oracle_analysis = idea.get('oracle_analysis', '')
+
         # If the idea object has title and content attributes
         if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'content'):
-            return {
+            result = {
                 "id": str(idea_id),
                 "title": idea_obj.title,
                 "content": idea_obj.content,
@@ -334,9 +353,14 @@ def idea_to_dict(idea) -> dict:
                 "auto_match_count": idea.get('auto_match_count', 0),
                 "manual_match_count": idea.get('manual_match_count', 0)
             }
+            # Add Oracle metadata if present
+            if oracle_generated:
+                result["oracle_generated"] = oracle_generated
+                result["oracle_analysis"] = oracle_analysis
+            return result
         # If the idea object is a string
         elif isinstance(idea_obj, str):
-            return {
+            result = {
                 "id": str(idea_id),
                 "title": "Untitled",
                 "content": idea_obj,
@@ -345,6 +369,11 @@ def idea_to_dict(idea) -> dict:
                 "auto_match_count": idea.get('auto_match_count', 0),
                 "manual_match_count": idea.get('manual_match_count', 0)
             }
+            # Add Oracle metadata if present
+            if oracle_generated:
+                result["oracle_generated"] = oracle_generated
+                result["oracle_analysis"] = oracle_analysis
+            return result
         # If the idea object is already a dict
         elif isinstance(idea_obj, dict):
             result = idea_obj.copy()
@@ -353,11 +382,15 @@ def idea_to_dict(idea) -> dict:
             result["match_count"] = idea.get('match_count', 0)
             result["auto_match_count"] = idea.get('auto_match_count', 0)
             result["manual_match_count"] = idea.get('manual_match_count', 0)
+            # Add Oracle metadata if present
+            if oracle_generated:
+                result["oracle_generated"] = oracle_generated
+                result["oracle_analysis"] = oracle_analysis
             return result
 
     # Legacy case: idea is a direct Idea object
     elif hasattr(idea, 'title') and hasattr(idea, 'content'):
-        return {
+        result = {
             "title": idea.title,
             "content": idea.content,
             "parent_ids": [],
@@ -365,6 +398,11 @@ def idea_to_dict(idea) -> dict:
             "auto_match_count": getattr(idea, 'auto_match_count', 0),
             "manual_match_count": getattr(idea, 'manual_match_count', 0)
         }
+        # Check for Oracle metadata on the idea object itself
+        if hasattr(idea, 'oracle_generated') and idea.oracle_generated:
+            result["oracle_generated"] = idea.oracle_generated
+            result["oracle_analysis"] = getattr(idea, 'oracle_analysis', '')
+        return result
 
     # Fallback case: idea is a string
     elif isinstance(idea, str):
@@ -1053,6 +1091,15 @@ async def get_models():
     return JSONResponse({
         "models": LLM_MODELS,
         "default": DEFAULT_MODEL
+    })
+
+@app.get("/api/oracle-modes")
+async def get_oracle_modes():
+    """Return the list of available Oracle modes"""
+    from idea.config import ORACLE_MODES, DEFAULT_ORACLE_MODE
+    return JSONResponse({
+        "modes": ORACLE_MODES,
+        "default": DEFAULT_ORACLE_MODE
     })
 
 @app.post("/api/reset-ratings")
