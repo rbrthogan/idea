@@ -65,7 +65,7 @@ class YAMLTemplateWrapper:
         # Core prompts
         self.CONTEXT_PROMPT = self.template.prompts.context
         self.IDEA_PROMPT = self._interpolate_prompt(self.template.prompts.idea)
-        self.NEW_IDEA_PROMPT = self._interpolate_prompt(self.template.prompts.new_idea)
+
         self.FORMAT_PROMPT = self.template.prompts.format
         self.CRITIQUE_PROMPT = self.template.prompts.critique
         self.REFINE_PROMPT = self._interpolate_prompt(self.template.prompts.refine)

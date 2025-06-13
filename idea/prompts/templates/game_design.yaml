@@ -20,27 +20,21 @@ special_requirements: |
 
 prompts:
   context: |
-    Generate a list of 50 game design concepts. These concepts should be one of the following:
-    a genre, a game style, a game mechanic, a game object, a game art concept, a gameplay loop, a goal/objective, a narrative/theme, a game world
-    Return the list of concepts as a single string, separated by commas with no other text in format:
-    CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
+    Generate a diverse list of 50 specific game design concepts. Mix concrete and abstract elements:
+    - SPECIFIC mechanics (gravity manipulation, color switching, time reversal, magnetic attraction, etc.)
+    - CONCRETE objects (bouncing balls, sliding blocks, growing plants, melting ice, etc.)
+    - UNIQUE genres (reverse tower defense, social deduction, asymmetric co-op, etc.)
+    - DISTINCTIVE themes (microscopic world, paper craft, sound visualization, etc.)
+    - NOVEL interactions (breathing into microphone, eye tracking, rhythm tapping, etc.)
+    - CREATIVE objectives (create harmony, spread rumors, solve mysteries, etc.)
+
+    Avoid generic terms like "puzzle", "action", "shooting", "jumping", "collecting".
+    Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
   idea: |
-    You are a uniquely creative game designer.
-    The above is some context to get you inspired.
-    Using some or none of it for inspiration,
-    suggest a new game design that is both interesting and fun to play.
-    With key game mechanics and controls.
+    Your game design must be built around 3-4 specific concepts from the context above. Choose concepts that create interesting gameplay synergies or novel combinations.
 
-    {requirements}
-
-  new_idea: |
-    You are a uniquely creative game designer.
-    You are given the preceding list of game designs.
-    Considering the above ideas please propose a new idea, that could be completely new
-    and different from the ideas above or could combine ideas to create a new idea.
-    Please avoid minor refinements of the ideas above, and instead propose a new idea
-    that is a significant departure.
+    Design a browser game where the core mechanics, theme, and player interactions all stem from these chosen context elements. The game should be impossible to design without these specific elements as the foundation.
 
     {requirements}
 
@@ -73,13 +67,17 @@ prompts:
 
   breed: |
     {ideas}
-    You are an experienced game designer and you are given the above game designs.
-    These designs received good feedback but the studio leadership passed on selecting them for development.
-    Your task it to create a new design that is better, that will be more likely to be selected for development.
-    This can be a combination of the best elements of the existing designs, a refinement of the existing designs or a completely new one that you were inspired to create.
+    Analyze the above game designs to identify patterns:
+    1. Which gameplay mechanics and styles appear repeatedly
+    2. What themes and genres are overused
+    3. Which design elements remain unexplored
 
-    Importantly you will be judged on originality of the new design so need to make sure you bring something new to the table.
-    Think outside the box and be creative.
+    Create a new game design that either:
+    - Uses mechanics underrepresented in the designs above
+    - Explores themes and genres not heavily covered
+    - Combines elements in ways that haven't been tried yet
+
+    Focus on designs that maximize originality while maintaining browser-game feasibility.
 
     {requirements}
 

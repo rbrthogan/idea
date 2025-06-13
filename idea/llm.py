@@ -117,19 +117,18 @@ class Ideator(LLMWrapper):
             # Fallback if the expected format is not found
             context_text = text.strip()
 
-        # Sample 10% of the words
+        # Use more of the context - sample 30-50% instead of 10%
         words = [word.strip() for word in context_text.split(',')]
-        return ", ".join(random.sample(words, max(1, int(len(words) * 0.1))))
+        # Use between 30-50% of the words to maintain diversity while avoiding overwhelming context
+        sample_size = max(3, min(int(len(words) * 0.4), 15))  # 40% but cap at 15 words
+        return ", ".join(random.sample(words, sample_size))
 
     def get_idea_prompt(self, idea_type: str) -> str:
         """Get prompt template for specific idea type"""
         prompts = get_prompts(idea_type)
         return prompts.IDEA_PROMPT
 
-    def get_new_idea_prompt(self, idea_type: str) -> str:
-        """Get prompt template for generating a new idea"""
-        prompts = get_prompts(idea_type)
-        return prompts.NEW_IDEA_PROMPT
+
 
     def seed_ideas(self, n: int, idea_type: str) -> List[str]:
         """Generate n initial ideas"""

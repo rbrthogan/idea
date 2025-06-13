@@ -17,7 +17,7 @@ class PromptSet(BaseModel):
     """Set of prompts required for idea generation"""
     context: str = Field(..., description="Prompt for generating contextual concepts")
     idea: str = Field(..., description="Prompt for generating initial ideas")
-    new_idea: str = Field(..., description="Prompt for generating new ideas from existing ones")
+
     format: str = Field(..., description="Prompt for formatting raw ideas")
     critique: str = Field(..., description="Prompt for critiquing ideas")
     refine: str = Field(..., description="Prompt for refining ideas based on critique")

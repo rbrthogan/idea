@@ -16,24 +16,22 @@ special_requirements: |
 
 prompts:
   context: |
-    Generate a list of 50 AI research concepts. These concepts should be one of the following:
-    a technique/method, an algorithm, an architecture, a dataset, a modality, a task, a problem/challenge, a solution, an application/use case, a future direction.
-    Return the list of concepts as a single string, separated by commas with no other text in format:
-    CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
+    Generate a diverse list of 50 specific AI research concepts. Mix cutting-edge and foundational elements:
+    - SPECIFIC techniques (few-shot learning, diffusion models, neural architecture search, etc.)
+    - CONCRETE applications (protein folding, autonomous navigation, music generation, etc.)
+    - EMERGING areas (neurosymbolic AI, quantum ML, AI safety, etc.)
+    - INTERDISCIPLINARY domains (computational biology, digital humanities, climate modeling, etc.)
+    - NOVEL architectures (transformers, graph neural networks, mixture of experts, etc.)
+    - EVALUATION methods (human preference learning, causal inference, robustness testing, etc.)
+
+    Avoid generic terms like "deep learning", "AI", "machine learning", "neural networks", "classification".
+    Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
   idea: |
-    The above is some context to get you inspired.
-    Using some or none of it for inspiration,
-    suggest a promising area for novel research in AI (it can be a big idea, or a small idea, in any subdomain).
-    keep it concise and to the point but with enough detail for a researcher to critique it.
-    {requirements}
+    Your research proposal must incorporate 3-4 specific concepts from the context above as foundational elements. Choose concepts that create interesting intersections or novel combinations.
 
-  new_idea: |
-    You are an experienced researcher and you are given the preceding list of proposals.
-    Considering the above ideas please propose a new idea, that could be completely new
-    and different from the ideas above or could combine ideas to create a new idea.
-    Please avoid minor refinements of the ideas above, and instead propose a new idea
-    that is a significant departure.
+    Develop a research proposal where the methodology, problem domain, and expected contributions all stem from these chosen context elements.
+
     {requirements}
 
   format: |
@@ -66,12 +64,17 @@ prompts:
 
   breed: |
     {ideas}
-    You are an experienced ai researcher and you are given the above research proposals.
-    These proposals received good feedback but were unable to be selected for funding. Your task it to create a new proposal that is better.
-    This can be a combination of the best elements of the existing proposals, a refinement of the existing proposals or a completely new one that you were inspired to create.
+    Analyze the above research proposals to identify patterns:
+    1. Which technical approaches and methodologies appear repeatedly
+    2. What application domains are overused
+    3. Which research gaps remain unexplored
 
-    Importantly you will be judged on originality of the new proposal so need to make sure you bring something new to the table.
-    Think outside the box and be creative.
+    Create a new research proposal that either:
+    - Explores technical approaches underrepresented in the proposals above
+    - Targets application domains not heavily covered
+    - Addresses research questions that emerge from combining diverse elements in novel ways
+
+    Focus on research directions that maximize novelty while maintaining technical soundness.
 
     {requirements}
 
