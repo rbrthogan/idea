@@ -231,6 +231,27 @@ async def start_evolution(request: Request):
         "contexts": contexts
     })
 
+@app.post("/api/stop-evolution")
+async def stop_evolution():
+    """
+    Request the evolution to stop gracefully
+    """
+    global engine
+
+    if engine is None:
+        return JSONResponse(
+            {"status": "error", "message": "No evolution is currently running"},
+            status_code=400,
+        )
+
+    # Request stop
+    engine.stop_evolution()
+
+    return JSONResponse({
+        "status": "success",
+        "message": "Stop request sent - evolution will halt at the next safe point"
+    })
+
 async def run_evolution_task(engine):
     """Run evolution in background with progress updates"""
     global evolution_status, evolution_queue, latest_evolution_data

@@ -181,6 +181,8 @@ document.addEventListener("DOMContentLoaded", () => {
     restoreCurrentEvolution();
 
     const startButton = document.getElementById('startButton');
+    const stopButton = document.getElementById('stopButton');
+
     if (startButton) {
         startButton.onclick = async function() {
             console.log("Starting evolution...");
@@ -215,9 +217,11 @@ document.addEventListener("DOMContentLoaded", () => {
             // Reset UI state
             resetUIState();
 
-            // Disable start button
+            // Update button states
             startButton.disabled = true;
             startButton.textContent = 'Running...';
+            stopButton.disabled = false;
+            stopButton.style.display = 'block';
 
             try {
                 console.log("Sending request with:", {
@@ -254,13 +258,48 @@ document.addEventListener("DOMContentLoaded", () => {
                     updateContextDisplay();  // Update context display after loading new data
                 } else {
                     console.error("Failed to run evolution:", await response.text());
-                    startButton.disabled = false;
-                    startButton.textContent = 'Start Evolution';
+                    resetButtonStates();
                 }
             } catch (error) {
                 console.error("Error running evolution:", error);
-                startButton.disabled = false;
-                startButton.textContent = 'Start Evolution';
+                resetButtonStates();
+            }
+        };
+    }
+
+    if (stopButton) {
+        stopButton.onclick = async function() {
+            console.log("Stopping evolution...");
+
+            // Disable stop button and show stopping state
+            stopButton.disabled = true;
+            stopButton.textContent = 'Stopping...';
+
+            try {
+                const response = await fetch('/api/stop-evolution', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log("Stop request sent:", data.message);
+
+                    // Update button text to indicate stop is in progress
+                    stopButton.textContent = 'Stopping...';
+
+                    // The polling will handle the final button state reset when evolution actually stops
+                } else {
+                    console.error("Failed to stop evolution:", await response.text());
+                    stopButton.disabled = false;
+                    stopButton.textContent = 'Stop Evolution';
+                }
+            } catch (error) {
+                console.error("Error stopping evolution:", error);
+                stopButton.disabled = false;
+                stopButton.textContent = 'Stop Evolution';
             }
         };
     }
@@ -1040,7 +1079,7 @@ async function pollProgress() {
             isEvolutionRunning = true;
             setTimeout(pollProgress, 1000); // Poll every second
         } else {
-            // Evolution complete
+            // Evolution complete or stopped
             isEvolutionRunning = false;
 
             if (data.history && data.history.length > 0) {
@@ -1062,16 +1101,38 @@ async function pollProgress() {
 
             // Update progress status
             if (progressStatus) {
-                progressStatus.textContent = 'Evolution complete!';
+                if (data.is_stopped) {
+                    progressStatus.textContent = data.stop_message || 'Evolution stopped';
+                } else {
+                    progressStatus.textContent = 'Evolution complete!';
+                }
             }
 
-            // Show completion notification
+            // Show completion/stop notification
             const startButton = document.getElementById('startButton');
-            startButton.textContent = 'Evolution Complete!';
-            startButton.disabled = false;
-            setTimeout(() => {
-                startButton.textContent = 'Start Evolution';
-            }, 2000);
+            const stopButton = document.getElementById('stopButton');
+
+            if (data.is_stopped) {
+                startButton.textContent = 'Evolution Stopped';
+                startButton.disabled = false;
+                stopButton.style.display = 'none';
+                stopButton.disabled = true;
+                stopButton.textContent = 'Stop Evolution';
+
+                setTimeout(() => {
+                    startButton.textContent = 'Start Evolution';
+                }, 3000);
+            } else {
+                startButton.textContent = 'Evolution Complete!';
+                startButton.disabled = false;
+                stopButton.style.display = 'none';
+                stopButton.disabled = true;
+                stopButton.textContent = 'Stop Evolution';
+
+                setTimeout(() => {
+                    startButton.textContent = 'Start Evolution';
+                }, 2000);
+            }
         }
     } catch (error) {
         console.error('Error polling progress:', error);
@@ -1264,6 +1325,23 @@ function showSuccessMessage(message) {
       document.body.removeChild(successDiv);
     }
   }, 3000);
+}
+
+// Function to reset button states
+function resetButtonStates() {
+    const startButton = document.getElementById('startButton');
+    const stopButton = document.getElementById('stopButton');
+
+    if (startButton) {
+        startButton.disabled = false;
+        startButton.textContent = 'Start Evolution';
+    }
+
+    if (stopButton) {
+        stopButton.disabled = true;
+        stopButton.textContent = 'Stop Evolution';
+        stopButton.style.display = 'none';
+    }
 }
 
 // Function to reset the UI state

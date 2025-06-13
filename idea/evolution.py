@@ -54,6 +54,10 @@ class EvolutionEngine:
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
 
+        # Add stop flag for graceful interruption
+        self.stop_requested = False
+        self.is_stopped = False
+
     def generate_contexts(self):
         """Generate contexts for the initial population"""
         self.contexts = []
@@ -61,6 +65,16 @@ class EvolutionEngine:
             context = self.ideator.generate_context(self.idea_type)
             self.contexts.append(context)
         return self.contexts
+
+    def stop_evolution(self):
+        """Request the evolution to stop gracefully"""
+        print("Stop requested - evolution will halt at the next safe point")
+        self.stop_requested = True
+
+    def reset_stop_state(self):
+        """Reset the stop state for a new evolution"""
+        self.stop_requested = False
+        self.is_stopped = False
 
     async def run_evolution_with_updates(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
         """
@@ -70,6 +84,9 @@ class EvolutionEngine:
             progress_callback: Async function that will be called with progress updates
         """
         try:
+            # Reset stop state at the beginning
+            self.reset_stop_state()
+
             # Seed the initial population
             print("Generating initial population (Generation 0)...")
             self.population = self.ideator.seed_ideas(self.pop_size, self.idea_type)
@@ -77,6 +94,22 @@ class EvolutionEngine:
             # Process and update each idea as it's completed
             print("Refining initial population...")
             for i, idea in enumerate(self.population):
+                # Check for stop request
+                if self.stop_requested:
+                    print("Stop requested during initial population generation")
+                    self.is_stopped = True
+                    await progress_callback({
+                        "current_generation": 0,
+                        "total_generations": self.generations,
+                        "is_running": False,
+                        "is_stopped": True,
+                        "history": [self.population[:i]] if i > 0 else [],
+                        "contexts": self.contexts,
+                        "progress": (i / (self.pop_size * (self.generations + 1))) * 100,
+                        "stop_message": f"Evolution stopped during initial generation (completed {i}/{self.pop_size} ideas)"
+                    })
+                    return
+
                 refined_idea = self.critic.refine(idea, self.idea_type)
                 formatted_idea = self.formatter.format_idea(refined_idea, self.idea_type)
                 self.population[i] = formatted_idea
@@ -97,13 +130,30 @@ class EvolutionEngine:
                     "progress": progress_percent
                 })
 
-                # Small delay to allow frontend to process updates
+                # Small delay to allow frontend to process updates and check for stop
                 await asyncio.sleep(0.1)
 
             self.history = [self.population.copy()]
 
             # Run evolution for specified number of generations
             for gen in range(self.generations):
+                # Check for stop request at the beginning of each generation
+                if self.stop_requested:
+                    self.is_stopped = True
+                    print(f"Stop requested - evolution halted after generation {gen}")
+                    await progress_callback({
+                        "current_generation": gen,
+                        "total_generations": self.generations,
+                        "is_running": False,
+                        "is_stopped": True,
+                        "history": self.history,
+                        "contexts": self.contexts,
+                        "progress": ((self.pop_size + gen * self.pop_size) / (self.pop_size * (self.generations + 1))) * 100,
+                        "stop_message": f"Evolution stopped after completing generation {gen}",
+                        "token_counts": self.get_total_token_count()
+                    })
+                    return
+
                 print(f"Starting generation {gen + 1}...")
 
                 # Adjust tournament size if population is too small
@@ -117,6 +167,28 @@ class EvolutionEngine:
 
                 # Process population in chunks
                 for i in range(0, len(self.population), actual_tournament_size):
+                    # Check for stop request during generation processing
+                    if self.stop_requested:
+                        self.is_stopped = True
+                        print(f"Stop requested - evolution halted during generation {gen + 1}")
+
+                        # If we have some new population, add it to history
+                        if new_population:
+                            self.history.append(new_population)
+
+                        await progress_callback({
+                            "current_generation": gen + 1,
+                            "total_generations": self.generations,
+                            "is_running": False,
+                            "is_stopped": True,
+                            "history": self.history,
+                            "contexts": self.contexts,
+                            "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
+                            "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{self.pop_size} ideas)",
+                            "token_counts": self.get_total_token_count()
+                        })
+                        return
+
                     group = self.population[i : i + actual_tournament_size]
                     ranks = self.critic.get_tournament_ranks(group, self.idea_type, self.tournament_comparisons)
 
@@ -127,6 +199,28 @@ class EvolutionEngine:
                         print(f"{title} - {rank}")
 
                     for k in range(len(group)):
+                        # Check for stop request during breeding
+                        if self.stop_requested:
+                            self.is_stopped = True
+                            print(f"Stop requested - evolution halted during breeding in generation {gen + 1}")
+
+                            # If we have some new population, add it to history
+                            if new_population:
+                                self.history.append(new_population)
+
+                            await progress_callback({
+                                "current_generation": gen + 1,
+                                "total_generations": self.generations,
+                                "is_running": False,
+                                "is_stopped": True,
+                                "history": self.history,
+                                "contexts": self.contexts,
+                                "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
+                                "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{self.pop_size} ideas)",
+                                "token_counts": self.get_total_token_count()
+                            })
+                            return
+
                         # using tournament ranks, weighted sample from group
                         weights = [ranks[i] for i in range(len(group))]
                         # normalize weights to be between 0 and 1
@@ -163,7 +257,7 @@ class EvolutionEngine:
                             "progress": progress_percent
                         })
 
-                        # Small delay to allow frontend to process updates
+                        # Small delay to allow frontend to process updates and check for stop
                         await asyncio.sleep(0.1)
 
                 # Update population with new ideas
@@ -171,17 +265,18 @@ class EvolutionEngine:
                 self.history.append(self.population)
                 print(f"Generation {gen + 1} complete. Population size: {len(self.population)}")
 
-            # Mark evolution as complete
-            await progress_callback({
-                "current_generation": self.generations,
-                "total_generations": self.generations,
-                "is_running": False,
-                "history": self.history,
-                "contexts": self.contexts,
-                "progress": 100,
-                "token_counts": self.get_total_token_count()
-            })
-            print("Evolution complete!")
+            # Mark evolution as complete (only if not stopped)
+            if not self.stop_requested:
+                await progress_callback({
+                    "current_generation": self.generations,
+                    "total_generations": self.generations,
+                    "is_running": False,
+                    "history": self.history,
+                    "contexts": self.contexts,
+                    "progress": 100,
+                    "token_counts": self.get_total_token_count()
+                })
+                print("Evolution complete!")
 
         except Exception as e:
             import traceback
