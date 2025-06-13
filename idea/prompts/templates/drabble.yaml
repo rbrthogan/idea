@@ -25,24 +25,21 @@ special_requirements: |
 
 prompts:
   context: |
-    Generate a list of 50 English words/concepts. These words/concepts should be one of the following:
-    a story telling genre, theme, character, setting, plot, technique, moral, message, style, tone.
-    Return the list of words/concepts as a single string, separated by commas with no other text in format:
-    CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
+    Generate a diverse list of 50 specific English words/concepts for creative writing inspiration. Mix concrete and abstract elements:
+    - SPECIFIC genres (noir, cosmic horror, slice-of-life, magical realism, cyberpunk, pastoral, etc.)
+    - CONCRETE settings (lighthouse, subway car, boarding school, space station, monastery, etc.)
+    - SPECIFIC character types (forensic accountant, street mime, lighthouse keeper, etc.)
+    - CONCRETE objects (music box, stethoscope, origami crane, etc.)
+    - UNUSUAL themes (impostor syndrome, collective memory, technological loneliness, etc.)
+    - SPECIFIC emotions (nostalgia, schadenfreude, saudade, etc.)
+
+    Avoid generic terms like "mystery", "fantasy", "love", "death", "hero", "conflict".
+    Return the list as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
   idea: |
-    The above is some context that you can choose to use or ignore. It's just there a potential source of inspiration.
+    Your story must be built around 3-4 specific concepts from the context above. Choose concepts that naturally fit together and weave them into every aspect of your story - the character, setting, conflict, and resolution should all stem from these chosen elements.
 
-    Write a drabble - a complete story in exactly 100 words.
-
-    {requirements}
-
-  new_idea: |
-    You are a uniquely creative writer and you are given the preceding list of drabbles.
-    With the above stories as inspiration, please propose a new drabble that could be completely new
-    and different from those above or could combine ideas from those above to create a new story.
-    Please avoid minor refinements and instead write something that is a significant departure.
-    Your story will be judge on creativity, originality, and the ability to tell a complete story in 100 words.
+    Write a complete drabble (exactly 100 words) that would be impossible to tell without these specific context elements as the foundation.
 
     {requirements}
 
@@ -62,30 +59,32 @@ prompts:
     No additional text, just the critique.
 
   refine: |
-    You are a professional creative writer. You have taken over from a previous write who has written a drabble.
-    The drabble had received a critique from a top creative writing professor and you are now tasked with refining it.
+    You are a professional creative writer refining a drabble based on critique.
 
     Original Drabble:
     {idea}
 
     Critique: {critique}
 
-    Please review both, consider your own opinion, style and skill and create your own take on the drabble.
-    This could be a refinement of the original or a fresh take on it.
-    Very importantly, the drabble should be 100 words long and a complete story. Do not describe a story or review a story.
-    Write the drabble itself.
-    No additional text, just the refined drabble on its own.
+    Create your refined version that addresses the critique while preserving the core creative elements and unusual concepts that make the story distinctive. The refined drabble should maintain whatever unique setting, character types, or themes made the original interesting.
+
+    Write exactly 100 words - a complete story, not a description.
 
     {requirements}
 
   breed: |
     {ideas}
-    You are a professional creative writer setting yourself writing challenges.
-    You are presented with the above 100 word short stories (drabbles) and tasked with creating a new one.
-    This can be a combination of the existing drabbles or a completely new one that you were inspired to create.
+    You are a professional creative writer. Analyze the above drabbles and identify:
+    1. What genres, themes, and character types appear repeatedly
+    2. What settings and plot structures are overused
+    3. What elements could be combined in unexpected ways
 
-    Importantly you will be judged on originality of the new story so need to make sure you bring something new to the table.
-    Think outside the box and be creative.
+    Create a new drabble that either:
+    - Takes the LEAST represented elements from the stories above, OR
+    - Combines elements that haven't been combined before, OR
+    - Shifts to a completely different genre/tone/setting than what dominates above
+
+    Prioritize novelty and avoiding repetitive patterns while maintaining story quality.
 
     {requirements}
 
@@ -134,21 +133,26 @@ prompts:
     Generate a complete, exactly 100-word drabble based on these elements:
 
   genotype_crossover: |
-    You are an innovative creative writer performing genetic crossover on story genotypes. Your task is to combine multiple parent genotypes to create a new, compelling narrative direction.
+    You are an innovative creative writer performing genetic crossover on story genotypes. Your task is to combine multiple parent genotypes to create a new, compelling narrative direction while avoiding repetitive patterns.
+
+    First, analyze the parent genotypes to identify:
+    1. Which genres, themes, and character archetypes appear repeatedly across parents
+    2. Which elements are overused or becoming predictable
+    3. Which combinations have not been explored yet
 
     Crossover rules for drabbles:
-    - Blend the most powerful emotional and thematic elements from each parent
+    - PRIORITIZE rare or underused elements from the parents over common ones
     - Combine genres and techniques in unexpected but coherent ways
-    - Merge character archetypes and conflicts to create complex dynamics
-    - Ensure the resulting combination maintains narrative coherence
-    - Maximize originality while avoiding genre confusion
-    - Create synergistic combinations where elements enhance each other
-    - Focus on emotional impact and thematic depth
+    - If similar character archetypes dominate, shift to less represented ones
+    - If certain emotional cores repeat, explore contrasting or unexplored emotions
+    - Create synergistic combinations that haven't been seen before
+    - Push toward narrative novelty while maintaining coherence
+    - Focus on unique emotional impact and fresh thematic depth
 
     Parent genotypes:
     {parent_genotypes}
 
-    Create a new narrative genotype by intelligently combining and potentially transforming these elements. Focus on creating emotionally resonant combinations that could result in a powerful, original drabble:
+    Create a new narrative genotype that deliberately combines the LEAST common elements from the parents, or finds entirely new combinations that maximize originality and avoid repetitive patterns:
 
 comparison_criteria:
   - "creativity"
