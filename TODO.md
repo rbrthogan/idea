@@ -16,4 +16,3 @@
 - Split evolution population into multiple "islands" of ideas, which are evolved independently with only rare opportunity for cross-island communication.
 
 ## Bugs
-- Oracle not appearing in cost estimate - check if it's getting counted properly

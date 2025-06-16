@@ -2060,34 +2060,6 @@ function showTokenDetailsModal(tokenCounts) {
     const totalInputTokens = tokenCounts.total_input.toLocaleString();
     const totalOutputTokens = tokenCounts.total_output.toLocaleString();
 
-    // Component totals
-    const ideatorTotal = tokenCounts.ideator.total.toLocaleString();
-    const formatterTotal = tokenCounts.formatter.total.toLocaleString();
-    const criticTotal = tokenCounts.critic.total.toLocaleString();
-    const breederTotal = tokenCounts.breeder.total.toLocaleString();
-
-    // Component input/output
-    const ideatorInput = tokenCounts.ideator.input.toLocaleString();
-    const ideatorOutput = tokenCounts.ideator.output.toLocaleString();
-    const formatterInput = tokenCounts.formatter.input.toLocaleString();
-    const formatterOutput = tokenCounts.formatter.output.toLocaleString();
-    const criticInput = tokenCounts.critic.input.toLocaleString();
-    const criticOutput = tokenCounts.critic.output.toLocaleString();
-    const breederInput = tokenCounts.breeder.input.toLocaleString();
-    const breederOutput = tokenCounts.breeder.output.toLocaleString();
-
-    // Component models
-    const ideatorModel = tokenCounts.ideator.model;
-    const formatterModel = tokenCounts.formatter.model;
-    const criticModel = tokenCounts.critic.model;
-    const breederModel = tokenCounts.breeder.model;
-
-    // Component costs
-    const ideatorCost = tokenCounts.ideator.cost.toFixed(4);
-    const formatterCost = tokenCounts.formatter.cost.toFixed(4);
-    const criticCost = tokenCounts.critic.cost.toFixed(4);
-    const breederCost = tokenCounts.breeder.cost.toFixed(4);
-
     // Get cost information
     const costInfo = tokenCounts.cost;
     const totalCost = costInfo.total_cost.toFixed(4);
@@ -2101,6 +2073,69 @@ function showTokenDetailsModal(tokenCounts) {
             return `<li class="list-group-item d-flex justify-content-between align-items-center">${e.name}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
         }).join('');
     }
+
+    // Dynamically build component data for all available components
+    const componentData = [];
+    const colors = [
+        'rgba(54, 162, 235, 0.7)',   // Blue
+        'rgba(75, 192, 192, 0.7)',   // Teal
+        'rgba(255, 99, 132, 0.7)',   // Red
+        'rgba(255, 206, 86, 0.7)',   // Yellow
+        'rgba(153, 102, 255, 0.7)',  // Purple
+        'rgba(255, 159, 64, 0.7)'    // Orange
+    ];
+    const borderColors = [
+        'rgba(54, 162, 235, 1)',
+        'rgba(75, 192, 192, 1)',
+        'rgba(255, 99, 132, 1)',
+        'rgba(255, 206, 86, 1)',
+        'rgba(153, 102, 255, 1)',
+        'rgba(255, 159, 64, 1)'
+    ];
+
+    let colorIndex = 0;
+
+    // Check for each possible component and add to componentData if it exists
+    const possibleComponents = ['ideator', 'formatter', 'critic', 'breeder', 'genotype_encoder', 'oracle'];
+
+    for (const componentName of possibleComponents) {
+        if (tokenCounts[componentName]) {
+            const component = tokenCounts[componentName];
+            componentData.push({
+                name: componentName.charAt(0).toUpperCase() + componentName.slice(1).replace('_', ' '),
+                displayName: componentName === 'genotype_encoder' ? 'Genotype Encoder' :
+                            componentName.charAt(0).toUpperCase() + componentName.slice(1),
+                total: component.total.toLocaleString(),
+                input: component.input.toLocaleString(),
+                output: component.output.toLocaleString(),
+                model: component.model,
+                cost: component.cost.toFixed(4),
+                totalValue: component.total,
+                costValue: component.cost,
+                backgroundColor: colors[colorIndex % colors.length],
+                borderColor: borderColors[colorIndex % borderColors.length]
+            });
+            colorIndex++;
+        }
+    }
+
+    // Build component breakdown HTML
+    let componentBreakdownHtml = '';
+    componentData.forEach(comp => {
+        componentBreakdownHtml += `
+            <li class="list-group-item">
+                <div class="d-flex justify-content-between align-items-center">
+                    <span>${comp.displayName} <span class="badge bg-secondary">${comp.model}</span></span>
+                    <span class="badge bg-primary rounded-pill">${comp.total}</span>
+                </div>
+                <div class="small text-muted mt-1">
+                    <span>Input: ${comp.input}</span> |
+                    <span>Output: ${comp.output}</span> |
+                    <span>Cost: $${comp.cost}</span>
+                </div>
+            </li>
+        `;
+    });
 
     // Create modal container if it doesn't exist
     let modalContainer = document.getElementById('token-details-modal');
@@ -2149,50 +2184,7 @@ function showTokenDetailsModal(tokenCounts) {
 
                             <h6>Component Breakdown:</h6>
                             <ul class="list-group">
-                                <li class="list-group-item">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <span>Ideator <span class="badge bg-secondary">${ideatorModel}</span></span>
-                                        <span class="badge bg-primary rounded-pill">${ideatorTotal}</span>
-                                    </div>
-                                    <div class="small text-muted mt-1">
-                                        <span>Input: ${ideatorInput}</span> |
-                                        <span>Output: ${ideatorOutput}</span> |
-                                        <span>Cost: $${ideatorCost}</span>
-                                    </div>
-                                </li>
-                                <li class="list-group-item">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <span>Formatter <span class="badge bg-secondary">${formatterModel}</span></span>
-                                        <span class="badge bg-primary rounded-pill">${formatterTotal}</span>
-                                    </div>
-                                    <div class="small text-muted mt-1">
-                                        <span>Input: ${formatterInput}</span> |
-                                        <span>Output: ${formatterOutput}</span> |
-                                        <span>Cost: $${formatterCost}</span>
-                                    </div>
-                                </li>
-                                <li class="list-group-item">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <span>Critic <span class="badge bg-secondary">${criticModel}</span></span>
-                                        <span class="badge bg-primary rounded-pill">${criticTotal}</span>
-                                    </div>
-                                    <div class="small text-muted mt-1">
-                                        <span>Input: ${criticInput}</span> |
-                                        <span>Output: ${criticOutput}</span> |
-                                        <span>Cost: $${criticCost}</span>
-                                    </div>
-                                </li>
-                                <li class="list-group-item">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <span>Breeder <span class="badge bg-secondary">${breederModel}</span></span>
-                                        <span class="badge bg-primary rounded-pill">${breederTotal}</span>
-                                    </div>
-                                    <div class="small text-muted mt-1">
-                                        <span>Input: ${breederInput}</span> |
-                                        <span>Output: ${breederOutput}</span> |
-                                        <span>Cost: $${breederCost}</span>
-                                    </div>
-                                </li>
+                                ${componentBreakdownHtml}
                             </ul>
                         </div>
                         <div class="col-md-6">
@@ -2226,26 +2218,11 @@ function showTokenDetailsModal(tokenCounts) {
         new Chart(pieCtx, {
             type: 'pie',
             data: {
-                labels: ['Ideator', 'Formatter', 'Critic', 'Breeder'],
+                labels: componentData.map(comp => comp.displayName),
                 datasets: [{
-                    data: [
-                        tokenCounts.ideator.total,
-                        tokenCounts.formatter.total,
-                        tokenCounts.critic.total,
-                        tokenCounts.breeder.total
-                    ],
-                    backgroundColor: [
-                        'rgba(54, 162, 235, 0.7)',
-                        'rgba(75, 192, 192, 0.7)',
-                        'rgba(255, 99, 132, 0.7)',
-                        'rgba(255, 206, 86, 0.7)'
-                    ],
-                    borderColor: [
-                        'rgba(54, 162, 235, 1)',
-                        'rgba(75, 192, 192, 1)',
-                        'rgba(255, 99, 132, 1)',
-                        'rgba(255, 206, 86, 1)'
-                    ],
+                    data: componentData.map(comp => comp.totalValue),
+                    backgroundColor: componentData.map(comp => comp.backgroundColor),
+                    borderColor: componentData.map(comp => comp.borderColor),
                     borderWidth: 1
                 }]
             },
@@ -2268,27 +2245,12 @@ function showTokenDetailsModal(tokenCounts) {
         new Chart(barCtx, {
             type: 'bar',
             data: {
-                labels: ['Ideator', 'Formatter', 'Critic', 'Breeder'],
+                labels: componentData.map(comp => comp.displayName),
                 datasets: [{
                     label: 'Cost (USD)',
-                    data: [
-                        parseFloat(ideatorCost),
-                        parseFloat(formatterCost),
-                        parseFloat(criticCost),
-                        parseFloat(breederCost)
-                    ],
-                    backgroundColor: [
-                        'rgba(54, 162, 235, 0.7)',
-                        'rgba(75, 192, 192, 0.7)',
-                        'rgba(255, 99, 132, 0.7)',
-                        'rgba(255, 206, 86, 0.7)'
-                    ],
-                    borderColor: [
-                        'rgba(54, 162, 235, 1)',
-                        'rgba(75, 192, 192, 1)',
-                        'rgba(255, 99, 132, 1)',
-                        'rgba(255, 206, 86, 1)'
-                    ],
+                    data: componentData.map(comp => comp.costValue),
+                    backgroundColor: componentData.map(comp => comp.backgroundColor),
+                    borderColor: componentData.map(comp => comp.borderColor),
                     borderWidth: 1
                 }]
             },
@@ -2357,5 +2319,5 @@ function showTokenDetailsModal(tokenCounts) {
                 }
             }
         });
-    });
+    }, { once: true });
 }
