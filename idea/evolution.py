@@ -362,6 +362,17 @@ class EvolutionEngine:
                         self.history[-1] = self.population.copy()
                         print(f"Updated history with Oracle changes. Final population size: {len(self.population)}")
 
+                        # Immediately update the UI with Oracle changes
+                        await progress_callback({
+                            "current_generation": gen + 1,
+                            "total_generations": self.generations,
+                            "is_running": True,
+                            "history": self.history,
+                            "contexts": self.contexts,
+                            "progress": ((gen + 1) / self.generations) * 100,
+                            "oracle_update": True,  # Flag to indicate this is an Oracle update
+                            "token_counts": self.get_total_token_count()
+                        })
                     except Exception as e:
                         print(f"Oracle failed with error: {e}. Continuing without Oracle enhancement.")
                         import traceback

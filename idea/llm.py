@@ -163,8 +163,6 @@ class Formatter(LLMWrapper):
         is_oracle_idea = isinstance(raw_idea, dict) and raw_idea.get("oracle_generated", False)
         oracle_analysis = raw_idea.get("oracle_analysis", "") if is_oracle_idea else ""
 
-
-
         # If raw_idea is a dictionary with 'id' and 'idea' keys, extract just the idea text
         idea_text = raw_idea["idea"] if isinstance(raw_idea, dict) and "idea" in raw_idea else raw_idea
         print(f"Formatting idea:\n {idea_text}")
@@ -651,9 +649,48 @@ ANALYSIS REQUIRED:
 3. Find which idea in the CURRENT GENERATION is most similar to previous ideas or adds least value
 4. Generate a replacement idea that deliberately avoids the overused patterns
 
-OUTPUT:
-- REPLACE_INDEX: The index (0-based) of the idea to replace in the current generation
-- NEW_IDEA: Your new diverse idea to replace it with
+OUTPUT: Your analysis should identify which idea to replace and your new diverse idea should replace it.
+"""
+
+        if oracle_mode == "add":
+            format_instructions = """
+CRITICAL RESPONSE FORMAT:
+You MUST structure your response EXACTLY as follows. Do NOT deviate from this format:
+
+=== ORACLE ANALYSIS ===
+[Your detailed analysis of patterns, overused concepts, themes, gaps, etc.]
+
+=== NEW IDEA ===
+[Only the new story/idea content here - no analysis, just the creative work]
+
+IMPORTANT:
+- Use EXACTLY those section headers with the equals signs
+- Put your analysis in the first section
+- Put ONLY the creative story content in the second section
+- Do NOT include any analysis or meta-commentary in the NEW IDEA section
+- The NEW IDEA section should be a complete, standalone creative work
+"""
+        else:  # replace mode
+            format_instructions = """
+CRITICAL RESPONSE FORMAT:
+You MUST structure your response EXACTLY as follows. Do NOT deviate from this format:
+
+=== ORACLE ANALYSIS ===
+[Your detailed analysis of patterns, overused concepts, themes, gaps, etc.]
+
+REPLACE_INDEX: [The index (0-based) of the idea to replace in the current generation]
+
+=== NEW IDEA ===
+[Only the new story/idea content here - no analysis, just the creative work]
+
+ABSOLUTELY CRITICAL FORMATTING RULES:
+- Use EXACTLY those section headers with the equals signs
+- Put your analysis in the first section, followed by the REPLACE_INDEX line
+- The NEW IDEA section must contain ONLY the creative story content
+- Do NOT include words like "Analysis:", "Recurring Elements:", or any meta-commentary in the NEW IDEA section
+- Do NOT include any analytical text in the NEW IDEA section
+- The NEW IDEA section should be a complete, standalone creative work that someone could read as a story
+- If you include ANY analysis in the NEW IDEA section, you will have failed the task
 """
 
         prompt = f"""You are the Oracle - an AI agent specializing in promoting diversity and avoiding convergence in evolutionary idea generation.
@@ -674,21 +711,7 @@ CONSTRAINTS:
 - Avoid superficial changes - look for fundamentally different approaches
 - Consider interdisciplinary connections and novel methodologies
 
-CRITICAL RESPONSE FORMAT:
-You MUST structure your response EXACTLY as follows. Do NOT deviate from this format:
-
-=== ORACLE ANALYSIS ===
-[Your detailed analysis of patterns, overused concepts, themes, gaps, etc.]
-
-=== NEW IDEA ===
-[Only the new story/idea content here - no analysis, just the creative work]
-
-IMPORTANT:
-- Use EXACTLY those section headers with the equals signs
-- Put your analysis in the first section
-- Put ONLY the creative story content in the second section
-- Do NOT include any analysis or meta-commentary in the NEW IDEA section
-- The NEW IDEA section should be a complete, standalone creative work
+{format_instructions}
 """
 
         return prompt
@@ -744,22 +767,39 @@ IMPORTANT:
             }
 
         else:  # replace mode
-            # Look for REPLACE_INDEX in the response
+            # Look for REPLACE_INDEX in the oracle analysis section
             replace_index = 0  # default to first idea if parsing fails
 
-            # Try to parse structured response for replace index
-            lines = response.split('\n')
-            for line in lines:
-                if line.startswith('REPLACE_INDEX:'):
+            # Try to parse REPLACE_INDEX from the oracle analysis section
+            analysis_lines = oracle_analysis.split('\n')
+            for line in analysis_lines:
+                if line.strip().startswith('REPLACE_INDEX:'):
                     try:
                         replace_index = int(line.split(':')[1].strip())
-                    except (ValueError, IndexError):
+                        print(f"ORACLE: Found REPLACE_INDEX: {replace_index}")
+                        break
+                    except (ValueError, IndexError) as e:
+                        print(f"ORACLE: Error parsing REPLACE_INDEX from line '{line}': {e}")
                         replace_index = 0
-                    break
+
+            # If we didn't find it in the analysis, also check the entire response as fallback
+            if replace_index == 0:  # Only search if we didn't find it above
+                lines = response.split('\n')
+                for line in lines:
+                    if line.strip().startswith('REPLACE_INDEX:'):
+                        try:
+                            replace_index = int(line.split(':')[1].strip())
+                            print(f"ORACLE: Found REPLACE_INDEX in fallback search: {replace_index}")
+                            break
+                        except (ValueError, IndexError):
+                            replace_index = 0
 
             # Ensure replace_index is valid
             if replace_index >= len(current_generation):
+                print(f"ORACLE: REPLACE_INDEX {replace_index} exceeds generation size {len(current_generation)}, using last index")
                 replace_index = len(current_generation) - 1
+
+            print(f"ORACLE: Final REPLACE_INDEX: {replace_index}")
 
             return {
                 "action": "replace",

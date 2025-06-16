@@ -74,17 +74,15 @@ prompts:
 
   breed: |
     {ideas}
-    You are a professional creative writer. Analyze the above drabbles and identify:
-    1. What genres, themes, and character types appear repeatedly
-    2. What settings and plot structures are overused
-    3. What elements could be combined in unexpected ways
-
-    Create a new drabble that either:
+    You are a professional creative writer. Based on the above drabbles, create a new drabble that either:
     - Takes the LEAST represented elements from the stories above, OR
     - Combines elements that haven't been combined before, OR
     - Shifts to a completely different genre/tone/setting than what dominates above
 
     Prioritize novelty and avoiding repetitive patterns while maintaining story quality.
+
+    IMPORTANT: Do NOT include any analysis, commentary, or meta-discussion in your response.
+    Return ONLY the new creative drabble story - no analysis of the parent stories.
 
     {requirements}
 

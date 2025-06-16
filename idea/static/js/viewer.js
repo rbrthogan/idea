@@ -754,7 +754,18 @@ function renderGenerations(gens) {
             // Check if this idea card already exists
             const existingCard = document.getElementById(`idea-${index}-${ideaIndex}`);
             if (existingCard) {
-                // Card already exists, no need to recreate it
+                // Card already exists, check if we need to update it (for Oracle replacements)
+                const existingButton = existingCard.querySelector('.view-lineage');
+                if (existingButton && index > 0) {
+                    const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
+                    const expectedButtonText = isOracleIdea ? 'Oracle Analysis' : 'Lineage';
+
+                    // Update button text if it's different (Oracle replacement occurred)
+                    if (existingButton.textContent !== expectedButtonText) {
+                        existingButton.textContent = expectedButtonText;
+                        console.log(`Updated button for idea ${ideaIndex} in generation ${index}: ${expectedButtonText}`);
+                    }
+                }
                 return;
             }
 
