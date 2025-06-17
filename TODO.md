@@ -4,7 +4,8 @@
 - Allow users to provide more guidance on particular flavours of ideas or add more contraints e.g. not general AI research but specifically on mechanistic interpretability.
 - Add an Idea type that focuses on field cross-pollination, e.g. "Idea from field X that could be applied to problem Y from field Z".
 - For slower models with high latency it seems like nothing is happening for a while, and a some more verbosity to the UI e.g. One line of grey text under the progress bar that reports the current log activity. e.g. "Generating initial context for idea x of y ... ", "rated limited, backing off for X seconds", etc. This will whizz by quickly for fast models, but be more visible for slow models.
-
+- Add download button for to charts (diversity and ELO ratings) to allow easy use later.
+- Population diversity chart disappear on refresh, ensure data is stored with population so it can be restored whenever population is loaded.
 
 
 ## Research Ideas

@@ -350,6 +350,32 @@
           <div id="generations-container" class="generations-container">
             <!-- Generation content will be dynamically added here -->
           </div>
+
+          <!-- Diversity Plot Section -->
+          <div id="diversity-plot-section" class="diversity-plot-section" style="display: none;">
+            <div class="diversity-plot-header">
+              <h3 class="diversity-plot-title">
+                <i class="fas fa-chart-line"></i>
+                Population Diversity Evolution
+              </h3>
+              <p class="diversity-plot-subtitle">
+                Track how idea diversity changes throughout the evolutionary process
+              </p>
+            </div>
+            <div class="diversity-plot-container">
+              <canvas id="diversity-chart" width="800" height="400"></canvas>
+            </div>
+            <div class="diversity-plot-legend">
+              <div class="legend-item">
+                <span class="legend-color overall-diversity"></span>
+                <span class="legend-text">Overall Population Diversity</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color generation-diversity"></span>
+                <span class="legend-text">Per-Generation Diversity</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

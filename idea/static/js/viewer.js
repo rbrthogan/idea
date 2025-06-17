@@ -1175,6 +1175,9 @@ async function pollProgress() {
             if (container) {
                 container.innerHTML = '';
             }
+            // Reset diversity plot for new evolution
+            resetDiversityPlot();
+            showDiversityPlotLoading();
         }
 
         // Update progress bar
@@ -1201,6 +1204,11 @@ async function pollProgress() {
 
             // Store the current evolution data in localStorage
             localStorage.setItem('currentEvolutionData', JSON.stringify(data.history));
+        }
+
+        // Handle diversity updates
+        if (data.diversity_history) {
+            handleDiversityUpdate(data);
         }
 
         if (data.contexts && data.contexts.length > 0) {
@@ -1232,6 +1240,11 @@ async function pollProgress() {
                 // Display token counts if available
                 if (data.token_counts) {
                     displayTokenCounts(data.token_counts);
+                }
+
+                // Final diversity update
+                if (data.diversity_history) {
+                    handleDiversityUpdate(data);
                 }
             }
 
@@ -2349,3 +2362,459 @@ function showTokenDetailsModal(tokenCounts) {
         });
     }, { once: true });
 }
+
+/* ==========================================
+   DIVERSITY PLOTTING FUNCTIONALITY
+   ========================================== */
+
+// Global variables for diversity plotting
+let diversityChart = null;
+let diversityData = {
+    overall: [],
+    perGeneration: []
+};
+
+/**
+ * Initialize the diversity chart
+ */
+function initializeDiversityChart() {
+    // Check if Chart.js is available
+    if (typeof Chart === 'undefined') {
+        console.error('❌ Chart.js is not loaded!');
+        return;
+    }
+
+    const canvas = document.getElementById('diversity-chart');
+    if (!canvas) {
+        console.error('❌ Diversity chart canvas not found!');
+        return;
+    }
+
+    try {
+        const ctx = canvas.getContext('2d');
+
+        // Destroy existing chart if it exists
+        if (diversityChart) {
+            diversityChart.destroy();
+        }
+
+        // Chart configuration with beautiful styling
+        const config = {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Overall Population Diversity',
+                        data: [],
+                        borderColor: 'rgba(139, 124, 246, 1)',
+                        backgroundColor: 'rgba(139, 124, 246, 0.1)',
+                        borderWidth: 3,
+                        fill: true,
+                        tension: 0.4,
+                        pointBackgroundColor: 'rgba(139, 124, 246, 1)',
+                        pointBorderColor: '#ffffff',
+                        pointBorderWidth: 2,
+                        pointRadius: 6,
+                        pointHoverRadius: 8,
+                        pointHoverBackgroundColor: 'rgba(139, 124, 246, 1)',
+                        pointHoverBorderColor: '#ffffff',
+                        pointHoverBorderWidth: 3
+                    },
+                    {
+                        label: 'Per-Generation Diversity',
+                        data: [],
+                        borderColor: 'rgba(244, 114, 182, 1)',
+                        backgroundColor: 'rgba(244, 114, 182, 0.1)',
+                        borderWidth: 3,
+                        fill: false,
+                        tension: 0.4,
+                        pointBackgroundColor: 'rgba(244, 114, 182, 1)',
+                        pointBorderColor: '#ffffff',
+                        pointBorderWidth: 2,
+                        pointRadius: 6,
+                        pointHoverRadius: 8,
+                        pointHoverBackgroundColor: 'rgba(244, 114, 182, 1)',
+                        pointHoverBorderColor: '#ffffff',
+                        pointHoverBorderWidth: 3,
+                        borderDash: [5, 5]
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                layout: {
+                    padding: {
+                        top: 20,
+                        right: 20,
+                        bottom: 20,
+                        left: 20
+                    }
+                },
+                plugins: {
+                    title: {
+                        display: false
+                    },
+                    legend: {
+                        display: false // Using custom legend
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                        titleColor: '#1E293B',
+                        bodyColor: '#64748B',
+                        borderColor: 'rgba(139, 124, 246, 0.2)',
+                        borderWidth: 1,
+                        cornerRadius: 12,
+                        displayColors: true,
+                        titleFont: {
+                            size: 14,
+                            weight: 'bold'
+                        },
+                        bodyFont: {
+                            size: 13
+                        },
+                        padding: 12,
+                        callbacks: {
+                            title: function(context) {
+                                const generation = context[0].label;
+                                return generation === '0' ? 'Initial Population' : `Generation ${generation}`;
+                            },
+                            label: function(context) {
+                                const value = parseFloat(context.parsed.y).toFixed(4);
+                                return `${context.dataset.label}: ${value}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Generation',
+                            color: '#64748B',
+                            font: {
+                                size: 14,
+                                weight: 'bold'
+                            }
+                        },
+                        grid: {
+                            color: 'rgba(139, 124, 246, 0.1)',
+                            lineWidth: 1
+                        },
+                        ticks: {
+                            color: '#64748B',
+                            font: {
+                                size: 12
+                            },
+                            callback: function(value, index, values) {
+                                const generation = this.getLabelForValue(value);
+                                return generation === '0' ? 'Initial' : `Gen ${generation}`;
+                            }
+                        }
+                    },
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Diversity Score',
+                            color: '#64748B',
+                            font: {
+                                size: 14,
+                                weight: 'bold'
+                            }
+                        },
+                        grid: {
+                            color: 'rgba(139, 124, 246, 0.1)',
+                            lineWidth: 1
+                        },
+                        ticks: {
+                            color: '#64748B',
+                            font: {
+                                size: 12
+                            }
+                        },
+                        beginAtZero: false
+                    }
+                },
+                animation: {
+                    duration: 1000,
+                    easing: 'easeInOutCubic'
+                },
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
+                elements: {
+                    line: {
+                        borderCapStyle: 'round',
+                        borderJoinStyle: 'round'
+                    }
+                }
+            }
+        };
+
+        // Create the chart
+        diversityChart = new Chart(ctx, config);
+
+        // Hide loading state
+        const loadingElement = document.querySelector('.diversity-loading');
+        if (loadingElement) {
+            loadingElement.style.display = 'none';
+        }
+
+    } catch (error) {
+        console.error('❌ Error initializing diversity chart:', error);
+    }
+}
+
+/**
+ * Process diversity history data for charting
+ * @param {Array} diversityHistory - Array of diversity calculation results
+ * @returns {Object} Processed data for charting
+ */
+function processDiversityData(diversityHistory) {
+    if (!diversityHistory || diversityHistory.length === 0) {
+        return { labels: [], overall: [], perGeneration: [] };
+    }
+
+    const labels = [];
+    const overallScores = [];
+    const perGenerationScores = [];
+
+    diversityHistory.forEach((diversityData, index) => {
+        // Check if we have valid diversity data
+        if (!diversityData) {
+            return;
+        }
+
+        // Handle case where diversity calculation is disabled or failed
+        if (diversityData.enabled === false) {
+            return;
+        }
+
+        if (diversityData.error) {
+            return;
+        }
+
+        // Add to charts - we have valid data
+        labels.push(index.toString());
+
+        // Try different property names for diversity score
+        const overallScore = diversityData.diversity_score ||
+                           diversityData.overall_diversity ||
+                           diversityData.score || 0;
+        overallScores.push(overallScore);
+
+        // Try to find per-generation diversity
+        let perGenScore = 0;
+        if (diversityData.generation_diversities && Array.isArray(diversityData.generation_diversities)) {
+            // Find the diversity for the current generation
+            const currentGenData = diversityData.generation_diversities.find(gen => gen.generation === index);
+            perGenScore = currentGenData ? (currentGenData.diversity_score || currentGenData.score || 0) : 0;
+        } else if (diversityData.current_generation_diversity) {
+            perGenScore = diversityData.current_generation_diversity;
+        } else {
+            // Fallback: use overall score for per-generation as well
+            perGenScore = overallScore;
+        }
+
+        perGenerationScores.push(perGenScore);
+    });
+
+    return {
+        labels,
+        overall: overallScores,
+        perGeneration: perGenerationScores
+    };
+}
+
+/**
+ * Update the diversity chart with new data
+ * @param {Array} diversityHistory - Updated diversity history
+ */
+function updateDiversityChart(diversityHistory) {
+    if (!diversityChart) {
+        initializeDiversityChart();
+    }
+
+    if (!diversityChart) {
+        console.error('❌ Failed to initialize diversity chart');
+        return;
+    }
+
+    // Verify the chart is still connected to a valid canvas
+    const canvas = document.getElementById('diversity-chart');
+    if (!canvas) {
+        console.error('❌ Canvas element not found, reinitializing...');
+        initializeDiversityChart();
+        if (!diversityChart) {
+            console.error('❌ Failed to reinitialize diversity chart');
+            return;
+        }
+    } else {
+        // Check if chart canvas context is still valid
+        try {
+            const ctx = canvas.getContext('2d');
+            if (!ctx || !diversityChart.canvas) {
+                if (diversityChart) {
+                    diversityChart.destroy();
+                }
+                initializeDiversityChart();
+            }
+        } catch (error) {
+            console.error('❌ Canvas context error:', error);
+            initializeDiversityChart();
+        }
+    }
+
+    try {
+        // Process the data
+        const processedData = processDiversityData(diversityHistory);
+
+        // Update chart data
+        diversityChart.data.labels = processedData.labels;
+        diversityChart.data.datasets[0].data = processedData.overall;
+        diversityChart.data.datasets[1].data = processedData.perGeneration;
+
+        // Update the chart with animation
+        diversityChart.update('default');
+
+        // Force canvas to be visible and properly sized
+        const canvas = document.getElementById('diversity-chart');
+        if (canvas) {
+            canvas.style.display = 'block';
+            canvas.style.width = '100%';
+            canvas.style.height = '400px';
+            canvas.style.maxWidth = '100%';
+        }
+
+        // Show the diversity plot section if there's data
+        const plotSection = document.getElementById('diversity-plot-section');
+        if (plotSection && processedData.labels.length > 0) {
+            plotSection.style.display = 'block';
+
+            // Hide loading state if showing
+            const loadingElement = plotSection.querySelector('.diversity-loading');
+            if (loadingElement) {
+                loadingElement.style.display = 'none';
+            }
+
+            // Force plot container to be visible and properly sized
+            const plotContainer = document.querySelector('.diversity-plot-container');
+            if (plotContainer) {
+                plotContainer.style.display = 'block';
+                plotContainer.style.height = '450px'; // Extra space for legend
+                plotContainer.style.width = '100%';
+                plotContainer.style.padding = '20px';
+                plotContainer.style.boxSizing = 'border-box';
+            }
+        }
+    } catch (error) {
+        console.error('❌ Error updating diversity chart:', error);
+    }
+}
+
+/**
+ * Show diversity plot section with loading state
+ */
+function showDiversityPlotLoading() {
+    const plotSection = document.getElementById('diversity-plot-section');
+    const plotContainer = document.querySelector('.diversity-plot-container');
+
+    if (plotSection && plotContainer) {
+        plotSection.style.display = 'block';
+
+        // Don't replace the entire content - just add loading overlay
+        const existingCanvas = plotContainer.querySelector('#diversity-chart');
+        const existingLoading = plotContainer.querySelector('.diversity-loading');
+
+        if (!existingLoading) {
+            // Create loading overlay instead of replacing content
+            const loadingDiv = document.createElement('div');
+            loadingDiv.className = 'diversity-loading';
+            loadingDiv.innerHTML = `
+                <div class="loading-spinner"></div>
+                <span>Calculating diversity metrics...</span>
+            `;
+            plotContainer.appendChild(loadingDiv);
+        }
+
+        // Make sure canvas exists
+        if (!existingCanvas) {
+            const canvas = document.createElement('canvas');
+            canvas.id = 'diversity-chart';
+            canvas.width = 800;
+            canvas.height = 400;
+            plotContainer.appendChild(canvas);
+        }
+    }
+}
+
+/**
+ * Reset diversity plot to initial state
+ */
+function resetDiversityPlot() {
+    const plotSection = document.getElementById('diversity-plot-section');
+    if (plotSection) {
+        plotSection.style.display = 'none';
+    }
+
+    if (diversityChart) {
+        diversityChart.data.labels = [];
+        diversityChart.data.datasets[0].data = [];
+        diversityChart.data.datasets[1].data = [];
+        diversityChart.update();
+    }
+
+    // Reset global diversity data
+    diversityData = {
+        overall: [],
+        perGeneration: []
+    };
+}
+
+/**
+ * Handle diversity data from progress updates
+ * @param {Object} progressData - Progress update data containing diversity_history
+ */
+function handleDiversityUpdate(progressData) {
+    if (progressData && progressData.diversity_history) {
+        updateDiversityChart(progressData.diversity_history);
+    }
+}
+
+/**
+ * Initialize diversity plot when evolution starts
+ */
+function initializeDiversityPlot() {
+    // Make sure the canvas is ready
+    setTimeout(() => {
+        const canvas = document.getElementById('diversity-chart');
+        if (canvas) {
+            // Restore canvas element if it was replaced
+            const plotContainer = document.querySelector('.diversity-plot-container');
+            if (plotContainer && !plotContainer.querySelector('canvas')) {
+                plotContainer.innerHTML = '<canvas id="diversity-chart" width="800" height="400"></canvas>';
+            }
+            initializeDiversityChart();
+        }
+    }, 100);
+}
+
+// Add event listeners when the document is ready
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize diversity chart when page loads
+    setTimeout(() => {
+        initializeDiversityChart();
+    }, 500);
+
+    // Enhance the start evolution function to reset diversity plot
+    const startButton = document.getElementById('startButton');
+    if (startButton) {
+        startButton.addEventListener('click', function() {
+            // Reset diversity plot when starting new evolution
+            resetDiversityPlot();
+            showDiversityPlotLoading();
+        });
+    }
+});
