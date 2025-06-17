@@ -9,6 +9,7 @@ import os
 from typing import Union, Optional
 from .validation import TemplateValidator, validate_template_file
 from .yaml_template import YAMLTemplateWrapper
+import copy
 
 
 def get_prompts(idea_type: str, use_yaml: bool = True):
@@ -31,7 +32,11 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
                 template, warnings = validate_template_file(str(yaml_path))
                 if warnings:
                     print(f"Template warnings for {idea_type}: {warnings}")
-                return YAMLTemplateWrapper(template)
+
+                # Load and merge Oracle prompts from core oracle template
+                wrapper = YAMLTemplateWrapper(template)
+                _load_oracle_prompts(wrapper)
+                return wrapper
             except Exception as e:
                 print(f"Failed to load YAML template for {idea_type}: {e}")
                 print("Falling back to Python module...")
@@ -89,7 +94,7 @@ def list_available_templates() -> dict:
 
     # Check for Python modules
     for py_file in prompts_dir.glob("*.py"):
-        if py_file.name in ['__init__.py', 'loader.py', 'validation.py', 'yaml_template.py']:
+        if py_file.name in ['__init__.py', 'loader.py', 'validation.py', 'yaml_template.py', 'oracle_prompts.py']:
             continue
 
         idea_type = py_file.stem
@@ -113,6 +118,42 @@ def list_available_templates() -> dict:
                 }
 
     return templates
+
+
+def _load_oracle_prompts(wrapper: YAMLTemplateWrapper):
+    """
+    Load Oracle prompts from the core oracle_prompts module and add them to the wrapper
+    """
+    try:
+        from .oracle_prompts import (
+            ORACLE_ADD_MODE_INSTRUCTION,
+            ORACLE_REPLACE_MODE_INSTRUCTION,
+            ORACLE_ADD_FORMAT_INSTRUCTIONS,
+            ORACLE_REPLACE_FORMAT_INSTRUCTIONS,
+            ORACLE_MAIN_PROMPT,
+            ORACLE_CONSTRAINTS
+        )
+
+        # Add Oracle prompts to the wrapper
+        wrapper.ORACLE_ADD_MODE_INSTRUCTION = ORACLE_ADD_MODE_INSTRUCTION
+        wrapper.ORACLE_REPLACE_MODE_INSTRUCTION = ORACLE_REPLACE_MODE_INSTRUCTION
+        wrapper.ORACLE_ADD_FORMAT_INSTRUCTIONS = ORACLE_ADD_FORMAT_INSTRUCTIONS
+        wrapper.ORACLE_REPLACE_FORMAT_INSTRUCTIONS = ORACLE_REPLACE_FORMAT_INSTRUCTIONS
+        wrapper.ORACLE_MAIN_PROMPT = ORACLE_MAIN_PROMPT
+
+        # Check if the idea-specific template has Oracle constraints customization
+        # For now, we'll use the default constraints but this allows future customization
+        wrapper.ORACLE_CONSTRAINTS = ORACLE_CONSTRAINTS
+
+    except Exception as e:
+        print(f"Warning: Failed to load Oracle prompts: {e}")
+        # Set empty Oracle prompts as fallback
+        wrapper.ORACLE_ADD_MODE_INSTRUCTION = ''
+        wrapper.ORACLE_REPLACE_MODE_INSTRUCTION = ''
+        wrapper.ORACLE_ADD_FORMAT_INSTRUCTIONS = ''
+        wrapper.ORACLE_REPLACE_FORMAT_INSTRUCTIONS = ''
+        wrapper.ORACLE_MAIN_PROMPT = ''
+        wrapper.ORACLE_CONSTRAINTS = ''
 
 
 def validate_template(idea_type: str) -> tuple[bool, list]:
@@ -145,5 +186,3 @@ def validate_template(idea_type: str) -> tuple[bool, list]:
             return True, []
         except ImportError as e:
             return False, [f"Failed to import: {e}"]
-
-

@@ -152,6 +152,7 @@ prompts:
 
     Create a new narrative genotype that deliberately combines the LEAST common elements from the parents, or finds entirely new combinations that maximize originality and avoid repetitive patterns:
 
+
 comparison_criteria:
   - "creativity"
   - "originality"

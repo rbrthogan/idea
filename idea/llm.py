@@ -626,93 +626,25 @@ class Oracle(LLMWrapper):
         prompts = get_prompts(idea_type)
         base_idea_prompt = prompts.IDEA_PROMPT
 
-        # Build the Oracle's comprehensive prompt
+        # Get Oracle-specific prompts from the template
         if oracle_mode == "add":
-            mode_instruction = """
-Your task is to ADD a completely new and diverse idea to the current generation.
-
-ANALYSIS REQUIRED:
-1. Identify the most common patterns, themes, approaches, and methodologies across ALL generations
-2. Spot repetitive concepts, similar problem-solving approaches, or overused techniques
-3. Find gaps in the idea space that haven't been explored
-4. Generate a novel idea that deliberately avoids the overused patterns
-
-OUTPUT: Provide your new diverse idea that would add the most value to the population.
-"""
+            mode_instruction = prompts.ORACLE_ADD_MODE_INSTRUCTION
+            format_instructions = prompts.ORACLE_ADD_FORMAT_INSTRUCTIONS
         else:  # replace mode
-            mode_instruction = """
-Your task is to REPLACE the least valuable idea in the current generation with something more diverse.
+            mode_instruction = prompts.ORACLE_REPLACE_MODE_INSTRUCTION
+            format_instructions = prompts.ORACLE_REPLACE_FORMAT_INSTRUCTIONS
 
-ANALYSIS REQUIRED:
-1. Identify the most common patterns, themes, approaches, and methodologies across ALL generations
-2. Spot repetitive concepts, similar problem-solving approaches, or overused techniques
-3. Find which idea in the CURRENT GENERATION is most similar to previous ideas or adds least value
-4. Generate a replacement idea that deliberately avoids the overused patterns
-
-OUTPUT: Your analysis should identify which idea to replace and your new diverse idea should replace it.
-"""
-
-        if oracle_mode == "add":
-            format_instructions = """
-CRITICAL RESPONSE FORMAT:
-You MUST structure your response EXACTLY as follows. Do NOT deviate from this format:
-
-=== ORACLE ANALYSIS ===
-[Your detailed analysis of patterns, overused concepts, themes, gaps, etc.]
-
-=== NEW IDEA ===
-[Only the new story/idea content here - no analysis, just the creative work]
-
-IMPORTANT:
-- Use EXACTLY those section headers with the equals signs
-- Put your analysis in the first section
-- Put ONLY the creative story content in the second section
-- Do NOT include any analysis or meta-commentary in the NEW IDEA section
-- The NEW IDEA section should be a complete, standalone creative work
-"""
-        else:  # replace mode
-            format_instructions = """
-CRITICAL RESPONSE FORMAT:
-You MUST structure your response EXACTLY as follows. Do NOT deviate from this format:
-
-=== ORACLE ANALYSIS ===
-[Your detailed analysis of patterns, overused concepts, themes, gaps, etc.]
-
-REPLACE_INDEX: [The index (0-based) of the idea to replace in the current generation]
-
-=== NEW IDEA ===
-[Only the new story/idea content here - no analysis, just the creative work]
-
-ABSOLUTELY CRITICAL FORMATTING RULES:
-- Use EXACTLY those section headers with the equals signs
-- Put your analysis in the first section, followed by the REPLACE_INDEX line
-- The NEW IDEA section must contain ONLY the creative story content
-- Do NOT include words like "Analysis:", "Recurring Elements:", or any meta-commentary in the NEW IDEA section
-- Do NOT include any analytical text in the NEW IDEA section
-- The NEW IDEA section should be a complete, standalone creative work that someone could read as a story
-- If you include ANY analysis in the NEW IDEA section, you will have failed the task
-"""
-
-        prompt = f"""You are the Oracle - an AI agent specializing in promoting diversity and avoiding convergence in evolutionary idea generation.
-
-CONTEXT: You are working with {idea_type} ideas. The base instruction for ideas is: "{base_idea_prompt}"
-
-COMPLETE EVOLUTION HISTORY:
-{history_text}
-
-CURRENT GENERATION TO ANALYZE:
-{current_text}
-
-{mode_instruction}
-
-CONSTRAINTS:
-- Your new idea must still fit the domain of {idea_type}
-- Focus on genuine innovation and unexplored directions
-- Avoid superficial changes - look for fundamentally different approaches
-- Consider interdisciplinary connections and novel methodologies
-
-{format_instructions}
-"""
+        # Build the Oracle's comprehensive prompt using the template
+        oracle_constraints = getattr(prompts, 'ORACLE_CONSTRAINTS', '')
+        prompt = prompts.ORACLE_MAIN_PROMPT.format(
+            idea_type=idea_type,
+            base_idea_prompt=base_idea_prompt,
+            history_text=history_text,
+            current_text=current_text,
+            mode_instruction=mode_instruction,
+            format_instructions=format_instructions,
+            oracle_constraints=oracle_constraints
+        )
 
         return prompt
 

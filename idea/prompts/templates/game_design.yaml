@@ -142,6 +142,8 @@ prompts:
 
     Create a new game design genotype by intelligently combining and potentially mutating these elements. Focus on creating fun, feasible combinations that could result in an addictive browser game:
 
+
+
 comparison_criteria:
   - "originality and creativity"
   - "simplicity"

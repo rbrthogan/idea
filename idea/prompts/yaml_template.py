@@ -82,6 +82,8 @@ class YAMLTemplateWrapper:
             self.COMPARISON_CRITERIA
         )
 
+        # Oracle prompts will be set by the loader
+
     def _interpolate_prompt(self, prompt_text: str) -> str:
         """
         Interpolate template-specific requirements into prompt text

@@ -136,6 +136,8 @@ prompts:
 
     Create a new research genotype by intelligently combining and potentially extending these elements. Focus on creating technically sound but innovative combinations that could lead to breakthrough research:
 
+
+
 comparison_criteria:
   - "originality and novelty"
   - "potential impact and significance"
