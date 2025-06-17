@@ -1352,68 +1352,74 @@ body::before {
    ========================================== */
 
 .diversity-plot-section {
-  margin-top: 3rem;
-  padding: 2rem;
   background: var(--surface);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md);
-  border: 1px solid var(--border-soft);
-  transition: var(--transition);
-  animation: fadeInScale 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.diversity-plot-section:hover {
-  box-shadow: var(--shadow-lg);
-  transform: translateY(-2px);
-}
-
-.diversity-plot-header {
-  text-align: center;
+  padding: 1.5rem;
   margin-bottom: 2rem;
-  padding-bottom: 1rem;
-  border-bottom: 2px solid var(--border-soft);
+  box-shadow: var(--shadow-soft), 0 1px 3px rgba(0, 0, 0, 0.05);
+  border: 1px solid var(--border-soft);
   position: relative;
 }
 
-.diversity-plot-header::after {
+.diversity-plot-section::before {
   content: '';
   position: absolute;
-  bottom: -2px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 80px;
-  height: 3px;
-  background: var(--primary);
-  border-radius: var(--radius-sm);
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background-color: var(--primary);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.diversity-plot-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
 }
 
 .diversity-plot-title {
-  color: var(--primary-dark);
-  font-size: 1.75rem;
-  font-weight: 700;
-  margin-bottom: 0.5rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  letter-spacing: -0.025em;
+  gap: 8px;
 }
 
-.diversity-plot-title i {
-  color: var(--primary);
-  font-size: 1.5rem;
-  filter: drop-shadow(0 2px 4px rgba(139, 124, 246, 0.15));
+.diversity-plot-title::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--primary);
+  flex-shrink: 0;
 }
 
-.diversity-plot-subtitle {
+.diversity-plot-toggle {
+  background: var(--surface);
+  border: 1px solid var(--border);
   color: var(--text-secondary);
-  font-size: 1rem;
-  margin-bottom: 0;
-  max-width: 600px;
-  margin-left: auto;
-  margin-right: auto;
-  line-height: 1.5;
-  font-weight: 400;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  transition: var(--transition);
+  cursor: pointer;
+}
+
+.diversity-plot-toggle:hover {
+  background: var(--primary-light);
+  border-color: var(--primary);
+  color: var(--primary-dark);
+}
+
+.diversity-plot-toggle i {
+  transition: var(--transition);
+}
+
+.diversity-plot-toggle[aria-expanded="false"] i {
+  transform: rotate(180deg);
 }
 
 .diversity-plot-container {
@@ -1429,14 +1435,7 @@ body::before {
 }
 
 .diversity-plot-container::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 4px;
-  background: linear-gradient(90deg, var(--primary), var(--secondary), var(--accent));
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  display: none;
 }
 
 .diversity-plot-container canvas {
@@ -1537,8 +1536,7 @@ body::before {
 /* Responsive Design for Diversity Plot */
 @media (max-width: 1200px) {
   .diversity-plot-section {
-    margin-top: 2.5rem;
-    padding: 1.75rem;
+    padding: 1.25rem;
   }
 
   .diversity-plot-container {
@@ -1548,12 +1546,7 @@ body::before {
 
 @media (max-width: 992px) {
   .diversity-plot-section {
-    margin-top: 2rem;
-    padding: 1.5rem;
-  }
-
-  .diversity-plot-title {
-    font-size: 1.5rem;
+    padding: 1rem;
   }
 
   .diversity-plot-container {
@@ -1567,14 +1560,11 @@ body::before {
 
 @media (max-width: 768px) {
   .diversity-plot-section {
-    margin-top: 1.5rem;
-    padding: 1rem;
+    padding: 0.875rem;
   }
 
   .diversity-plot-title {
-    font-size: 1.25rem;
-    flex-direction: column;
-    gap: 0.5rem;
+    font-size: 1rem;
   }
 
   .diversity-plot-legend {
@@ -1586,24 +1576,15 @@ body::before {
   .diversity-plot-container {
     padding: 0.75rem;
   }
-
-  .diversity-plot-subtitle {
-    font-size: 0.9rem;
-  }
 }
 
 @media (max-width: 576px) {
   .diversity-plot-section {
-    margin-top: 1rem;
     padding: 0.75rem;
   }
 
   .diversity-plot-title {
-    font-size: 1.125rem;
-  }
-
-  .diversity-plot-subtitle {
-    font-size: 0.85rem;
+    font-size: 0.9rem;
   }
 
   .diversity-plot-container {
