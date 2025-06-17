@@ -34,9 +34,9 @@ class EvolutionEngine:
         breeder_temp: float = 2.0,
         tournament_size: int = 5,
         tournament_comparisons: int = 20,
-        use_genotype_breeding: bool = False,
+        use_genotype_breeding: bool = True,
         genotype_encoder_temp: float = 1.2,
-        use_oracle: bool = False,
+        use_oracle: bool = True,
         oracle_mode: str = "add",
         oracle_temp: float = 1.8
     ):

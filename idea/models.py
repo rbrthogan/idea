@@ -10,4 +10,3 @@ class Idea(BaseModel):
     content: str
 
     # You can include more fields if needed, e.g. metrics, iteration history, etc.
-

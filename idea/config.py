@@ -20,7 +20,7 @@ ORACLE_MODES = [
     {"id": "replace", "name": "Replace Least Diverse Idea"}
 ]
 
-DEFAULT_ORACLE_MODE = "add"
+DEFAULT_ORACLE_MODE = "replace"
 
 model_prices_per_million_tokens = {
     "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.3},

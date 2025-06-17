@@ -439,6 +439,24 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         });
     }
+
+    // Initialize default UI states based on checkbox states
+    // Handle genotype breeding default state
+    if (genotypeToggle && genotypeEncoderTempContainer) {
+        if (genotypeToggle.checked) {
+            genotypeEncoderTempContainer.style.display = 'block';
+            console.log("Genotype breeding enabled by default");
+        }
+    }
+
+    // Handle Oracle default state
+    if (oracleToggle && oracleModeContainer && oracleTempContainer) {
+        if (oracleToggle.checked) {
+            oracleModeContainer.style.display = 'block';
+            oracleTempContainer.style.display = 'block';
+            console.log("Oracle diversity agent enabled by default");
+        }
+    }
 });
 
 // Function to restore current evolution from localStorage
