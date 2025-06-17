@@ -428,12 +428,26 @@ async function loadCurrentEvolution() {
         const storedData = localStorage.getItem('currentEvolutionData');
         if (storedData) {
             try {
-                const generations = JSON.parse(storedData);
-                console.log("Loaded generations from localStorage:", generations);
+                const evolutionState = JSON.parse(storedData);
+                console.log("Loaded evolution state from localStorage:", evolutionState);
 
-                if (generations && generations.length > 0) {
+                // Handle both old format (just history array) and new format (object with history and diversity_history)
+                let generationsData;
+                if (Array.isArray(evolutionState)) {
+                    // Old format - just the history array
+                    generationsData = evolutionState;
+                } else if (evolutionState && evolutionState.history) {
+                    // New format - object with history and diversity_history
+                    generationsData = evolutionState.history;
+                } else {
+                    console.error("Invalid evolution data format");
+                    // Continue to API call if localStorage parsing fails
+                    throw new Error("Invalid evolution data format");
+                }
+
+                if (generationsData && generationsData.length > 0) {
                     // Flatten all generations into a single array of ideas
-                    const ideas = generations.flat().map(idea => ({
+                    const ideas = generationsData.flat().map(idea => ({
                         ...idea,
                         id: generateUUID(),
                         elo: 1500

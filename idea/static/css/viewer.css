@@ -1424,6 +1424,8 @@ body::before {
   margin-bottom: 1.5rem;
   border: 1px solid var(--border-soft);
   overflow: hidden;
+  min-height: 450px; /* Ensure minimum height */
+  width: 100%;
 }
 
 .diversity-plot-container::before {
@@ -1439,7 +1441,9 @@ body::before {
 
 .diversity-plot-container canvas {
   max-width: 100%;
-  height: auto !important;
+  min-height: 400px !important;
+  height: 400px !important;
+  width: 100% !important;
   display: block;
   margin: 0 auto;
   border-radius: var(--radius-sm);

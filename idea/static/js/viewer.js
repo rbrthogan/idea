@@ -468,16 +468,40 @@ async function restoreCurrentEvolution() {
         const storedData = localStorage.getItem('currentEvolutionData');
         if (storedData) {
             try {
-                const generationsData = JSON.parse(storedData);
-                console.log("Found evolution data in localStorage:", generationsData);
+                const evolutionState = JSON.parse(storedData);
+                console.log("Found evolution data in localStorage:", evolutionState);
+
+                // Handle both old format (just history array) and new format (object with history and diversity_history)
+                let generationsData, diversityData;
+                if (Array.isArray(evolutionState)) {
+                    // Old format - just the history array
+                    generationsData = evolutionState;
+                    diversityData = [];
+                } else if (evolutionState && evolutionState.history) {
+                    // New format - object with history and diversity_history
+                    generationsData = evolutionState.history;
+                    diversityData = evolutionState.diversity_history || [];
+                } else {
+                    console.error("Invalid evolution data format");
+                    return false;
+                }
 
                 if (generationsData && generationsData.length > 0) {
                     // Render the generations
                     renderGenerations(generationsData);
 
+                    // Restore diversity plot if we have diversity data
+                    if (diversityData && diversityData.length > 0) {
+                        console.log("Restoring diversity plot with data:", diversityData);
+                        updateDiversityChart(diversityData);
+                        // Ensure proper sizing after restoration
+                        setTimeout(ensureDiversityChartSizing, 200);
+                    }
+
                     // Set up currentEvolutionData for download functionality
                     currentEvolutionData = {
                         history: generationsData,
+                        diversity_history: diversityData,
                         contexts: contexts
                     };
 
@@ -1014,17 +1038,14 @@ function updateContextDisplay() {
 
 // Clean implementation of downloadResults to prevent double-saving
 function downloadResults(data) {
-    console.log("Download function called with data:", data);
-
-    // Ensure we have valid data
-    if (!data || (!data.history && !data.contexts)) {
-        console.error("Invalid data for saving:", data);
-        alert("No data available to save");
+    if (!data) {
+        alert('No evolution data available to download');
         return;
     }
 
-    // Use browser's built-in prompt for simplicity
-    const filename = prompt("Enter filename to save:", `evolution_${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+    // Use browser's built-in prompt for filename
+    const defaultFilename = `evolution_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    const filename = prompt("Enter filename to save:", defaultFilename);
 
     // Exit if user cancels
     if (!filename) {
@@ -1034,23 +1055,28 @@ function downloadResults(data) {
 
     console.log(`Saving to filename: ${filename}`);
 
-    // Disable the download button to prevent double-clicks
+    // Include all available data in the save
+    const saveData = {
+        history: data.history || [],
+        diversity_history: data.diversity_history || [],
+        contexts: data.contexts || [],
+        token_counts: data.token_counts || {},
+        timestamp: new Date().toISOString(),
+        metadata: {
+            total_generations: data.total_generations || (data.history ? data.history.length : 0),
+            population_size: data.history && data.history.length > 0 ? data.history[0].length : 0,
+            model_used: data.model_type || 'unknown',
+            saved_from: 'evolution_viewer'
+        }
+    };
+
+    console.log("Preparing to save evolution data:", saveData);
+
+    // Disable button to prevent multiple saves
     const downloadButton = document.getElementById('downloadButton');
     if (downloadButton) {
         downloadButton.disabled = true;
     }
-
-    // Prepare the data for saving
-    const saveData = {
-        history: data.history || [],
-        contexts: data.contexts || [],
-        metadata: {
-            timestamp: new Date().toISOString(),
-            generations: data.total_generations || 0
-        }
-    };
-
-    console.log("Prepared save data:", saveData);
 
     // Send to server
     fetch('/api/save-evolution', {
@@ -1122,6 +1148,17 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
                 // Render the generations
                 renderGenerations(data.data.history);
 
+                // Restore diversity plot if we have diversity data
+                if (data.data.diversity_history && data.data.diversity_history.length > 0) {
+                    console.log("Restoring diversity plot from saved evolution:", data.data.diversity_history);
+                    updateDiversityChart(data.data.diversity_history);
+                    // Ensure proper sizing after restoration
+                    setTimeout(ensureDiversityChartSizing, 200);
+                } else {
+                    console.log("No diversity data found in saved evolution, resetting plot");
+                    resetDiversityPlot();
+                }
+
                 // Update contexts if available
                 if (data.data.contexts) {
                     contexts = data.data.contexts;
@@ -1148,6 +1185,9 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
                 '<p class="text-muted">Context will appear here when evolution starts...</p>';
             document.querySelector('.context-navigation').style.display = 'none';
             document.getElementById('downloadButton').disabled = true;
+
+            // Reset diversity plot when no current evolution is available
+            resetDiversityPlot();
         }
     }
 });
@@ -1202,8 +1242,12 @@ async function pollProgress() {
             console.log("Rendering generations from progress update");
             renderGenerations(data.history);
 
-            // Store the current evolution data in localStorage
-            localStorage.setItem('currentEvolutionData', JSON.stringify(data.history));
+            // Store the current evolution data in localStorage including diversity data
+            const evolutionStateToStore = {
+                history: data.history,
+                diversity_history: data.diversity_history || []
+            };
+            localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
         }
 
         // Handle diversity updates
@@ -1231,8 +1275,12 @@ async function pollProgress() {
                 currentEvolutionData = data;
                 renderGenerations(data.history);
 
-                // Store the final evolution data in localStorage
-                localStorage.setItem('currentEvolutionData', JSON.stringify(data.history));
+                // Store the final evolution data in localStorage including diversity data
+                const evolutionStateToStore = {
+                    history: data.history,
+                    diversity_history: data.diversity_history || []
+                };
+                localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
 
                 // Set up the download button
                 setupDownloadButton(data);
@@ -2444,6 +2492,7 @@ function initializeDiversityChart() {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                devicePixelRatio: window.devicePixelRatio || 1,
                 layout: {
                     padding: {
                         top: 20,
@@ -2549,6 +2598,11 @@ function initializeDiversityChart() {
                         borderCapStyle: 'round',
                         borderJoinStyle: 'round'
                     }
+                },
+                onResize: function(chart, size) {
+                    // Ensure proper sizing on resize
+                    chart.canvas.style.height = '400px';
+                    chart.canvas.style.width = '100%';
                 }
             }
         };
@@ -2679,15 +2733,6 @@ function updateDiversityChart(diversityHistory) {
         // Update the chart with animation
         diversityChart.update('default');
 
-        // Force canvas to be visible and properly sized
-        const canvas = document.getElementById('diversity-chart');
-        if (canvas) {
-            canvas.style.display = 'block';
-            canvas.style.width = '100%';
-            canvas.style.height = '400px';
-            canvas.style.maxWidth = '100%';
-        }
-
         // Show the diversity plot section if there's data
         const plotSection = document.getElementById('diversity-plot-section');
         if (plotSection && processedData.labels.length > 0) {
@@ -2699,14 +2744,30 @@ function updateDiversityChart(diversityHistory) {
                 loadingElement.style.display = 'none';
             }
 
-            // Force plot container to be visible and properly sized
+            // Ensure proper sizing of canvas and container
+            const canvas = document.getElementById('diversity-chart');
             const plotContainer = document.querySelector('.diversity-plot-container');
-            if (plotContainer) {
+
+            if (canvas && plotContainer) {
+                // Force proper sizing
                 plotContainer.style.display = 'block';
-                plotContainer.style.height = '450px'; // Extra space for legend
+                plotContainer.style.height = '450px';
                 plotContainer.style.width = '100%';
                 plotContainer.style.padding = '20px';
                 plotContainer.style.boxSizing = 'border-box';
+
+                // Ensure canvas takes full available space
+                canvas.style.display = 'block';
+                canvas.style.width = '100%';
+                canvas.style.height = '400px';
+                canvas.style.maxWidth = '100%';
+
+                // Force chart to resize to container
+                setTimeout(() => {
+                    if (diversityChart) {
+                        diversityChart.resize();
+                    }
+                }, 100);
             }
         }
     } catch (error) {
@@ -2774,12 +2835,52 @@ function resetDiversityPlot() {
 }
 
 /**
+ * Ensure diversity chart is properly sized and visible
+ */
+function ensureDiversityChartSizing() {
+    const plotSection = document.getElementById('diversity-plot-section');
+    const plotContainer = document.querySelector('.diversity-plot-container');
+    const canvas = document.getElementById('diversity-chart');
+
+    if (plotSection && plotContainer && canvas) {
+        // Make sure all elements are visible
+        plotSection.style.display = 'block';
+        plotContainer.style.display = 'block';
+
+        // Set explicit dimensions
+        plotContainer.style.height = '450px';
+        plotContainer.style.width = '100%';
+        plotContainer.style.padding = '20px';
+        plotContainer.style.boxSizing = 'border-box';
+        plotContainer.style.marginBottom = '2rem';
+
+        canvas.style.display = 'block';
+        canvas.style.height = '400px';
+        canvas.style.width = '100%';
+        canvas.style.maxWidth = '100%';
+        canvas.style.maxHeight = '400px';
+
+        // Force chart resize if it exists
+        if (diversityChart) {
+            setTimeout(() => {
+                diversityChart.resize();
+                diversityChart.update('none'); // Update without animation for immediate effect
+            }, 50);
+        }
+
+        console.log('✓ Diversity chart sizing ensured');
+    }
+}
+
+/**
  * Handle diversity data from progress updates
  * @param {Object} progressData - Progress update data containing diversity_history
  */
 function handleDiversityUpdate(progressData) {
     if (progressData && progressData.diversity_history) {
         updateDiversityChart(progressData.diversity_history);
+        // Ensure proper sizing after update
+        setTimeout(ensureDiversityChartSizing, 100);
     }
 }
 
@@ -2818,3 +2919,55 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+/**
+ * Debug function to diagnose diversity chart issues
+ */
+function debugDiversityChart() {
+    console.log('🔍 DIVERSITY CHART DEBUG INFO');
+    console.log('================================');
+
+    const plotSection = document.getElementById('diversity-plot-section');
+    const plotContainer = document.querySelector('.diversity-plot-container');
+    const canvas = document.getElementById('diversity-chart');
+
+    console.log('Plot section exists:', !!plotSection);
+    console.log('Plot section display:', plotSection?.style.display);
+    console.log('Plot container exists:', !!plotContainer);
+    console.log('Canvas exists:', !!canvas);
+    console.log('Canvas dimensions:', canvas ? `${canvas.offsetWidth}x${canvas.offsetHeight}` : 'N/A');
+    console.log('Chart instance exists:', !!diversityChart);
+    console.log('Chart canvas valid:', diversityChart?.canvas ? 'Yes' : 'No');
+
+    if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        console.log('Canvas bounding rect:', rect);
+    }
+
+    // Check localStorage
+    const storedData = localStorage.getItem('currentEvolutionData');
+    if (storedData) {
+        try {
+            const data = JSON.parse(storedData);
+            console.log('LocalStorage data format:', Array.isArray(data) ? 'Old (array)' : 'New (object)');
+            if (data.diversity_history) {
+                console.log('Diversity history entries:', data.diversity_history.length);
+            }
+        } catch (e) {
+            console.log('LocalStorage parse error:', e.message);
+        }
+    } else {
+        console.log('No localStorage data found');
+    }
+
+    console.log('================================');
+
+    // Try to fix sizing if chart exists
+    if (diversityChart && canvas) {
+        console.log('Attempting to fix chart sizing...');
+        ensureDiversityChartSizing();
+    }
+}
+
+// Make debug function available globally for browser console
+window.debugDiversityChart = debugDiversityChart;
