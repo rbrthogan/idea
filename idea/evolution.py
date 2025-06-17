@@ -5,6 +5,7 @@ import asyncio
 from idea.models import Idea
 from idea.llm import Ideator, Formatter, Critic, Breeder, GenotypeEncoder, Oracle
 from idea.prompts.loader import list_available_templates
+from idea.diversity import DiversityCalculator
 from tqdm import tqdm
 
 
@@ -79,6 +80,10 @@ class EvolutionEngine:
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
 
+        # Initialize diversity calculator
+        self.diversity_calculator = DiversityCalculator()
+        self.diversity_history = []  # List of diversity metrics for each generation
+
         # Add stop flag for graceful interruption
         self.stop_requested = False
         self.is_stopped = False
@@ -100,6 +105,30 @@ class EvolutionEngine:
         """Reset the stop state for a new evolution"""
         self.stop_requested = False
         self.is_stopped = False
+
+    async def _calculate_and_store_diversity(self) -> Dict[str, Any]:
+        """
+        Calculate diversity metrics for the current population history and store them.
+
+        Returns:
+            Dictionary containing diversity metrics
+        """
+        try:
+            if not self.history:
+                return {"enabled": False, "reason": "No history available"}
+
+            print("🔍 Calculating population diversity...")
+            diversity_data = await self.diversity_calculator.calculate_diversity(self.history)
+            self.diversity_history.append(diversity_data)
+
+            # Print diversity summary to logs
+            self.diversity_calculator.print_diversity_summary(diversity_data)
+
+            return diversity_data
+
+        except Exception as e:
+            print(f"Warning: Diversity calculation failed: {e}")
+            return {"enabled": True, "error": str(e)}
 
     async def run_evolution_with_updates(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
         """
@@ -131,7 +160,8 @@ class EvolutionEngine:
                         "history": [self.population[:i]] if i > 0 else [],
                         "contexts": self.contexts,
                         "progress": (i / (self.pop_size * (self.generations + 1))) * 100,
-                        "stop_message": f"Evolution stopped during initial generation (completed {i}/{self.pop_size} ideas)"
+                        "stop_message": f"Evolution stopped during initial generation (completed {i}/{self.pop_size} ideas)",
+                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                     })
                     return
 
@@ -152,13 +182,17 @@ class EvolutionEngine:
                     "is_running": True,
                     "history": current_history,
                     "contexts": self.contexts,
-                    "progress": progress_percent
+                    "progress": progress_percent,
+                    "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                 })
 
                 # Small delay to allow frontend to process updates and check for stop
                 await asyncio.sleep(0.1)
 
             self.history = [self.population.copy()]
+
+            # Calculate initial diversity for generation 0
+            initial_diversity = await self._calculate_and_store_diversity()
 
             # Run evolution for specified number of generations
             for gen in range(self.generations):
@@ -175,7 +209,8 @@ class EvolutionEngine:
                         "contexts": self.contexts,
                         "progress": ((self.pop_size + gen * self.pop_size) / (self.pop_size * (self.generations + 1))) * 100,
                         "stop_message": f"Evolution stopped after completing generation {gen}",
-                        "token_counts": self.get_total_token_count()
+                        "token_counts": self.get_total_token_count(),
+                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                     })
                     return
 
@@ -215,7 +250,8 @@ class EvolutionEngine:
                             "contexts": self.contexts,
                             "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
                             "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
-                            "token_counts": self.get_total_token_count()
+                            "token_counts": self.get_total_token_count(),
+                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                         })
                         return
 
@@ -248,7 +284,8 @@ class EvolutionEngine:
                                 "contexts": self.contexts,
                                 "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
                                 "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
-                                "token_counts": self.get_total_token_count()
+                                "token_counts": self.get_total_token_count(),
+                                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                             })
                             return
 
@@ -290,7 +327,8 @@ class EvolutionEngine:
                             "is_running": True,
                             "history": history_copy,
                             "contexts": self.contexts,
-                            "progress": progress_percent
+                            "progress": progress_percent,
+                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                         })
 
                         # Small delay to allow frontend to process updates and check for stop
@@ -304,6 +342,9 @@ class EvolutionEngine:
                 self.population = new_population
                 self.history.append(self.population)
                 print(f"Generation {gen + 1} complete. Population size: {len(self.population)}")
+
+                # Calculate diversity for this generation
+                generation_diversity = await self._calculate_and_store_diversity()
 
                 # Apply Oracle for diversity enhancement (if enabled)
                 if self.use_oracle and self.oracle:
@@ -371,7 +412,8 @@ class EvolutionEngine:
                             "contexts": self.contexts,
                             "progress": ((gen + 1) / self.generations) * 100,
                             "oracle_update": True,  # Flag to indicate this is an Oracle update
-                            "token_counts": self.get_total_token_count()
+                            "token_counts": self.get_total_token_count(),
+                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                         })
                     except Exception as e:
                         print(f"Oracle failed with error: {e}. Continuing without Oracle enhancement.")
@@ -387,9 +429,21 @@ class EvolutionEngine:
                     "history": self.history,
                     "contexts": self.contexts,
                     "progress": 100,
-                    "token_counts": self.get_total_token_count()
+                    "token_counts": self.get_total_token_count(),
+                    "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                 })
                 print("Evolution complete!")
+
+                # Print final diversity summary
+                if self.diversity_history:
+                    print("\n🎯 FINAL DIVERSITY SUMMARY 🎯")
+                    print("Evolution complete! Here's how diversity evolved:")
+                    for i, div_data in enumerate(self.diversity_history):
+                        if div_data.get("enabled", False) and "error" not in div_data:
+                            gen_label = "Initial" if i == 0 else f"Gen {i}"
+                            score = div_data.get("diversity_score", 0.0)
+                            print(f"  {gen_label}: Diversity = {score:.4f}")
+                    print("=" * 50)
 
         except Exception as e:
             import traceback
@@ -397,7 +451,8 @@ class EvolutionEngine:
             print(traceback.format_exc())
             await progress_callback({
                 "is_running": False,
-                "error": str(e)
+                "error": str(e),
+                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
             })
 
     def get_ideas_by_generation(self, generation_index: int) -> List[Dict]:
