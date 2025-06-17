@@ -764,6 +764,16 @@ function renderGenerations(gens) {
                     if (existingButton.textContent !== expectedButtonText) {
                         existingButton.textContent = expectedButtonText;
                         console.log(`Updated button for idea ${ideaIndex} in generation ${index}: ${expectedButtonText}`);
+
+                        // IMPORTANT: Update the event handler to use the new idea data
+                        // Remove the old event listener by cloning the button (clones don't copy event listeners)
+                        const newButton = existingButton.cloneNode(true);
+                        existingButton.parentNode.replaceChild(newButton, existingButton);
+
+                        // Add the new event handler with the updated idea data
+                        newButton.addEventListener('click', () => {
+                            showLineageModal(idea, index);
+                        });
                     }
                 }
                 return;
