@@ -36,6 +36,17 @@ prompts:
     Avoid generic terms like "mystery", "fantasy", "love", "death", "hero", "conflict".
     Return the list as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
+  specific_prompt: |
+    From the following concepts, randomly select 2 or 3 that would create an interesting combination and create 1 simple, concise prompt:
+
+    {context_pool}
+
+    SELECTION STRATEGY: Pick concepts that might make an interesting story together. Don't include too many concepts that would make the story too complex.
+
+    Create a brief request like: "Write a [genre/style] drabble about a [character type] dealing with [concept]." Or "Write a drabble set in a [setting] about a exploring this [theme]."
+
+    Your concise prompt:
+
   idea: |
     Your story must be built around 3-4 specific concepts from the context above. Choose concepts that naturally fit together and weave them into every aspect of your story - the character, setting, conflict, and resolution should all stem from these chosen elements.
 

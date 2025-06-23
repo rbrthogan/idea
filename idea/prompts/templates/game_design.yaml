@@ -31,6 +31,17 @@ prompts:
     Avoid generic terms like "puzzle", "action", "shooting", "jumping", "collecting".
     Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
+  specific_prompt: |
+    From the following game design concepts, randomly select 2 or 3 that would create an interesting combination and create 1 concise design request:
+
+    {context_pool}
+
+    SELECTION STRATEGY: Pick concepts that create surprising gameplay synergies. Avoid predictable pairings like "puzzle + matching" or "action + shooting". Don't include too many concepts that would make the game too complex.
+
+    Create a brief design direction like: "Design a [genre/type] game that combines [mechanic] where players [objective]." Or "Design a game that combines [interaction] with [theme/setting]."
+
+    Your concise design prompt:
+
   idea: |
     Your game design must be built around 3-4 specific concepts from the context above. Choose concepts that create interesting gameplay synergies or novel combinations.
 

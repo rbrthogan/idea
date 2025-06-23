@@ -79,6 +79,7 @@ class EvolutionEngine:
 
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
+        self.specific_prompts = []  # List of specific prompts generated from contexts (translation layer)
 
         # Initialize diversity calculator
         self.diversity_calculator = DiversityCalculator()
@@ -143,7 +144,7 @@ class EvolutionEngine:
 
             # Seed the initial population
             print("Generating initial population (Generation 0)...")
-            self.population = self.ideator.seed_ideas(self.pop_size, self.idea_type)
+            self.population, self.specific_prompts = self.ideator.seed_ideas(self.pop_size, self.idea_type)
 
             # Process and update each idea as it's completed
             print("Refining initial population...")
@@ -159,6 +160,7 @@ class EvolutionEngine:
                         "is_stopped": True,
                         "history": [self.population[:i]] if i > 0 else [],
                         "contexts": self.contexts,
+                        "specific_prompts": self.specific_prompts,
                         "progress": (i / (self.pop_size * (self.generations + 1))) * 100,
                         "stop_message": f"Evolution stopped during initial generation (completed {i}/{self.pop_size} ideas)",
                         "diversity_history": self.diversity_history.copy() if self.diversity_history else []
@@ -182,6 +184,7 @@ class EvolutionEngine:
                     "is_running": True,
                     "history": current_history,
                     "contexts": self.contexts,
+                    "specific_prompts": self.specific_prompts,
                     "progress": progress_percent,
                     "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                 })
@@ -207,6 +210,7 @@ class EvolutionEngine:
                         "is_stopped": True,
                         "history": self.history,
                         "contexts": self.contexts,
+                        "specific_prompts": self.specific_prompts,
                         "progress": ((self.pop_size + gen * self.pop_size) / (self.pop_size * (self.generations + 1))) * 100,
                         "stop_message": f"Evolution stopped after completing generation {gen}",
                         "token_counts": self.get_total_token_count(),
@@ -248,6 +252,7 @@ class EvolutionEngine:
                             "is_stopped": True,
                             "history": self.history,
                             "contexts": self.contexts,
+                            "specific_prompts": self.specific_prompts,
                             "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
                             "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
                             "token_counts": self.get_total_token_count(),
@@ -282,6 +287,7 @@ class EvolutionEngine:
                                 "is_stopped": True,
                                 "history": self.history,
                                 "contexts": self.contexts,
+                                "specific_prompts": self.specific_prompts,
                                 "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
                                 "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
                                 "token_counts": self.get_total_token_count(),
@@ -327,6 +333,7 @@ class EvolutionEngine:
                             "is_running": True,
                             "history": history_copy,
                             "contexts": self.contexts,
+                            "specific_prompts": self.specific_prompts,
                             "progress": progress_percent,
                             "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                         })
@@ -410,6 +417,7 @@ class EvolutionEngine:
                             "is_running": True,
                             "history": self.history,
                             "contexts": self.contexts,
+                            "specific_prompts": self.specific_prompts,
                             "progress": ((gen + 1) / self.generations) * 100,
                             "oracle_update": True,  # Flag to indicate this is an Oracle update
                             "token_counts": self.get_total_token_count(),
@@ -428,6 +436,7 @@ class EvolutionEngine:
                     "is_running": False,
                     "history": self.history,
                     "contexts": self.contexts,
+                    "specific_prompts": self.specific_prompts,
                     "progress": 100,
                     "token_counts": self.get_total_token_count(),
                     "diversity_history": self.diversity_history.copy() if self.diversity_history else []

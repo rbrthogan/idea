@@ -121,29 +121,48 @@ class Ideator(LLMWrapper):
         words = [word.strip() for word in context_text.split(',')]
         # Use between 30-50% of the words to maintain diversity while avoiding overwhelming context
         sample_size = max(3, min(int(len(words) * 0.4), 15))  # 40% but cap at 15 words
-        return ", ".join(random.sample(words, sample_size))
+        subset = random.sample(words, sample_size)
+        return ", ".join(subset)
+
+
+    def generate_specific_prompt(self, context_pool: str, idea_type: str) -> str:
+        """Generate a specific idea prompt from the context pool using the translation layer"""
+        prompts = get_prompts(idea_type)
+
+        # Create the translation prompt with shuffled subset
+        translation_prompt = prompts.SPECIFIC_PROMPT.format(context_pool=context_pool)
+
+        specific_prompt = self.generate_text(translation_prompt)
+        print(f"Generated specific prompt: {specific_prompt}")
+
+        return specific_prompt
 
     def get_idea_prompt(self, idea_type: str) -> str:
         """Get prompt template for specific idea type"""
         prompts = get_prompts(idea_type)
         return prompts.IDEA_PROMPT
 
+    def seed_ideas(self, n: int, idea_type: str) -> tuple[List[str], List[str]]:
+        """Generate n initial ideas
 
-
-    def seed_ideas(self, n: int, idea_type: str) -> List[str]:
-        """Generate n initial ideas"""
-        idea_prompt = self.get_idea_prompt(idea_type)
-
+        Returns:
+            tuple: (ideas, specific_prompts)
+        """
         ideas = []
+        specific_prompts = []
 
         for _ in tqdm(range(n), desc="Generating ideas"):
-            # Generate context using the context_prompt method regardless of context_type parameter
-            context = self.generate_context(idea_type)
-            print(f"Context: {context}")
-            prompt = f"{context}\nInstruction: {idea_prompt}"
-            response = self.generate_text(prompt)
+            # Generate context pool
+            context_pool = self.generate_context(idea_type)
+            # Generate specific prompt from context pool
+            specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
+            specific_prompts.append(specific_prompt)
+            # Generate idea using the specific prompt
+            response = self.generate_text(specific_prompt)
+
             ideas.append({"id": uuid.uuid4(), "idea": response, "parent_ids": []})
-        return ideas
+
+        return ideas, specific_prompts
 
 
 class Formatter(LLMWrapper):

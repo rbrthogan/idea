@@ -27,6 +27,19 @@ prompts:
     Avoid generic terms like "deep learning", "AI", "machine learning", "neural networks", "classification".
     Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
+  specific_prompt: |
+    From the following AI research concepts, randomly select 2 or 3 that would create an interesting combination and create a single concise research request:
+
+    {context_pool}
+
+    SELECTION STRATEGY: Pick concepts that create surprising interdisciplinary connections. Avoid obvious pairings like "neural networks + computer vision". Look for unusual cross-domain combinations.
+
+    Create a brief research direction like: "Develop research combining [technique] with [application area] to address [problem/challenge]."
+
+    Avoid adding too many concepts that would make the request to complex.
+
+    Your concise research prompt:
+
   idea: |
     Your research proposal must incorporate 3-4 specific concepts from the context above as foundational elements. Choose concepts that create interesting intersections or novel combinations.
 

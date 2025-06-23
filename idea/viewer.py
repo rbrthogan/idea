@@ -256,7 +256,8 @@ async def start_evolution(request: Request):
     return JSONResponse({
         "status": "success",
         "message": "Evolution started",
-        "contexts": contexts
+        "contexts": contexts,
+        "specific_prompts": []  # Will be populated as evolution progresses
     })
 
 @app.post("/api/stop-evolution")

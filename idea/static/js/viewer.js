@@ -96,6 +96,7 @@ let pollingInterval;
 let isEvolutionRunning = false;
 let currentContextIndex = 0;
 let contexts = [];
+let specificPrompts = [];
 let currentEvolutionId = null;
 let currentEvolutionData = null;
 let generations = [];
@@ -303,8 +304,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
                     // Reset contexts and index
                     contexts = data.contexts || [];
+                    specificPrompts = data.specific_prompts || [];
                     currentContextIndex = 0;
                     console.log("Loaded contexts:", contexts);
+                    console.log("Loaded specific prompts:", specificPrompts);
 
                     // Create progress bar container if it doesn't exist
                     if (!document.getElementById('progress-container')) {
@@ -481,6 +484,14 @@ async function restoreCurrentEvolution() {
                     // New format - object with history and diversity_history
                     generationsData = evolutionState.history;
                     diversityData = evolutionState.diversity_history || [];
+                    // Restore context data if available
+                    if (evolutionState.contexts) {
+                        contexts = evolutionState.contexts;
+                        specificPrompts = evolutionState.specific_prompts || [];
+                        currentContextIndex = 0;
+                        updateContextDisplay();
+                        document.querySelector('.context-navigation').style.display = 'block';
+                    }
                 } else {
                     console.error("Invalid evolution data format");
                     return false;
@@ -992,8 +1003,15 @@ function updateContextDisplay() {
         // Make sure the container is visible
         contextContainer.style.display = 'block';
 
-        // Format the context text into separate items
-        const contextItems = contexts[currentContextIndex]
+        // Use specific prompts if available (translation layer), otherwise use raw contexts (legacy)
+        const displayContent = specificPrompts.length > 0 && specificPrompts[currentContextIndex]
+            ? specificPrompts[currentContextIndex]
+            : contexts[currentContextIndex];
+
+        const displayTitle = specificPrompts.length > 0 ? "Specific Prompt" : "Context Pool";
+
+        // Format the content into separate items
+        const contentItems = displayContent
             .split('\n')
             .filter(item => item.trim())
             .map(item => `<div class="context-item">${item.trim()}</div>`)
@@ -1001,14 +1019,15 @@ function updateContextDisplay() {
 
         contextDisplay.innerHTML = `
             <div class="context-content">
-                ${contextItems}
+                <h6 class="mb-3 text-primary">${displayTitle} ${currentContextIndex + 1}</h6>
+                ${contentItems}
             </div>
             <div class="context-navigation">
                 <div class="context-nav-buttons">
                     <button class="context-nav-btn" id="prevContext" ${currentContextIndex === 0 ? 'disabled' : ''}>
                         ← Previous
                     </button>
-                    <span id="contextCounter">Context ${currentContextIndex + 1} of ${contexts.length}</span>
+                    <span id="contextCounter">${displayTitle} ${currentContextIndex + 1} of ${contexts.length}</span>
                     <button class="context-nav-btn" id="nextContext" ${currentContextIndex === contexts.length - 1 ? 'disabled' : ''}>
                         Next →
                     </button>
@@ -1162,6 +1181,7 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
                 // Update contexts if available
                 if (data.data.contexts) {
                     contexts = data.data.contexts;
+                    specificPrompts = data.data.specific_prompts || [];
                     currentContextIndex = 0;
                     updateContextDisplay();
                     document.querySelector('.context-navigation').style.display = 'block';
@@ -1245,7 +1265,9 @@ async function pollProgress() {
             // Store the current evolution data in localStorage including diversity data
             const evolutionStateToStore = {
                 history: data.history,
-                diversity_history: data.diversity_history || []
+                diversity_history: data.diversity_history || [],
+                contexts: data.contexts || contexts,
+                specific_prompts: data.specific_prompts || specificPrompts
             };
             localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
         }
@@ -1257,6 +1279,7 @@ async function pollProgress() {
 
         if (data.contexts && data.contexts.length > 0) {
             contexts = data.contexts;
+            specificPrompts = data.specific_prompts || [];
             currentContextIndex = 0;
             updateContextDisplay();
             document.querySelector('.context-navigation').style.display = 'block';
@@ -1551,6 +1574,7 @@ function resetUIState() {
 
     // Reset contexts
     contexts = [];
+    specificPrompts = [];
     currentContextIndex = 0;
 
     // Reset context display
@@ -1700,14 +1724,21 @@ function showContextModal(ideaIndex) {
         const contextIndex = (ideaIndex !== undefined && ideaIndex < contexts.length) ?
                             ideaIndex : currentContextIndex;
 
-        console.log(`Using contextIndex: ${contextIndex}, context: "${contexts[contextIndex]}"`);
+        // Use specific prompts if available (translation layer), otherwise use raw contexts (legacy)
+        const displayContent = specificPrompts.length > 0 && specificPrompts[contextIndex]
+            ? specificPrompts[contextIndex]
+            : contexts[contextIndex];
+
+        const displayTitle = specificPrompts.length > 0 ? "Specific Prompt" : "Context Pool";
+
+        console.log(`Using contextIndex: ${contextIndex}, ${displayTitle.toLowerCase()}: "${displayContent}"`);
 
         // Update the modal title to show which context we're viewing
         const modalTitle = document.getElementById('contextModalLabel');
-        modalTitle.textContent = `Initial Context for Idea ${contextIndex + 1}`;
+        modalTitle.textContent = `${displayTitle} for Idea ${contextIndex + 1}`;
 
-        // Format the context text into separate items
-        const contextItems = contexts[contextIndex]
+        // Format the content into separate items
+        const contextItems = displayContent
             .split('\n')
             .filter(item => item.trim())
             .map(item => `<div class="context-item">${item.trim()}</div>`)
@@ -1715,6 +1746,11 @@ function showContextModal(ideaIndex) {
 
         contextModalContent.innerHTML = `
             <div class="context-content">
+                <div class="alert alert-info mb-3">
+                    <strong>${displayTitle}:</strong> ${specificPrompts.length > 0 ?
+                        'This is the specific prompt generated from the context pool to create this idea.' :
+                        'This is the raw context pool used to inspire this idea.'}
+                </div>
                 ${contextItems}
             </div>
         `;

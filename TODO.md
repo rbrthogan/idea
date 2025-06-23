@@ -18,3 +18,4 @@
 
 ## Bugs
 - When opening on "current evolution" the diversity chart initially appears with data but is then refreshed to empty. If saved it can be restored by selecting the saved evolution, but current evolution view should also work.
+- Is temperature been correcly passed to the generate_text function in each case?
