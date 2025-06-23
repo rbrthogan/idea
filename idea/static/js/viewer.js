@@ -97,6 +97,7 @@ let isEvolutionRunning = false;
 let currentContextIndex = 0;
 let contexts = [];
 let specificPrompts = [];
+let breedingPrompts = [];  // Store breeding prompts for each generation
 let currentEvolutionId = null;
 let currentEvolutionData = null;
 let generations = [];
@@ -302,6 +303,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     // Reset contexts and index
                     contexts = data.contexts || [];
                     specificPrompts = data.specific_prompts || [];
+                    breedingPrompts = data.breeding_prompts || [];
                     currentContextIndex = 0;
                     console.log("Loaded contexts:", contexts);
                     console.log("Loaded specific prompts:", specificPrompts);
@@ -757,7 +759,7 @@ function renderGenerations(gens) {
             contentDiv.id = `generation-content-${index}`;
 
             const scrollContainer = document.createElement('div');
-            scrollContainer.className = 'scroll-container';
+            scrollContainer.className = 'scroll-container row g-3';
             scrollContainer.id = `scroll-container-${index}`;
 
             // Add a wrapper to ensure proper containment
@@ -809,58 +811,81 @@ function renderGenerations(gens) {
 
             // Create a new card for this idea
             const card = document.createElement('div');
-            card.className = 'card gen-card';
+            card.className = 'col-md-6 col-lg-4 mb-4';
             card.id = `idea-${index}-${ideaIndex}`;
 
             // Create a plain text preview for the card
             const plainPreview = createCardPreview(idea.content, 150);
 
-            // Add "View Context" button for initial generation cards
-            const viewContextButton = index === 0 ?
-                `<button class="btn btn-outline-secondary btn-sm view-context me-2">View Context</button>` : '';
+            // Add "Prompt" button for initial generation cards
+            const viewPromptButton = index === 0 ?
+                `<button class="btn btn-outline-info btn-sm view-prompt me-2" title="View Initial Prompt">
+                    <i class="fas fa-lightbulb"></i><span class="btn-text">Prompt</span>
+                </button>` : '';
 
-            // Add "Lineage" or "Oracle Analysis" button for non-initial generation cards
-            // Check if this is an Oracle-generated idea to show appropriate button text
-            const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
-            const buttonText = isOracleIdea ? 'Oracle Analysis' : 'Lineage';
-            const viewLineageButton = index > 0 ?
-                `<button class="btn btn-outline-secondary btn-sm view-lineage me-2">${buttonText}</button>` : '';
+            // Add "Prompt" button for breeding generation cards (if we have breeding prompts)
+            const breedingPromptButton = index > 0 ?
+                `<button class="btn btn-outline-info btn-sm view-breeding-prompt me-2" title="View Breeding Prompt">
+                    <i class="fas fa-lightbulb"></i><span class="btn-text">Prompt</span>
+                </button>` : '';
+
+            // Add lineage button for breeding generations (generations 1+)
+            const lineageButton = index > 0 ?
+                `<button class="btn btn-outline-secondary btn-sm lineage-btn" title="View Lineage">
+                    <i class="fas fa-project-diagram"></i><span class="btn-text">Lineage</span>
+                </button>` : '';
 
             card.innerHTML = `
-                <div class="card-body">
-                    <h5 class="card-title">${idea.title || 'Untitled'}</h5>
-                    <div class="card-text">
-                        <p>${plainPreview}</p>
-                    </div>
-                    <div class="card-actions">
-                        ${viewContextButton}
-                        ${viewLineageButton}
-                        <button class="btn btn-primary btn-sm view-idea">View Full Idea</button>
+                <div class="card h-100 shadow-sm">
+                    <div class="card-body d-flex flex-column">
+                        <h5 class="card-title text-primary">${idea.title || 'Untitled'}</h5>
+                        <p class="card-text flex-grow-1">${plainPreview}</p>
+                        <div class="card-actions">
+                            ${viewPromptButton}
+                            ${breedingPromptButton}
+                            <button class="btn btn-primary btn-sm view-idea" title="View Full Idea">
+                                <i class="fas fa-expand"></i><span class="btn-text">Full Idea</span>
+                            </button>
+                            ${lineageButton}
+                        </div>
                     </div>
                 </div>
             `;
 
-            // Add click handler for view button
+            // Add event handlers after setting innerHTML
             const viewButton = card.querySelector('.view-idea');
             viewButton.addEventListener('click', () => {
                 showIdeaModal(idea);
             });
 
-            // Add click handler for view context button if it exists
+            // Add click handler for initial prompt button if it exists (generation 0)
             if (index === 0) {
-                const viewContextBtn = card.querySelector('.view-context');
-                viewContextBtn.addEventListener('click', () => {
-                    // Pass the idea index to show the correct context
-                    showContextModal(ideaIndex);
-                });
+                const viewPromptBtn = card.querySelector('.view-prompt');
+                if (viewPromptBtn) {
+                    viewPromptBtn.addEventListener('click', () => {
+                        showPromptModal(ideaIndex, 'initial');
+                    });
+                }
             }
 
-            // Add click handler for view lineage button if it exists
+            // Add click handler for breeding prompt button if it exists (generation > 0)
             if (index > 0) {
-                const viewLineageBtn = card.querySelector('.view-lineage');
-                viewLineageBtn.addEventListener('click', () => {
-                    showLineageModal(idea, index);
-                });
+                const viewBreedingPromptBtn = card.querySelector('.view-breeding-prompt');
+                if (viewBreedingPromptBtn) {
+                    viewBreedingPromptBtn.addEventListener('click', () => {
+                        showPromptModal(ideaIndex, 'breeding', index);
+                    });
+                }
+            }
+
+            // Add click handler for lineage button if it exists
+            if (index > 0) {
+                const lineageBtn = card.querySelector('.lineage-btn');
+                if (lineageBtn) {
+                    lineageBtn.addEventListener('click', () => {
+                        showLineageModal(idea, index);
+                    });
+                }
             }
 
             scrollContainer.appendChild(card);
@@ -1157,6 +1182,7 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
                 if (data.data.contexts) {
                     contexts = data.data.contexts;
                     specificPrompts = data.data.specific_prompts || [];
+                    breedingPrompts = data.data.breeding_prompts || [];
                     currentContextIndex = 0;
                     updateContextDisplay();
                     document.querySelector('.context-navigation').style.display = 'block';
@@ -1255,6 +1281,7 @@ async function pollProgress() {
         if (data.contexts && data.contexts.length > 0) {
             contexts = data.contexts;
             specificPrompts = data.specific_prompts || [];
+            breedingPrompts = data.breeding_prompts || [];
             currentContextIndex = 0;
             updateContextDisplay();
             document.querySelector('.context-navigation').style.display = 'block';
@@ -1550,6 +1577,7 @@ function resetUIState() {
     // Reset contexts
     contexts = [];
     specificPrompts = [];
+    breedingPrompts = [];
     currentContextIndex = 0;
 
     // Reset context display
@@ -2982,3 +3010,128 @@ function debugDiversityChart() {
 
 // Make debug function available globally for browser console
 window.debugDiversityChart = debugDiversityChart;
+
+// Function to show the prompt modal (handles both initial and breeding prompts)
+function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
+    console.log(`showPromptModal called with ideaIndex: ${ideaIndex}, promptType: ${promptType}, generationIndex: ${generationIndex}`);
+
+    // Create modal if it doesn't exist
+    let promptModal = document.getElementById('promptModal');
+
+    if (!promptModal) {
+        // Create the modal element
+        promptModal = document.createElement('div');
+        promptModal.className = 'modal fade';
+        promptModal.id = 'promptModal';
+        promptModal.tabIndex = '-1';
+        promptModal.setAttribute('aria-labelledby', 'promptModalLabel');
+        promptModal.setAttribute('aria-hidden', 'true');
+
+        // Set up the modal HTML structure
+        promptModal.innerHTML = `
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="promptModalLabel">Prompt</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="promptModalContent"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Add the modal to the document body
+        document.body.appendChild(promptModal);
+    }
+
+    // Get the modal content element
+    const promptModalContent = document.getElementById('promptModalContent');
+    const modalTitle = document.getElementById('promptModalLabel');
+
+    let displayContent = '';
+    let displayTitle = '';
+
+    if (promptType === 'initial') {
+        // Handle initial generation prompts
+        if (specificPrompts.length > 0 && specificPrompts[ideaIndex]) {
+            displayContent = specificPrompts[ideaIndex];
+            displayTitle = `Initial Prompt for Idea ${ideaIndex + 1}`;
+        } else if (contexts.length > 0 && contexts[ideaIndex]) {
+            displayContent = contexts[ideaIndex];
+            displayTitle = `Initial Context for Idea ${ideaIndex + 1}`;
+        } else {
+            displayContent = 'No prompt available';
+            displayTitle = 'Initial Prompt';
+        }
+
+        console.log(`Using initial prompt for idea ${ideaIndex}: "${displayContent}"`);
+    } else if (promptType === 'breeding') {
+        // Handle breeding generation prompts
+        const breedingGenIndex = generationIndex - 1; // Generation 1 corresponds to index 0 in breedingPrompts
+
+        if (breedingPrompts.length > breedingGenIndex &&
+            breedingPrompts[breedingGenIndex] &&
+            breedingPrompts[breedingGenIndex][ideaIndex]) {
+            displayContent = breedingPrompts[breedingGenIndex][ideaIndex];
+            displayTitle = `Breeding Prompt for Generation ${generationIndex}, Idea ${ideaIndex + 1}`;
+        } else {
+            displayContent = 'No breeding prompt available for this idea';
+            displayTitle = `Breeding Prompt - Generation ${generationIndex}`;
+        }
+
+        console.log(`Using breeding prompt for gen ${generationIndex}, idea ${ideaIndex}: "${displayContent}"`);
+    }
+
+    // Update the modal title
+    modalTitle.textContent = displayTitle;
+
+    // Format the content
+    if (displayContent && displayContent !== 'No prompt available' && displayContent !== 'No breeding prompt available for this idea') {
+        const contentItems = displayContent
+            .split('\n')
+            .filter(item => item.trim())
+            .map(item => `<div class="prompt-item">${item.trim()}</div>`)
+            .join('');
+
+        promptModalContent.innerHTML = `
+            <div class="prompt-content">
+                <div class="alert alert-info mb-3">
+                    <strong>${promptType === 'initial' ? 'Initial' : 'Breeding'} Prompt:</strong>
+                    ${promptType === 'initial'
+                        ? 'This is the specific prompt used to create this initial idea from the context pool.'
+                        : 'This is the specific prompt generated from parent concepts to create this bred idea.'}
+                </div>
+                ${contentItems}
+            </div>
+        `;
+    } else {
+        promptModalContent.innerHTML = `<p class="text-muted">${displayContent}</p>`;
+    }
+
+    // Show the modal
+    if (window.bootstrap) {
+        const modal = new bootstrap.Modal(promptModal);
+
+        // Add cleanup event listener
+        const cleanupFunction = function(event) {
+            const backdrops = document.querySelectorAll('.modal-backdrop');
+            backdrops.forEach(backdrop => backdrop.remove());
+            document.body.classList.remove('modal-open');
+            document.body.style.overflow = '';
+            document.body.style.paddingRight = '';
+        };
+
+        promptModal.removeEventListener('hidden.bs.modal', cleanupFunction);
+        promptModal.addEventListener('hidden.bs.modal', cleanupFunction);
+
+        modal.show();
+    } else {
+        console.error("Bootstrap is not available. Make sure it's properly loaded.");
+        promptModal.style.display = 'block';
+    }
+}

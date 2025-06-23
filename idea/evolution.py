@@ -72,6 +72,7 @@ class EvolutionEngine:
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
         self.specific_prompts = []  # List of specific prompts generated from contexts (translation layer)
+        self.breeding_prompts = []  # List of lists: breeding prompts for each generation (empty for gen 0)
 
         # Initialize diversity calculator
         self.diversity_calculator = DiversityCalculator()
@@ -153,6 +154,7 @@ class EvolutionEngine:
                         "history": [self.population[:i]] if i > 0 else [],
                         "contexts": self.contexts,
                         "specific_prompts": self.specific_prompts,
+                        "breeding_prompts": self.breeding_prompts,
                         "progress": (i / (self.pop_size * (self.generations + 1))) * 100,
                         "stop_message": f"Evolution stopped during initial generation (completed {i}/{self.pop_size} ideas)",
                         "diversity_history": self.diversity_history.copy() if self.diversity_history else []
@@ -177,6 +179,7 @@ class EvolutionEngine:
                     "history": current_history,
                     "contexts": self.contexts,
                     "specific_prompts": self.specific_prompts,
+                    "breeding_prompts": self.breeding_prompts,
                     "progress": progress_percent,
                     "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                 })
@@ -203,6 +206,7 @@ class EvolutionEngine:
                         "history": self.history,
                         "contexts": self.contexts,
                         "specific_prompts": self.specific_prompts,
+                        "breeding_prompts": self.breeding_prompts,
                         "progress": ((self.pop_size + gen * self.pop_size) / (self.pop_size * (self.generations + 1))) * 100,
                         "stop_message": f"Evolution stopped after completing generation {gen}",
                         "token_counts": self.get_total_token_count(),
@@ -219,6 +223,7 @@ class EvolutionEngine:
                     print(f"Adjusting tournament size to {actual_tournament_size} due to small population")
 
                 new_population = []
+                generation_breeding_prompts = []  # Collect breeding prompts for this generation
                 random.shuffle(self.population)
 
                 # Generate exactly as many new ideas as the current population size (preserving Oracle additions)
@@ -245,6 +250,7 @@ class EvolutionEngine:
                             "history": self.history,
                             "contexts": self.contexts,
                             "specific_prompts": self.specific_prompts,
+                            "breeding_prompts": self.breeding_prompts,
                             "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
                             "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
                             "token_counts": self.get_total_token_count(),
@@ -304,6 +310,12 @@ class EvolutionEngine:
                         parent_ideas = [group[idx] for idx in parent_indices]
                         new_idea = self.breeder.breed(parent_ideas, self.idea_type, self.genotype_encoder)
 
+                        # Extract and store the breeding prompt before formatting
+                        if isinstance(new_idea, dict) and "specific_prompt" in new_idea:
+                            generation_breeding_prompts.append(new_idea["specific_prompt"])
+                        else:
+                            generation_breeding_prompts.append(None)  # Fallback
+
                         # Format the idea and add to new population
                         formatted_idea = self.formatter.format_idea(new_idea, self.idea_type)
                         new_population.append(formatted_idea)
@@ -318,6 +330,10 @@ class EvolutionEngine:
                         history_copy = self.history.copy()
                         history_copy.append(new_population.copy())
 
+                        # Include the current generation's breeding prompts for real-time updates
+                        breeding_prompts_with_current = self.breeding_prompts.copy()
+                        breeding_prompts_with_current.append(generation_breeding_prompts.copy())
+
                         # Send progress update
                         await progress_callback({
                             "current_generation": gen + 1,
@@ -326,6 +342,7 @@ class EvolutionEngine:
                             "history": history_copy,
                             "contexts": self.contexts,
                             "specific_prompts": self.specific_prompts,
+                            "breeding_prompts": breeding_prompts_with_current,
                             "progress": progress_percent,
                             "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                         })
@@ -340,7 +357,12 @@ class EvolutionEngine:
                 # Update population with new ideas
                 self.population = new_population
                 self.history.append(self.population)
+
+                # Store the breeding prompts for this generation
+                self.breeding_prompts.append(generation_breeding_prompts)
+
                 print(f"Generation {gen + 1} complete. Population size: {len(self.population)}")
+                print(f"Collected {len(generation_breeding_prompts)} breeding prompts for generation {gen + 1}")
 
                 # Calculate diversity for this generation
                 generation_diversity = await self._calculate_and_store_diversity()
@@ -410,6 +432,7 @@ class EvolutionEngine:
                             "history": self.history,
                             "contexts": self.contexts,
                             "specific_prompts": self.specific_prompts,
+                            "breeding_prompts": self.breeding_prompts,
                             "progress": ((gen + 1) / self.generations) * 100,
                             "oracle_update": True,  # Flag to indicate this is an Oracle update
                             "token_counts": self.get_total_token_count(),
@@ -429,6 +452,7 @@ class EvolutionEngine:
                     "history": self.history,
                     "contexts": self.contexts,
                     "specific_prompts": self.specific_prompts,
+                    "breeding_prompts": self.breeding_prompts,
                     "progress": 100,
                     "token_counts": self.get_total_token_count(),
                     "diversity_history": self.diversity_history.copy() if self.diversity_history else []

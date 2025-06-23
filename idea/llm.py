@@ -124,7 +124,6 @@ class Ideator(LLMWrapper):
         subset = random.sample(words, sample_size)
         return ", ".join(subset)
 
-
     def generate_specific_prompt(self, context_pool: str, idea_type: str) -> str:
         """Generate a specific idea prompt from the context pool using the translation layer"""
         prompts = get_prompts(idea_type)
@@ -136,6 +135,58 @@ class Ideator(LLMWrapper):
         print(f"Generated specific prompt: {specific_prompt}")
 
         return specific_prompt
+
+    def generate_context_from_parents(self, parent_genotypes: List[str]) -> str:
+        """Generate context pool from parent genotypes by combining and sampling concepts
+
+        Args:
+            parent_genotypes: List of genotypes from parent ideas
+
+        Returns:
+            A sampled context pool string
+        """
+        # Combine all concepts from parent genotypes
+        all_concepts = []
+        for genotype in parent_genotypes:
+            # Split genotype by semicolons and clean up
+            concepts = [concept.strip() for concept in genotype.split(';') if concept.strip()]
+            all_concepts.extend(concepts)
+
+        # Remove duplicates while preserving order
+        unique_concepts = list(dict.fromkeys(all_concepts))
+
+        # Sample 50% at random as requested by user
+        if len(unique_concepts) > 1:
+            sample_size = max(1, len(unique_concepts) // 2)  # 50% but at least 1
+            sampled_concepts = random.sample(unique_concepts, sample_size)
+        else:
+            sampled_concepts = unique_concepts
+
+        context_pool = ", ".join(sampled_concepts)
+        print(f"Generated context from parents: {context_pool}")
+        return context_pool
+
+    def generate_idea_from_context(self, context_pool: str, idea_type: str) -> tuple[str, str]:
+        """Helper function to generate an idea from a context pool
+
+        This function encapsulates steps 3 and 4 from the user's request:
+        3. Using the sample to ask LLM to create specific prompt
+        4. Generate an idea from specific prompt
+
+        Args:
+            context_pool: The context pool to generate from
+            idea_type: Type of idea to generate
+
+        Returns:
+            tuple: (generated_idea, specific_prompt_used)
+        """
+        # Generate specific prompt from context pool
+        specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
+
+        # Generate idea using the specific prompt
+        response = self.generate_text(specific_prompt)
+
+        return response, specific_prompt
 
     def get_idea_prompt(self, idea_type: str) -> str:
         """Get prompt template for specific idea type"""
@@ -154,11 +205,9 @@ class Ideator(LLMWrapper):
         for _ in tqdm(range(n), desc="Generating ideas"):
             # Generate context pool
             context_pool = self.generate_context(idea_type)
-            # Generate specific prompt from context pool
-            specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
+
+            response, specific_prompt = self.generate_idea_from_context(context_pool, idea_type)
             specific_prompts.append(specific_prompt)
-            # Generate idea using the specific prompt
-            response = self.generate_text(specific_prompt)
 
             ideas.append({"id": uuid.uuid4(), "idea": response, "parent_ids": []})
 
@@ -422,7 +471,13 @@ class Breeder(LLMWrapper):
         super().__init__(agent_name=self.agent_name, **kwargs)
 
     def breed(self, ideas: List[str], idea_type: str, genotype_encoder: 'GenotypeEncoder') -> str:
-        """Breed ideas to create a new idea using genotype-based breeding
+        """Breed ideas to create a new idea using the new approach that mirrors initial population generation
+
+        This follows the same pattern as initial idea generation:
+        1. Get concepts from the parents (their genotypes) and combine them
+        2. Sample 50% at random (in python code)
+        3. Using the sample to ask LLM to create specific prompt
+        4. Generate an idea from specific prompt
 
         Args:
             ideas: List of parent ideas that have already been selected in the main evolution loop
@@ -438,23 +493,36 @@ class Breeder(LLMWrapper):
             if isinstance(parent, dict) and "id" in parent:
                 parent_ids.append(str(parent["id"]))
 
-
-        # Encode parent ideas to genotypes
+        # Step 1: Get concepts from the parents (their genotypes) and combine them
         parent_genotypes = []
         for parent in ideas:
             genotype = genotype_encoder.encode_to_genotype(parent, idea_type)
             parent_genotypes.append(genotype)
 
-        # Perform genetic crossover
-        new_genotype = genotype_encoder.crossover_genotypes(parent_genotypes, idea_type)
+        # We need to get an instance of Ideator to use the new helper methods
+        # Use the same configuration as this Breeder instance
+        ideator = Ideator(
+            provider=self.provider,
+            model_name=self.model_name,
+            temperature=self.temperature
+        )
 
-        # Decode the new genotype back to a full idea
-        new_idea = genotype_encoder.decode_from_genotype(new_genotype, idea_type)
+        # Step 2: Sample 50% at random (handled in generate_context_from_parents)
+        # Step 3 & 4: Using the sample to create specific prompt and generate idea
+        context_pool = ideator.generate_context_from_parents(parent_genotypes)
+        new_idea, specific_prompt = ideator.generate_idea_from_context(context_pool, idea_type)
 
-        print(f"Generated new idea from genotype crossover: {new_idea[:100]}...")
+        print(f"Generated new idea from parent concepts: {new_idea[:100]}...")
+        print(f"Using specific prompt: {specific_prompt[:100]}...")
 
         # Create a new idea with a unique ID and parent IDs
-        return {"id": uuid.uuid4(), "idea": new_idea, "parent_ids": parent_ids}
+        # Also include the specific prompt used for breeding
+        return {
+            "id": uuid.uuid4(),
+            "idea": new_idea,
+            "parent_ids": parent_ids,
+            "specific_prompt": specific_prompt  # Store the specific prompt for later display
+        }
 
 class GenotypeEncoder(LLMWrapper):
     """Encodes ideas to genotypes (basic elements) and decodes genotypes back to ideas"""
