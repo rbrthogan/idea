@@ -421,13 +421,12 @@ class Breeder(LLMWrapper):
         # Don't set temperature directly here, let it come from kwargs
         super().__init__(agent_name=self.agent_name, **kwargs)
 
-    def breed(self, ideas: List[str], idea_type: str, use_genotype: bool = False, genotype_encoder: 'GenotypeEncoder' = None) -> str:
-        """Breed ideas to create a new idea
+    def breed(self, ideas: List[str], idea_type: str, genotype_encoder: 'GenotypeEncoder') -> str:
+        """Breed ideas to create a new idea using genotype-based breeding
 
         Args:
             ideas: List of parent ideas that have already been selected in the main evolution loop
             idea_type: Type of idea to breed
-            use_genotype: Whether to use genotype-based breeding
             genotype_encoder: GenotypeEncoder instance for genotype operations
 
         Returns:
@@ -439,51 +438,20 @@ class Breeder(LLMWrapper):
             if isinstance(parent, dict) and "id" in parent:
                 parent_ids.append(str(parent["id"]))
 
-        if use_genotype and genotype_encoder:
-            # Genotype-based breeding
-            print("Using genotype-based breeding...")
 
-            # Encode parent ideas to genotypes
-            parent_genotypes = []
-            for parent in ideas:
-                genotype = genotype_encoder.encode_to_genotype(parent, idea_type)
-                parent_genotypes.append(genotype)
+        # Encode parent ideas to genotypes
+        parent_genotypes = []
+        for parent in ideas:
+            genotype = genotype_encoder.encode_to_genotype(parent, idea_type)
+            parent_genotypes.append(genotype)
 
-            # Perform genetic crossover
-            new_genotype = genotype_encoder.crossover_genotypes(parent_genotypes, idea_type)
+        # Perform genetic crossover
+        new_genotype = genotype_encoder.crossover_genotypes(parent_genotypes, idea_type)
 
-            # Decode the new genotype back to a full idea
-            new_idea = genotype_encoder.decode_from_genotype(new_genotype, idea_type)
+        # Decode the new genotype back to a full idea
+        new_idea = genotype_encoder.decode_from_genotype(new_genotype, idea_type)
 
-            print(f"Generated new idea from genotype crossover: {new_idea[:100]}...")
-
-        else:
-            # Traditional phenotype-based breeding
-            print("Using traditional phenotype-based breeding...")
-
-            prompts = get_prompts(idea_type)
-
-            # Extract idea texts from parent ideas
-            parent_texts = []
-            for parent in ideas:
-                # Extract parent text
-                if isinstance(parent, dict) and "idea" in parent:
-                    parent_obj = parent["idea"]
-                    if hasattr(parent_obj, 'title') and hasattr(parent_obj, 'content'):
-                        parent_texts.append(f"{parent_obj.title}: {parent_obj.content}")
-                    else:
-                        parent_texts.append(str(parent_obj))
-                else:
-                    parent_texts.append(str(parent))
-
-            # Format the parent ideas for the prompt
-            parent_str = "\n\n".join([f"Parent {i+1}:\n{text}" for i, text in enumerate(parent_texts)])
-
-            # Create the breeding prompt
-            prompt = prompts.BREED_PROMPT.format(ideas=parent_str)
-
-            # Generate the new idea
-            new_idea = self.generate_text(prompt)
+        print(f"Generated new idea from genotype crossover: {new_idea[:100]}...")
 
         # Create a new idea with a unique ID and parent IDs
         return {"id": uuid.uuid4(), "idea": new_idea, "parent_ids": parent_ids}

@@ -247,8 +247,6 @@ document.addEventListener("DOMContentLoaded", () => {
             const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
             const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
 
-            // Get genotype breeding values
-            const useGenotypeBreeding = document.getElementById('useGenotypeBreeding').checked;
             const genotypeEncoderTemp = parseFloat(document.getElementById('genotypeEncoderTemp').value);
 
             // Get Oracle values
@@ -266,7 +264,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 breederTemp,
                 tournamentSize,
                 tournamentComparisons,
-                useGenotypeBreeding,
                 genotypeEncoderTemp,
                 useOracle,
                 oracleMode,
@@ -408,21 +405,6 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
-    // Add event listener for genotype breeding toggle
-    const genotypeToggle = document.getElementById('useGenotypeBreeding');
-    const genotypeEncoderTempContainer = document.getElementById('genotypeEncoderTempContainer');
-
-    if (genotypeToggle && genotypeEncoderTempContainer) {
-        genotypeToggle.addEventListener('change', function() {
-            if (this.checked) {
-                genotypeEncoderTempContainer.style.display = 'block';
-                console.log("Genotype breeding enabled");
-            } else {
-                genotypeEncoderTempContainer.style.display = 'none';
-                console.log("Genotype breeding disabled");
-            }
-        });
-    }
 
     // Add event listener for Oracle toggle
     const oracleToggle = document.getElementById('useOracle');
@@ -444,13 +426,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // Initialize default UI states based on checkbox states
-    // Handle genotype breeding default state
-    if (genotypeToggle && genotypeEncoderTempContainer) {
-        if (genotypeToggle.checked) {
-            genotypeEncoderTempContainer.style.display = 'block';
-            console.log("Genotype breeding enabled by default");
-        }
-    }
 
     // Handle Oracle default state
     if (oracleToggle && oracleModeContainer && oracleTempContainer) {

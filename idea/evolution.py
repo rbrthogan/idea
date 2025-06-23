@@ -35,7 +35,6 @@ class EvolutionEngine:
         breeder_temp: float = 2.0,
         tournament_size: int = 5,
         tournament_comparisons: int = 20,
-        use_genotype_breeding: bool = True,
         genotype_encoder_temp: float = 1.2,
         use_oracle: bool = True,
         oracle_mode: str = "add",
@@ -46,7 +45,6 @@ class EvolutionEngine:
         self.generations = generations
         self.tournament_size = tournament_size
         self.tournament_comparisons = tournament_comparisons
-        self.use_genotype_breeding = use_genotype_breeding
         self.use_oracle = use_oracle
         self.oracle_mode = oracle_mode
         self.population: List[Idea] = []
@@ -54,9 +52,7 @@ class EvolutionEngine:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
 
         # Initialize LLM components with appropriate temperatures
-        print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}")
-        if use_genotype_breeding:
-            print(f"Genotype breeding enabled with GenotypeEncoder temperature: {genotype_encoder_temp}")
+        print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}, GenotypeEncoder={genotype_encoder_temp}")
         if use_oracle:
             print(f"Oracle enabled with mode: {oracle_mode}, temperature: {oracle_temp}")
 
@@ -65,11 +61,7 @@ class EvolutionEngine:
         self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=critic_temp)
         self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=breeder_temp)
 
-        # Initialize genotype encoder if genotype breeding is enabled
-        if use_genotype_breeding:
-            self.genotype_encoder = GenotypeEncoder(provider="google_generative_ai", model_name=model_type, temperature=genotype_encoder_temp)
-        else:
-            self.genotype_encoder = None
+        self.genotype_encoder = GenotypeEncoder(provider="google_generative_ai", model_name=model_type, temperature=genotype_encoder_temp)
 
         # Initialize Oracle if enabled
         if use_oracle:
@@ -310,7 +302,7 @@ class EvolutionEngine:
                         # Select parents and breed
                         parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights, replace=False)
                         parent_ideas = [group[idx] for idx in parent_indices]
-                        new_idea = self.breeder.breed(parent_ideas, self.idea_type, self.use_genotype_breeding, self.genotype_encoder)
+                        new_idea = self.breeder.breed(parent_ideas, self.idea_type, self.genotype_encoder)
 
                         # Format the idea and add to new population
                         formatted_idea = self.formatter.format_idea(new_idea, self.idea_type)
