@@ -759,7 +759,7 @@ function renderGenerations(gens) {
             contentDiv.id = `generation-content-${index}`;
 
             const scrollContainer = document.createElement('div');
-            scrollContainer.className = 'scroll-container row g-3';
+            scrollContainer.className = 'scroll-container';
             scrollContainer.id = `scroll-container-${index}`;
 
             // Add a wrapper to ensure proper containment
@@ -811,7 +811,7 @@ function renderGenerations(gens) {
 
             // Create a new card for this idea
             const card = document.createElement('div');
-            card.className = 'col-md-6 col-lg-4 mb-4';
+            card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
 
             // Create a plain text preview for the card
@@ -820,39 +820,42 @@ function renderGenerations(gens) {
             // Add "Prompt" button for initial generation cards
             const viewPromptButton = index === 0 ?
                 `<button class="btn btn-outline-info btn-sm view-prompt me-2" title="View Initial Prompt">
-                    <i class="fas fa-lightbulb"></i><span class="btn-text">Prompt</span>
+                    <i class="fas fa-lightbulb"></i> Prompt
                 </button>` : '';
 
             // Add "Prompt" button for breeding generation cards (if we have breeding prompts)
             const breedingPromptButton = index > 0 ?
                 `<button class="btn btn-outline-info btn-sm view-breeding-prompt me-2" title="View Breeding Prompt">
-                    <i class="fas fa-lightbulb"></i><span class="btn-text">Prompt</span>
+                    <i class="fas fa-lightbulb"></i> Prompt
                 </button>` : '';
 
-            // Add lineage button for breeding generations (generations 1+)
-            const lineageButton = index > 0 ?
-                `<button class="btn btn-outline-secondary btn-sm lineage-btn" title="View Lineage">
-                    <i class="fas fa-project-diagram"></i><span class="btn-text">Lineage</span>
+            // Add "Lineage" or "Oracle Analysis" button for non-initial generation cards
+            // Check if this is an Oracle-generated idea to show appropriate button text with icon
+            const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
+            const buttonText = isOracleIdea ? '<i class="fas fa-eye"></i> Oracle' : '<i class="fas fa-project-diagram"></i> Lineage';
+            const viewLineageButton = index > 0 ?
+                `<button class="btn btn-outline-secondary btn-sm view-lineage" title="${isOracleIdea ? 'View Oracle Analysis' : 'View Lineage'}" style="margin-left: auto;">
+                    ${buttonText}
                 </button>` : '';
 
             card.innerHTML = `
-                <div class="card h-100 shadow-sm">
-                    <div class="card-body d-flex flex-column">
-                        <h5 class="card-title text-primary">${idea.title || 'Untitled'}</h5>
-                        <p class="card-text flex-grow-1">${plainPreview}</p>
-                        <div class="card-actions">
-                            ${viewPromptButton}
-                            ${breedingPromptButton}
-                            <button class="btn btn-primary btn-sm view-idea" title="View Full Idea">
-                                <i class="fas fa-expand"></i><span class="btn-text">Full Idea</span>
-                            </button>
-                            ${lineageButton}
-                        </div>
+                <div class="card-body">
+                    <h5 class="card-title">${idea.title || 'Untitled'}</h5>
+                    <div class="card-text">
+                        <p>${plainPreview}</p>
+                    </div>
+                    <div class="card-actions">
+                        ${viewPromptButton}
+                        ${breedingPromptButton}
+                        <button class="btn btn-primary btn-sm view-idea">
+                            <i class="fas fa-expand"></i> Full Idea
+                        </button>
+                        ${viewLineageButton}
                     </div>
                 </div>
             `;
 
-            // Add event handlers after setting innerHTML
+            // Add click handler for view button
             const viewButton = card.querySelector('.view-idea');
             viewButton.addEventListener('click', () => {
                 showIdeaModal(idea);
@@ -861,31 +864,27 @@ function renderGenerations(gens) {
             // Add click handler for initial prompt button if it exists (generation 0)
             if (index === 0) {
                 const viewPromptBtn = card.querySelector('.view-prompt');
-                if (viewPromptBtn) {
-                    viewPromptBtn.addEventListener('click', () => {
-                        showPromptModal(ideaIndex, 'initial');
-                    });
-                }
+                viewPromptBtn.addEventListener('click', () => {
+                    // Pass the idea index to show the correct context
+                    showPromptModal(ideaIndex, 'initial');
+                });
             }
 
             // Add click handler for breeding prompt button if it exists (generation > 0)
             if (index > 0) {
                 const viewBreedingPromptBtn = card.querySelector('.view-breeding-prompt');
-                if (viewBreedingPromptBtn) {
-                    viewBreedingPromptBtn.addEventListener('click', () => {
-                        showPromptModal(ideaIndex, 'breeding', index);
-                    });
-                }
+                viewBreedingPromptBtn.addEventListener('click', () => {
+                    // Pass the generation index and idea index for breeding prompts
+                    showPromptModal(ideaIndex, 'breeding', index);
+                });
             }
 
-            // Add click handler for lineage button if it exists
+            // Add click handler for view lineage button if it exists
             if (index > 0) {
-                const lineageBtn = card.querySelector('.lineage-btn');
-                if (lineageBtn) {
-                    lineageBtn.addEventListener('click', () => {
-                        showLineageModal(idea, index);
-                    });
-                }
+                const viewLineageBtn = card.querySelector('.view-lineage');
+                viewLineageBtn.addEventListener('click', () => {
+                    showLineageModal(idea, index);
+                });
             }
 
             scrollContainer.appendChild(card);
