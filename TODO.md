@@ -15,6 +15,7 @@
 - Add a meta prompt to get the model to improve the new idea generation prompts based on the history of the evolution.
 - Split evolution population into multiple "islands" of ideas, which are evolved independently with only rare opportunity for cross-island communication.
 - Relook at genotype breeding. More explicit crossover and mutation. Idea creation should be similar to initial population.
+- update oracle to generate a specific prompt from analysis of the population.
 
 ## Bugs
 - When opening on "current evolution" the diversity chart initially appears with data but is then refreshed to empty. If saved it can be restored by selecting the saved evolution, but current evolution view should also work.

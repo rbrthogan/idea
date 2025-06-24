@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Callable, Awaitable
+from typing import List, Dict, Any, Callable, Awaitable, Optional
 import random
 import numpy as np
 import asyncio
@@ -82,6 +82,14 @@ class EvolutionEngine:
         self.stop_requested = False
         self.is_stopped = False
 
+        # Dedicated embedding storage for efficient centroid computation
+        # Maps idea ID to its embedding vector for fast lookup and updates
+        self.idea_embeddings = {}  # Dict[str, np.ndarray]
+        # Maintain ordered list of all valid embeddings for quick centroid calculation
+        self.all_embeddings = []  # List[np.ndarray]
+        # Track which ideas have embeddings to handle removals efficiently
+        self.embedding_id_to_index = {}  # Dict[str, int] - maps idea ID to index in all_embeddings
+
     def generate_contexts(self):
         """Generate contexts for the initial population"""
         self.contexts = []
@@ -103,6 +111,7 @@ class EvolutionEngine:
     async def _calculate_and_store_diversity(self) -> Dict[str, Any]:
         """
         Calculate diversity metrics for the current population history and store them.
+        Also populates our embedding storage for efficient centroid computation.
 
         Returns:
             Dictionary containing diversity metrics
@@ -112,6 +121,18 @@ class EvolutionEngine:
                 return {"enabled": False, "reason": "No history available"}
 
             print("🔍 Calculating population diversity...")
+
+            # Flatten all ideas from all generations to populate embedding storage
+            all_ideas = []
+            for generation in self.history:
+                all_ideas.extend(generation)
+
+            # Ensure we have embeddings for all ideas (this will populate our storage)
+            if all_ideas:
+                await self._get_or_compute_embeddings_for_ideas(all_ideas)
+                print(f"📦 Embedding storage now contains {len(self.all_embeddings)} embeddings")
+
+            # Calculate diversity using the standard diversity calculator
             diversity_data = await self.diversity_calculator.calculate_diversity(self.history)
             self.diversity_history.append(diversity_data)
 
@@ -123,6 +144,82 @@ class EvolutionEngine:
         except Exception as e:
             print(f"Warning: Diversity calculation failed: {e}")
             return {"enabled": True, "error": str(e)}
+
+    async def _find_least_interesting_idea_idx(self, current_generation: List[str]) -> int:
+        """
+        Find the index of the least interesting idea in the current generation using embedding-based centroid distance.
+
+        The "interesting-ness" score is computed as the distance of each idea to the POPULATION centroid
+        (computed from ALL historical ideas across ALL generations).
+        The idea with the lowest score (closest to centroid) is considered least interesting.
+
+        Args:
+            current_generation: List of ideas in the current generation
+
+        Returns:
+            Index of the least interesting idea (0-based)
+        """
+        try:
+            if not self.diversity_calculator.is_enabled():
+                print("Diversity calculator not enabled, defaulting to first idea for replacement")
+                return 0
+
+            if len(current_generation) <= 1:
+                return 0
+
+            print(f"🎯 Calculating embedding-based interesting-ness scores for {len(current_generation)} ideas...")
+            print(f"🎯 Population has {len(self.all_embeddings)} total embeddings for centroid calculation")
+
+            # Get or compute embeddings for current generation ideas
+            embeddings = await self._get_or_compute_embeddings_for_ideas(current_generation)
+
+            # Filter out failed embeddings and track their indices
+            valid_embeddings = []
+            valid_indices = []
+            for idx, embedding in enumerate(embeddings):
+                if embedding is not None:
+                    valid_embeddings.append(embedding)
+                    valid_indices.append(idx)
+
+            if len(valid_embeddings) == 0:
+                print("No valid embeddings for current generation, defaulting to first idea")
+                return 0
+
+            # Compute population centroid from ALL historical embeddings
+            population_centroid = await self._compute_population_centroid()
+            if population_centroid is None:
+                print("No population centroid available, defaulting to first idea")
+                return 0
+
+            # Calculate distance from each current generation idea to the population centroid
+            import numpy as np
+            distances = []
+            for i, embedding in enumerate(valid_embeddings):
+                distance = np.sqrt(np.sum((embedding - population_centroid) ** 2))
+                distances.append(distance)
+
+            # Find the index of the idea with minimum distance (least interesting)
+            min_distance_idx = np.argmin(distances)
+            least_interesting_original_idx = valid_indices[min_distance_idx]
+
+            # Extract title for logging
+            least_interesting_idea = current_generation[least_interesting_original_idx]
+            title = "Unknown"
+            if isinstance(least_interesting_idea, dict) and "idea" in least_interesting_idea:
+                idea_obj = least_interesting_idea["idea"]
+                if hasattr(idea_obj, 'title'):
+                    title = idea_obj.title
+
+            print(f"🎯 Least interesting idea (closest to population centroid): '{title}' at index {least_interesting_original_idx}")
+            print(f"   Distance to population centroid: {distances[min_distance_idx]:.4f}")
+            print(f"   Population centroid computed from {len(self.all_embeddings)} historical embeddings")
+
+            return least_interesting_original_idx
+
+        except Exception as e:
+            print(f"Error calculating interesting-ness scores: {e}")
+            print("Defaulting to first idea for replacement")
+            return 0
 
     async def run_evolution_with_updates(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
         """
@@ -398,8 +495,8 @@ class EvolutionEngine:
                             print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
 
                         elif oracle_result["action"] == "replace":
-                            # Replace existing idea with more diverse one
-                            replace_idx = oracle_result["replace_index"]
+                            # Replace existing idea with more diverse one using embedding-based selection
+                            replace_idx = await self._find_least_interesting_idea_idx(self.population)
                             oracle_idea = oracle_result["new_idea"]
                             formatted_oracle_idea = self.formatter.format_idea(oracle_idea, self.idea_type)
 
@@ -416,9 +513,19 @@ class EvolutionEngine:
                                 if hasattr(idea_obj, 'title'):
                                     old_title = idea_obj.title
 
+                            # Update embedding storage: remove old idea's embedding
+                            old_idea_id = str(old_idea.get("id", "")) if isinstance(old_idea, dict) else ""
+                            if old_idea_id:
+                                await self._remove_embedding(old_idea_id)
+                                print(f"🗑️ Removed embedding for replaced idea: '{old_title}'")
+
                             self.population[replace_idx] = formatted_oracle_idea
-                            print(f"Oracle replaced idea '{old_title}' at index {replace_idx} with more diverse alternative")
+                            print(f"Oracle replaced idea '{old_title}' at index {replace_idx} (least interesting by embedding distance) with more diverse alternative")
                             print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
+
+                            # Store embedding for new Oracle idea
+                            # Note: The embedding will be computed and stored when _get_or_compute_embeddings_for_ideas is called next time
+                            # This is efficient because it avoids computing the embedding immediately
 
                         # Update the history with Oracle's changes
                         self.history[-1] = self.population.copy()
@@ -642,3 +749,102 @@ class EvolutionEngine:
 
         token_data['estimates'] = estimates
         return token_data
+
+    async def _store_embedding(self, idea_id: str, embedding: np.ndarray):
+        """
+        Store an embedding for an idea.
+
+        Args:
+            idea_id: Unique ID of the idea
+            embedding: The embedding vector for the idea
+        """
+        if idea_id not in self.idea_embeddings:
+            # New embedding - add to all storage structures
+            self.idea_embeddings[idea_id] = embedding
+            index = len(self.all_embeddings)
+            self.all_embeddings.append(embedding)
+            self.embedding_id_to_index[idea_id] = index
+        else:
+            # Update existing embedding
+            index = self.embedding_id_to_index[idea_id]
+            self.all_embeddings[index] = embedding
+            self.idea_embeddings[idea_id] = embedding
+
+    async def _remove_embedding(self, idea_id: str):
+        """
+        Remove an embedding for an idea.
+
+        Args:
+            idea_id: Unique ID of the idea to remove
+        """
+        if idea_id not in self.idea_embeddings:
+            return
+
+        # Get index of the embedding to remove
+        remove_index = self.embedding_id_to_index[idea_id]
+
+        # Remove from all storage structures
+        del self.idea_embeddings[idea_id]
+        self.all_embeddings.pop(remove_index)
+        del self.embedding_id_to_index[idea_id]
+
+        # Update indices for all embeddings after the removed one
+        for other_id, other_index in self.embedding_id_to_index.items():
+            if other_index > remove_index:
+                self.embedding_id_to_index[other_id] = other_index - 1
+
+    async def _compute_population_centroid(self) -> Optional[np.ndarray]:
+        """
+        Compute the centroid of all stored embeddings.
+
+        Returns:
+            Population centroid as numpy array, or None if no embeddings available
+        """
+        if not self.all_embeddings:
+            return None
+
+        import numpy as np
+        return np.mean(self.all_embeddings, axis=0)
+
+    async def _get_or_compute_embeddings_for_ideas(self, ideas: List[str]) -> List[Optional[np.ndarray]]:
+        """
+        Get embeddings for ideas, computing them if not already stored.
+
+        Args:
+            ideas: List of idea dictionaries
+
+        Returns:
+            List of embeddings (or None for failed embeddings)
+        """
+        embeddings = []
+        new_embeddings_needed = []
+        new_embedding_indices = []
+
+        # Check which embeddings we already have
+        for i, idea in enumerate(ideas):
+            idea_id = str(idea.get("id", "")) if isinstance(idea, dict) else ""
+            if idea_id and idea_id in self.idea_embeddings:
+                embeddings.append(self.idea_embeddings[idea_id])
+            else:
+                embeddings.append(None)  # Placeholder
+                new_embeddings_needed.append(idea)
+                new_embedding_indices.append(i)
+
+        # Compute missing embeddings
+        if new_embeddings_needed:
+            print(f"Computing {len(new_embeddings_needed)} new embeddings...")
+            texts = [self.diversity_calculator._get_idea_text(idea) for idea in new_embeddings_needed]
+            new_embeddings = await self.diversity_calculator._get_embeddings_batch(texts)
+
+            # Store and assign new embeddings
+            for i, (idea, embedding) in enumerate(zip(new_embeddings_needed, new_embeddings)):
+                original_index = new_embedding_indices[i]
+                embeddings[original_index] = embedding
+
+                # Store the embedding if it's valid
+                if embedding is not None:
+                    idea_id = str(idea.get("id", "")) if isinstance(idea, dict) else ""
+                    if idea_id:
+                        await self._store_embedding(idea_id, embedding)
+
+        return embeddings

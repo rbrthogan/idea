@@ -15,7 +15,7 @@ DEFAULT_MODEL = "gemini-2.5-flash-lite"
 # Oracle configuration
 ORACLE_MODES = [
     {"id": "add", "name": "Add New Idea (Grow Population)"},
-    {"id": "replace", "name": "Replace Least Diverse Idea"}
+    {"id": "replace", "name": "Replace Least Interesting Idea (Embedding-Based)"}
 ]
 
 DEFAULT_ORACLE_MODE = "replace"

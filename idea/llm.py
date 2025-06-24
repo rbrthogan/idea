@@ -672,16 +672,19 @@ class Oracle(LLMWrapper):
 
     def analyze_and_diversify(self, history: List[List[str]], current_generation: List[str], idea_type: str, oracle_mode: str = "add") -> dict:
         """
-        Analyze the entire evolution history and either add a new diverse idea or replace a similar one
+        Analyze the entire evolution history and generate a new diverse idea.
+
+        Note: For replace mode, the Oracle no longer decides which idea to replace.
+        The replacement selection is now handled by embedding-based centroid distance calculation.
 
         Args:
             history: Complete evolution history, list of generations (each generation is a list of ideas)
             current_generation: Current generation's ideas
             idea_type: Type of ideas being evolved
-            oracle_mode: "add" to grow population by 1, "replace" to replace similar idea
+            oracle_mode: "add" to grow population by 1, "replace" to replace idea (selection done externally)
 
         Returns:
-            Dictionary with either new_idea or replacement info
+            Dictionary with new_idea and action type
         """
         # Build comprehensive analysis prompt
         analysis_prompt = self._build_analysis_prompt(history, current_generation, idea_type, oracle_mode)
@@ -787,43 +790,12 @@ class Oracle(LLMWrapper):
             }
 
         else:  # replace mode
-            # Look for REPLACE_INDEX in the oracle analysis section
-            replace_index = 0  # default to first idea if parsing fails
-
-            # Try to parse REPLACE_INDEX from the oracle analysis section
-            analysis_lines = oracle_analysis.split('\n')
-            for line in analysis_lines:
-                if line.strip().startswith('REPLACE_INDEX:'):
-                    try:
-                        replace_index = int(line.split(':')[1].strip())
-                        print(f"ORACLE: Found REPLACE_INDEX: {replace_index}")
-                        break
-                    except (ValueError, IndexError) as e:
-                        print(f"ORACLE: Error parsing REPLACE_INDEX from line '{line}': {e}")
-                        replace_index = 0
-
-            # If we didn't find it in the analysis, also check the entire response as fallback
-            if replace_index == 0:  # Only search if we didn't find it above
-                lines = response.split('\n')
-                for line in lines:
-                    if line.strip().startswith('REPLACE_INDEX:'):
-                        try:
-                            replace_index = int(line.split(':')[1].strip())
-                            print(f"ORACLE: Found REPLACE_INDEX in fallback search: {replace_index}")
-                            break
-                        except (ValueError, IndexError):
-                            replace_index = 0
-
-            # Ensure replace_index is valid
-            if replace_index >= len(current_generation):
-                print(f"ORACLE: REPLACE_INDEX {replace_index} exceeds generation size {len(current_generation)}, using last index")
-                replace_index = len(current_generation) - 1
-
-            print(f"ORACLE: Final REPLACE_INDEX: {replace_index}")
+            # Note: Oracle no longer decides which idea to replace
+            # Replacement selection is handled externally via embedding-based centroid distance
+            print(f"ORACLE: Generated replacement idea. Selection of which idea to replace will be handled externally via embeddings.")
 
             return {
                 "action": "replace",
-                "replace_index": replace_index,
                 "new_idea": {
                     "id": str(uuid.uuid4()),
                     "idea": new_idea_text,

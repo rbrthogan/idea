@@ -177,7 +177,7 @@ async function loadOracleModes() {
         if (oracleModeSelect && oracleModeSelect.children.length === 0) {
             oracleModeSelect.innerHTML = `
                 <option value="add">Add New Idea (Grow Population)</option>
-                <option value="replace">Replace Least Diverse Idea</option>
+                <option value="replace">Replace Least Interesting Idea (Embedding-Based)</option>
             `;
         }
     }

@@ -15,15 +15,16 @@ OUTPUT: Provide your new diverse idea that would add the most value to the popul
 """
 
 ORACLE_REPLACE_MODE_INSTRUCTION = """
-Your task is to REPLACE the least valuable idea in the current generation with something more diverse.
+Your task is to GENERATE a new diverse idea to enrich the current generation with fresh and novel ideas.
 
 ANALYSIS REQUIRED:
 1. Identify the most common patterns, themes, approaches, and methodologies across ALL generations
 2. Spot repetitive concepts, similar problem-solving approaches, or overused techniques
-3. Find which idea in the CURRENT GENERATION is most similar to previous ideas or adds least value
+3. Find gaps in the idea space that haven't been explored
 4. Generate a replacement idea that deliberately avoids the overused patterns
 
-OUTPUT: Your analysis should identify which idea to replace and your new diverse idea should replace it.
+
+OUTPUT: Provide your analysis of patterns and your new diverse idea that would add the most value to the population.
 """
 
 ORACLE_ADD_FORMAT_INSTRUCTIONS = """
@@ -51,14 +52,12 @@ You MUST structure your response EXACTLY as follows. Do NOT deviate from this fo
 === ORACLE ANALYSIS ===
 [Your detailed analysis of patterns, overused concepts, themes, gaps, etc.]
 
-REPLACE_INDEX: [The index (0-based) of the idea to replace in the current generation]
-
 === NEW IDEA ===
 [Only the new story/idea content here - no analysis, just the creative work]
 
 ABSOLUTELY CRITICAL FORMATTING RULES:
 - Use EXACTLY those section headers with the equals signs
-- Put your analysis in the first section, followed by the REPLACE_INDEX line
+- Put your analysis in the first section
 - The NEW IDEA section must contain ONLY the creative story content
 - Do NOT include words like "Analysis:", "Recurring Elements:", or any meta-commentary in the NEW IDEA section
 - Do NOT include any analytical text in the NEW IDEA section
