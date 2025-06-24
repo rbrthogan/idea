@@ -56,12 +56,10 @@ prompts:
     Title: [title text]
     Content: [content text]
 
-    Or it may already be properly formatted text.
+    If no explicit title is provided, create an appropriate one based on the content.
 
     Input to format:
     {input_text}
-
-    Return a valid JSON object with "title" and "content" fields. Extract the title and content appropriately, ensuring the title is creative and descriptive. If no explicit title is provided, create an appropriate one based on the content.
 
   critique: |
     You are a helpful AI that refines ideas.
