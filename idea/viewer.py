@@ -191,10 +191,9 @@ async def start_evolution(request: Request):
 
     # Get Oracle parameters with defaults
     use_oracle = data.get('useOracle', False)
-    oracle_mode = data.get('oracleMode', 'add')
     try:
         oracle_temp = float(data.get('oracleTemp', 1.8))
-        print(f"Parsed Oracle values: use_oracle={use_oracle}, oracle_mode={oracle_mode}, oracle_temp={oracle_temp}")
+        print(f"Parsed Oracle values: use_oracle={use_oracle}, oracle_temp={oracle_temp}")
     except ValueError as e:
         print(f"Error parsing Oracle values: {e}")
         # Use defaults if parsing fails
@@ -205,7 +204,7 @@ async def start_evolution(request: Request):
           f"temperatures: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}, "
           f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
           f"genotype_encoder_temp={genotype_encoder_temp}, "
-          f"oracle={use_oracle}, oracle_mode={oracle_mode}, oracle_temp={oracle_temp}")
+          f"oracle={use_oracle}, oracle_temp={oracle_temp}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -220,7 +219,7 @@ async def start_evolution(request: Request):
         tournament_comparisons=tournament_comparisons,
         genotype_encoder_temp=genotype_encoder_temp,
         use_oracle=use_oracle,
-        oracle_mode=oracle_mode,
+
         oracle_temp=oracle_temp
     )
 
@@ -1091,14 +1090,7 @@ async def get_models():
         "default": DEFAULT_MODEL
     })
 
-@app.get("/api/oracle-modes")
-async def get_oracle_modes():
-    """Return the list of available Oracle modes"""
-    from idea.config import ORACLE_MODES, DEFAULT_ORACLE_MODE
-    return JSONResponse({
-        "modes": ORACLE_MODES,
-        "default": DEFAULT_ORACLE_MODE
-    })
+
 
 @app.post("/api/reset-ratings")
 async def reset_ratings(request: Request):

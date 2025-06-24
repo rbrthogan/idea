@@ -670,33 +670,31 @@ class Oracle(LLMWrapper):
         temp = kwargs.pop('temperature', 1.8)
         super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
 
-    def analyze_and_diversify(self, history: List[List[str]], current_generation: List[str], idea_type: str, oracle_mode: str = "add") -> dict:
+    def analyze_and_diversify(self, history: List[List[str]], current_generation: List[str], idea_type: str) -> dict:
         """
-        Analyze the entire evolution history and generate a new diverse idea.
+        Analyze the entire evolution history and generate a new diverse idea to replace an existing one.
 
-        Note: For replace mode, the Oracle no longer decides which idea to replace.
-        The replacement selection is now handled by embedding-based centroid distance calculation.
+        The replacement selection is handled by embedding-based centroid distance calculation.
 
         Args:
             history: Complete evolution history, list of generations (each generation is a list of ideas)
             current_generation: Current generation's ideas
             idea_type: Type of ideas being evolved
-            oracle_mode: "add" to grow population by 1, "replace" to replace idea (selection done externally)
 
         Returns:
             Dictionary with new_idea and action type
         """
         # Build comprehensive analysis prompt
-        analysis_prompt = self._build_analysis_prompt(history, current_generation, idea_type, oracle_mode)
+        analysis_prompt = self._build_analysis_prompt(history, current_generation, idea_type)
 
         print(f"Oracle analyzing {len(history)} generations with {sum(len(gen) for gen in history)} total ideas...")
 
         # This is the "expensive" single query that does everything
         response = self.generate_text(analysis_prompt)
 
-        return self._parse_oracle_response(response, current_generation, oracle_mode)
+        return self._parse_oracle_response(response, current_generation)
 
-    def _build_analysis_prompt(self, history: List[List[str]], current_generation: List[str], idea_type: str, oracle_mode: str) -> str:
+    def _build_analysis_prompt(self, history: List[List[str]], current_generation: List[str], idea_type: str) -> str:
         """Build the comprehensive analysis prompt for the Oracle"""
 
         # Format all historical ideas by generation
@@ -718,12 +716,8 @@ class Oracle(LLMWrapper):
         base_idea_prompt = prompts.IDEA_PROMPT
 
         # Get Oracle-specific prompts from the template
-        if oracle_mode == "add":
-            mode_instruction = prompts.ORACLE_ADD_MODE_INSTRUCTION
-            format_instructions = prompts.ORACLE_ADD_FORMAT_INSTRUCTIONS
-        else:  # replace mode
-            mode_instruction = prompts.ORACLE_REPLACE_MODE_INSTRUCTION
-            format_instructions = prompts.ORACLE_REPLACE_FORMAT_INSTRUCTIONS
+        mode_instruction = prompts.ORACLE_INSTRUCTION
+        format_instructions = prompts.ORACLE_FORMAT_INSTRUCTIONS
 
         # Build the Oracle's comprehensive prompt using the template
         oracle_constraints = getattr(prompts, 'ORACLE_CONSTRAINTS', '')
@@ -750,7 +744,7 @@ class Oracle(LLMWrapper):
         else:
             return str(idea)
 
-    def _parse_oracle_response(self, response: str, current_generation: List[str], oracle_mode: str) -> dict:
+    def _parse_oracle_response(self, response: str, current_generation: List[str]) -> dict:
         """Parse the Oracle's response and extract the analysis and new idea separately"""
 
         # Parse the structured response to separate analysis from new idea
@@ -776,31 +770,17 @@ class Oracle(LLMWrapper):
             oracle_analysis = f"Oracle parsing error: {e}. Response was treated as idea content."
             print(f"ORACLE: Parsing exception - {e}")
 
-        if oracle_mode == "add":
-            # Create new idea with unique ID
-            return {
-                "action": "add",
-                "new_idea": {
-                    "id": str(uuid.uuid4()),
-                    "idea": new_idea_text,
-                    "parent_ids": [],
-                    "oracle_generated": True,
-                    "oracle_analysis": oracle_analysis
-                }
-            }
+        # Oracle only supports replace mode
+        # Replacement selection is handled externally via embedding-based centroid distance
+        print(f"ORACLE: Generated replacement idea. Selection of which idea to replace will be handled externally via embeddings.")
 
-        else:  # replace mode
-            # Note: Oracle no longer decides which idea to replace
-            # Replacement selection is handled externally via embedding-based centroid distance
-            print(f"ORACLE: Generated replacement idea. Selection of which idea to replace will be handled externally via embeddings.")
-
-            return {
-                "action": "replace",
-                "new_idea": {
-                    "id": str(uuid.uuid4()),
-                    "idea": new_idea_text,
-                    "parent_ids": [],
-                    "oracle_generated": True,
-                    "oracle_analysis": oracle_analysis
-                }
+        return {
+            "action": "replace",
+            "new_idea": {
+                "id": str(uuid.uuid4()),
+                "idea": new_idea_text,
+                "parent_ids": [],
+                "oracle_generated": True,
+                "oracle_analysis": oracle_analysis
             }
+        }

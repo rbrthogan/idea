@@ -126,19 +126,15 @@ def _load_oracle_prompts(wrapper: YAMLTemplateWrapper):
     """
     try:
         from .oracle_prompts import (
-            ORACLE_ADD_MODE_INSTRUCTION,
-            ORACLE_REPLACE_MODE_INSTRUCTION,
-            ORACLE_ADD_FORMAT_INSTRUCTIONS,
-            ORACLE_REPLACE_FORMAT_INSTRUCTIONS,
+            ORACLE_INSTRUCTION,
+            ORACLE_FORMAT_INSTRUCTIONS,
             ORACLE_MAIN_PROMPT,
             ORACLE_CONSTRAINTS
         )
 
         # Add Oracle prompts to the wrapper
-        wrapper.ORACLE_ADD_MODE_INSTRUCTION = ORACLE_ADD_MODE_INSTRUCTION
-        wrapper.ORACLE_REPLACE_MODE_INSTRUCTION = ORACLE_REPLACE_MODE_INSTRUCTION
-        wrapper.ORACLE_ADD_FORMAT_INSTRUCTIONS = ORACLE_ADD_FORMAT_INSTRUCTIONS
-        wrapper.ORACLE_REPLACE_FORMAT_INSTRUCTIONS = ORACLE_REPLACE_FORMAT_INSTRUCTIONS
+        wrapper.ORACLE_INSTRUCTION = ORACLE_INSTRUCTION
+        wrapper.ORACLE_FORMAT_INSTRUCTIONS = ORACLE_FORMAT_INSTRUCTIONS
         wrapper.ORACLE_MAIN_PROMPT = ORACLE_MAIN_PROMPT
 
         # Check if the idea-specific template has Oracle constraints customization
@@ -148,10 +144,8 @@ def _load_oracle_prompts(wrapper: YAMLTemplateWrapper):
     except Exception as e:
         print(f"Warning: Failed to load Oracle prompts: {e}")
         # Set empty Oracle prompts as fallback
-        wrapper.ORACLE_ADD_MODE_INSTRUCTION = ''
-        wrapper.ORACLE_REPLACE_MODE_INSTRUCTION = ''
-        wrapper.ORACLE_ADD_FORMAT_INSTRUCTIONS = ''
-        wrapper.ORACLE_REPLACE_FORMAT_INSTRUCTIONS = ''
+        wrapper.ORACLE_INSTRUCTION = ''
+        wrapper.ORACLE_FORMAT_INSTRUCTIONS = ''
         wrapper.ORACLE_MAIN_PROMPT = ''
         wrapper.ORACLE_CONSTRAINTS = ''
 

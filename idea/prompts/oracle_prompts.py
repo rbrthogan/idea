@@ -2,19 +2,7 @@
 Core Oracle prompts for promoting diversity and avoiding convergence in evolutionary idea generation
 """
 
-ORACLE_ADD_MODE_INSTRUCTION = """
-Your task is to ADD a completely new and diverse idea to the current generation.
-
-ANALYSIS REQUIRED:
-1. Identify the most common patterns, themes, approaches, and methodologies across ALL generations
-2. Spot repetitive concepts, similar problem-solving approaches, or overused techniques
-3. Find gaps in the idea space that haven't been explored
-4. Generate a novel idea that deliberately avoids the overused patterns
-
-OUTPUT: Provide your new diverse idea that would add the most value to the population.
-"""
-
-ORACLE_REPLACE_MODE_INSTRUCTION = """
+ORACLE_INSTRUCTION = """
 Your task is to GENERATE a new diverse idea to enrich the current generation with fresh and novel ideas.
 
 ANALYSIS REQUIRED:
@@ -23,29 +11,10 @@ ANALYSIS REQUIRED:
 3. Find gaps in the idea space that haven't been explored
 4. Generate a replacement idea that deliberately avoids the overused patterns
 
-
 OUTPUT: Provide your analysis of patterns and your new diverse idea that would add the most value to the population.
 """
 
-ORACLE_ADD_FORMAT_INSTRUCTIONS = """
-CRITICAL RESPONSE FORMAT:
-You MUST structure your response EXACTLY as follows. Do NOT deviate from this format:
-
-=== ORACLE ANALYSIS ===
-[Your detailed analysis of patterns, overused concepts, themes, gaps, etc.]
-
-=== NEW IDEA ===
-[Only the new story/idea content here - no analysis, just the creative work]
-
-IMPORTANT:
-- Use EXACTLY those section headers with the equals signs
-- Put your analysis in the first section
-- Put ONLY the creative story content in the second section
-- Do NOT include any analysis or meta-commentary in the NEW IDEA section
-- The NEW IDEA section should be a complete, standalone creative work
-"""
-
-ORACLE_REPLACE_FORMAT_INSTRUCTIONS = """
+ORACLE_FORMAT_INSTRUCTIONS = """
 CRITICAL RESPONSE FORMAT:
 You MUST structure your response EXACTLY as follows. Do NOT deviate from this format:
 

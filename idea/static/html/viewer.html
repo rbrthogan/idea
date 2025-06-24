@@ -277,15 +277,8 @@
                   <small class="text-muted">Expensive agent that analyzes all previous generations to introduce diversity and avoid convergence</small>
                 </div>
 
-                <!-- Oracle Mode Selection (only shown when Oracle is enabled) -->
-                <div class="mb-3" id="oracleModeContainer" style="display: none;">
-                  <label for="oracleMode" class="form-label">Oracle Mode</label>
-                  <select class="form-select" id="oracleMode">
-                    <option value="add">Add New Idea (Grow Population)</option>
-                    <option value="replace" selected>Replace Least Interesting Idea (Embedding-Based)</option>
-                  </select>
-                  <small class="text-muted">Choose whether Oracle adds new ideas or replaces existing ones</small>
-                </div>
+                <!-- Hidden Oracle mode value (always replace) -->
+                <input type="hidden" id="oracleMode" value="replace">
 
                 <!-- Oracle Temperature (only shown when Oracle is enabled) -->
                 <div class="mb-3" id="oracleTempContainer" style="display: none;">

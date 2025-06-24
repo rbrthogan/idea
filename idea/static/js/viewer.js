@@ -141,45 +141,13 @@ async function loadTemplateTypes() {
 }
 
 /**
- * Load available Oracle modes and populate the Oracle mode dropdown
+ * Load Oracle configuration (Oracle is fixed to replace mode)
  */
 async function loadOracleModes() {
-    try {
-        const response = await fetch('/api/oracle-modes');
-        const data = await response.json();
-
-        if (data.status === 'success' || (data.modes && data.modes.length > 0)) {
-            const oracleModeSelect = document.getElementById('oracleMode');
-            if (oracleModeSelect) {
-                oracleModeSelect.innerHTML = ''; // Clear existing options
-
-                data.modes.forEach(mode => {
-                    const option = document.createElement('option');
-                    option.value = mode.id;
-                    option.textContent = mode.name;
-                    oracleModeSelect.appendChild(option);
-                });
-
-                // Set default selection
-                if (data.default) {
-                    oracleModeSelect.value = data.default;
-                } else if (data.modes.length > 0) {
-                    oracleModeSelect.value = data.modes[0].id;
-                }
-            }
-        } else {
-            console.error('Error loading Oracle modes:', data.message || 'No modes found');
-        }
-    } catch (error) {
-        console.error('Error loading Oracle modes:', error);
-        // Fallback to hardcoded options if API fails
-        const oracleModeSelect = document.getElementById('oracleMode');
-        if (oracleModeSelect && oracleModeSelect.children.length === 0) {
-            oracleModeSelect.innerHTML = `
-                <option value="add">Add New Idea (Grow Population)</option>
-                <option value="replace">Replace Least Interesting Idea (Embedding-Based)</option>
-            `;
-        }
+    // Oracle is now fixed to replace mode only
+    const oracleModeSelect = document.getElementById('oracleMode');
+    if (oracleModeSelect) {
+        oracleModeSelect.value = 'replace';
     }
 }
 
@@ -410,17 +378,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Add event listener for Oracle toggle
     const oracleToggle = document.getElementById('useOracle');
-    const oracleModeContainer = document.getElementById('oracleModeContainer');
     const oracleTempContainer = document.getElementById('oracleTempContainer');
 
-    if (oracleToggle && oracleModeContainer && oracleTempContainer) {
+    if (oracleToggle && oracleTempContainer) {
         oracleToggle.addEventListener('change', function() {
             if (this.checked) {
-                oracleModeContainer.style.display = 'block';
                 oracleTempContainer.style.display = 'block';
                 console.log("Oracle diversity agent enabled");
             } else {
-                oracleModeContainer.style.display = 'none';
                 oracleTempContainer.style.display = 'none';
                 console.log("Oracle diversity agent disabled");
             }
@@ -430,9 +395,8 @@ document.addEventListener("DOMContentLoaded", () => {
     // Initialize default UI states based on checkbox states
 
     // Handle Oracle default state
-    if (oracleToggle && oracleModeContainer && oracleTempContainer) {
+    if (oracleToggle && oracleTempContainer) {
         if (oracleToggle.checked) {
-            oracleModeContainer.style.display = 'block';
             oracleTempContainer.style.display = 'block';
             console.log("Oracle diversity agent enabled by default");
         }

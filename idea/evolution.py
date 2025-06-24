@@ -37,7 +37,7 @@ class EvolutionEngine:
         tournament_comparisons: int = 20,
         genotype_encoder_temp: float = 1.2,
         use_oracle: bool = True,
-        oracle_mode: str = "add",
+
         oracle_temp: float = 1.8
     ):
         self.idea_type = idea_type or get_default_template_id()
@@ -46,7 +46,6 @@ class EvolutionEngine:
         self.tournament_size = tournament_size
         self.tournament_comparisons = tournament_comparisons
         self.use_oracle = use_oracle
-        self.oracle_mode = oracle_mode
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
@@ -54,7 +53,7 @@ class EvolutionEngine:
         # Initialize LLM components with appropriate temperatures
         print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}, GenotypeEncoder={genotype_encoder_temp}")
         if use_oracle:
-            print(f"Oracle enabled with mode: {oracle_mode}, temperature: {oracle_temp}")
+            print(f"Oracle enabled, temperature: {oracle_temp}")
 
         self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=ideator_temp)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
@@ -323,7 +322,7 @@ class EvolutionEngine:
                 generation_breeding_prompts = []  # Collect breeding prompts for this generation
                 random.shuffle(self.population)
 
-                # Generate exactly as many new ideas as the current population size (preserving Oracle additions)
+                # Generate exactly as many new ideas as the current population size
                 current_pop_size = len(self.population)
                 print(f"Generating {current_pop_size} new ideas for next generation")
 
@@ -469,63 +468,45 @@ class EvolutionEngine:
                     try:
                         print(f"Oracle analyzing population for diversity enhancement...")
                         print(f"Population size before Oracle: {len(self.population)}")
-                        print(f"Oracle mode: {self.oracle_mode}")
                         print(f"History generations: {len(self.history)}")
 
                         oracle_result = self.oracle.analyze_and_diversify(
-                            self.history, self.population, self.idea_type, self.oracle_mode
+                            self.history, self.population, self.idea_type
                         )
 
                         print(f"Oracle result: {oracle_result}")
 
-                        if oracle_result["action"] == "add":
-                            # Add new diverse idea to population
-                            oracle_idea = oracle_result["new_idea"]
-                            print(f"Oracle generating new idea: {oracle_idea}")
-                            formatted_oracle_idea = self.formatter.format_idea(oracle_idea, self.idea_type)
+                        # Replace existing idea with more diverse one using embedding-based selection
+                        replace_idx = await self._find_least_interesting_idea_idx(self.population)
+                        oracle_idea = oracle_result["new_idea"]
+                        formatted_oracle_idea = self.formatter.format_idea(oracle_idea, self.idea_type)
 
-                            # Ensure Oracle metadata is preserved after formatting
-                            if not formatted_oracle_idea.get("oracle_generated", False):
-                                print("WARNING: Oracle metadata lost during formatting! Restoring...")
-                                formatted_oracle_idea["oracle_generated"] = True
-                                formatted_oracle_idea["oracle_analysis"] = oracle_idea.get("oracle_analysis", "Oracle analysis was lost during formatting")
+                        # Ensure Oracle metadata is preserved after formatting
+                        if not formatted_oracle_idea.get("oracle_generated", False):
+                            print("WARNING: Oracle metadata lost during formatting! Restoring...")
+                            formatted_oracle_idea["oracle_generated"] = True
+                            formatted_oracle_idea["oracle_analysis"] = oracle_idea.get("oracle_analysis", "Oracle analysis was lost during formatting")
 
-                            self.population.append(formatted_oracle_idea)
-                            print(f"Oracle added new diverse idea. Population size now: {len(self.population)}")
-                            print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
+                        old_idea = self.population[replace_idx]
+                        old_title = "Unknown"
+                        if isinstance(old_idea, dict) and "idea" in old_idea:
+                            idea_obj = old_idea["idea"]
+                            if hasattr(idea_obj, 'title'):
+                                old_title = idea_obj.title
 
-                        elif oracle_result["action"] == "replace":
-                            # Replace existing idea with more diverse one using embedding-based selection
-                            replace_idx = await self._find_least_interesting_idea_idx(self.population)
-                            oracle_idea = oracle_result["new_idea"]
-                            formatted_oracle_idea = self.formatter.format_idea(oracle_idea, self.idea_type)
+                        # Update embedding storage: remove old idea's embedding
+                        old_idea_id = str(old_idea.get("id", "")) if isinstance(old_idea, dict) else ""
+                        if old_idea_id:
+                            await self._remove_embedding(old_idea_id)
+                            print(f"🗑️ Removed embedding for replaced idea: '{old_title}'")
 
-                            # Ensure Oracle metadata is preserved after formatting
-                            if not formatted_oracle_idea.get("oracle_generated", False):
-                                print("WARNING: Oracle metadata lost during formatting! Restoring...")
-                                formatted_oracle_idea["oracle_generated"] = True
-                                formatted_oracle_idea["oracle_analysis"] = oracle_idea.get("oracle_analysis", "Oracle analysis was lost during formatting")
+                        self.population[replace_idx] = formatted_oracle_idea
+                        print(f"Oracle replaced idea '{old_title}' at index {replace_idx} (least interesting by embedding distance) with more diverse alternative")
+                        print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
 
-                            old_idea = self.population[replace_idx]
-                            old_title = "Unknown"
-                            if isinstance(old_idea, dict) and "idea" in old_idea:
-                                idea_obj = old_idea["idea"]
-                                if hasattr(idea_obj, 'title'):
-                                    old_title = idea_obj.title
-
-                            # Update embedding storage: remove old idea's embedding
-                            old_idea_id = str(old_idea.get("id", "")) if isinstance(old_idea, dict) else ""
-                            if old_idea_id:
-                                await self._remove_embedding(old_idea_id)
-                                print(f"🗑️ Removed embedding for replaced idea: '{old_title}'")
-
-                            self.population[replace_idx] = formatted_oracle_idea
-                            print(f"Oracle replaced idea '{old_title}' at index {replace_idx} (least interesting by embedding distance) with more diverse alternative")
-                            print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
-
-                            # Store embedding for new Oracle idea
-                            # Note: The embedding will be computed and stored when _get_or_compute_embeddings_for_ideas is called next time
-                            # This is efficient because it avoids computing the embedding immediately
+                        # Store embedding for new Oracle idea
+                        # Note: The embedding will be computed and stored when _get_or_compute_embeddings_for_ideas is called next time
+                        # This is efficient because it avoids computing the embedding immediately
 
                         # Update the history with Oracle's changes
                         self.history[-1] = self.population.copy()
