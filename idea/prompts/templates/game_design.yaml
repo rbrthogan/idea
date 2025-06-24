@@ -50,9 +50,18 @@ prompts:
     {requirements}
 
   format: |
-    Please take this drabble and return it unchanged in the requested JSON format:
+    Please take this game design and return it unchanged in the requested JSON format:
 
+    The input may be in the format:
+    Title: [title text]
+    Content: [content text]
+
+    Or it may already be properly formatted text.
+
+    Input to format:
     {input_text}
+
+    Return a valid JSON object with "title" and "content" fields. Extract the title and content appropriately, ensuring the title is creative and descriptive. If no explicit title is provided, create an appropriate one based on the content.
 
   critique: |
     You are a helpful AI that refines ideas.

@@ -251,7 +251,40 @@ Please format this into a structured format with a compelling title and well-org
 
         print(f"Prompt:\n {prompt}")
         response = self.generate_text(prompt, response_schema=Idea)
-        formatted_idea = Idea(**json.loads(response))
+
+        try:
+            formatted_idea = Idea(**json.loads(response))
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"FORMATTER: JSON parsing failed: {e}")
+            print(f"FORMATTER: Raw response: {response}")
+
+            # Fallback: Try to extract title and content manually
+            title = "Untitled"
+            content = response.strip()
+
+            # Try to parse "Title: X\nContent: Y" format
+            if "Title:" in response and "Content:" in response:
+                lines = response.split('\n')
+                title_line = None
+                content_lines = []
+                found_content = False
+
+                for line in lines:
+                    if line.strip().startswith("Title:"):
+                        title_line = line.replace("Title:", "").strip()
+                    elif line.strip().startswith("Content:"):
+                        content_lines.append(line.replace("Content:", "").strip())
+                        found_content = True
+                    elif found_content:
+                        content_lines.append(line)
+
+                if title_line:
+                    title = title_line
+                if content_lines:
+                    content = "\n".join(content_lines).strip()
+
+            print(f"FORMATTER: Fallback extracted - Title: '{title}', Content length: {len(content)}")
+            formatted_idea = Idea(title=title, content=content)
 
         # If the input was a dictionary with an ID, preserve that ID and all metadata
         if isinstance(raw_idea, dict) and "id" in raw_idea:
