@@ -465,6 +465,7 @@ async function restoreCurrentEvolution() {
                     if (evolutionState.contexts) {
                         contexts = evolutionState.contexts;
                         specificPrompts = evolutionState.specific_prompts || [];
+                        breedingPrompts = evolutionState.breeding_prompts || [];
                         currentContextIndex = 0;
                         updateContextDisplay();
                         document.querySelector('.context-navigation').style.display = 'block';
@@ -490,7 +491,9 @@ async function restoreCurrentEvolution() {
                     currentEvolutionData = {
                         history: generationsData,
                         diversity_history: diversityData,
-                        contexts: contexts
+                        contexts: contexts,
+                        specific_prompts: specificPrompts,
+                        breeding_prompts: breedingPrompts
                     };
 
                     // Enable download button
@@ -788,7 +791,7 @@ function renderGenerations(gens) {
                 const existingButton = existingCard.querySelector('.view-lineage');
                 if (existingButton && index > 0) {
                     const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
-                    const expectedButtonText = isOracleIdea ? 'Oracle Analysis' : 'Lineage';
+                    const expectedButtonText = isOracleIdea ? 'Oracle' : 'Lineage';
 
                     // Update button text if it's different (Oracle replacement occurred)
                     if (existingButton.textContent !== expectedButtonText) {
@@ -1078,6 +1081,8 @@ function downloadResults(data) {
         history: data.history || [],
         diversity_history: data.diversity_history || [],
         contexts: data.contexts || [],
+        specific_prompts: data.specific_prompts || specificPrompts || [],
+        breeding_prompts: data.breeding_prompts || breedingPrompts || [],
         token_counts: data.token_counts || {},
         timestamp: new Date().toISOString(),
         metadata: {
@@ -1267,7 +1272,8 @@ async function pollProgress() {
                 history: data.history,
                 diversity_history: data.diversity_history || [],
                 contexts: data.contexts || contexts,
-                specific_prompts: data.specific_prompts || specificPrompts
+                specific_prompts: data.specific_prompts || specificPrompts,
+                breeding_prompts: data.breeding_prompts || breedingPrompts
             };
             localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
         }
@@ -1302,7 +1308,10 @@ async function pollProgress() {
                 // Store the final evolution data in localStorage including diversity data
                 const evolutionStateToStore = {
                     history: data.history,
-                    diversity_history: data.diversity_history || []
+                    diversity_history: data.diversity_history || [],
+                    contexts: data.contexts || contexts,
+                    specific_prompts: data.specific_prompts || specificPrompts,
+                    breeding_prompts: data.breeding_prompts || breedingPrompts
                 };
                 localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
 
