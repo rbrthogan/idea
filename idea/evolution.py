@@ -4,6 +4,7 @@ import numpy as np
 import asyncio
 import uuid
 from idea.models import Idea
+from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates
 from idea.diversity import DiversityCalculator
@@ -31,13 +32,11 @@ class EvolutionEngine:
         pop_size: int = 5,
         generations: int = 3,
         model_type: str = "gemini-2.0-flash",
-        ideator_temp: float = 2.0,
-        critic_temp: float = 1.5,
-        breeder_temp: float = 2.0,
+        creative_temp: float = DEFAULT_CREATIVE_TEMP,
+        top_p: float = DEFAULT_TOP_P,
         tournament_size: int = 5,
         tournament_comparisons: int = 20,
         use_oracle: bool = True,
-        oracle_temp: float = 1.8
     ):
         self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
@@ -50,18 +49,18 @@ class EvolutionEngine:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
 
         # Initialize LLM components with appropriate temperatures
-        print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}")
+        print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}")
         if use_oracle:
-            print(f"Oracle enabled, temperature: {oracle_temp}")
+            print(f"Oracle enabled, using same creative settings")
 
-        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=ideator_temp)
+        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
-        self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=critic_temp)
-        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=breeder_temp)
+        self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p)
+        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p)
 
         # Initialize Oracle if enabled
         if use_oracle:
-            self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=oracle_temp)
+            self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p)
         else:
             self.oracle = None
 

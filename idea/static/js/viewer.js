@@ -187,9 +187,6 @@ document.addEventListener("DOMContentLoaded", () => {
     // Load available Oracle modes
     loadOracleModes();
 
-    // Set up temperature sliders
-    setupTemperatureSliders();
-
     // Load evolutions dropdown
     loadEvolutions();
 
@@ -207,35 +204,28 @@ document.addEventListener("DOMContentLoaded", () => {
             const ideaType = document.getElementById('ideaType').value;
             const modelType = document.getElementById('modelType').value;
 
-            // Get temperature values
-            const ideatorTemp = parseFloat(document.getElementById('ideatorTemp').value);
-            const criticTemp = parseFloat(document.getElementById('criticTemp').value);
-            const breederTemp = parseFloat(document.getElementById('breederTemp').value);
+            const creativeTemp = parseFloat(document.getElementById('creativeTemp').value);
+            const topP = parseFloat(document.getElementById('topP').value);
 
             // Get tournament values
             const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
             const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
 
-
-
             // Get Oracle values
             const useOracle = document.getElementById('useOracle').checked;
             const oracleMode = document.getElementById('oracleMode').value;
-            const oracleTemp = parseFloat(document.getElementById('oracleTemp').value);
 
             const requestBody = {
                 popSize,
                 generations,
                 ideaType,
                 modelType,
-                ideatorTemp,
-                criticTemp,
-                breederTemp,
-                            tournamentSize,
-            tournamentComparisons,
+                creativeTemp,
+                topP,
+                tournamentSize,
+                tournamentComparisons,
                 useOracle,
                 oracleMode,
-                oracleTemp
             };
 
             console.log("Request body JSON:", JSON.stringify(requestBody));
@@ -252,7 +242,7 @@ document.addEventListener("DOMContentLoaded", () => {
             try {
                 console.log("Sending request with:", {
                     popSize, generations, ideaType, modelType,
-                    ideatorTemp, criticTemp, breederTemp
+                    creativeTemp, topP
                 });
 
                 const response = await fetch('/api/start-evolution', {
@@ -377,28 +367,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Add event listener for Oracle toggle
     const oracleToggle = document.getElementById('useOracle');
-    const oracleTempContainer = document.getElementById('oracleTempContainer');
 
-    if (oracleToggle && oracleTempContainer) {
+    if (oracleToggle) {
         oracleToggle.addEventListener('change', function() {
             if (this.checked) {
-                oracleTempContainer.style.display = 'block';
                 console.log("Oracle diversity agent enabled");
             } else {
-                oracleTempContainer.style.display = 'none';
                 console.log("Oracle diversity agent disabled");
             }
         });
-    }
-
-    // Initialize default UI states based on checkbox states
-
-    // Handle Oracle default state
-    if (oracleToggle && oracleTempContainer) {
-        if (oracleToggle.checked) {
-            oracleTempContainer.style.display = 'block';
-            console.log("Oracle diversity agent enabled by default");
-        }
     }
 });
 
@@ -1632,37 +1609,7 @@ function createProgressBar() {
     generationsContainer.parentNode.insertBefore(progressContainer, generationsContainer);
 }
 
-// Function to set up temperature sliders
-function setupTemperatureSliders() {
-    const sliders = [
-        { id: 'ideatorTemp', valueId: 'ideatorTempValue', defaultValue: 2.0 },
-        { id: 'criticTemp', valueId: 'criticTempValue', defaultValue: 1.5 },
-        { id: 'breederTemp', valueId: 'breederTempValue', defaultValue: 2.0 }
-    ];
 
-    sliders.forEach(slider => {
-        const sliderElement = document.getElementById(slider.id);
-        const valueElement = document.getElementById(slider.valueId);
-
-        if (sliderElement && valueElement) {
-            // Set initial value
-            sliderElement.value = slider.defaultValue;
-            valueElement.textContent = slider.defaultValue;
-
-            // Log when slider changes (don't add new event listeners as we're using inline handlers)
-            console.log(`Slider ${slider.id} initialized with value ${slider.defaultValue}`);
-        } else {
-            console.error(`Could not find elements for slider ${slider.id} or value display ${slider.valueId}`);
-        }
-    });
-
-    // Log initial values to verify
-    console.log("Initial temperature values:", {
-        ideator: document.getElementById('ideatorTemp')?.value,
-        critic: document.getElementById('criticTemp')?.value,
-        breeder: document.getElementById('breederTemp')?.value
-    });
-}
 
 // Function to show the context modal
 function showContextModal(ideaIndex) {

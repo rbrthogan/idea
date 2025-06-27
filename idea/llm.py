@@ -20,17 +20,19 @@ class LLMWrapper(ABC):
                  provider: str = "google_generative_ai",
                  model_name: str = "gemini-2.0-flash",
                  prompt_template: str = "",
-                 temperature: float = 0.7,
+                 temperature: float = 1.0,
+                 top_p: float = 0.95,
                  agent_name: str = ""):
         self.provider = provider
         self.model_name = model_name
         self.prompt_template = prompt_template
         self.temperature = temperature
+        self.top_p = top_p
         self.total_token_count = 0
         self.input_token_count = 0
         self.output_token_count = 0
         self.agent_name = agent_name
-        print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}")
+        print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}")
         self._setup_provider()
 
     def _setup_provider(self):
@@ -86,8 +88,7 @@ class LLMWrapper(ABC):
 
         config = {
             "temperature": actual_temp,
-            "top_p": 0.95,
-            "top_k": 40,
+            "top_p": self.top_p,
             "max_output_tokens": self.MAX_TOKENS,
         }
         if response_schema:
@@ -221,8 +222,9 @@ class Formatter(LLMWrapper):
 
     def __init__(self, **kwargs):
         # Use a default temperature only if not provided in kwargs
-        temp = kwargs.pop('temperature', 1.0)
-        super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
+        temp = kwargs.pop('temperature', 0.0)
+        top_p = kwargs.pop('top_p', 0.95)
+        super().__init__(agent_name=self.agent_name, temperature=temp, top_p=top_p, **kwargs)
 
     def format_idea(self, raw_idea: str, idea_type: str) -> str:
         """Format a raw idea into a structured format"""
@@ -540,7 +542,8 @@ class Breeder(LLMWrapper):
         ideator = Ideator(
             provider=self.provider,
             model_name=self.model_name,
-            temperature=self.temperature
+            temperature=self.temperature,
+            top_p=self.top_p
         )
 
         # Step 2: Sample 50% at random (handled in generate_context_from_parents)
@@ -567,8 +570,9 @@ class Oracle(LLMWrapper):
 
     def __init__(self, **kwargs):
         # Use a higher temperature to encourage creativity and diversity
-        temp = kwargs.pop('temperature', 1.8)
-        super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
+        temp = kwargs.pop('temperature', 1.0)
+        top_p = kwargs.pop('top_p', 0.95)
+        super().__init__(agent_name=self.agent_name, temperature=temp, top_p=top_p, **kwargs)
 
     def analyze_and_diversify(self, history: List[List[str]], idea_type: str) -> dict:
         """

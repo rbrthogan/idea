@@ -18,7 +18,7 @@ import numpy as np
 from idea.evolution import EvolutionEngine
 from idea.models import Idea
 from idea.llm import Critic
-from idea.config import LLM_MODELS, DEFAULT_MODEL
+from idea.config import LLM_MODELS, DEFAULT_MODEL, DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
 from idea.template_manager import router as template_router
 from idea.prompts.loader import list_available_templates
 
@@ -157,18 +157,16 @@ async def start_evolution(request: Request):
     idea_type = data.get('ideaType', get_default_template_id())
     model_type = data.get('modelType', 'gemini-2.0-flash-lite')
 
-    # Get temperature parameters with defaults
+    # Get creative and tournament parameters with defaults
     try:
-        ideator_temp = float(data.get('ideatorTemp', 2.0))
-        critic_temp = float(data.get('criticTemp', 1.5))
-        breeder_temp = float(data.get('breederTemp', 2.0))
-        print(f"Parsed temperature values: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}")
+        creative_temp = float(data.get('creativeTemp', DEFAULT_CREATIVE_TEMP))
+        top_p = float(data.get('topP', DEFAULT_TOP_P))
+        print(f"Parsed creative values: temp={creative_temp}, top_p={top_p}")
     except ValueError as e:
-        print(f"Error parsing temperature values: {e}")
+        print(f"Error parsing creative values: {e}")
         # Use defaults if parsing fails
-        ideator_temp = 1.0
-        critic_temp = 0.7
-        breeder_temp = 1.0
+        creative_temp = DEFAULT_CREATIVE_TEMP
+        top_p = DEFAULT_TOP_P
 
     # Get tournament parameters with defaults
     try:
@@ -181,23 +179,15 @@ async def start_evolution(request: Request):
         tournament_size = 5
         tournament_comparisons = 20
 
-
-
     # Get Oracle parameters with defaults
     use_oracle = data.get('useOracle', False)
-    try:
-        oracle_temp = float(data.get('oracleTemp', 1.8))
-        print(f"Parsed Oracle values: use_oracle={use_oracle}, oracle_temp={oracle_temp}")
-    except ValueError as e:
-        print(f"Error parsing Oracle values: {e}")
-        # Use defaults if parsing fails
-        oracle_temp = 1.8
+    print(f"Parsed Oracle values: use_oracle={use_oracle}")
 
     print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
           f"idea_type={idea_type}, model_type={model_type}, "
-          f"temperatures: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}, "
+          f"creative_temp={creative_temp}, top_p={top_p}, "
           f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"oracle={use_oracle}, oracle_temp={oracle_temp}")
+          f"oracle={use_oracle}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -205,13 +195,11 @@ async def start_evolution(request: Request):
         generations=generations,
         idea_type=idea_type,
         model_type=model_type,
-        ideator_temp=ideator_temp,
-        critic_temp=critic_temp,
-        breeder_temp=breeder_temp,
+        creative_temp=creative_temp,
+        top_p=top_p,
         tournament_size=tournament_size,
         tournament_comparisons=tournament_comparisons,
         use_oracle=use_oracle,
-        oracle_temp=oracle_temp
     )
 
     # Generate contexts for each idea

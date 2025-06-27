@@ -200,39 +200,27 @@
             </button>
             <div class="collapse mt-3" id="temperatureControls">
               <div class="card card-body">
-                <h6 class="mb-3">Temperature Controls</h6>
+                <h6 class="mb-3">LLM Controls</h6>
 
-                <!-- Ideator Temperature -->
+                <!-- Creative Temperature -->
                 <div class="mb-3">
-                  <label for="ideatorTemp" class="form-label d-flex justify-content-between">
-                    <span>Ideator Temperature</span>
-                    <span id="ideatorTempValue">2.0</span>
+                  <label for="creativeTemp" class="form-label d-flex justify-content-between">
+                    <span>Creative Temperature</span>
+                    <span id="creativeTempValue">1.5</span>
                   </label>
-                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="ideatorTemp" value="1.0" oninput="document.getElementById('ideatorTempValue').textContent = this.value">
-                  <small class="text-muted">Controls creativity when generating ideas</small>
+                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="creativeTemp" value="1.5" oninput="document.getElementById('creativeTempValue').textContent = this.value">
+                  <small class="text-muted">Controls the creativity of the LLM. Higher values are more creative.</small>
                 </div>
 
-                <!-- Critic Temperature -->
+                <!-- Top P -->
                 <div class="mb-3">
-                  <label for="criticTemp" class="form-label d-flex justify-content-between">
-                    <span>Critic Temperature</span>
-                    <span id="criticTempValue">1.5</span>
+                  <label for="topP" class="form-label d-flex justify-content-between">
+                    <span>Top P</span>
+                    <span id="topPValue">0.90</span>
                   </label>
-                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="criticTemp" value="0.7" oninput="document.getElementById('criticTempValue').textContent = this.value">
-                  <small class="text-muted">Controls consistency in evaluating ideas</small>
+                  <input type="range" class="form-range" min="0" max="1" step="0.01" id="topP" value="0.9" oninput="document.getElementById('topPValue').textContent = this.value">
+                  <small class="text-muted">Controls the diversity of the LLM's responses.</small>
                 </div>
-
-                <!-- Breeder Temperature -->
-                <div class="mb-3">
-                  <label for="breederTemp" class="form-label d-flex justify-content-between">
-                    <span>Breeder Temperature</span>
-                    <span id="breederTempValue">2.0</span>
-                  </label>
-                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="breederTemp" value="1.0" oninput="document.getElementById('breederTempValue').textContent = this.value">
-                  <small class="text-muted">Controls creativity when combining ideas</small>
-                </div>
-
-
 
                 <h6 class="mb-3 mt-4">Tournament Controls</h6>
 
@@ -271,16 +259,6 @@
 
                 <!-- Hidden Oracle mode value (always replace) -->
                 <input type="hidden" id="oracleMode" value="replace">
-
-                <!-- Oracle Temperature (only shown when Oracle is enabled) -->
-                <div class="mb-3" id="oracleTempContainer" style="display: none;">
-                  <label for="oracleTemp" class="form-label d-flex justify-content-between">
-                    <span>Oracle Temperature</span>
-                    <span id="oracleTempValue">1.8</span>
-                  </label>
-                  <input type="range" class="form-range" min="0" max="2" step="0.1" id="oracleTemp" value="1.8" oninput="document.getElementById('oracleTempValue').textContent = this.value">
-                  <small class="text-muted">Controls creativity when generating diverse ideas (higher = more creative)</small>
-                </div>
               </div>
             </div>
           </div>
