@@ -604,62 +604,6 @@ class GenotypeEncoder(LLMWrapper):
         print(f"Encoded genotype: {genotype}")
         return genotype
 
-    def decode_from_genotype(self, genotype: str, idea_type: str) -> str:
-        """
-        Convert basic elements (genotype) back to a full idea (phenotype)
-
-        Args:
-            genotype: The genotype string with basic elements
-            idea_type: Type of idea for customization
-
-        Returns:
-            A full idea string
-        """
-        # Create decoding prompt based on idea type
-        prompts = get_prompts(idea_type)
-
-        # Get genotype decoding prompt from template
-        prompt_template = prompts.GENOTYPE_DECODE_PROMPT
-
-        prompt = prompt_template.format(genotype=genotype)
-
-        response = self.generate_text(prompt)
-
-        print(f"Decoded from genotype '{genotype}' to: {response[:100]}...")
-        return response
-
-    def crossover_genotypes(self, genotypes: List[str], idea_type: str) -> str:
-        """
-        Perform genetic crossover between multiple genotypes to create a new genotype
-
-        Args:
-            genotypes: List of parent genotypes
-            idea_type: Type of idea for customization
-
-        Returns:
-            A new genotype created from crossover
-        """
-        # Create crossover prompt based on idea type
-        prompts = get_prompts(idea_type)
-
-        # Get genotype crossover prompt from template
-        prompt_template = prompts.GENOTYPE_CROSSOVER_PROMPT
-
-        # Format parent genotypes
-        parent_str = "\n".join([f"Parent {i+1}: {genotype}" for i, genotype in enumerate(genotypes)])
-
-        prompt = prompt_template.format(parent_genotypes=parent_str)
-
-        response = self.generate_text(prompt)
-
-        # Clean up the response
-        new_genotype = response.strip()
-        if ":" in new_genotype and new_genotype.startswith(("New genotype", "Result", "Output")):
-            new_genotype = new_genotype.split(":", 1)[1].strip()
-
-        print(f"Crossover result: {new_genotype}")
-        return new_genotype
-
 
 class Oracle(LLMWrapper):
     """Analyzes entire population history and introduces diversity by identifying overused patterns"""

@@ -13,7 +13,7 @@ def test_ideator_uses_configured_temperature(monkeypatch):
 
     def fake_generate_text(self, prompt, temperature=None, response_schema=None):
         used_temps.append(temperature if temperature is not None else self.temperature)
-        return "stub"
+        return "concept1, concept2, concept3, concept4, concept5"
 
     monkeypatch.setattr(Ideator, "generate_text", fake_generate_text)
 

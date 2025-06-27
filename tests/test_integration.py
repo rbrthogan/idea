@@ -22,7 +22,7 @@ class TestLLMSystemIntegration:
 
         # Test that all required attributes are available for LLM agents
         required_attrs = [
-            'ITEM_TYPE', 'CONTEXT_PROMPT', 'IDEA_PROMPT', 'NEW_IDEA_PROMPT',
+            'ITEM_TYPE', 'CONTEXT_PROMPT', 'IDEA_PROMPT',
             'FORMAT_PROMPT', 'CRITIQUE_PROMPT', 'REFINE_PROMPT', 'BREED_PROMPT',
             'COMPARISON_CRITERIA', 'COMPARISON_PROMPT'
         ]
@@ -49,9 +49,6 @@ class TestPromptInterpolation:
         idea_prompt = prompts.IDEA_PROMPT
         assert 'A drabble is a short work of fiction' in idea_prompt
 
-        new_idea_prompt = prompts.NEW_IDEA_PROMPT
-        assert 'A drabble is a short work of fiction' in new_idea_prompt
-
         refine_prompt = prompts.REFINE_PROMPT
         assert 'A drabble is a short work of fiction' in refine_prompt
 
@@ -66,9 +63,6 @@ class TestPromptInterpolation:
         idea_prompt = prompts.IDEA_PROMPT
         assert 'The game should be simple enough' in idea_prompt
 
-        new_idea_prompt = prompts.NEW_IDEA_PROMPT
-        assert 'The game should be simple enough' in new_idea_prompt
-
         refine_prompt = prompts.REFINE_PROMPT
         assert 'The game should be simple enough' in refine_prompt
 
@@ -82,7 +76,6 @@ class TestPromptInterpolation:
         # AI research template doesn't have special requirements
         # Just verify the prompts are loaded correctly
         assert len(prompts.IDEA_PROMPT) > 0
-        assert len(prompts.NEW_IDEA_PROMPT) > 0
         assert len(prompts.REFINE_PROMPT) > 0
         assert len(prompts.BREED_PROMPT) > 0
 
@@ -113,7 +106,6 @@ class TestPromptPlaceholders:
             # (but keep the required runtime placeholders)
             interpolated_prompts = [
                 prompts.IDEA_PROMPT,
-                prompts.NEW_IDEA_PROMPT,
                 prompts.REFINE_PROMPT,
                 prompts.BREED_PROMPT
             ]

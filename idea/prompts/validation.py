@@ -23,11 +23,8 @@ class PromptSet(BaseModel):
     critique: str = Field(..., description="Prompt for critiquing ideas")
     refine: str = Field(..., description="Prompt for refining ideas based on critique")
     breed: str = Field(..., description="Prompt for breeding/combining ideas")
-    # Genotype breeding prompts - required for genotype-phenotype breeding
     genotype_encode: str = Field(..., description="Prompt for encoding ideas to genotypes")
-    genotype_decode: str = Field(..., description="Prompt for decoding genotypes to ideas")
-    genotype_crossover: str = Field(..., description="Prompt for genetic crossover of genotypes")
-        # Optional comparison prompt - will be generated dynamically if not provided
+    # Optional comparison prompt - will be generated dynamically if not provided
     comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas (optional - auto-generated)")
 
 

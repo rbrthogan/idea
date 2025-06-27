@@ -366,19 +366,6 @@ function displayTemplateDetails(template, validation) {
 
             <div class="accordion-item">
                 <h2 class="accordion-header">
-                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#newIdeaDetail">
-                        <i class="fas fa-plus-circle me-2"></i>New Idea Prompt
-                    </button>
-                </h2>
-                <div id="newIdeaDetail" class="accordion-collapse collapse">
-                    <div class="accordion-body">
-                        <pre style="white-space: pre-wrap; font-size: 0.9rem;">${template.prompts.new_idea}</pre>
-                    </div>
-                </div>
-            </div>
-
-            <div class="accordion-item">
-                <h2 class="accordion-header">
                     <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#formatDetail">
                         <i class="fas fa-align-left me-2"></i>Format Prompt
                     </button>
@@ -512,7 +499,6 @@ function populateForm(template) {
 
     document.getElementById('contextPrompt').value = template.prompts?.context || '';
     document.getElementById('ideaPrompt').value = template.prompts?.idea || '';
-    document.getElementById('newIdeaPrompt').value = template.prompts?.new_idea || '';
     document.getElementById('formatPrompt').value = template.prompts?.format || '';
     document.getElementById('critiquePrompt').value = template.prompts?.critique || '';
     document.getElementById('refinePrompt').value = template.prompts?.refine || '';
@@ -592,7 +578,6 @@ async function saveTemplate() {
             special_requirements: document.getElementById('specialRequirements').value,
             context_prompt: document.getElementById('contextPrompt').value,
             idea_prompt: document.getElementById('ideaPrompt').value,
-            new_idea_prompt: document.getElementById('newIdeaPrompt').value,
             format_prompt: document.getElementById('formatPrompt').value,
             critique_prompt: document.getElementById('critiquePrompt').value,
             refine_prompt: document.getElementById('refinePrompt').value,

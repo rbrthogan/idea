@@ -33,7 +33,7 @@ class TestYAMLTemplateLoading:
         prompts = get_prompts(template_name, use_yaml=True)
 
         required_prompts = [
-            'CONTEXT_PROMPT', 'IDEA_PROMPT', 'NEW_IDEA_PROMPT',
+            'CONTEXT_PROMPT', 'IDEA_PROMPT',
             'FORMAT_PROMPT', 'CRITIQUE_PROMPT', 'REFINE_PROMPT', 'BREED_PROMPT',
             'COMPARISON_PROMPT'
         ]
@@ -131,7 +131,7 @@ class TestTemplateValidation:
             "prompts": {
                 "context": "Context prompt",
                 "idea": "Idea prompt",
-                "new_idea": "New idea prompt",
+                "specific_prompt": "Specific prompt",
                 "format": "Format prompt missing input_text placeholder",  # Missing {input_text}
                 "critique": "Critique prompt missing idea placeholder",  # Missing {idea}
                 "refine": "Refine prompt missing placeholders",  # Missing {idea} and {critique}

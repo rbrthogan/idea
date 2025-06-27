@@ -31,7 +31,6 @@ class TemplateCreateRequest(BaseModel):
     special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")
     context_prompt: str = Field(..., description="Context generation prompt")
     idea_prompt: str = Field(..., description="Idea generation prompt")
-    new_idea_prompt: str = Field(..., description="New idea generation prompt")
     format_prompt: str = Field(..., description="Format prompt")
     critique_prompt: str = Field(..., description="Critique prompt")
     refine_prompt: str = Field(..., description="Refine prompt")
@@ -48,7 +47,6 @@ class TemplateUpdateRequest(BaseModel):
     special_requirements: Optional[str] = None
     context_prompt: Optional[str] = None
     idea_prompt: Optional[str] = None
-    new_idea_prompt: Optional[str] = None
     format_prompt: Optional[str] = None
     critique_prompt: Optional[str] = None
     refine_prompt: Optional[str] = None
@@ -77,11 +75,6 @@ def get_template_starter() -> Dict[str, Any]:
             "idea": "Using the above context for inspiration, generate a creative and innovative idea.\n"
                    "Keep it detailed enough to be useful but concise enough to be clear.\n"
                    "\n{requirements}",
-            "new_idea": "You are given the preceding list of ideas.\n"
-                       "Considering these ideas, propose a new idea that could be completely new\n"
-                       "or could combine elements from the existing ideas.\n"
-                       "Please avoid minor refinements and create something that is a significant departure.\n"
-                       "\n{requirements}",
             "format": "Take the following idea and rewrite it in a clear, structured format.\n"
                      "Ensure it has a compelling title and well-organized content: {input_text}",
             "critique": "You are an expert evaluator reviewing the following idea:\n"
@@ -99,8 +92,7 @@ def get_template_starter() -> Dict[str, Any]:
                     "This can be a combination of existing ideas or something completely new that they inspired.\n"
                     "Focus on originality and bringing something new to the table.\n"
                     "Think outside the box and be creative.\n"
-                    "\n{requirements}",
-
+                    "\n{requirements}"
         },
         "comparison_criteria": [
             "originality and creativity",
@@ -205,7 +197,6 @@ async def create_template(request: TemplateCreateRequest):
             "prompts": {
                 "context": request.context_prompt,
                 "idea": request.idea_prompt,
-                "new_idea": request.new_idea_prompt,
                 "format": request.format_prompt,
                 "critique": request.critique_prompt,
                 "refine": request.refine_prompt,
@@ -272,8 +263,6 @@ async def update_template(template_id: str, request: TemplateUpdateRequest):
             template_data["prompts"]["context"] = request.context_prompt
         if request.idea_prompt is not None:
             template_data["prompts"]["idea"] = request.idea_prompt
-        if request.new_idea_prompt is not None:
-            template_data["prompts"]["new_idea"] = request.new_idea_prompt
         if request.format_prompt is not None:
             template_data["prompts"]["format"] = request.format_prompt
         if request.critique_prompt is not None:
