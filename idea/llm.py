@@ -51,10 +51,11 @@ class LLMWrapper(ABC):
     def generate_text(self,
                      prompt: str,
                      temperature: Optional[float] = None,
+                     top_p: Optional[float] = None,
                      response_schema: Type[BaseModel] = None) -> str:
         """Base method for generating text with retry logic built in"""
         if self.provider == "google_generative_ai":
-            config = self._get_generation_config(temperature, response_schema)
+            config = self._get_generation_config(temperature, top_p, response_schema)
             model = genai.GenerativeModel(
                 model_name=self.model_name,
                 generation_config=config
@@ -82,13 +83,16 @@ class LLMWrapper(ABC):
 
     def _get_generation_config(self,
                              temperature: Optional[float],
+                             top_p: Optional[float],
                              response_schema: Optional[Type[BaseModel]] = None) -> Dict[str, Any]:
         actual_temp = temperature if temperature is not None else self.temperature
+        actual_top_p = top_p if top_p is not None else self.top_p
         print(f"{self.agent_name} using temperature: {actual_temp} (override: {temperature}, default: {self.temperature})")
+        print(f"{self.agent_name} using top_p: {actual_top_p} (override: {top_p}, default: {self.top_p})")
 
         config = {
             "temperature": actual_temp,
-            "top_p": self.top_p,
+            "top_p": actual_top_p,
             "max_output_tokens": self.MAX_TOKENS,
         }
         if response_schema:
