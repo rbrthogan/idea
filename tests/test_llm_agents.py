@@ -93,9 +93,8 @@ This is the analysis.
 === IDEA PROMPT ===
 This is the new idea prompt.
 """
-    with patch('idea.llm.get_prompts', return_value=DummyPrompts()), \
-         patch.object(Oracle, 'generate_text', return_value=response_text):
-        result = oracle.analyze_and_diversify([], [], "airesearch")
+    with patch('idea.llm.get_prompts', return_value=DummyPrompts()),         patch.object(Oracle, 'generate_text', return_value=response_text):
+        result = oracle.analyze_and_diversify([], "airesearch")
 
     assert result["action"] == "replace"
     assert result["oracle_analysis"] == "This is the analysis."

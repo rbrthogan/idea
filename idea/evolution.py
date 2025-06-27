@@ -472,7 +472,7 @@ class EvolutionEngine:
                         print(f"History generations: {len(self.history)}")
 
                         oracle_result = self.oracle.analyze_and_diversify(
-                            self.history, self.population, self.idea_type
+                            self.history, self.idea_type
                         )
 
                         print(f"Oracle result: {oracle_result}")
@@ -515,6 +515,11 @@ class EvolutionEngine:
                             print(f"🗑️ Removed embedding for replaced idea: '{old_title}'")
 
                         self.population[replace_idx] = formatted_oracle_idea
+                        
+                        # Also update the corresponding prompt so the UI is consistent
+                        if self.breeding_prompts:
+                            self.breeding_prompts[-1][replace_idx] = idea_prompt
+                            
                         print(f"Oracle replaced idea '{old_title}' at index {replace_idx} (least interesting by embedding distance) with more diverse alternative")
                         print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
 

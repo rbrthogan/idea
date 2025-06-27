@@ -11,7 +11,7 @@ ANALYSIS REQUIRED:
 3. Find gaps in the idea space that haven't been explored - not just a twist on what there's, think of valid idea that are completely disjoint from current ideas
 4. Generate a prompt for areplacement idea that deliberately avoids the overused patterns
 
-OUTPUT: Provide your analysis of patterns and your new diverse idea that would add the most value to the population.
+OUTPUT: Provide your analysis of patterns and your new diverse idea prompt that would add the most value to the population.
 """
 
 ORACLE_FORMAT_INSTRUCTIONS = """
@@ -37,13 +37,10 @@ ABSOLUTELY CRITICAL FORMATTING RULES:
 ORACLE_MAIN_PROMPT = """
 You are the Oracle - an AI agent specializing in promoting diversity and avoiding convergence in evolutionary idea generation.
 
-CONTEXT: You are working with {idea_type} ideas. The base instruction for ideas is: "{base_idea_prompt}"
+CONTEXT: You are working with {idea_type} ideas.
 
-COMPLETE EVOLUTION HISTORY:
+COMPLETE EVOLUTION HISTORY (the last generation is the most recent):
 {history_text}
-
-CURRENT GENERATION TO ANALYZE:
-{current_text}
 
 {mode_instruction}
 

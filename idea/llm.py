@@ -670,7 +670,7 @@ class Oracle(LLMWrapper):
         temp = kwargs.pop('temperature', 1.8)
         super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
 
-    def analyze_and_diversify(self, history: List[List[str]], current_generation: List[str], idea_type: str) -> dict:
+    def analyze_and_diversify(self, history: List[List[str]], idea_type: str) -> dict:
         """
         Analyze the entire evolution history and generate a new diverse idea to replace an existing one.
 
@@ -678,23 +678,22 @@ class Oracle(LLMWrapper):
 
         Args:
             history: Complete evolution history, list of generations (each generation is a list of ideas)
-            current_generation: Current generation's ideas
             idea_type: Type of ideas being evolved
 
         Returns:
             Dictionary with new_idea and action type
         """
         # Build comprehensive analysis prompt
-        analysis_prompt = self._build_analysis_prompt(history, current_generation, idea_type)
+        analysis_prompt = self._build_analysis_prompt(history, idea_type)
 
         print(f"Oracle analyzing {len(history)} generations with {sum(len(gen) for gen in history)} total ideas...")
 
         # This is the "expensive" single query that does everything
         response = self.generate_text(analysis_prompt)
 
-        return self._parse_oracle_response(response, current_generation)
+        return self._parse_oracle_response(response)
 
-    def _build_analysis_prompt(self, history: List[List[str]], current_generation: List[str], idea_type: str) -> str:
+    def _build_analysis_prompt(self, history: List[List[str]], idea_type: str) -> str:
         """Build the comprehensive analysis prompt for the Oracle"""
 
         # Format all historical ideas by generation
@@ -704,12 +703,6 @@ class Oracle(LLMWrapper):
             for idea_idx, idea in enumerate(generation):
                 idea_content = self._extract_idea_content(idea)
                 history_text += f"Idea {gen_idx}.{idea_idx}: {idea_content}\n"
-
-        # Format current generation
-        current_text = "\n--- CURRENT GENERATION ---\n"
-        for idea_idx, idea in enumerate(current_generation):
-            idea_content = self._extract_idea_content(idea)
-            current_text += f"Idea {idea_idx}: {idea_content}\n"
 
         # Get prompts for the idea type
         prompts = get_prompts(idea_type)
@@ -724,9 +717,7 @@ class Oracle(LLMWrapper):
         oracle_constraints = getattr(prompts, 'ORACLE_CONSTRAINTS', '')
         prompt = prompts.ORACLE_MAIN_PROMPT.format(
             idea_type=idea_type,
-            base_idea_prompt=base_idea_prompt,
             history_text=history_text,
-            current_text=current_text,
             mode_instruction=mode_instruction,
             format_instructions=format_instructions,
             oracle_constraints=oracle_constraints,
@@ -746,7 +737,7 @@ class Oracle(LLMWrapper):
         else:
             return str(idea)
 
-    def _parse_oracle_response(self, response: str, current_generation: List[str]) -> dict:
+    def _parse_oracle_response(self, response: str) -> dict:
         """Parse the Oracle's response and extract the analysis and new idea separately"""
 
         # Parse the structured response to separate analysis from new idea
