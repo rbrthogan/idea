@@ -416,15 +416,17 @@ async function restoreCurrentEvolution() {
                 console.log("Found evolution data in localStorage:", evolutionState);
 
                 // Handle both old format (just history array) and new format (object with history and diversity_history)
-                let generationsData, diversityData;
+                let generationsData, diversityData, tokenCounts;
                 if (Array.isArray(evolutionState)) {
                     // Old format - just the history array
                     generationsData = evolutionState;
                     diversityData = [];
+                    tokenCounts = null;
                 } else if (evolutionState && evolutionState.history) {
                     // New format - object with history and diversity_history
                     generationsData = evolutionState.history;
                     diversityData = evolutionState.diversity_history || [];
+                    tokenCounts = evolutionState.token_counts || null;
                     // Restore context data if available
                     if (evolutionState.contexts) {
                         contexts = evolutionState.contexts;
@@ -457,8 +459,15 @@ async function restoreCurrentEvolution() {
                         diversity_history: diversityData,
                         contexts: contexts,
                         specific_prompts: specificPrompts,
-                        breeding_prompts: breedingPrompts
+                        breeding_prompts: breedingPrompts,
+                        token_counts: tokenCounts
                     };
+
+                    // Display token counts if available
+                    if (tokenCounts) {
+                        console.log("Restoring token counts from localStorage:", tokenCounts);
+                        displayTokenCounts(tokenCounts);
+                    }
 
                     // Enable download button
                     const downloadButton = document.getElementById('downloadButton');
@@ -754,7 +763,7 @@ function renderGenerations(gens) {
                 // An Oracle update might have replaced this idea.
                 // We check if the new data for this slot is an Oracle idea.
                 const isOracleIdea = idea.oracle_generated === true;
-                
+
                 // We also check if the existing card in the DOM reflects this.
                 // A simple way is to check the button's inner HTML for the icon.
                 const lineageButton = existingCard.querySelector('.view-lineage');
@@ -1151,6 +1160,12 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
                     document.querySelector('.context-navigation').style.display = 'block';
                 }
 
+                // Display token counts if available
+                if (data.data.token_counts) {
+                    console.log("Displaying token counts from saved evolution:", data.data.token_counts);
+                    displayTokenCounts(data.data.token_counts);
+                }
+
                 // Enable download button
                 document.getElementById('downloadButton').disabled = false;
             }
@@ -1226,13 +1241,14 @@ async function pollProgress() {
             console.log("Rendering generations from progress update");
             renderGenerations(data.history);
 
-            // Store the current evolution data in localStorage including diversity data
+            // Store the current evolution data in localStorage including diversity data and token counts
             const evolutionStateToStore = {
                 history: data.history,
                 diversity_history: data.diversity_history || [],
                 contexts: data.contexts || contexts,
                 specific_prompts: data.specific_prompts || specificPrompts,
-                breeding_prompts: data.breeding_prompts || breedingPrompts
+                breeding_prompts: data.breeding_prompts || breedingPrompts,
+                token_counts: data.token_counts || null
             };
             localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
         }
@@ -1264,13 +1280,14 @@ async function pollProgress() {
                 currentEvolutionData = data;
                 renderGenerations(data.history);
 
-                // Store the final evolution data in localStorage including diversity data
+                // Store the final evolution data in localStorage including diversity data and token counts
                 const evolutionStateToStore = {
                     history: data.history,
                     diversity_history: data.diversity_history || [],
                     contexts: data.contexts || contexts,
                     specific_prompts: data.specific_prompts || specificPrompts,
-                    breeding_prompts: data.breeding_prompts || breedingPrompts
+                    breeding_prompts: data.breeding_prompts || breedingPrompts,
+                    token_counts: data.token_counts || null
                 };
                 localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
 
