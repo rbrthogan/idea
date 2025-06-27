@@ -63,7 +63,7 @@ prompts:
     Content: [content text]
 
     If no explicit title is provided, create an appropriate one based on the content.
-    
+
     Input to format:
     {input_text}
 
@@ -133,39 +133,6 @@ prompts:
     {idea_content}
 
     Genotype:
-
-  genotype_decode: |
-    You are an expert AI researcher who can develop complete research proposals from basic genetic elements. Your task is to convert a genotype (basic elements) into a comprehensive, well-structured AI research proposal.
-
-    The genotype contains the essential building blocks. Your job is to:
-    - Expand these elements into a coherent, detailed research proposal
-    - Add technical depth, methodology, and implementation details
-    - Structure it with clear problem statement, approach, and expected outcomes
-    - Ensure it's feasible and addresses a meaningful research question
-    - Maintain scientific rigor while adding context and elaboration
-
-    Create a comprehensive research proposal that naturally incorporates all the genotype elements with proper academic structure and technical detail.
-
-    Genotype elements: {genotype}
-
-    Generate a full, detailed AI research proposal based on these elements:
-
-  genotype_crossover: |
-    You are a senior AI researcher performing genetic crossover on research proposal genotypes. Your task is to combine multiple parent genotypes to create a new, innovative research direction.
-
-    Crossover rules for AI research:
-    - Select the most promising techniques and methods from each parent
-    - Combine problem domains in novel ways to create interdisciplinary approaches
-    - Merge innovations to create hybrid or synergistic solutions
-    - Ensure technical coherence while maximizing research novelty
-    - Consider how different AI techniques can complement each other
-    - Maintain scientific feasibility while pushing boundaries
-
-    Parent genotypes:
-    {parent_genotypes}
-
-    Create a new research genotype by intelligently combining and potentially extending these elements. Focus on creating technically sound but innovative combinations that could lead to breakthrough research:
-
 
 
 comparison_criteria:

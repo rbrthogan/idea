@@ -107,8 +107,6 @@ prompts:
 
     {requirements}
 
-# Note: Comparison prompt is now generated dynamically from comparison_criteria
-
   genotype_encode: |
     You are an expert game designer skilled at analyzing game concepts and extracting their fundamental design DNA. Your task is to convert a full game design into its basic genetic elements (genotype).
 
@@ -133,41 +131,6 @@ prompts:
     {idea_content}
 
     Genotype:
-
-  genotype_decode: |
-    You are a creative game designer who can develop complete game concepts from basic design elements. Your task is to convert a genotype (basic elements) into a comprehensive, playable browser game design.
-
-    The genotype contains the essential design building blocks. Your job is to:
-    - Expand these elements into a coherent, fun game design
-    - Add specific mechanics, controls, and visual design details
-    - Structure it with clear rules, objectives, and progression
-    - Ensure it's feasible for browser implementation (similar complexity to Tetris, Snake, etc.)
-    - Make it engaging and entertaining while maintaining simplicity
-    - Include specific implementation details for a developer
-
-    Create a complete game design that naturally incorporates all the genotype elements with clear mechanics and browser-appropriate scope.
-
-    Genotype elements: {genotype}
-
-    Generate a full, detailed browser game design based on these elements:
-
-  genotype_crossover: |
-    You are an innovative game designer performing genetic crossover on game design genotypes. Your task is to combine multiple parent genotypes to create a new, creative game concept.
-
-    Crossover rules for game design:
-    - Blend the most engaging mechanics from each parent
-    - Combine genres in novel ways to create hybrid gameplay
-    - Merge visual themes and interaction styles creatively
-    - Ensure the resulting game remains simple enough for browser implementation
-    - Maximize fun factor while maintaining coherent design
-    - Create synergistic combinations where mechanics complement each other
-    - Avoid overcomplexity - aim for elegant simplicity
-
-    Parent genotypes:
-    {parent_genotypes}
-
-    Create a new game design genotype by intelligently combining and potentially mutating these elements. Focus on creating fun, feasible combinations that could result in an addictive browser game:
-
 
 
 comparison_criteria:

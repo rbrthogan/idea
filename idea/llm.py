@@ -11,6 +11,7 @@ import numpy as np
 from idea.models import Idea
 from idea.prompts.loader import get_prompts
 import uuid
+
 class LLMWrapper(ABC):
     """Base class for LLM interactions"""
     MAX_TOKENS = 8192
@@ -457,41 +458,6 @@ class Critic(LLMWrapper):
         except Exception as e:
             print(f"Error in compare_ideas: {e}")
             return None  # Return None instead of "tie" on error
-
-# def Oracle(LLMWrapper):
-#     """Oracle for the evolution"""
-#     agent_name = "Oracle"
-
-#     def __init__(self, **kwargs):
-#         super().__init__(agent_name=self.agent_name, temperature=0.3, **kwargs)
-
-
-if __name__ == "__main__":
-    import os
-    import google.generativeai as genai
-
-    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-
-    # Create the model
-    generation_config = {
-    "temperature": 1,
-    "top_p": 0.95,
-    "top_k": 40,
-    "max_output_tokens": 8192,
-    "response_mime_type": "text/plain",
-    }
-
-    model = genai.GenerativeModel(
-    model_name="gemini-1.5-pro-latest",
-    generation_config=generation_config,
-    )
-
-    response = model.generate_content(
-        "write a proposal for a new AI research project",
-        generation_config=generation_config,
-    )
-
-    print(response.json())
 
 
 class Breeder(LLMWrapper):

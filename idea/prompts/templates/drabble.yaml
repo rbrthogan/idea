@@ -114,7 +114,6 @@ prompts:
 
     {requirements}
 
-# Note: Comparison prompt is now generated dynamically from comparison_criteria
 
   genotype_encode: |
     You are an expert literary analyst skilled at deconstructing stories into their fundamental narrative DNA. Your task is to convert a complete drabble (100-word story) into its basic genetic elements (genotype).
@@ -141,46 +140,7 @@ prompts:
 
     Genotype:
 
-  genotype_decode: |
-    You are a masterful creative writer who can craft complete stories from basic narrative elements. Your task is to convert a genotype (basic elements) into a complete, compelling 100-word drabble.
-
-    The genotype contains the essential storytelling building blocks. Your job is to:
-    - Weave these elements into a complete narrative arc with beginning, middle, and end
-    - Create specific characters, dialogue, and concrete details
-    - Build a vivid setting and atmosphere
-    - Ensure the story is exactly 100 words (not including title)
-    - Make it emotionally impactful and memorable
-    - Avoid clichés and overused tropes while incorporating the genetic elements naturally
-
-    Create a complete drabble that naturally incorporates all the genotype elements while telling a compelling, original story.
-
-    Genotype elements: {genotype}
-
-    Generate a complete, exactly 100-word drabble based on these elements:
-
-  genotype_crossover: |
-    You are an innovative creative writer performing genetic crossover on story genotypes. Your task is to combine multiple parent genotypes to create a new, compelling narrative direction while avoiding repetitive patterns.
-
-    First, analyze the parent genotypes to identify:
-    1. Which genres, themes, and character archetypes appear repeatedly across parents
-    2. Which elements are overused or becoming predictable
-    3. Which combinations have not been explored yet
-
-    Crossover rules for drabbles:
-    - PRIORITIZE rare or underused elements from the parents over common ones
-    - Combine genres and techniques in unexpected but coherent ways
-    - If similar character archetypes dominate, shift to less represented ones
-    - If certain emotional cores repeat, explore contrasting or unexplored emotions
-    - Create synergistic combinations that haven't been seen before
-    - Push toward narrative novelty while maintaining coherence
-    - Focus on unique emotional impact and fresh thematic depth
-
-    Parent genotypes:
-    {parent_genotypes}
-
-    Create a new narrative genotype that deliberately combines the LEAST common elements from the parents, or finds entirely new combinations that maximize originality and avoid repetitive patterns:
-
-
+ 
 comparison_criteria:
   - "creativity"
   - "originality"
