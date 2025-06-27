@@ -751,29 +751,24 @@ function renderGenerations(gens) {
             // Check if this idea card already exists
             const existingCard = document.getElementById(`idea-${index}-${ideaIndex}`);
             if (existingCard) {
-                // Card already exists, check if we need to update it (for Oracle replacements)
-                const existingButton = existingCard.querySelector('.view-lineage');
-                if (existingButton && index > 0) {
-                    const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
-                    const expectedButtonText = isOracleIdea ? 'Oracle' : 'Lineage';
+                // An Oracle update might have replaced this idea.
+                // We check if the new data for this slot is an Oracle idea.
+                const isOracleIdea = idea.oracle_generated === true;
+                
+                // We also check if the existing card in the DOM reflects this.
+                // A simple way is to check the button's inner HTML for the icon.
+                const lineageButton = existingCard.querySelector('.view-lineage');
+                const cardIsAlreadyOracle = lineageButton && lineageButton.innerHTML.includes('fa-eye');
 
-                    // Update button text if it's different (Oracle replacement occurred)
-                    if (existingButton.textContent !== expectedButtonText) {
-                        existingButton.textContent = expectedButtonText;
-                        console.log(`Updated button for idea ${ideaIndex} in generation ${index}: ${expectedButtonText}`);
-
-                        // IMPORTANT: Update the event handler to use the new idea data
-                        // Remove the old event listener by cloning the button (clones don't copy event listeners)
-                        const newButton = existingButton.cloneNode(true);
-                        existingButton.parentNode.replaceChild(newButton, existingButton);
-
-                        // Add the new event handler with the updated idea data
-                        newButton.addEventListener('click', () => {
-                            showLineageModal(idea, index);
-                        });
-                    }
+                if (isOracleIdea && !cardIsAlreadyOracle) {
+                    // The data is now an Oracle idea, but the card isn't.
+                    // This means a replacement happened. We must re-render the card completely.
+                    console.log(`Oracle replacement detected for idea ${ideaIndex} in generation ${index}. Re-rendering card.`);
+                    existingCard.remove(); // Remove the old card
+                } else {
+                    // The card exists and is up-to-date, so we skip re-rendering.
+                    return;
                 }
-                return;
             }
 
             // Create a new card for this idea
