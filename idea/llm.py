@@ -718,6 +718,7 @@ class Oracle(LLMWrapper):
         # Get Oracle-specific prompts from the template
         mode_instruction = prompts.ORACLE_INSTRUCTION
         format_instructions = prompts.ORACLE_FORMAT_INSTRUCTIONS
+        example_idea_prompts = getattr(prompts, 'EXAMPLE_IDEA_PROMPTS', '')
 
         # Build the Oracle's comprehensive prompt using the template
         oracle_constraints = getattr(prompts, 'ORACLE_CONSTRAINTS', '')
@@ -728,7 +729,8 @@ class Oracle(LLMWrapper):
             current_text=current_text,
             mode_instruction=mode_instruction,
             format_instructions=format_instructions,
-            oracle_constraints=oracle_constraints
+            oracle_constraints=oracle_constraints,
+            example_idea_prompts=example_idea_prompts
         )
 
         return prompt
@@ -749,24 +751,24 @@ class Oracle(LLMWrapper):
 
         # Parse the structured response to separate analysis from new idea
         oracle_analysis = ""
-        new_idea_text = ""
+        idea_prompt = ""
 
         try:
             # Split response into sections
-            if "=== ORACLE ANALYSIS ===" in response and "=== NEW IDEA ===" in response:
+            if "=== ORACLE ANALYSIS ===" in response and "=== IDEA PROMPT ===" in response:
                 parts = response.split("=== ORACLE ANALYSIS ===")[1]
-                analysis_part, idea_part = parts.split("=== NEW IDEA ===")
+                analysis_part, idea_part = parts.split("=== IDEA PROMPT ===")
                 oracle_analysis = analysis_part.strip()
-                new_idea_text = idea_part.strip()
-                print(f"ORACLE: Successfully parsed structured response - analysis: {len(oracle_analysis)} chars, idea: {len(new_idea_text)} chars")
+                idea_prompt = idea_part.strip()
+                print(f"ORACLE: Successfully parsed structured response - analysis: {len(oracle_analysis)} chars, idea prompt: {len(idea_prompt)} chars")
             else:
                 # Fallback: treat entire response as new idea content but preserve Oracle metadata
-                new_idea_text = response.strip()
-                oracle_analysis = f"Oracle response was not properly formatted. Expected sections '=== ORACLE ANALYSIS ===' and '=== NEW IDEA ===' but got unstructured response. This indicates the LLM did not follow the required format."
+                idea_prompt = response.strip()
+                oracle_analysis = f"Oracle response was not properly formatted. Expected sections '=== ORACLE ANALYSIS ===' and '=== IDEA PROMPT ===' but got unstructured response. This indicates the LLM did not follow the required format."
                 print(f"ORACLE: Fallback parsing - treating entire response as idea content. Response length: {len(response)} chars")
         except Exception as e:
             # Fallback parsing failed
-            new_idea_text = response.strip()
+            idea_prompt = response.strip()
             oracle_analysis = f"Oracle parsing error: {e}. Response was treated as idea content."
             print(f"ORACLE: Parsing exception - {e}")
 
@@ -776,11 +778,6 @@ class Oracle(LLMWrapper):
 
         return {
             "action": "replace",
-            "new_idea": {
-                "id": str(uuid.uuid4()),
-                "idea": new_idea_text,
-                "parent_ids": [],
-                "oracle_generated": True,
-                "oracle_analysis": oracle_analysis
-            }
+            "idea_prompt": idea_prompt,
+            "oracle_analysis": oracle_analysis
         }

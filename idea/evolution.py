@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Callable, Awaitable, Optional
 import random
 import numpy as np
 import asyncio
+import uuid
 from idea.models import Idea
 from idea.llm import Ideator, Formatter, Critic, Breeder, GenotypeEncoder, Oracle
 from idea.prompts.loader import list_available_templates
@@ -478,7 +479,20 @@ class EvolutionEngine:
 
                         # Replace existing idea with more diverse one using embedding-based selection
                         replace_idx = await self._find_least_interesting_idea_idx(self.population)
-                        oracle_idea = oracle_result["new_idea"]
+                        
+                        # Generate a new idea using the oracle's prompt
+                        idea_prompt = oracle_result["idea_prompt"]
+                        new_idea = self.ideator.generate_text(idea_prompt)
+                        
+                        # Create the new idea structure
+                        oracle_idea = {
+                            "id": uuid.uuid4(),
+                            "idea": new_idea,
+                            "parent_ids": [],
+                            "oracle_generated": True,
+                            "oracle_analysis": oracle_result["oracle_analysis"]
+                        }
+
                         formatted_oracle_idea = self.formatter.format_idea(oracle_idea, self.idea_type)
 
                         # Ensure Oracle metadata is preserved after formatting

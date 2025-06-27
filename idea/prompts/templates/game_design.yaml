@@ -40,13 +40,21 @@ prompts:
 
     Create a brief design direction like: "Design a [genre/type] game that combines [mechanic] where players [objective]." Or "Design a game that combines [interaction] with [theme/setting]."
 
-    Your concise design prompt:
+    Your concise game design prompt:
+
+  example_idea_prompts: |
+    - "Design a puzzle game where the player manipulates gravity to solve challenges."
+    - "Create a concept for a role-playing game set in a world where music is magic."
+    - "Outline a strategy game where players build and manage a colony on Mars."
+    - "Design a mobile game that uses augmented reality to turn the real world into a fantasy RPG."
+    - "Create a narrative-driven game about a character who is losing their memories."
 
   idea: |
-    Your game design must be built around 3-4 specific concepts from the context above. Choose concepts that create interesting gameplay synergies or novel combinations.
-
-    Design a browser game where the core mechanics, theme, and player interactions all stem from these chosen context elements. The game should be impossible to design without these specific elements as the foundation.
-
+    Your game design document must incorporate the following elements from the context pool:
+    {context_pool}
+    The document should be well-structured and provide a clear overview of the game concept.
+    It should include sections on gameplay mechanics, art style, and target audience.
+    No additional text, just the game design document.
     {requirements}
 
   format: |

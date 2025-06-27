@@ -45,13 +45,22 @@ prompts:
 
     Create a brief request like: "Write a [genre/style] drabble about a [character type] dealing with [concept]." Or "Write a drabble set in a [setting] about a exploring this [theme]."
 
-    Your concise prompt:
+    Your concise story prompt:
+
+  example_idea_prompts: |
+    - "Write a 100-word story about a sentient teapot that is afraid of the dark."
+    - "In exactly 100 words, describe the last moments of a star."
+    - "A 100-word story about a detective who solves crimes by talking to ghosts."
+    - "Write a drabble about a child who finds a door to another world in their closet."
+    - "A 100-word story about a robot who learns to love."
 
   idea: |
-    Your story must be built around 3-4 specific concepts from the context above. Choose concepts that naturally fit together and weave them into every aspect of your story - the character, setting, conflict, and resolution should all stem from these chosen elements.
-
-    Write a complete drabble (exactly 100 words) that would be impossible to tell without these specific context elements as the foundation.
-
+    Your story must be exactly 100 words long.
+    It must incorporate the following elements from the context pool:
+    {context_pool}
+    The story should be a complete narrative with a beginning, middle, and end.
+    It should be well-written and engaging.
+    No additional text, just the story.
     {requirements}
 
   format: |

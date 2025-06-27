@@ -40,6 +40,13 @@ prompts:
 
     Your concise research prompt:
 
+  example_idea_prompts: |
+    - "Develop a research proposal on using generative adversarial networks (GANs) for creating realistic synthetic data for training autonomous vehicles."
+    - "Propose a new method for explainable AI (XAI) in medical diagnosis, focusing on transformer models."
+    - "Investigate the use of reinforcement learning for optimizing supply chain management in a post-pandemic world."
+    - "Explore the intersection of AI and art, creating a system that can generate novel pieces of music in the style of a given composer."
+    - "Design a study to assess the ethical implications of using AI in hiring and recruitment processes."
+
   idea: |
     Your research proposal must incorporate 3-4 specific concepts from the context above as foundational elements. Choose concepts that create interesting intersections or novel combinations.
 

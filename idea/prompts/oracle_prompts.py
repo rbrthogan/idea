@@ -8,8 +8,8 @@ Your task is to GENERATE a new diverse idea to enrich the current generation wit
 ANALYSIS REQUIRED:
 1. Identify the most common patterns, themes, approaches, and methodologies across ALL generations
 2. Spot repetitive concepts, similar problem-solving approaches, or overused techniques
-3. Find gaps in the idea space that haven't been explored
-4. Generate a replacement idea that deliberately avoids the overused patterns
+3. Find gaps in the idea space that haven't been explored - not just a twist on what there's, think of valid idea that are completely disjoint from current ideas
+4. Generate a prompt for areplacement idea that deliberately avoids the overused patterns
 
 OUTPUT: Provide your analysis of patterns and your new diverse idea that would add the most value to the population.
 """
@@ -21,17 +21,17 @@ You MUST structure your response EXACTLY as follows. Do NOT deviate from this fo
 === ORACLE ANALYSIS ===
 [Your detailed analysis of patterns, overused concepts, themes, gaps, etc.]
 
-=== NEW IDEA ===
-[Only the new story/idea content here - no analysis, just the creative work]
+=== IDEA PROMPT ===
+[Your new idea prompt here - a concise and specific request for a new idea]
 
 ABSOLUTELY CRITICAL FORMATTING RULES:
 - Use EXACTLY those section headers with the equals signs
 - Put your analysis in the first section
-- The NEW IDEA section must contain ONLY the creative story content
-- Do NOT include words like "Analysis:", "Recurring Elements:", or any meta-commentary in the NEW IDEA section
-- Do NOT include any analytical text in the NEW IDEA section
-- The NEW IDEA section should be a complete, standalone creative work that someone could read as a story
-- If you include ANY analysis in the NEW IDEA section, you will have failed the task
+- The IDEA PROMPT section must contain ONLY the new idea prompt
+- Do NOT include words like "Analysis:", "Recurring Elements:", or any meta-commentary in the IDEA PROMPT section
+- Do NOT include any analytical text in the IDEA PROMPT section
+- The IDEA PROMPT should be a complete, standalone creative request
+- If you include ANY analysis in the IDEA PROMPT section, you will have failed the task
 """
 
 ORACLE_MAIN_PROMPT = """
@@ -53,6 +53,9 @@ CONSTRAINTS:
 - Avoid superficial changes - look for fundamentally different approaches
 - Consider interdisciplinary connections and novel methodologies
 {oracle_constraints}
+
+Here are some examples of good idea prompts:
+{example_idea_prompts}
 
 {format_instructions}
 """
