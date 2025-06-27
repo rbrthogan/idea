@@ -4,7 +4,7 @@ import numpy as np
 import asyncio
 import uuid
 from idea.models import Idea
-from idea.llm import Ideator, Formatter, Critic, Breeder, GenotypeEncoder, Oracle
+from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates
 from idea.diversity import DiversityCalculator
 from tqdm import tqdm
@@ -36,9 +36,7 @@ class EvolutionEngine:
         breeder_temp: float = 2.0,
         tournament_size: int = 5,
         tournament_comparisons: int = 20,
-        genotype_encoder_temp: float = 1.2,
         use_oracle: bool = True,
-
         oracle_temp: float = 1.8
     ):
         self.idea_type = idea_type or get_default_template_id()
@@ -52,7 +50,7 @@ class EvolutionEngine:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
 
         # Initialize LLM components with appropriate temperatures
-        print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}, GenotypeEncoder={genotype_encoder_temp}")
+        print(f"Initializing agents with temperatures: Ideator={ideator_temp}, Critic={critic_temp}, Breeder={breeder_temp}")
         if use_oracle:
             print(f"Oracle enabled, temperature: {oracle_temp}")
 
@@ -60,8 +58,6 @@ class EvolutionEngine:
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
         self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=critic_temp)
         self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=breeder_temp)
-
-        self.genotype_encoder = GenotypeEncoder(provider="google_generative_ai", model_name=model_type, temperature=genotype_encoder_temp)
 
         # Initialize Oracle if enabled
         if use_oracle:
@@ -405,7 +401,7 @@ class EvolutionEngine:
                         # Select parents and breed
                         parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights, replace=False)
                         parent_ideas = [group[idx] for idx in parent_indices]
-                        new_idea = self.breeder.breed(parent_ideas, self.idea_type, self.genotype_encoder)
+                        new_idea = self.breeder.breed(parent_ideas, self.idea_type)
 
                         # Extract and store the breeding prompt before formatting
                         if isinstance(new_idea, dict) and "specific_prompt" in new_idea:
@@ -479,11 +475,11 @@ class EvolutionEngine:
 
                         # Replace existing idea with more diverse one using embedding-based selection
                         replace_idx = await self._find_least_interesting_idea_idx(self.population)
-                        
+
                         # Generate a new idea using the oracle's prompt
                         idea_prompt = oracle_result["idea_prompt"]
                         new_idea = self.ideator.generate_text(idea_prompt)
-                        
+
                         # Create the new idea structure
                         oracle_idea = {
                             "id": uuid.uuid4(),
@@ -515,11 +511,11 @@ class EvolutionEngine:
                             print(f"🗑️ Removed embedding for replaced idea: '{old_title}'")
 
                         self.population[replace_idx] = formatted_oracle_idea
-                        
+
                         # Also update the corresponding prompt so the UI is consistent
                         if self.breeding_prompts:
                             self.breeding_prompts[-1][replace_idx] = idea_prompt
-                            
+
                         print(f"Oracle replaced idea '{old_title}' at index {replace_idx} (least interesting by embedding distance) with more diverse alternative")
                         print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
 
@@ -612,14 +608,13 @@ class EvolutionEngine:
         critic_output = getattr(self.critic, 'output_token_count', 0)
         breeder_input = getattr(self.breeder, 'input_token_count', 0)
         breeder_output = getattr(self.breeder, 'output_token_count', 0)
-        genotype_encoder_input = getattr(self.genotype_encoder, 'input_token_count', 0) if self.genotype_encoder else 0
-        genotype_encoder_output = getattr(self.genotype_encoder, 'output_token_count', 0) if self.genotype_encoder else 0
+
         oracle_input = getattr(self.oracle, 'input_token_count', 0) if self.oracle else 0
         oracle_output = getattr(self.oracle, 'output_token_count', 0) if self.oracle else 0
 
         # Calculate totals
-        total_input = ideator_input + formatter_input + critic_input + breeder_input + genotype_encoder_input + oracle_input
-        total_output = ideator_output + formatter_output + critic_output + breeder_output + genotype_encoder_output + oracle_output
+        total_input = ideator_input + formatter_input + critic_input + breeder_input + oracle_input
+        total_output = ideator_output + formatter_output + critic_output + breeder_output + oracle_output
         total = total_input + total_output
 
         # Get pricing information from config
@@ -630,7 +625,7 @@ class EvolutionEngine:
         formatter_model = getattr(self.formatter, 'model_name', 'gemini-2.0-flash')
         critic_model = getattr(self.critic, 'model_name', 'gemini-2.0-flash')
         breeder_model = getattr(self.breeder, 'model_name', 'gemini-2.0-flash')
-        genotype_encoder_model = getattr(self.genotype_encoder, 'model_name', 'gemini-2.0-flash') if self.genotype_encoder else None
+
         oracle_model = getattr(self.oracle, 'model_name', 'gemini-2.0-flash') if self.oracle else None
 
         # Default pricing if model not found in config
@@ -641,7 +636,7 @@ class EvolutionEngine:
         formatter_pricing = model_prices_per_million_tokens.get(formatter_model, default_price)
         critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
         breeder_pricing = model_prices_per_million_tokens.get(breeder_model, default_price)
-        genotype_encoder_pricing = model_prices_per_million_tokens.get(genotype_encoder_model, default_price) if genotype_encoder_model else default_price
+
         oracle_pricing = model_prices_per_million_tokens.get(oracle_model, default_price) if oracle_model else default_price
 
         # Calculate cost for each component
@@ -653,14 +648,13 @@ class EvolutionEngine:
         critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
         breeder_input_cost = (breeder_pricing["input"] * breeder_input) / 1_000_000
         breeder_output_cost = (breeder_pricing["output"] * breeder_output) / 1_000_000
-        genotype_encoder_input_cost = (genotype_encoder_pricing["input"] * genotype_encoder_input) / 1_000_000 if self.genotype_encoder else 0
-        genotype_encoder_output_cost = (genotype_encoder_pricing["output"] * genotype_encoder_output) / 1_000_000 if self.genotype_encoder else 0
+
         oracle_input_cost = (oracle_pricing["input"] * oracle_input) / 1_000_000 if self.oracle else 0
         oracle_output_cost = (oracle_pricing["output"] * oracle_output) / 1_000_000 if self.oracle else 0
 
         # Calculate total costs
-        total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost + genotype_encoder_input_cost + oracle_input_cost
-        total_output_cost = ideator_output_cost + formatter_output_cost + critic_output_cost + breeder_output_cost + genotype_encoder_output_cost + oracle_output_cost
+        total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost + oracle_input_cost
+        total_output_cost = ideator_output_cost + formatter_output_cost + critic_output_cost + breeder_output_cost + oracle_output_cost
         total_cost = total_input_cost + total_output_cost
 
         token_data = {
@@ -709,16 +703,7 @@ class EvolutionEngine:
             }
         }
 
-        # Add genotype encoder data if enabled
-        if self.genotype_encoder:
-            token_data['genotype_encoder'] = {
-                'total': self.genotype_encoder.total_token_count,
-                'input': genotype_encoder_input,
-                'output': genotype_encoder_output,
-                'model': genotype_encoder_model,
-                'cost': genotype_encoder_input_cost + genotype_encoder_output_cost
-            }
-            token_data['models']['genotype_encoder'] = genotype_encoder_model
+
 
         # Add Oracle data if enabled
         if self.oracle:

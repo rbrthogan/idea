@@ -461,76 +461,13 @@ class Critic(LLMWrapper):
 
 
 class Breeder(LLMWrapper):
-    """Breeds ideas"""
+    """Breeds ideas and handles genotype encoding/decoding"""
     agent_name = "Breeder"
     parent_count = 2
 
     def __init__(self, **kwargs):
         # Don't set temperature directly here, let it come from kwargs
         super().__init__(agent_name=self.agent_name, **kwargs)
-
-    def breed(self, ideas: List[str], idea_type: str, genotype_encoder: 'GenotypeEncoder') -> str:
-        """Breed ideas to create a new idea using the new approach that mirrors initial population generation
-
-        This follows the same pattern as initial idea generation:
-        1. Get concepts from the parents (their genotypes) and combine them
-        2. Sample 50% at random (in python code)
-        3. Using the sample to ask LLM to create specific prompt
-        4. Generate an idea from specific prompt
-
-        Args:
-            ideas: List of parent ideas that have already been selected in the main evolution loop
-            idea_type: Type of idea to breed
-            genotype_encoder: GenotypeEncoder instance for genotype operations
-
-        Returns:
-            A new idea with a unique ID and parent IDs
-        """
-        # Extract parent IDs
-        parent_ids = []
-        for parent in ideas:
-            if isinstance(parent, dict) and "id" in parent:
-                parent_ids.append(str(parent["id"]))
-
-        # Step 1: Get concepts from the parents (their genotypes) and combine them
-        parent_genotypes = []
-        for parent in ideas:
-            genotype = genotype_encoder.encode_to_genotype(parent, idea_type)
-            parent_genotypes.append(genotype)
-
-        # We need to get an instance of Ideator to use the new helper methods
-        # Use the same configuration as this Breeder instance
-        ideator = Ideator(
-            provider=self.provider,
-            model_name=self.model_name,
-            temperature=self.temperature
-        )
-
-        # Step 2: Sample 50% at random (handled in generate_context_from_parents)
-        # Step 3 & 4: Using the sample to create specific prompt and generate idea
-        context_pool = ideator.generate_context_from_parents(parent_genotypes)
-        new_idea, specific_prompt = ideator.generate_idea_from_context(context_pool, idea_type)
-
-        print(f"Generated new idea from parent concepts: {new_idea[:100]}...")
-        print(f"Using specific prompt: {specific_prompt[:100]}...")
-
-        # Create a new idea with a unique ID and parent IDs
-        # Also include the specific prompt used for breeding
-        return {
-            "id": uuid.uuid4(),
-            "idea": new_idea,
-            "parent_ids": parent_ids,
-            "specific_prompt": specific_prompt  # Store the specific prompt for later display
-        }
-
-class GenotypeEncoder(LLMWrapper):
-    """Encodes ideas to genotypes (basic elements) and decodes genotypes back to ideas"""
-    agent_name = "GenotypeEncoder"
-
-    def __init__(self, **kwargs):
-        # Use a moderate temperature for encoding/decoding
-        temp = kwargs.pop('temperature', 1.2)
-        super().__init__(agent_name=self.agent_name, temperature=temp, **kwargs)
 
     def encode_to_genotype(self, idea: str, idea_type: str) -> str:
         """
@@ -569,6 +506,59 @@ class GenotypeEncoder(LLMWrapper):
 
         print(f"Encoded genotype: {genotype}")
         return genotype
+
+    def breed(self, ideas: List[str], idea_type: str) -> str:
+        """Breed ideas to create a new idea using the new approach that mirrors initial population generation
+
+        This follows the same pattern as initial idea generation:
+        1. Get concepts from the parents (their genotypes) and combine them
+        2. Sample 50% at random (in python code)
+        3. Using the sample to ask LLM to create specific prompt
+        4. Generate an idea from specific prompt
+
+        Args:
+            ideas: List of parent ideas that have already been selected in the main evolution loop
+            idea_type: Type of idea to breed
+
+        Returns:
+            A new idea with a unique ID and parent IDs
+        """
+        # Extract parent IDs
+        parent_ids = []
+        for parent in ideas:
+            if isinstance(parent, dict) and "id" in parent:
+                parent_ids.append(str(parent["id"]))
+
+        # Step 1: Get concepts from the parents (their genotypes) and combine them
+        parent_genotypes = []
+        for parent in ideas:
+            genotype = self.encode_to_genotype(parent, idea_type)
+            parent_genotypes.append(genotype)
+
+        # We need to get an instance of Ideator to use the new helper methods
+        # Use the same configuration as this Breeder instance
+        ideator = Ideator(
+            provider=self.provider,
+            model_name=self.model_name,
+            temperature=self.temperature
+        )
+
+        # Step 2: Sample 50% at random (handled in generate_context_from_parents)
+        # Step 3 & 4: Using the sample to create specific prompt and generate idea
+        context_pool = ideator.generate_context_from_parents(parent_genotypes)
+        new_idea, specific_prompt = ideator.generate_idea_from_context(context_pool, idea_type)
+
+        print(f"Generated new idea from parent concepts: {new_idea[:100]}...")
+        print(f"Using specific prompt: {specific_prompt[:100]}...")
+
+        # Create a new idea with a unique ID and parent IDs
+        # Also include the specific prompt used for breeding
+        return {
+            "id": uuid.uuid4(),
+            "idea": new_idea,
+            "parent_ids": parent_ids,
+            "specific_prompt": specific_prompt  # Store the specific prompt for later display
+        }
 
 
 class Oracle(LLMWrapper):

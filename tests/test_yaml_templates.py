@@ -135,7 +135,8 @@ class TestTemplateValidation:
                 "format": "Format prompt missing input_text placeholder",  # Missing {input_text}
                 "critique": "Critique prompt missing idea placeholder",  # Missing {idea}
                 "refine": "Refine prompt missing placeholders",  # Missing {idea} and {critique}
-                "breed": "Breed prompt missing ideas placeholder"  # Missing {ideas}
+                "breed": "Breed prompt missing ideas placeholder",  # Missing {ideas}
+                "genotype_encode": "Genotype encode prompt"
             },
             "comparison_criteria": ["test"]
         }

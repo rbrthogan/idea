@@ -181,13 +181,7 @@ async def start_evolution(request: Request):
         tournament_size = 5
         tournament_comparisons = 20
 
-    try:
-        genotype_encoder_temp = float(data.get('genotypeEncoderTemp', 1.2))
-        print(f"Parsed genotype encoder temperature: {genotype_encoder_temp}")
-    except ValueError as e:
-        print(f"Error parsing genotype encoder temperature: {e}")
-        # Use defaults if parsing fails
-        genotype_encoder_temp = 1.2
+
 
     # Get Oracle parameters with defaults
     use_oracle = data.get('useOracle', False)
@@ -203,7 +197,6 @@ async def start_evolution(request: Request):
           f"idea_type={idea_type}, model_type={model_type}, "
           f"temperatures: ideator={ideator_temp}, critic={critic_temp}, breeder={breeder_temp}, "
           f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"genotype_encoder_temp={genotype_encoder_temp}, "
           f"oracle={use_oracle}, oracle_temp={oracle_temp}")
 
     # Create and run evolution with specified parameters
@@ -217,9 +210,7 @@ async def start_evolution(request: Request):
         breeder_temp=breeder_temp,
         tournament_size=tournament_size,
         tournament_comparisons=tournament_comparisons,
-        genotype_encoder_temp=genotype_encoder_temp,
         use_oracle=use_oracle,
-
         oracle_temp=oracle_temp
     )
 

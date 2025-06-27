@@ -216,7 +216,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
             const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
 
-            const genotypeEncoderTemp = parseFloat(document.getElementById('genotypeEncoderTemp').value);
+
 
             // Get Oracle values
             const useOracle = document.getElementById('useOracle').checked;
@@ -231,9 +231,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 ideatorTemp,
                 criticTemp,
                 breederTemp,
-                tournamentSize,
-                tournamentComparisons,
-                genotypeEncoderTemp,
+                            tournamentSize,
+            tournamentComparisons,
                 useOracle,
                 oracleMode,
                 oracleTemp
