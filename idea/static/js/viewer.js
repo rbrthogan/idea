@@ -3138,46 +3138,70 @@ function configureThinkingBudgetForModel(modelName) {
         'gemini-2.5-pro': {
             min: 128,
             max: 32768,
-            default: 1000,
+            default: 128,  // Minimum possible since can't disable
+            defaultMode: 'custom',  // Use custom mode with minimum value
             canDisable: false,
-            help: 'Dynamic thinking: Model decides when and how much to think (128-32768 tokens)'
+            help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
         },
         'gemini-2.5-flash': {
             min: 128,  // Custom range starts at 128
             max: 24576,
-            default: 1000,
+            default: 0,  // Disabled by default
+            defaultMode: 'disabled',  // Use disabled mode
             canDisable: true,
-            help: 'Dynamic thinking: Model decides when and how much to think (0-24576 tokens)'
+            help: 'Thinking disabled by default (0-24576 tokens available for custom)'
         },
         'gemini-2.5-flash-lite-preview-06-17': {
             min: 512,  // Custom range starts at 512
             max: 24576,
-            default: 1000,
+            default: 0,  // Disabled by default
+            defaultMode: 'disabled',  // Use disabled mode
             canDisable: true,
-            help: 'Dynamic thinking: Model decides when and how much to think (0-24576 tokens)'
+            help: 'Thinking disabled by default (0-24576 tokens available for custom)'
         }
     };
 
     const config = configs[modelName];
     if (!config) return;
 
-    // Show/hide disabled option based on model capability
+        // Show/hide disabled option based on model capability
     if (config.canDisable) {
         thinkingDisabledOption.style.display = 'block';
     } else {
         thinkingDisabledOption.style.display = 'none';
-        // If disabled was selected but model doesn't support it, switch to dynamic
-        const disabledRadio = document.getElementById('thinkingDisabled');
-        if (disabledRadio && disabledRadio.checked) {
-            document.getElementById('thinkingDynamic').checked = true;
-            updateThinkingBudgetMode();
-        }
     }
 
-    // Update slider range
+    // Set the default mode based on model configuration
+    const dynamicRadio = document.getElementById('thinkingDynamic');
+    const disabledRadio = document.getElementById('thinkingDisabled');
+    const customRadio = document.getElementById('thinkingCustom');
+
+    // Clear all selections first
+    if (dynamicRadio) dynamicRadio.checked = false;
+    if (disabledRadio) disabledRadio.checked = false;
+    if (customRadio) customRadio.checked = false;
+
+    // Set the appropriate default based on config
+    if (config.defaultMode === 'disabled' && config.canDisable) {
+        disabledRadio.checked = true;
+    } else if (config.defaultMode === 'custom') {
+        customRadio.checked = true;
+    } else {
+        // Fallback to dynamic
+        dynamicRadio.checked = true;
+    }
+
+    // Update slider range and default value
     thinkingBudgetSlider.min = config.min;
     thinkingBudgetSlider.max = config.max;
-    thinkingBudgetSlider.value = Math.max(config.default, config.min);
+
+    // Set slider to model's default value (128 for Pro, doesn't matter for disabled modes)
+    if (config.defaultMode === 'custom') {
+        thinkingBudgetSlider.value = config.default;
+    } else {
+        // Set to a reasonable value for when user switches to custom later
+        thinkingBudgetSlider.value = Math.max(config.min, 512);
+    }
 
     // Update step size based on range (larger steps for larger ranges)
     const range = config.max - config.min;
@@ -3198,7 +3222,10 @@ function configureThinkingBudgetForModel(modelName) {
         thinkingBudgetMax.textContent = config.max.toLocaleString();
     }
 
-    // Update display
+    // Update the mode display (show/hide custom slider)
+    updateThinkingBudgetMode();
+
+    // Update the slider value display
     updateThinkingBudgetDisplay();
 }
 

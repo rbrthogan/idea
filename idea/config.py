@@ -21,19 +21,19 @@ THINKING_BUDGET_CONFIG = {
     "gemini-2.5-pro": {
         "min": 128,
         "max": 32768,
-        "default": -1,  # Dynamic thinking
+        "default": 128,  # Minimum possible (can't disable)
         "can_disable": False  # Cannot set to 0
     },
     "gemini-2.5-flash": {
         "min": 0,
         "max": 24576,
-        "default": -1,  # Dynamic thinking
+        "default": 0,  # Disabled thinking
         "can_disable": True  # Can set to 0
     },
     "gemini-2.5-flash-lite-preview-06-17": {
         "min": 512,
         "max": 24576,
-        "default": -1,  # Dynamic thinking
+        "default": 0,  # Disabled thinking
         "can_disable": True  # Can set to 0
     }
 }
