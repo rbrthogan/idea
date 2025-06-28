@@ -37,6 +37,7 @@ class EvolutionEngine:
         tournament_size: int = 5,
         tournament_comparisons: int = 20,
         use_oracle: bool = True,
+        thinking_budget: Optional[int] = None,
     ):
         self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
@@ -44,23 +45,24 @@ class EvolutionEngine:
         self.tournament_size = tournament_size
         self.tournament_comparisons = tournament_comparisons
         self.use_oracle = use_oracle
+        self.thinking_budget = thinking_budget
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
 
         # Initialize LLM components with appropriate temperatures
-        print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}")
+        print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}, thinking_budget={thinking_budget}")
         if use_oracle:
             print(f"Oracle enabled, using same creative settings")
 
-        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p)
+        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
-        self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p)
-        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p)
+        self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
+        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
 
         # Initialize Oracle if enabled
         if use_oracle:
-            self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p)
+            self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
         else:
             self.oracle = None
 
@@ -701,8 +703,6 @@ class EvolutionEngine:
                 'breeder': breeder_model
             }
         }
-
-
 
         # Add Oracle data if enabled
         if self.oracle:

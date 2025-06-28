@@ -222,6 +222,48 @@
                   <small class="text-muted">Controls the diversity of the LLM's responses.</small>
                 </div>
 
+                <!-- Thinking Budget (only for Gemini 2.5 models) -->
+                <div class="mb-3" id="thinkingBudgetContainer" style="display: none;">
+                  <label class="form-label">Thinking Budget</label>
+
+                  <!-- Radio button options -->
+                  <div class="mb-2">
+                    <div class="form-check">
+                      <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingDynamic" value="dynamic" checked onchange="updateThinkingBudgetMode()">
+                      <label class="form-check-label" for="thinkingDynamic">
+                        <strong>Dynamic</strong> - Model decides when and how much to think
+                      </label>
+                    </div>
+                    <div class="form-check" id="thinkingDisabledOption" style="display: none;">
+                      <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingDisabled" value="disabled" onchange="updateThinkingBudgetMode()">
+                      <label class="form-check-label" for="thinkingDisabled">
+                        <strong>Disabled</strong> - Turn off thinking completely
+                      </label>
+                    </div>
+                    <div class="form-check">
+                      <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingCustom" value="custom" onchange="updateThinkingBudgetMode()">
+                      <label class="form-check-label" for="thinkingCustom">
+                        <strong>Custom</strong> - Set specific token budget
+                      </label>
+                    </div>
+                  </div>
+
+                  <!-- Custom slider (only shown when Custom is selected) -->
+                  <div id="thinkingBudgetCustomContainer" style="display: none;">
+                    <label for="thinkingBudgetSlider" class="form-label d-flex justify-content-between">
+                      <span>Token Budget</span>
+                      <span id="thinkingBudgetValue">1000</span>
+                    </label>
+                                         <input type="range" class="form-range" min="128" max="32768" step="128" id="thinkingBudgetSlider" value="1000" oninput="updateThinkingBudgetDisplay()">
+                     <div class="d-flex justify-content-between">
+                       <small class="text-muted" id="thinkingBudgetMin">128</small>
+                       <small class="text-muted" id="thinkingBudgetMax">32768</small>
+                     </div>
+                  </div>
+
+                  <small class="text-muted" id="thinkingBudgetHelp">Dynamic thinking: Model decides when and how much to think</small>
+                </div>
+
                 <h6 class="mb-3 mt-4">Tournament Controls</h6>
 
                 <!-- Tournament Size -->

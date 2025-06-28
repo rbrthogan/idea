@@ -183,11 +183,19 @@ async def start_evolution(request: Request):
     use_oracle = data.get('useOracle', False)
     print(f"Parsed Oracle values: use_oracle={use_oracle}")
 
+    # Get thinking budget parameter (only for Gemini 2.5 models)
+    thinking_budget = data.get('thinkingBudget')
+    if thinking_budget is not None:
+        thinking_budget = int(thinking_budget)
+        print(f"Parsed thinking budget: {thinking_budget}")
+    else:
+        print("No thinking budget specified (non-2.5 model or not set)")
+
     print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
           f"idea_type={idea_type}, model_type={model_type}, "
           f"creative_temp={creative_temp}, top_p={top_p}, "
           f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"oracle={use_oracle}")
+          f"oracle={use_oracle}, thinking_budget={thinking_budget}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -200,6 +208,7 @@ async def start_evolution(request: Request):
         tournament_size=tournament_size,
         tournament_comparisons=tournament_comparisons,
         use_oracle=use_oracle,
+        thinking_budget=thinking_budget,
     )
 
     # Generate contexts for each idea

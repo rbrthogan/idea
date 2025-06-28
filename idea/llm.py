@@ -22,17 +22,19 @@ class LLMWrapper(ABC):
                  prompt_template: str = "",
                  temperature: float = 1.0,
                  top_p: float = 0.95,
-                 agent_name: str = ""):
+                 agent_name: str = "",
+                 thinking_budget: Optional[int] = None):
         self.provider = provider
         self.model_name = model_name
         self.prompt_template = prompt_template
         self.temperature = temperature
         self.top_p = top_p
+        self.thinking_budget = thinking_budget
         self.total_token_count = 0
         self.input_token_count = 0
         self.output_token_count = 0
         self.agent_name = agent_name
-        print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}")
+        print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, thinking_budget: {thinking_budget}")
         self._setup_provider()
 
     def _setup_provider(self):
@@ -55,31 +57,101 @@ class LLMWrapper(ABC):
                      response_schema: Type[BaseModel] = None) -> str:
         """Base method for generating text with retry logic built in"""
         if self.provider == "google_generative_ai":
-            config = self._get_generation_config(temperature, top_p, response_schema)
-            model = genai.GenerativeModel(
-                model_name=self.model_name,
-                generation_config=config
+            # Use newer google.genai client if thinking budget is specified for 2.5 models
+            if self.thinking_budget is not None and "2.5" in self.model_name:
+                return self._generate_with_new_client(prompt, temperature, top_p, response_schema)
+            else:
+                return self._generate_with_old_client(prompt, temperature, top_p, response_schema)
+        return "Not implemented"
+
+    def _generate_with_new_client(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
+        """Generate using new google.genai client with thinking budget support"""
+        try:
+            from google import genai
+            from google.genai import types
+
+            # Configure client
+            api_key = os.environ.get("GEMINI_API_KEY")
+            client = genai.Client(api_key=api_key)
+
+            # Prepare generation config
+            actual_temp = temperature if temperature is not None else self.temperature
+            actual_top_p = top_p if top_p is not None else self.top_p
+
+            config_dict = {
+                "temperature": actual_temp,
+                "top_p": actual_top_p,
+                "max_output_tokens": self.MAX_TOKENS,
+            }
+
+            # Add thinking config
+            if self.thinking_budget == -1:
+                config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=-1)
+                print(f"{self.agent_name} using dynamic thinking budget")
+            elif self.thinking_budget == 0:
+                config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+                print(f"{self.agent_name} thinking disabled")
+            else:
+                config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=self.thinking_budget)
+                print(f"{self.agent_name} using thinking budget: {self.thinking_budget}")
+
+            if response_schema:
+                config_dict["response_schema"] = response_schema
+                config_dict["response_mime_type"] = "application/json"
+
+            config = types.GenerateContentConfig(**config_dict)
+
+            print(f"{self.agent_name} using NEW client with temperature: {actual_temp}, top_p: {actual_top_p}")
+
+            # Generate content
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config
             )
-            response = model.generate_content(prompt, generation_config=config)
 
-            # Track total tokens
-            self.total_token_count += response.usage_metadata.total_token_count
-
-            # Try to get input and output tokens if available
-            try:
+            # Track tokens (new client has different structure)
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                self.total_token_count += response.usage_metadata.total_token_count
                 if hasattr(response.usage_metadata, 'prompt_token_count'):
                     self.input_token_count += response.usage_metadata.prompt_token_count
                 if hasattr(response.usage_metadata, 'candidates_token_count'):
                     self.output_token_count += response.usage_metadata.candidates_token_count
-            except AttributeError:
-                # If detailed token counts aren't available, estimate based on total
-                # Assuming a typical 1:4 ratio of input:output tokens
-                self.input_token_count += int(response.usage_metadata.total_token_count * 0.2)
-                self.output_token_count += int(response.usage_metadata.total_token_count * 0.8)
 
             print(f"Total tokens {self.agent_name}: {self.total_token_count} (Input: {self.input_token_count}, Output: {self.output_token_count})")
             return response.text if response.text else "No response."
-        return "Not implemented"
+
+        except Exception as e:
+            print(f"ERROR: New client failed: {e}")
+            print(f"Falling back to old client without thinking budget")
+            return self._generate_with_old_client(prompt, temperature, top_p, response_schema)
+
+    def _generate_with_old_client(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
+        """Generate using old google.generativeai client (fallback)"""
+        config = self._get_generation_config(temperature, top_p, response_schema)
+        model = genai.GenerativeModel(
+            model_name=self.model_name,
+            generation_config=config
+        )
+        response = model.generate_content(prompt, generation_config=config)
+
+        # Track total tokens
+        self.total_token_count += response.usage_metadata.total_token_count
+
+        # Try to get input and output tokens if available
+        try:
+            if hasattr(response.usage_metadata, 'prompt_token_count'):
+                self.input_token_count += response.usage_metadata.prompt_token_count
+            if hasattr(response.usage_metadata, 'candidates_token_count'):
+                self.output_token_count += response.usage_metadata.candidates_token_count
+        except AttributeError:
+            # If detailed token counts aren't available, estimate based on total
+            # Assuming a typical 1:4 ratio of input:output tokens
+            self.input_token_count += int(response.usage_metadata.total_token_count * 0.2)
+            self.output_token_count += int(response.usage_metadata.total_token_count * 0.8)
+
+        print(f"Total tokens {self.agent_name}: {self.total_token_count} (Input: {self.input_token_count}, Output: {self.output_token_count})")
+        return response.text if response.text else "No response."
 
     def _get_generation_config(self,
                              temperature: Optional[float],
@@ -87,7 +159,7 @@ class LLMWrapper(ABC):
                              response_schema: Optional[Type[BaseModel]] = None) -> Dict[str, Any]:
         actual_temp = temperature if temperature is not None else self.temperature
         actual_top_p = top_p if top_p is not None else self.top_p
-        print(f"{self.agent_name} using temperature: {actual_temp} (override: {temperature}, default: {self.temperature})")
+        print(f"{self.agent_name} using OLD client with temperature: {actual_temp} (override: {temperature}, default: {self.temperature})")
         print(f"{self.agent_name} using top_p: {actual_top_p} (override: {top_p}, default: {self.top_p})")
 
         config = {
@@ -95,6 +167,7 @@ class LLMWrapper(ABC):
             "top_p": actual_top_p,
             "max_output_tokens": self.MAX_TOKENS,
         }
+
         if response_schema:
             config["response_schema"] = response_schema
             config["response_mime_type"] = "application/json"

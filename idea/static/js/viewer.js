@@ -190,6 +190,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // Load evolutions dropdown
     loadEvolutions();
 
+    // Set up model change listener for thinking budget
+    setupModelChangeListener();
+
     // Try to restore current evolution from localStorage
     restoreCurrentEvolution();
 
@@ -215,6 +218,9 @@ document.addEventListener("DOMContentLoaded", () => {
             const useOracle = document.getElementById('useOracle').checked;
             const oracleMode = document.getElementById('oracleMode').value;
 
+            // Get thinking budget value (only for Gemini 2.5 models)
+            const thinkingBudget = getThinkingBudgetValue();
+
             const requestBody = {
                 popSize,
                 generations,
@@ -226,6 +232,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 tournamentComparisons,
                 useOracle,
                 oracleMode,
+                thinkingBudget,
             };
 
             console.log("Request body JSON:", JSON.stringify(requestBody));
@@ -3064,4 +3071,199 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
         console.error("Bootstrap is not available. Make sure it's properly loaded.");
         promptModal.style.display = 'block';
     }
+}
+
+/**
+ * Set up model change listener to show/hide thinking budget control
+ */
+function setupModelChangeListener() {
+    const modelSelect = document.getElementById('modelType');
+    const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
+
+    if (modelSelect && thinkingBudgetContainer) {
+        modelSelect.addEventListener('change', function() {
+            updateThinkingBudgetVisibility();
+        });
+
+        // Initialize visibility on page load
+        updateThinkingBudgetVisibility();
+    }
+}
+
+/**
+ * Update thinking budget control visibility based on selected model
+ */
+function updateThinkingBudgetVisibility() {
+    const modelSelect = document.getElementById('modelType');
+    const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
+    const dynamicRadio = document.getElementById('thinkingDynamic');
+    const customContainer = document.getElementById('thinkingBudgetCustomContainer');
+
+    if (!modelSelect || !thinkingBudgetContainer) return;
+
+    const selectedModel = modelSelect.value;
+    const isGemini25 = selectedModel.includes('2.5');
+
+    if (isGemini25) {
+        thinkingBudgetContainer.style.display = 'block';
+
+        // Reset to dynamic mode when switching models
+        if (dynamicRadio) {
+            dynamicRadio.checked = true;
+        }
+        if (customContainer) {
+            customContainer.style.display = 'none';
+        }
+
+        configureThinkingBudgetForModel(selectedModel);
+    } else {
+        thinkingBudgetContainer.style.display = 'none';
+    }
+}
+
+/**
+ * Configure thinking budget for specific model
+ */
+function configureThinkingBudgetForModel(modelName) {
+    const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
+    const thinkingBudgetHelp = document.getElementById('thinkingBudgetHelp');
+    const thinkingDisabledOption = document.getElementById('thinkingDisabledOption');
+    const thinkingBudgetMin = document.getElementById('thinkingBudgetMin');
+    const thinkingBudgetMax = document.getElementById('thinkingBudgetMax');
+
+    if (!thinkingBudgetSlider || !thinkingBudgetHelp || !thinkingDisabledOption) return;
+
+    // Configuration based on model specifications
+    const configs = {
+        'gemini-2.5-pro': {
+            min: 128,
+            max: 32768,
+            default: 1000,
+            canDisable: false,
+            help: 'Dynamic thinking: Model decides when and how much to think (128-32768 tokens)'
+        },
+        'gemini-2.5-flash': {
+            min: 128,  // Custom range starts at 128
+            max: 24576,
+            default: 1000,
+            canDisable: true,
+            help: 'Dynamic thinking: Model decides when and how much to think (0-24576 tokens)'
+        },
+        'gemini-2.5-flash-lite-preview-06-17': {
+            min: 512,  // Custom range starts at 512
+            max: 24576,
+            default: 1000,
+            canDisable: true,
+            help: 'Dynamic thinking: Model decides when and how much to think (0-24576 tokens)'
+        }
+    };
+
+    const config = configs[modelName];
+    if (!config) return;
+
+    // Show/hide disabled option based on model capability
+    if (config.canDisable) {
+        thinkingDisabledOption.style.display = 'block';
+    } else {
+        thinkingDisabledOption.style.display = 'none';
+        // If disabled was selected but model doesn't support it, switch to dynamic
+        const disabledRadio = document.getElementById('thinkingDisabled');
+        if (disabledRadio && disabledRadio.checked) {
+            document.getElementById('thinkingDynamic').checked = true;
+            updateThinkingBudgetMode();
+        }
+    }
+
+    // Update slider range
+    thinkingBudgetSlider.min = config.min;
+    thinkingBudgetSlider.max = config.max;
+    thinkingBudgetSlider.value = Math.max(config.default, config.min);
+
+    // Update step size based on range (larger steps for larger ranges)
+    const range = config.max - config.min;
+    if (range > 10000) {
+        thinkingBudgetSlider.step = 256;  // Larger steps for big ranges
+    } else if (range > 5000) {
+        thinkingBudgetSlider.step = 128;
+    } else {
+        thinkingBudgetSlider.step = 64;
+    }
+
+    // Update display elements
+    thinkingBudgetHelp.textContent = config.help;
+    if (thinkingBudgetMin) {
+        thinkingBudgetMin.textContent = config.min.toLocaleString();
+    }
+    if (thinkingBudgetMax) {
+        thinkingBudgetMax.textContent = config.max.toLocaleString();
+    }
+
+    // Update display
+    updateThinkingBudgetDisplay();
+}
+
+/**
+ * Update thinking budget display value
+ */
+function updateThinkingBudgetDisplay() {
+    const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
+    const thinkingBudgetValue = document.getElementById('thinkingBudgetValue');
+
+    if (!thinkingBudgetSlider || !thinkingBudgetValue) return;
+
+    const value = parseInt(thinkingBudgetSlider.value);
+    thinkingBudgetValue.textContent = value.toLocaleString();
+}
+
+/**
+ * Handle thinking budget mode changes (radio buttons)
+ */
+function updateThinkingBudgetMode() {
+    const customContainer = document.getElementById('thinkingBudgetCustomContainer');
+    const dynamicRadio = document.getElementById('thinkingDynamic');
+    const disabledRadio = document.getElementById('thinkingDisabled');
+    const customRadio = document.getElementById('thinkingCustom');
+
+    if (!customContainer || !dynamicRadio || !customRadio) return;
+
+    if (customRadio.checked) {
+        // Show custom slider
+        customContainer.style.display = 'block';
+        updateThinkingBudgetDisplay();
+    } else {
+        // Hide custom slider
+        customContainer.style.display = 'none';
+    }
+}
+
+/**
+ * Get thinking budget value for API request
+ */
+function getThinkingBudgetValue() {
+    const modelSelect = document.getElementById('modelType');
+    const dynamicRadio = document.getElementById('thinkingDynamic');
+    const disabledRadio = document.getElementById('thinkingDisabled');
+    const customRadio = document.getElementById('thinkingCustom');
+    const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
+
+    if (!modelSelect) return null;
+
+    const selectedModel = modelSelect.value;
+    const isGemini25 = selectedModel.includes('2.5');
+
+    if (!isGemini25) {
+        return null; // Don't send thinking budget for non-2.5 models
+    }
+
+    // Determine value based on selected mode
+    if (dynamicRadio && dynamicRadio.checked) {
+        return -1; // Dynamic thinking
+    } else if (disabledRadio && disabledRadio.checked) {
+        return 0; // Disabled thinking
+    } else if (customRadio && customRadio.checked && thinkingBudgetSlider) {
+        return parseInt(thinkingBudgetSlider.value); // Custom value
+    }
+
+    // Default to dynamic if nothing selected
+    return -1;
 }
