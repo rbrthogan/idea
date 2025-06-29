@@ -2395,7 +2395,8 @@ function showTokenDetailsModal(tokenCounts) {
 let diversityChart = null;
 let diversityData = {
     overall: [],
-    perGeneration: []
+    perGeneration: [],
+    interGeneration: []
 };
 
 /**
@@ -2462,6 +2463,25 @@ function initializeDiversityChart() {
                         pointHoverBorderColor: '#ffffff',
                         pointHoverBorderWidth: 3,
                         borderDash: [5, 5]
+                    },
+                    {
+                        label: 'Inter-Generation Diversity',
+                        data: [],
+                        borderColor: 'rgba(34, 197, 94, 1)',
+                        backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                        borderWidth: 3,
+                        fill: false,
+                        tension: 0.4,
+                        pointBackgroundColor: 'rgba(34, 197, 94, 1)',
+                        pointBorderColor: '#ffffff',
+                        pointBorderWidth: 2,
+                        pointRadius: 6,
+                        pointHoverRadius: 8,
+                        pointHoverBackgroundColor: 'rgba(34, 197, 94, 1)',
+                        pointHoverBorderColor: '#ffffff',
+                        pointHoverBorderWidth: 3,
+                        borderDash: [10, 3],
+                        spanGaps: true // Skip null values instead of breaking the line
                     }
                 ]
             },
@@ -2482,7 +2502,16 @@ function initializeDiversityChart() {
                         display: false
                     },
                     legend: {
-                        display: false // Using custom legend
+                        display: true,
+                        position: 'top',
+                        labels: {
+                            usePointStyle: true,
+                            padding: 20,
+                            font: {
+                                size: 12
+                            },
+                            color: '#64748B'
+                        }
                     },
                     tooltip: {
                         backgroundColor: 'rgba(255, 255, 255, 0.95)',
@@ -2604,12 +2633,13 @@ function initializeDiversityChart() {
  */
 function processDiversityData(diversityHistory) {
     if (!diversityHistory || diversityHistory.length === 0) {
-        return { labels: [], overall: [], perGeneration: [] };
+        return { labels: [], overall: [], perGeneration: [], interGeneration: [] };
     }
 
     const labels = [];
     const overallScores = [];
     const perGenerationScores = [];
+    const interGenerationScores = [];
 
     diversityHistory.forEach((diversityData, index) => {
         // Check if we have valid diversity data
@@ -2649,12 +2679,21 @@ function processDiversityData(diversityHistory) {
         }
 
         perGenerationScores.push(perGenScore);
+
+        // Extract inter-generation diversity (skip None/null values)
+        const interGenScore = diversityData.inter_generation_diversity;
+        if (interGenScore !== null && interGenScore !== undefined) {
+            interGenerationScores.push(interGenScore);
+        } else {
+            interGenerationScores.push(null); // Chart.js can handle null values
+        }
     });
 
     return {
         labels,
         overall: overallScores,
-        perGeneration: perGenerationScores
+        perGeneration: perGenerationScores,
+        interGeneration: interGenerationScores
     };
 }
 
@@ -2705,6 +2744,7 @@ function updateDiversityChart(diversityHistory) {
         diversityChart.data.labels = processedData.labels;
         diversityChart.data.datasets[0].data = processedData.overall;
         diversityChart.data.datasets[1].data = processedData.perGeneration;
+        diversityChart.data.datasets[2].data = processedData.interGeneration;
 
         // Update the chart with animation
         diversityChart.update('default');
@@ -2800,6 +2840,7 @@ function resetDiversityPlot() {
         diversityChart.data.labels = [];
         diversityChart.data.datasets[0].data = [];
         diversityChart.data.datasets[1].data = [];
+        diversityChart.data.datasets[2].data = [];
         diversityChart.update();
     }
 

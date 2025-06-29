@@ -168,6 +168,35 @@ class DiversityCalculator:
         # Return mean square distance
         return total_distance / pair_count if pair_count > 0 else 0.0
 
+    def _calculate_inter_generation_diversity(self, history_embeddings: List[List[np.ndarray]]) -> Optional[float]:
+        """
+        Calculate inter-generation diversity by computing centroids of each generation
+        and measuring mean euclidean distances between all pairs of centroids.
+
+        Args:
+            history_embeddings: List of generations, each containing a list of embedding vectors
+
+        Returns:
+            Mean euclidean distance between generation centroids, or None if insufficient generations
+        """
+        if len(history_embeddings) < 2:
+            return None
+
+        # Calculate centroid for each generation
+        centroids = []
+        for gen_embeddings in history_embeddings:
+            if len(gen_embeddings) == 0:
+                continue
+            # Calculate centroid as mean of all embeddings in the generation
+            centroid = np.mean(gen_embeddings, axis=0)
+            centroids.append(centroid)
+
+        # Calculate mean euclidean distance between all pairs of centroids
+        if len(centroids) < 2:
+            return None
+
+        return self._calculate_mean_square_distance(centroids)
+
     async def calculate_diversity(self, history: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """
         Calculate diversity metrics for the entire population history.
@@ -233,8 +262,9 @@ class DiversityCalculator:
             # Calculate overall diversity
             overall_diversity = self._calculate_mean_square_distance(valid_embeddings)
 
-            # Calculate per-generation diversity
+            # Calculate per-generation diversity and organize embeddings by generation
             generation_diversities = []
+            history_embeddings = []  # For inter-generation diversity calculation
             embedding_idx = 0
 
             for gen_idx, gen_count in enumerate(generation_idea_counts):
@@ -243,6 +273,9 @@ class DiversityCalculator:
                     if embedding_idx < len(all_embeddings) and all_embeddings[embedding_idx] is not None:
                         gen_embeddings.append(all_embeddings[embedding_idx])
                     embedding_idx += 1
+
+                # Add to history embeddings for inter-generation calculation
+                history_embeddings.append(gen_embeddings)
 
                 if len(gen_embeddings) >= 2:
                     gen_diversity = self._calculate_mean_square_distance(gen_embeddings)
@@ -256,9 +289,13 @@ class DiversityCalculator:
                     "valid_embeddings": len(gen_embeddings)
                 })
 
+            # Calculate inter-generation diversity
+            inter_generation_diversity = self._calculate_inter_generation_diversity(history_embeddings)
+
             diversity_result = {
                 "enabled": True,
                 "diversity_score": overall_diversity,
+                "inter_generation_diversity": inter_generation_diversity,
                 "total_ideas": len(all_ideas),
                 "valid_embeddings": len(valid_embeddings),
                 "embedding_success_rate": embedding_success_rate,
@@ -299,6 +336,11 @@ class DiversityCalculator:
         print("🔍 DIVERSITY METRICS 🔍")
         print("=" * 50)
         print(f"Overall Diversity Score: {diversity_data['diversity_score']:.4f}")
+        inter_gen_diversity = diversity_data.get('inter_generation_diversity', None)
+        if inter_gen_diversity is not None:
+            print(f"Inter-Generation Diversity: {inter_gen_diversity:.4f}")
+        else:
+            print("Inter-Generation Diversity: N/A (requires 2+ generations)")
         print(f"Total Ideas Analyzed: {diversity_data['total_ideas']}")
         print(f"Valid Embeddings: {diversity_data['valid_embeddings']}")
         print(f"Embedding Success Rate: {diversity_data['embedding_success_rate']:.1%}")
