@@ -758,8 +758,34 @@ async def auto_rate(request: Request):
                 'message': 'Not enough ideas to compare (minimum 2 required)'
             }, status_code=400)
 
-        # Create a critic agent from llm.py with the specified model
-        critic = Critic(model_name=model_id)
+                # Determine the appropriate thinking budget for the model
+        def get_default_thinking_budget(model_name):
+            """Get the default thinking budget for a model, same as main app logic"""
+            from idea.config import THINKING_BUDGET_CONFIG
+
+            # Only 2.5 models support thinking budget
+            if "2.5" not in model_name:
+                return None
+
+            # Get the config for this model and use its default value
+            # This matches the main app logic:
+            # - gemini-2.5-pro: default = 128 (minimum, can't disable)
+            # - gemini-2.5-flash: default = 0 (disabled)
+            # - gemini-2.5-flash-lite-preview-06-17: default = 0 (disabled)
+            config = THINKING_BUDGET_CONFIG.get(model_name, {})
+            return config.get('default', 0)  # Default to 0 (disabled) if not found
+
+        thinking_budget = get_default_thinking_budget(model_id)
+
+        # Create a critic agent from llm.py with the specified model and app defaults
+        # Use the same defaults as the evolution engine to ensure consistency
+        critic = Critic(
+            provider="google_generative_ai",
+            model_name=model_id,
+            temperature=DEFAULT_CREATIVE_TEMP,
+            top_p=DEFAULT_TOP_P,
+            thinking_budget=thinking_budget
+        )
 
         # Perform the requested number of comparisons
         results = []
