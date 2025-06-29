@@ -10,7 +10,7 @@ LLM_MODELS = [
 ]
 
 # Default model
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_MODEL = "gemini-2.5-flash-lite-preview-06-17"
 
 # Default creative settings
 DEFAULT_CREATIVE_TEMP = 1.5
