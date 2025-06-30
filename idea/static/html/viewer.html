@@ -285,22 +285,6 @@
                   <input type="range" class="form-range" min="5" max="50" step="5" id="tournamentComparisons" value="20" oninput="document.getElementById('tournamentComparisonsValue').textContent = this.value">
                   <small class="text-muted">Number of comparisons to run in each tournament</small>
                 </div>
-
-                <h6 class="mb-3 mt-4">Oracle Diversity Enhancement</h6>
-
-                <!-- Oracle Toggle -->
-                <div class="mb-3">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="useOracle" checked>
-                    <label class="form-check-label" for="useOracle">
-                      Enable Oracle Diversity Agent
-                    </label>
-                  </div>
-                  <small class="text-muted">Expensive agent that analyzes all previous generations to introduce diversity and avoid convergence</small>
-                </div>
-
-                <!-- Hidden Oracle mode value (always replace) -->
-                <input type="hidden" id="oracleMode" value="replace">
               </div>
             </div>
           </div>

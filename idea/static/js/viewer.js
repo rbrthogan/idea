@@ -141,17 +141,6 @@ async function loadTemplateTypes() {
 }
 
 /**
- * Load Oracle configuration (Oracle is fixed to replace mode)
- */
-async function loadOracleModes() {
-    // Oracle is now fixed to replace mode only
-    const oracleModeSelect = document.getElementById('oracleMode');
-    if (oracleModeSelect) {
-        oracleModeSelect.value = 'replace';
-    }
-}
-
-/**
  * Fallback template population if API fails
  */
 function populateFallbackTemplates() {
@@ -184,9 +173,6 @@ document.addEventListener("DOMContentLoaded", () => {
     // Load available templates
     loadTemplateTypes();
 
-    // Load available Oracle modes
-    loadOracleModes();
-
     // Load evolutions dropdown
     loadEvolutions();
 
@@ -214,10 +200,6 @@ document.addEventListener("DOMContentLoaded", () => {
             const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
             const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
 
-            // Get Oracle values
-            const useOracle = document.getElementById('useOracle').checked;
-            const oracleMode = document.getElementById('oracleMode').value;
-
             // Get thinking budget value (only for Gemini 2.5 models)
             const thinkingBudget = getThinkingBudgetValue();
 
@@ -230,8 +212,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 topP,
                 tournamentSize,
                 tournamentComparisons,
-                useOracle,
-                oracleMode,
                 thinkingBudget,
             };
 
@@ -370,20 +350,6 @@ document.addEventListener("DOMContentLoaded", () => {
             updateContextDisplay();
         }
     });
-
-
-    // Add event listener for Oracle toggle
-    const oracleToggle = document.getElementById('useOracle');
-
-    if (oracleToggle) {
-        oracleToggle.addEventListener('change', function() {
-            if (this.checked) {
-                console.log("Oracle diversity agent enabled");
-            } else {
-                console.log("Oracle diversity agent disabled");
-            }
-        });
-    }
 });
 
 // Function to restore current evolution from localStorage

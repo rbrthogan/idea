@@ -36,7 +36,6 @@ class EvolutionEngine:
         top_p: float = DEFAULT_TOP_P,
         tournament_size: int = 5,
         tournament_comparisons: int = 20,
-        use_oracle: bool = True,
         thinking_budget: Optional[int] = None,
     ):
         self.idea_type = idea_type or get_default_template_id()
@@ -44,7 +43,6 @@ class EvolutionEngine:
         self.generations = generations
         self.tournament_size = tournament_size
         self.tournament_comparisons = tournament_comparisons
-        self.use_oracle = use_oracle
         self.thinking_budget = thinking_budget
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
@@ -52,19 +50,13 @@ class EvolutionEngine:
 
         # Initialize LLM components with appropriate temperatures
         print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}, thinking_budget={thinking_budget}")
-        if use_oracle:
-            print(f"Oracle enabled, using same creative settings")
 
         self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
         self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
         self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
 
-        # Initialize Oracle if enabled
-        if use_oracle:
-            self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
-        else:
-            self.oracle = None
+        self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
 
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
@@ -465,7 +457,7 @@ class EvolutionEngine:
                 generation_diversity = await self._calculate_and_store_diversity()
 
                 # Apply Oracle for diversity enhancement (if enabled)
-                if self.use_oracle and self.oracle:
+                if self.oracle:
                     try:
                         print(f"Oracle analyzing population for diversity enhancement...")
                         print(f"Population size before Oracle: {len(self.population)}")
@@ -623,8 +615,8 @@ class EvolutionEngine:
         breeder_input = getattr(self.breeder, 'input_token_count', 0)
         breeder_output = getattr(self.breeder, 'output_token_count', 0)
 
-        oracle_input = getattr(self.oracle, 'input_token_count', 0) if self.oracle else 0
-        oracle_output = getattr(self.oracle, 'output_token_count', 0) if self.oracle else 0
+        oracle_input = getattr(self.oracle, 'input_token_count', 0)
+        oracle_output = getattr(self.oracle, 'output_token_count', 0)
 
         # Calculate totals
         total_input = ideator_input + formatter_input + critic_input + breeder_input + oracle_input
@@ -639,8 +631,7 @@ class EvolutionEngine:
         formatter_model = getattr(self.formatter, 'model_name', 'gemini-2.0-flash')
         critic_model = getattr(self.critic, 'model_name', 'gemini-2.0-flash')
         breeder_model = getattr(self.breeder, 'model_name', 'gemini-2.0-flash')
-
-        oracle_model = getattr(self.oracle, 'model_name', 'gemini-2.0-flash') if self.oracle else None
+        oracle_model = getattr(self.oracle, 'model_name', 'gemini-2.0-flash')
 
         # Default pricing if model not found in config
         default_price = {"input": 0.1, "output": 0.4}
@@ -650,8 +641,7 @@ class EvolutionEngine:
         formatter_pricing = model_prices_per_million_tokens.get(formatter_model, default_price)
         critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
         breeder_pricing = model_prices_per_million_tokens.get(breeder_model, default_price)
-
-        oracle_pricing = model_prices_per_million_tokens.get(oracle_model, default_price) if oracle_model else default_price
+        oracle_pricing = model_prices_per_million_tokens.get(oracle_model, default_price)
 
         # Calculate cost for each component
         ideator_input_cost = (ideator_pricing["input"] * ideator_input) / 1_000_000
@@ -662,9 +652,8 @@ class EvolutionEngine:
         critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
         breeder_input_cost = (breeder_pricing["input"] * breeder_input) / 1_000_000
         breeder_output_cost = (breeder_pricing["output"] * breeder_output) / 1_000_000
-
-        oracle_input_cost = (oracle_pricing["input"] * oracle_input) / 1_000_000 if self.oracle else 0
-        oracle_output_cost = (oracle_pricing["output"] * oracle_output) / 1_000_000 if self.oracle else 0
+        oracle_input_cost = (oracle_pricing["input"] * oracle_input) / 1_000_000
+        oracle_output_cost = (oracle_pricing["output"] * oracle_output) / 1_000_000
 
         # Calculate total costs
         total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost + oracle_input_cost
@@ -700,6 +689,13 @@ class EvolutionEngine:
                 'model': breeder_model,
                 'cost': breeder_input_cost + breeder_output_cost
             },
+            'oracle': {
+                'total': self.oracle.total_token_count,
+                'input': oracle_input,
+                'output': oracle_output,
+                'model': oracle_model,
+                'cost': oracle_input_cost + oracle_output_cost
+            },
             'total': total,
             'total_input': total_input,
             'total_output': total_output,
@@ -713,20 +709,10 @@ class EvolutionEngine:
                 'ideator': ideator_model,
                 'formatter': formatter_model,
                 'critic': critic_model,
-                'breeder': breeder_model
+                'breeder': breeder_model,
+                'oracle': oracle_model
             }
         }
-
-        # Add Oracle data if enabled
-        if self.oracle:
-            token_data['oracle'] = {
-                'total': self.oracle.total_token_count,
-                'input': oracle_input,
-                'output': oracle_output,
-                'model': oracle_model,
-                'cost': oracle_input_cost + oracle_output_cost
-            }
-            token_data['models']['oracle'] = oracle_model
 
         # Calculate estimated total cost for each available model using the
         # overall token counts. This gives users a rough idea of what the
