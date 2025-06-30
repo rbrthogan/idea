@@ -816,14 +816,15 @@ function renderGenerations(gens) {
             const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
             const isEliteIdea = idea.elite_selected;
             
-            // Debug logging
-            console.log(`Idea ${ideaIndex} in generation ${index}:`, {
-                title: idea.title,
-                oracle_generated: idea.oracle_generated,
-                elite_selected: idea.elite_selected,
-                isOracleIdea,
-                isEliteIdea
-            });
+            // Debug logging - only for elite ideas to help troubleshooting
+            if (isEliteIdea) {
+                console.log(`🌟 ELITE IDEA DETECTED - Idea ${ideaIndex} in generation ${index}:`, {
+                    title: idea.title,
+                    elite_selected: idea.elite_selected,
+                    elite_source_id: idea.elite_source_id,
+                    elite_source_generation: idea.elite_source_generation
+                });
+            }
             
             let buttonText, buttonTitle, buttonClass;
             if (isOracleIdea) {

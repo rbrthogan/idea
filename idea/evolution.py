@@ -402,10 +402,13 @@ class EvolutionEngine:
                     
                     # Mark this idea as elite (most creative/original) and preserve source
                     # Ensure formatted_elite is a dictionary (format_idea should return dict for dict input)
+                    print(f"🌟 DEBUG: Elite idea before metadata: {type(formatted_elite)}, keys: {list(formatted_elite.keys()) if isinstance(formatted_elite, dict) else 'N/A'}")
+                    
                     if isinstance(formatted_elite, dict):
                         formatted_elite["elite_selected"] = True
                         formatted_elite["elite_source_id"] = elite_idea.get("id")
                         formatted_elite["elite_source_generation"] = gen
+                        print(f"🌟 DEBUG: Elite metadata added, keys now: {list(formatted_elite.keys())}")
                     else:
                         # Fallback: convert to dict if needed
                         formatted_elite = {
@@ -416,6 +419,9 @@ class EvolutionEngine:
                             "elite_source_id": elite_idea.get("id"),
                             "elite_source_generation": gen
                         }
+                        print(f"🌟 DEBUG: Elite idea converted to dict with keys: {list(formatted_elite.keys())}")
+                    
+                    print(f"🌟 DEBUG: Final elite idea has elite_selected: {formatted_elite.get('elite_selected')}")
                     
                     # Add to new population
                     new_population.append(formatted_elite)

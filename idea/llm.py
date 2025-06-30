@@ -388,6 +388,12 @@ class Formatter(LLMWrapper):
                 result["oracle_generated"] = True
                 result["oracle_analysis"] = oracle_analysis
 
+            # Preserve Elite metadata
+            if raw_idea.get("elite_selected", False):
+                result["elite_selected"] = raw_idea["elite_selected"]
+                result["elite_source_id"] = raw_idea.get("elite_source_id")
+                result["elite_source_generation"] = raw_idea.get("elite_source_generation")
+
             return result
         return formatted_idea
 
@@ -418,7 +424,7 @@ class Critic(LLMWrapper):
         )
         refined_idea = self.generate_text(prompt)
 
-        # If the input was a dictionary with an ID, preserve that ID and parent_ids
+        # If the input was a dictionary with an ID, preserve that ID and all metadata
         if isinstance(idea, dict) and "id" in idea:
             result = {"id": idea["id"], "idea": refined_idea}
             # Preserve parent_ids if they exist
@@ -426,6 +432,18 @@ class Critic(LLMWrapper):
                 result["parent_ids"] = idea["parent_ids"]
             else:
                 result["parent_ids"] = []
+            
+            # Preserve Oracle metadata
+            if idea.get("oracle_generated", False):
+                result["oracle_generated"] = idea["oracle_generated"]
+                result["oracle_analysis"] = idea.get("oracle_analysis", "")
+            
+            # Preserve Elite metadata
+            if idea.get("elite_selected", False):
+                result["elite_selected"] = idea["elite_selected"]
+                result["elite_source_id"] = idea.get("elite_source_id")
+                result["elite_source_generation"] = idea.get("elite_source_generation")
+            
             return result
         return refined_idea
 
