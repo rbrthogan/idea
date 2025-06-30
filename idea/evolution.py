@@ -410,8 +410,11 @@ class EvolutionEngine:
                         else:
                             generation_breeding_prompts.append(None)  # Fallback
 
+                        # refine the idea
+                        refined_idea = self.critic.refine(new_idea, self.idea_type)
+
                         # Format the idea and add to new population
-                        formatted_idea = self.formatter.format_idea(new_idea, self.idea_type)
+                        formatted_idea = self.formatter.format_idea(refined_idea, self.idea_type)
                         new_population.append(formatted_idea)
                         ideas_generated += 1
 
@@ -498,8 +501,9 @@ class EvolutionEngine:
                             "oracle_generated": True,
                             "oracle_analysis": oracle_result["oracle_analysis"]
                         }
-
-                        formatted_oracle_idea = self.formatter.format_idea(oracle_idea, self.idea_type)
+                        # refine the idea
+                        refined_oracle_idea = self.critic.refine(oracle_idea, self.idea_type)
+                        formatted_oracle_idea = self.formatter.format_idea(refined_oracle_idea, self.idea_type)
 
                         # Ensure Oracle metadata is preserved after formatting
                         if not formatted_oracle_idea.get("oracle_generated", False):
