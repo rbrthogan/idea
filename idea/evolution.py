@@ -226,7 +226,7 @@ class EvolutionEngine:
         """
         try:
             if not self.diversity_calculator.is_enabled():
-                print("Diversity calculator not enabled, defaulting to first idea for elite selection")
+                print("Diversity calculator not enabled, defaulting to first idea for creative selection")
                 return 0
 
             if len(current_generation) <= 1:
@@ -283,7 +283,7 @@ class EvolutionEngine:
 
         except Exception as e:
             print(f"Error calculating diversity scores: {e}")
-            print("Defaulting to first idea for elite selection")
+            print("Defaulting to first idea for creative selection")
             return 0
 
     async def run_evolution_with_updates(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
@@ -400,6 +400,23 @@ class EvolutionEngine:
                     refined_elite = self.critic.refine(elite_idea, self.idea_type)
                     formatted_elite = self.formatter.format_idea(refined_elite, self.idea_type)
                     
+                    # Mark this idea as elite (most creative/original) and preserve source
+                    # Ensure formatted_elite is a dictionary (format_idea should return dict for dict input)
+                    if isinstance(formatted_elite, dict):
+                        formatted_elite["elite_selected"] = True
+                        formatted_elite["elite_source_id"] = elite_idea.get("id")
+                        formatted_elite["elite_source_generation"] = gen
+                    else:
+                        # Fallback: convert to dict if needed
+                        formatted_elite = {
+                            "id": uuid.uuid4(),
+                            "idea": formatted_elite,
+                            "parent_ids": [],
+                            "elite_selected": True,
+                            "elite_source_id": elite_idea.get("id"),
+                            "elite_source_generation": gen
+                        }
+                    
                     # Add to new population
                     new_population.append(formatted_elite)
                     generation_breeding_prompts.append(elite_breeding_prompt)  # Use the original breeding prompt if available
@@ -411,13 +428,13 @@ class EvolutionEngine:
                         if hasattr(idea_obj, 'title'):
                             elite_title = idea_obj.title
                     
-                    print(f"🌟 Elite idea '{elite_title}' added to generation {gen + 1}")
+                    print(f"🌟 Most creative idea '{elite_title}' added to generation {gen + 1}")
                     elite_processed = True
 
                 # Calculate how many ideas we need to breed (total minus elite if processed)
                 current_pop_size = len(self.population)
                 ideas_to_breed = current_pop_size - (1 if elite_processed else 0)
-                print(f"Generating {ideas_to_breed} new ideas via breeding for generation {gen + 1} (plus {1 if elite_processed else 0} elite)")
+                print(f"Generating {ideas_to_breed} new ideas via breeding for generation {gen + 1} (plus {1 if elite_processed else 0} creative)")
                 
                 # Reset elite for next iteration
                 elite_idea = None
@@ -677,9 +694,9 @@ class EvolutionEngine:
                             if hasattr(idea_obj, 'title'):
                                 elite_title = idea_obj.title
                         
-                        print(f"🌟 Elite idea selected for next generation: '{elite_title}' (will be refined and formatted)")
+                        print(f"🌟 Most creative idea selected for next generation: '{elite_title}' (will be refined and formatted)")
                     except Exception as e:
-                        print(f"Elite selection failed with error: {e}. Continuing without elite selection.")
+                        print(f"Creative selection failed with error: {e}. Continuing without creative selection.")
                         elite_idea = None
 
             # Mark evolution as complete (only if not stopped)

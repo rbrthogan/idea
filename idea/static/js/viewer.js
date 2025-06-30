@@ -89,6 +89,63 @@ lineageStyles.textContent = `
             flex: 1 1 100%;
         }
     }
+
+    /* Elite idea styling */
+    .elite-origin-section .alert-success {
+        border-left: 4px solid #28a745;
+    }
+
+    .elite-source-card {
+        border: 2px solid #28a745;
+        border-radius: 0.5rem;
+        background-color: #f8fff9;
+    }
+
+    .elite-source-card .card-title {
+        color: #155724;
+        font-weight: 600;
+    }
+
+    .elite-source-card .card-preview {
+        color: #495057;
+    }
+
+    /* Visual indicator for elite ideas in the main view */
+    .card[data-elite="true"] {
+        border: 2px solid #ffd700 !important;
+        background: linear-gradient(135deg, #fff9e6 0%, #ffffff 100%) !important;
+        box-shadow: 0 4px 8px rgba(255, 215, 0, 0.2) !important;
+        position: relative;
+    }
+
+    .card[data-elite="true"]::before {
+        content: "⭐";
+        position: absolute;
+        top: -8px;
+        right: -8px;
+        background: #ffd700;
+        border-radius: 50%;
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        z-index: 1;
+        border: 2px solid white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .card[data-elite="true"] .btn.view-lineage {
+        background-color: #ffd700;
+        border-color: #ffd700;
+        color: #000;
+    }
+
+    .card[data-elite="true"] .btn.view-lineage:hover {
+        background-color: #e6c200;
+        border-color: #e6c200;
+    }
 `;
 document.head.appendChild(lineageStyles);
 
@@ -733,6 +790,11 @@ function renderGenerations(gens) {
             const card = document.createElement('div');
             card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
+            
+            // Mark elite ideas with data attribute for styling
+            if (idea.elite_selected) {
+                card.setAttribute('data-elite', 'true');
+            }
 
             // Create a plain text preview for the card
             const plainPreview = createCardPreview(idea.content, 150);
@@ -749,12 +811,28 @@ function renderGenerations(gens) {
                     <i class="fas fa-lightbulb"></i> Prompt
                 </button>` : '';
 
-            // Add "Lineage" or "Oracle Analysis" button for non-initial generation cards
+            // Add "Lineage", "Oracle Analysis", or "Creative Origin" button for non-initial generation cards
             // Check if this is an Oracle-generated idea to show appropriate button text with icon
             const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
-            const buttonText = isOracleIdea ? '<i class="fas fa-eye"></i> Oracle' : '<i class="fas fa-project-diagram"></i> Lineage';
+            const isEliteIdea = idea.elite_selected;
+            
+            let buttonText, buttonTitle, buttonClass;
+            if (isOracleIdea) {
+                buttonText = '<i class="fas fa-eye"></i> Oracle';
+                buttonTitle = 'View Oracle Analysis';
+                buttonClass = 'view-lineage';
+            } else if (isEliteIdea) {
+                buttonText = '<i class="fas fa-star"></i> Creative';
+                buttonTitle = 'View Creative Origin';
+                buttonClass = 'view-lineage';
+            } else {
+                buttonText = '<i class="fas fa-project-diagram"></i> Lineage';
+                buttonTitle = 'View Lineage';
+                buttonClass = 'view-lineage';
+            }
+            
             const viewLineageButton = index > 0 ?
-                `<button class="btn btn-outline-secondary btn-sm view-lineage" title="${isOracleIdea ? 'View Oracle Analysis' : 'View Lineage'}" style="margin-left: auto;">
+                `<button class="btn btn-outline-secondary btn-sm ${buttonClass}" title="${buttonTitle}" style="margin-left: auto;">
                     ${buttonText}
                 </button>` : '';
 
@@ -1774,6 +1852,108 @@ function showLineageModal(idea, generationIndex) {
         modal.show();
 
         return; // Exit early for Oracle ideas
+    }
+
+    // Check if this is an elite (most creative) idea
+    if (idea.elite_selected) {
+        // Show creative origin instead of lineage
+        document.getElementById('lineageModalLabel').textContent = `Creative Origin: ${idea.title || 'Untitled'}`;
+
+        // Find the source idea from the previous generation
+        const sourceGenerationIndex = idea.elite_source_generation;
+        const sourceIdeaId = idea.elite_source_id;
+        
+        let sourceIdea = null;
+        if (sourceGenerationIndex !== undefined && sourceIdeaId && generations[sourceGenerationIndex]) {
+            sourceIdea = generations[sourceGenerationIndex].find(sourceCandidate => sourceCandidate.id === sourceIdeaId);
+        }
+
+        let originHtml;
+        if (sourceIdea) {
+            const sourcePreview = createCardPreview(sourceIdea.content, 200);
+            originHtml = `
+                <div class="elite-origin-section">
+                    <div class="alert alert-success mb-3">
+                        <h6><i class="fas fa-star"></i> Most Creative Idea Selected</h6>
+                        <p class="mb-0">This idea was identified as the most creative and original in Generation ${sourceGenerationIndex + 1}, with the largest distance from the population centroid. It was preserved and refined for the next generation.</p>
+                    </div>
+                    <div class="elite-origin-content">
+                        <h6>Original Source (Generation ${sourceGenerationIndex + 1}):</h6>
+                        <div class="card elite-source-card">
+                            <div class="card-body">
+                                <h6 class="card-title">${sourceIdea.title || 'Untitled'}</h6>
+                                <div class="card-preview">
+                                    <p>${sourcePreview}</p>
+                                </div>
+                                <button class="btn btn-sm btn-primary view-source-idea">
+                                    View Full Original Idea
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            originHtml = `
+                <div class="elite-origin-section">
+                    <div class="alert alert-success mb-3">
+                        <h6><i class="fas fa-star"></i> Most Creative Idea Selected</h6>
+                        <p class="mb-0">This idea was identified as the most creative and original, with the largest distance from the population centroid. It was preserved and refined for the next generation.</p>
+                    </div>
+                    <div class="alert alert-warning">
+                        <p class="mb-0">Could not find the original source idea from the previous generation.</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        lineageModalContent.innerHTML = originHtml;
+
+        // Add event listener for the view source button if it exists
+        const viewSourceBtn = lineageModalContent.querySelector('.view-source-idea');
+        if (viewSourceBtn && sourceIdea) {
+            viewSourceBtn.addEventListener('click', () => {
+                // Store current idea for reopening
+                const currentIdea = idea;
+                const currentGenIndex = generationIndex;
+
+                // Close the lineage modal
+                if (window.bootstrap) {
+                    const lineageModalInstance = bootstrap.Modal.getInstance(lineageModal);
+                    if (lineageModalInstance) {
+                        lineageModalInstance.hide();
+                    }
+                } else {
+                    lineageModal.style.display = 'none';
+                }
+
+                // Add event listener to reopen lineage modal when idea modal closes
+                setTimeout(() => {
+                    const ideaModalElement = document.getElementById('ideaModal');
+                    const reopenLineage = function() {
+                        ideaModalElement.removeEventListener('hidden.bs.modal', reopenLineage);
+                        setTimeout(() => {
+                            showLineageModal(currentIdea, currentGenIndex);
+                        }, 150);
+                    };
+                    ideaModalElement.addEventListener('hidden.bs.modal', reopenLineage);
+                    
+                    // Show the source idea modal
+                    showIdeaModal(sourceIdea);
+                }, 150);
+            });
+        }
+
+        // Show the modal
+        let modal;
+        if (window.bootstrap) {
+            modal = new bootstrap.Modal(lineageModal);
+        } else {
+            lineageModal.style.display = 'block';
+        }
+        modal.show();
+
+        return; // Exit early for elite ideas
     }
 
     // For regular ideas, set the modal title to include the idea title

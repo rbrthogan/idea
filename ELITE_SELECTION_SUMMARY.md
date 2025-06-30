@@ -86,13 +86,37 @@ async def _find_most_diverse_idea_idx(self, current_generation: List[str]) -> in
 - No breaking changes to existing APIs or data structures
 - Maintains compatibility with existing Oracle and breeding systems
 
+## Frontend Updates
+
+### Visual Indicators
+- **Elite Ideas**: Cards with golden border, star icon, and gradient background
+- **Creative Button**: Elite ideas show a "⭐ Creative" button instead of "Lineage"
+- **Golden Styling**: Elite buttons have gold background with hover effects
+
+### New Modal: Creative Origin
+- **Elite Lineage**: Shows the source idea from the previous generation
+- **Clear Explanation**: Explains why the idea was selected (most creative/original)
+- **Source Navigation**: Click to view the full original idea from the previous generation
+- **Visual Design**: Green-themed cards with success alerts
+
+### Button Types
+1. **🔗 Lineage**: Standard bred ideas (shows parents)
+2. **👁 Oracle**: Oracle-generated ideas (shows analysis)
+3. **⭐ Creative**: Elite ideas (shows original source)
+
 ## Usage
 
 The elite selection system is now automatically integrated into the evolution process. No additional configuration or API changes are required. The system will:
 
 1. Run normal tournament breeding and Oracle enhancement
-2. Automatically select the most diverse idea after Oracle updates
-3. Pass that idea directly to the next generation
+2. Automatically select the most creative/original idea after Oracle updates
+3. Pass that idea directly to the next generation with visual indicators
 4. Continue with normal breeding for the remaining population slots
+
+### User Experience
+- Elite ideas are visually distinct with golden styling and star icons
+- Clicking "Creative" button shows the original source idea
+- Clear explanation of why the idea was preserved
+- No confusion with breeding lineage (which doesn't exist for elite ideas)
 
 The elite selection provides a balance between exploration (through breeding) and exploitation (by preserving the most diverse solutions found so far).
