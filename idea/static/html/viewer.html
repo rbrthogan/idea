@@ -346,9 +346,14 @@
           <div id="diversity-plot-section" class="diversity-plot-section" style="display: none;">
             <div class="diversity-plot-header">
               <h3 class="diversity-plot-title">Population Diversity Evolution</h3>
-              <button class="diversity-plot-toggle btn btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#diversity-plot-content" aria-expanded="true" aria-controls="diversity-plot-content">
-                <i class="fas fa-chevron-up"></i>
-              </button>
+              <div class="diversity-plot-controls">
+                <button class="btn btn-sm btn-outline-primary" id="diversity-axis-toggle" title="Toggle between combined and split y-axes">
+                  <i class="fas fa-arrows-alt-v"></i> Split Axes
+                </button>
+                <button class="diversity-plot-toggle btn btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#diversity-plot-content" aria-expanded="true" aria-controls="diversity-plot-content">
+                  <i class="fas fa-chevron-up"></i>
+                </button>
+              </div>
             </div>
             <div class="collapse show" id="diversity-plot-content">
               <div class="diversity-plot-container">

@@ -2398,6 +2398,126 @@ let diversityData = {
     perGeneration: [],
     interGeneration: []
 };
+let isSplitAxes = false;
+
+/**
+ * Get chart scales configuration based on current axis mode
+ */
+function getDiversityChartScales() {
+    const baseScales = {
+        x: {
+            title: {
+                display: true,
+                text: 'Generation',
+                color: '#64748B',
+                font: {
+                    size: 14,
+                    weight: 'bold'
+                }
+            },
+            grid: {
+                color: 'rgba(139, 124, 246, 0.1)',
+                lineWidth: 1
+            },
+            ticks: {
+                color: '#64748B',
+                font: {
+                    size: 12
+                },
+                callback: function(value, index, values) {
+                    const generation = this.getLabelForValue(value);
+                    return generation === '0' ? 'Initial' : `Gen ${generation}`;
+                }
+            }
+        },
+        y: {
+            title: {
+                display: true,
+                text: isSplitAxes ? 'Diversity Score (Population & Per-Gen)' : 'Diversity Score',
+                color: '#64748B',
+                font: {
+                    size: 14,
+                    weight: 'bold'
+                }
+            },
+            grid: {
+                color: 'rgba(139, 124, 246, 0.1)',
+                lineWidth: 1
+            },
+            ticks: {
+                color: '#64748B',
+                font: {
+                    size: 12
+                }
+            },
+            beginAtZero: false,
+            position: 'left'
+        }
+    };
+
+    // Add second y-axis if in split mode
+    if (isSplitAxes) {
+        baseScales.y1 = {
+            type: 'linear',
+            display: true,
+            position: 'right',
+            title: {
+                display: true,
+                text: 'Inter-Generation Diversity',
+                color: 'rgba(34, 197, 94, 1)',
+                font: {
+                    size: 14,
+                    weight: 'bold'
+                }
+            },
+            grid: {
+                drawOnChartArea: false,
+            },
+            ticks: {
+                color: 'rgba(34, 197, 94, 1)',
+                font: {
+                    size: 12
+                }
+            },
+            beginAtZero: false
+        };
+    }
+
+    return baseScales;
+}
+
+/**
+ * Toggle between combined and split y-axes
+ */
+function toggleDiversityAxes() {
+    if (!diversityChart) {
+        console.warn('Diversity chart not initialized');
+        return;
+    }
+
+    isSplitAxes = !isSplitAxes;
+
+    // Update button text
+    const toggleButton = document.getElementById('diversity-axis-toggle');
+    if (toggleButton) {
+        const icon = toggleButton.querySelector('i');
+        const text = isSplitAxes ? ' Combined Axes' : ' Split Axes';
+        toggleButton.innerHTML = `<i class="fas fa-arrows-alt-v"></i>${text}`;
+    }
+
+    // Update dataset yAxisID for inter-generation diversity
+    if (isSplitAxes) {
+        diversityChart.data.datasets[2].yAxisID = 'y1';
+    } else {
+        diversityChart.data.datasets[2].yAxisID = 'y';
+    }
+
+    // Update scales configuration
+    diversityChart.options.scales = getDiversityChartScales();
+
+    // Update the chart
+    diversityChart.update('active');
+}
 
 /**
  * Initialize the diversity chart
@@ -2481,7 +2601,8 @@ function initializeDiversityChart() {
                         pointHoverBorderColor: '#ffffff',
                         pointHoverBorderWidth: 3,
                         borderDash: [10, 3],
-                        spanGaps: true // Skip null values instead of breaking the line
+                        spanGaps: true, // Skip null values instead of breaking the line
+                        yAxisID: 'y'
                     }
                 ]
             },
@@ -2536,60 +2657,14 @@ function initializeDiversityChart() {
                             },
                             label: function(context) {
                                 const value = parseFloat(context.parsed.y).toFixed(4);
-                                return `${context.dataset.label}: ${value}`;
+                                const axisLabel = isSplitAxes && context.datasetIndex === 2 ?
+                                    ' (right axis)' : (isSplitAxes ? ' (left axis)' : '');
+                                return `${context.dataset.label}: ${value}${axisLabel}`;
                             }
                         }
                     }
                 },
-                scales: {
-                    x: {
-                        title: {
-                            display: true,
-                            text: 'Generation',
-                            color: '#64748B',
-                            font: {
-                                size: 14,
-                                weight: 'bold'
-                            }
-                        },
-                        grid: {
-                            color: 'rgba(139, 124, 246, 0.1)',
-                            lineWidth: 1
-                        },
-                        ticks: {
-                            color: '#64748B',
-                            font: {
-                                size: 12
-                            },
-                            callback: function(value, index, values) {
-                                const generation = this.getLabelForValue(value);
-                                return generation === '0' ? 'Initial' : `Gen ${generation}`;
-                            }
-                        }
-                    },
-                    y: {
-                        title: {
-                            display: true,
-                            text: 'Diversity Score',
-                            color: '#64748B',
-                            font: {
-                                size: 14,
-                                weight: 'bold'
-                            }
-                        },
-                        grid: {
-                            color: 'rgba(139, 124, 246, 0.1)',
-                            lineWidth: 1
-                        },
-                        ticks: {
-                            color: '#64748B',
-                            font: {
-                                size: 12
-                            }
-                        },
-                        beginAtZero: false
-                    }
-                },
+                scales: getDiversityChartScales(),
                 animation: {
                     duration: 1000,
                     easing: 'easeInOutCubic'
@@ -2934,6 +3009,12 @@ document.addEventListener('DOMContentLoaded', function() {
             resetDiversityPlot();
             showDiversityPlotLoading();
         });
+    }
+
+    // Add event listener for diversity axis toggle
+    const axisToggleButton = document.getElementById('diversity-axis-toggle');
+    if (axisToggleButton) {
+        axisToggleButton.addEventListener('click', toggleDiversityAxes);
     }
 });
 

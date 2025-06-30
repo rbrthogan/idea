@@ -1477,6 +1477,12 @@ body::before {
   margin-bottom: 1.5rem;
 }
 
+.diversity-plot-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
 .diversity-plot-title {
   font-size: 1.125rem;
   font-weight: 600;
