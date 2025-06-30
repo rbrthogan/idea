@@ -6,7 +6,7 @@ import uuid
 from idea.models import Idea
 from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
-from idea.prompts.loader import list_available_templates
+from idea.prompts.loader import list_available_templates, get_prompts
 from idea.diversity import DiversityCalculator
 from tqdm import tqdm
 
@@ -477,9 +477,18 @@ class EvolutionEngine:
                         # Replace existing idea with more diverse one using embedding-based selection
                         replace_idx = await self._find_least_interesting_idea_idx(self.population)
 
-                        # Generate a new idea using the oracle's prompt
+                        # Generate a new idea using the oracle's prompt, extended with special requirements
                         idea_prompt = oracle_result["idea_prompt"]
-                        new_idea = self.ideator.generate_text(idea_prompt)
+
+                        # Get the special requirements and extend the Oracle prompt with them
+                        prompts = get_prompts(self.idea_type)
+                        extended_prompt = idea_prompt
+
+                        # If there are special requirements, append them to the Oracle prompt
+                        if hasattr(prompts, 'template') and prompts.template.special_requirements:
+                            extended_prompt = f"{idea_prompt}\n\nConstraints:\n{prompts.template.special_requirements}"
+
+                        new_idea = self.ideator.generate_text(extended_prompt)
 
                         # Create the new idea structure
                         oracle_idea = {

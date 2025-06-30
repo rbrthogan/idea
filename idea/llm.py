@@ -262,8 +262,16 @@ class Ideator(LLMWrapper):
         # Generate specific prompt from context pool
         specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
 
-        # Generate idea using the specific prompt
-        response = self.generate_text(specific_prompt)
+        # Get the special requirements and extend the specific prompt with them
+        prompts = get_prompts(idea_type)
+        extended_prompt = specific_prompt
+
+        # If there are special requirements, append them to the specific prompt
+        if hasattr(prompts, 'template') and prompts.template.special_requirements:
+            extended_prompt = f"{specific_prompt}\n\nConstraints:\n{prompts.template.special_requirements}"
+
+        # Generate idea using the extended prompt (specific prompt + requirements)
+        response = self.generate_text(extended_prompt)
 
         return response, specific_prompt
 
@@ -706,6 +714,27 @@ class Oracle(LLMWrapper):
         )
 
         return prompt
+
+    def _extract_idea_content(self, idea) -> str:
+        """Extract readable content from an idea object for analysis"""
+        # Handle different idea formats
+        if isinstance(idea, dict) and "idea" in idea:
+            idea_obj = idea["idea"]
+            # If the idea object has title and content attributes
+            if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'content'):
+                return f"Title: {idea_obj.title}\nContent: {idea_obj.content}"
+            # If the idea object is a string
+            elif isinstance(idea_obj, str):
+                return idea_obj
+            # If the idea object is already a dict
+            elif isinstance(idea_obj, dict):
+                title = idea_obj.get('title', 'Untitled')
+                content = idea_obj.get('content', str(idea_obj))
+                return f"Title: {title}\nContent: {content}"
+
+        # Fallback: treat as string
+        return str(idea)
+
 
     def _parse_oracle_response(self, response: str) -> dict:
         """Parse the Oracle's response and extract the analysis and new idea separately"""
