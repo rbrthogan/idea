@@ -210,6 +210,82 @@ class EvolutionEngine:
             print("Defaulting to first idea for replacement")
             return 0
 
+    async def _find_most_diverse_idea_idx(self, current_generation: List[str]) -> int:
+        """
+        Find the index of the most diverse idea in the current generation using embedding-based centroid distance.
+
+        The diversity score is computed as the distance of each idea to the POPULATION centroid
+        (computed from ALL historical ideas across ALL generations).
+        The idea with the highest score (farthest from centroid) is considered most diverse.
+
+        Args:
+            current_generation: List of ideas in the current generation
+
+        Returns:
+            Index of the most diverse idea (0-based)
+        """
+        try:
+            if not self.diversity_calculator.is_enabled():
+                print("Diversity calculator not enabled, defaulting to first idea for creative selection")
+                return 0
+
+            if len(current_generation) <= 1:
+                return 0
+
+            print(f"🌟 Calculating embedding-based diversity scores for {len(current_generation)} ideas...")
+            print(f"🌟 Population has {len(self.all_embeddings)} total embeddings for centroid calculation")
+
+            # Get or compute embeddings for current generation ideas
+            embeddings = await self._get_or_compute_embeddings_for_ideas(current_generation)
+
+            # Filter out failed embeddings and track their indices
+            valid_embeddings = []
+            valid_indices = []
+            for idx, embedding in enumerate(embeddings):
+                if embedding is not None:
+                    valid_embeddings.append(embedding)
+                    valid_indices.append(idx)
+
+            if len(valid_embeddings) == 0:
+                print("No valid embeddings for current generation, defaulting to first idea")
+                return 0
+
+            # Compute population centroid from ALL historical embeddings
+            population_centroid = await self._compute_population_centroid()
+            if population_centroid is None:
+                print("No population centroid available, defaulting to first idea")
+                return 0
+
+            # Calculate distance from each current generation idea to the population centroid
+            import numpy as np
+            distances = []
+            for i, embedding in enumerate(valid_embeddings):
+                distance = np.sqrt(np.sum((embedding - population_centroid) ** 2))
+                distances.append(distance)
+
+            # Find the index of the idea with maximum distance (most diverse)
+            max_distance_idx = np.argmax(distances)
+            most_diverse_original_idx = valid_indices[max_distance_idx]
+
+            # Extract title for logging
+            most_diverse_idea = current_generation[most_diverse_original_idx]
+            title = "Unknown"
+            if isinstance(most_diverse_idea, dict) and "idea" in most_diverse_idea:
+                idea_obj = most_diverse_idea["idea"]
+                if hasattr(idea_obj, 'title'):
+                    title = idea_obj.title
+
+            print(f"🌟 Most diverse idea (farthest from population centroid): '{title}' at index {most_diverse_original_idx}")
+            print(f"   Distance to population centroid: {distances[max_distance_idx]:.4f}")
+            print(f"   Population centroid computed from {len(self.all_embeddings)} historical embeddings")
+
+            return most_diverse_original_idx
+
+        except Exception as e:
+            print(f"Error calculating diversity scores: {e}")
+            print("Defaulting to first idea for creative selection")
+            return 0
+
     async def run_evolution_with_updates(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
         """
         Runs the evolution process with progress updates
@@ -279,6 +355,9 @@ class EvolutionEngine:
             initial_diversity = await self._calculate_and_store_diversity()
 
             # Run evolution for specified number of generations
+            elite_idea = None
+            elite_breeding_prompt = None
+            
             for gen in range(self.generations):
                 # Check for stop request at the beginning of each generation
                 if self.stop_requested:
@@ -312,11 +391,62 @@ class EvolutionEngine:
                 generation_breeding_prompts = []  # Collect breeding prompts for this generation
                 random.shuffle(self.population)
 
-                # Generate exactly as many new ideas as the current population size
-                current_pop_size = len(self.population)
-                print(f"Generating {current_pop_size} new ideas for next generation")
+                # Handle elite idea from previous generation (if available)
+                elite_processed = False
+                if elite_idea is not None:
+                    print(f"🌟 Processing elite idea for generation {gen + 1}...")
+                    
+                    # Refine and format the elite idea
+                    refined_elite = self.critic.refine(elite_idea, self.idea_type)
+                    formatted_elite = self.formatter.format_idea(refined_elite, self.idea_type)
+                    
+                    # Mark this idea as elite (most creative/original) and preserve source
+                    # Ensure formatted_elite is a dictionary (format_idea should return dict for dict input)
+                    print(f"🌟 DEBUG: Elite idea before metadata: {type(formatted_elite)}, keys: {list(formatted_elite.keys()) if isinstance(formatted_elite, dict) else 'N/A'}")
+                    
+                    if isinstance(formatted_elite, dict):
+                        formatted_elite["elite_selected"] = True
+                        formatted_elite["elite_source_id"] = elite_idea.get("id")
+                        formatted_elite["elite_source_generation"] = gen
+                        print(f"🌟 DEBUG: Elite metadata added, keys now: {list(formatted_elite.keys())}")
+                    else:
+                        # Fallback: convert to dict if needed
+                        formatted_elite = {
+                            "id": uuid.uuid4(),
+                            "idea": formatted_elite,
+                            "parent_ids": [],
+                            "elite_selected": True,
+                            "elite_source_id": elite_idea.get("id"),
+                            "elite_source_generation": gen
+                        }
+                        print(f"🌟 DEBUG: Elite idea converted to dict with keys: {list(formatted_elite.keys())}")
+                    
+                    print(f"🌟 DEBUG: Final elite idea has elite_selected: {formatted_elite.get('elite_selected')}")
+                    
+                    # Add to new population
+                    new_population.append(formatted_elite)
+                    generation_breeding_prompts.append(elite_breeding_prompt)  # Use the original breeding prompt if available
+                    
+                    # Extract title for logging
+                    elite_title = "Unknown"
+                    if isinstance(formatted_elite, dict) and "idea" in formatted_elite:
+                        idea_obj = formatted_elite["idea"]
+                        if hasattr(idea_obj, 'title'):
+                            elite_title = idea_obj.title
+                    
+                    print(f"🌟 Most creative idea '{elite_title}' added to generation {gen + 1}")
+                    elite_processed = True
 
-                # Process population in chunks for breeding, but generate exactly current_pop_size ideas
+                # Calculate how many ideas we need to breed (total minus elite if processed)
+                current_pop_size = len(self.population)
+                ideas_to_breed = current_pop_size - (1 if elite_processed else 0)
+                print(f"Generating {ideas_to_breed} new ideas via breeding for generation {gen + 1} (plus {1 if elite_processed else 0} creative)")
+                
+                # Reset elite for next iteration
+                elite_idea = None
+                elite_breeding_prompt = None
+
+                # Process population in chunks for breeding, but generate exactly ideas_to_breed ideas
                 ideas_generated = 0
                 for i in range(0, len(self.population), actual_tournament_size):
                     # Check for stop request during generation processing
@@ -353,8 +483,8 @@ class EvolutionEngine:
                         title = idea_obj.title if hasattr(idea_obj, 'title') else "Untitled"
                         print(f"{title} - {rank}")
 
-                    # Generate ideas from this group until we reach current_pop_size total
-                    while ideas_generated < current_pop_size:
+                    # Generate ideas from this group until we reach ideas_to_breed total
+                    while ideas_generated < ideas_to_breed:
                         # Check for stop request during breeding
                         if self.stop_requested:
                             self.is_stopped = True
@@ -440,7 +570,7 @@ class EvolutionEngine:
                         await asyncio.sleep(0.1)
 
                         # Break out of group processing if we've generated enough ideas
-                        if ideas_generated >= current_pop_size:
+                        if ideas_generated >= ideas_to_breed:
                             break
 
                 # Update population with new ideas
@@ -551,6 +681,53 @@ class EvolutionEngine:
                         print(f"Oracle failed with error: {e}. Continuing without Oracle enhancement.")
                         import traceback
                         traceback.print_exc()
+
+                # Elite selection: Pass the most diverse idea directly to the next generation (if not the last generation)
+                if gen < self.generations - 1:  # Only do elite selection if there's a next generation
+                    try:
+                        print(f"🌟 Performing elite selection for next generation...")
+                        most_diverse_idx = await self._find_most_diverse_idea_idx(self.population)
+                        elite_idea = self.population[most_diverse_idx].copy() if isinstance(self.population[most_diverse_idx], dict) else self.population[most_diverse_idx]
+                        
+                        # Mark the SOURCE idea in the current generation as selected for elite
+                        # This is what the frontend will see
+                        if isinstance(self.population[most_diverse_idx], dict):
+                            self.population[most_diverse_idx]["elite_selected_source"] = True
+                            self.population[most_diverse_idx]["elite_target_generation"] = gen + 1
+                            # Update history to reflect this change
+                            self.history[-1] = self.population.copy()
+                            print(f"🌟 DEBUG: Marked source idea at index {most_diverse_idx} as elite_selected_source")
+                        
+                        # Get the corresponding breeding prompt if available
+                        if self.breeding_prompts and self.breeding_prompts[-1] and most_diverse_idx < len(self.breeding_prompts[-1]):
+                            elite_breeding_prompt = self.breeding_prompts[-1][most_diverse_idx]
+                        
+                        # Extract title for logging
+                        elite_title = "Unknown"
+                        if isinstance(elite_idea, dict) and "idea" in elite_idea:
+                            idea_obj = elite_idea["idea"]
+                            if hasattr(idea_obj, 'title'):
+                                elite_title = idea_obj.title
+                        
+                        print(f"🌟 Most creative idea selected for next generation: '{elite_title}' (will be refined and formatted)")
+                        
+                        # Send an update to notify frontend about elite selection
+                        await progress_callback({
+                            "current_generation": gen + 1,
+                            "total_generations": self.generations,
+                            "is_running": True,
+                            "history": self.history,
+                            "contexts": self.contexts,
+                            "specific_prompts": self.specific_prompts,
+                            "breeding_prompts": self.breeding_prompts,
+                            "progress": ((gen + 1) / self.generations) * 100,
+                            "elite_selection_update": True,  # Flag to indicate elite selection update
+                            "token_counts": self.get_total_token_count(),
+                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
+                        })
+                    except Exception as e:
+                        print(f"Creative selection failed with error: {e}. Continuing without creative selection.")
+                        elite_idea = None
 
             # Mark evolution as complete (only if not stopped)
             if not self.stop_requested:
