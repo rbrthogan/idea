@@ -814,15 +814,17 @@ function renderGenerations(gens) {
             // Add "Lineage", "Oracle Analysis", or "Creative Origin" button for non-initial generation cards
             // Check if this is an Oracle-generated idea to show appropriate button text with icon
             const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
-            const isEliteIdea = idea.elite_selected;
+            const isEliteIdea = idea.elite_selected || idea.elite_selected_source;
             
             // Debug logging - only for elite ideas to help troubleshooting
-            if (isEliteIdea) {
-                console.log(`🌟 ELITE IDEA DETECTED - Idea ${ideaIndex} in generation ${index}:`, {
+            if (isEliteIdea || idea.elite_selected_source) {
+                console.log(`🌟 ELITE/CREATIVE IDEA DETECTED - Idea ${ideaIndex} in generation ${index}:`, {
                     title: idea.title,
                     elite_selected: idea.elite_selected,
+                    elite_selected_source: idea.elite_selected_source,
                     elite_source_id: idea.elite_source_id,
-                    elite_source_generation: idea.elite_source_generation
+                    elite_source_generation: idea.elite_source_generation,
+                    elite_target_generation: idea.elite_target_generation
                 });
             }
             
@@ -1865,20 +1867,40 @@ function showLineageModal(idea, generationIndex) {
     }
 
     // Check if this is an elite (most creative) idea
-    if (idea.elite_selected) {
-        // Show creative origin instead of lineage
-        document.getElementById('lineageModalLabel').textContent = `Creative Origin: ${idea.title || 'Untitled'}`;
+    if (idea.elite_selected || idea.elite_selected_source) {
+        // Determine the type of elite display
+        if (idea.elite_selected_source) {
+            // This is a SOURCE idea that was selected to be elite
+            document.getElementById('lineageModalLabel').textContent = `Selected as Most Creative: ${idea.title || 'Untitled'}`;
+            
+            const targetGeneration = idea.elite_target_generation;
+            const originHtml = `
+                <div class="elite-origin-section">
+                    <div class="alert alert-success mb-3">
+                        <h6><i class="fas fa-star"></i> Selected as Most Creative</h6>
+                        <p class="mb-0">This idea was identified as the most creative and original in Generation ${generationIndex + 1}, with the largest distance from the population centroid. It was selected to pass directly to Generation ${targetGeneration + 1} where it will be refined and formatted.</p>
+                    </div>
+                    <div class="alert alert-info">
+                        <p class="mb-0"><strong>Note:</strong> Look for this idea in Generation ${targetGeneration + 1} to see its refined version.</p>
+                    </div>
+                </div>
+            `;
+            
+            lineageModalContent.innerHTML = originHtml;
+        } else {
+            // This is a REFINED elite idea in the next generation
+            document.getElementById('lineageModalLabel').textContent = `Creative Origin: ${idea.title || 'Untitled'}`;
 
-        // Find the source idea from the previous generation
-        const sourceGenerationIndex = idea.elite_source_generation;
-        const sourceIdeaId = idea.elite_source_id;
-        
-        let sourceIdea = null;
-        if (sourceGenerationIndex !== undefined && sourceIdeaId && generations[sourceGenerationIndex]) {
-            sourceIdea = generations[sourceGenerationIndex].find(sourceCandidate => sourceCandidate.id === sourceIdeaId);
-        }
-
-        let originHtml;
+            // Find the source idea from the previous generation
+            const sourceGenerationIndex = idea.elite_source_generation;
+            const sourceIdeaId = idea.elite_source_id;
+            
+                         let sourceIdea = null;
+             if (sourceGenerationIndex !== undefined && sourceIdeaId && generations[sourceGenerationIndex]) {
+                 sourceIdea = generations[sourceGenerationIndex].find(sourceCandidate => sourceCandidate.id === sourceIdeaId);
+             }
+ 
+             let originHtml;
         if (sourceIdea) {
             const sourcePreview = createCardPreview(sourceIdea.content, 200);
             originHtml = `
@@ -1964,6 +1986,7 @@ function showLineageModal(idea, generationIndex) {
         modal.show();
 
         return; // Exit early for elite ideas
+        }
     }
 
     // For regular ideas, set the modal title to include the idea title

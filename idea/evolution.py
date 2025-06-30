@@ -687,7 +687,16 @@ class EvolutionEngine:
                     try:
                         print(f"🌟 Performing elite selection for next generation...")
                         most_diverse_idx = await self._find_most_diverse_idea_idx(self.population)
-                        elite_idea = self.population[most_diverse_idx]
+                        elite_idea = self.population[most_diverse_idx].copy() if isinstance(self.population[most_diverse_idx], dict) else self.population[most_diverse_idx]
+                        
+                        # Mark the SOURCE idea in the current generation as selected for elite
+                        # This is what the frontend will see
+                        if isinstance(self.population[most_diverse_idx], dict):
+                            self.population[most_diverse_idx]["elite_selected_source"] = True
+                            self.population[most_diverse_idx]["elite_target_generation"] = gen + 1
+                            # Update history to reflect this change
+                            self.history[-1] = self.population.copy()
+                            print(f"🌟 DEBUG: Marked source idea at index {most_diverse_idx} as elite_selected_source")
                         
                         # Get the corresponding breeding prompt if available
                         if self.breeding_prompts and self.breeding_prompts[-1] and most_diverse_idx < len(self.breeding_prompts[-1]):
@@ -701,6 +710,21 @@ class EvolutionEngine:
                                 elite_title = idea_obj.title
                         
                         print(f"🌟 Most creative idea selected for next generation: '{elite_title}' (will be refined and formatted)")
+                        
+                        # Send an update to notify frontend about elite selection
+                        await progress_callback({
+                            "current_generation": gen + 1,
+                            "total_generations": self.generations,
+                            "is_running": True,
+                            "history": self.history,
+                            "contexts": self.contexts,
+                            "specific_prompts": self.specific_prompts,
+                            "breeding_prompts": self.breeding_prompts,
+                            "progress": ((gen + 1) / self.generations) * 100,
+                            "elite_selection_update": True,  # Flag to indicate elite selection update
+                            "token_counts": self.get_total_token_count(),
+                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
+                        })
                     except Exception as e:
                         print(f"Creative selection failed with error: {e}. Continuing without creative selection.")
                         elite_idea = None
