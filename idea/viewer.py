@@ -14,6 +14,7 @@ import json
 from pydantic import BaseModel
 from datetime import datetime
 import numpy as np
+import uuid
 
 from idea.evolution import EvolutionEngine
 from idea.models import Idea
@@ -310,6 +311,19 @@ async def run_evolution_task(engine):
     # Run the evolution with progress updates
     await engine.run_evolution_with_updates(progress_callback)
 
+def convert_uuids_to_strings(obj):
+    """Recursively convert all UUID objects to strings in a data structure"""
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_uuids_to_strings(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_uuids_to_strings(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_uuids_to_strings(item) for item in obj)
+    else:
+        return obj
+
 def idea_to_dict(idea) -> dict:
     """Convert an Idea object or idea dictionary to a dictionary for JSON serialization"""
     # If idea is already a dictionary with 'id' and 'idea' keys
@@ -317,16 +331,16 @@ def idea_to_dict(idea) -> dict:
         idea_obj = idea['idea']
         idea_id = idea['id']
 
-        # Get parent IDs if they exist
-        parent_ids = idea.get('parent_ids', [])
+        # Get parent IDs if they exist and convert UUIDs to strings
+        parent_ids = [str(pid) if isinstance(pid, uuid.UUID) else pid for pid in idea.get('parent_ids', [])]
 
         # Get Oracle metadata if it exists
         oracle_generated = idea.get('oracle_generated', False)
         oracle_analysis = idea.get('oracle_analysis', '')
 
-        # Get Elite/Creative metadata if it exists
+        # Get Elite/Creative metadata if it exists and convert UUIDs to strings
         elite_selected = idea.get('elite_selected', False)
-        elite_source_id = idea.get('elite_source_id')
+        elite_source_id = str(idea.get('elite_source_id')) if idea.get('elite_source_id') else None
         elite_source_generation = idea.get('elite_source_generation')
         elite_selected_source = idea.get('elite_selected_source', False)
         elite_target_generation = idea.get('elite_target_generation')
@@ -495,7 +509,7 @@ async def get_progress():
     except Exception as e:
         print(f"Error getting queue updates: {e}")
 
-    return JSONResponse(evolution_status)
+    return JSONResponse(convert_uuids_to_strings(evolution_status))
 
 @app.post("/api/save-evolution")
 async def save_evolution(request: Request):
