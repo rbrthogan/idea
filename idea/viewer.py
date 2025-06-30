@@ -758,7 +758,7 @@ async def auto_rate(request: Request):
                 'message': 'Not enough ideas to compare (minimum 2 required)'
             }, status_code=400)
 
-                # Determine the appropriate thinking budget for the model
+        # Determine the appropriate thinking budget for the model
         def get_default_thinking_budget(model_name):
             """Get the default thinking budget for a model, same as main app logic"""
             from idea.config import THINKING_BUDGET_CONFIG
@@ -1103,8 +1103,6 @@ async def get_models():
         "models": LLM_MODELS,
         "default": DEFAULT_MODEL
     })
-
-
 
 @app.post("/api/reset-ratings")
 async def reset_ratings(request: Request):

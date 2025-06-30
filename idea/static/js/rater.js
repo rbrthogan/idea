@@ -696,6 +696,26 @@ startAutoRatingBtn.addEventListener('click', async function() {
         let allResults = [];
         let finalIdeas = [];
         let finalTokenCounts = null;
+        let accumulatedTokenCounts = {
+            total: 0,
+            total_input: 0,
+            total_output: 0,
+            cost: {
+                input_cost: 0,
+                output_cost: 0,
+                total_cost: 0,
+                currency: 'USD'
+            },
+            critic: {
+                total: 0,
+                input: 0,
+                output: 0,
+                model: null,
+                cost: 0
+            },
+            models: {},
+            estimates: {}
+        };
 
         for (let i = 0; i < chunks; i++) {
             // Calculate how many comparisons to do in this chunk
@@ -735,9 +755,55 @@ startAutoRatingBtn.addEventListener('click', async function() {
             // Store the latest ideas data
             finalIdeas = data.ideas || [];
 
-            // Store token counts from the final response (only from the last chunk)
+                        // Accumulate token count data from each chunk
             if (data.token_counts) {
-                finalTokenCounts = data.token_counts;
+                const chunkTokens = data.token_counts;
+
+                // Accumulate totals
+                accumulatedTokenCounts.total += chunkTokens.total || 0;
+                accumulatedTokenCounts.total_input += chunkTokens.total_input || 0;
+                accumulatedTokenCounts.total_output += chunkTokens.total_output || 0;
+
+                // Accumulate costs
+                if (chunkTokens.cost) {
+                    accumulatedTokenCounts.cost.input_cost += chunkTokens.cost.input_cost || 0;
+                    accumulatedTokenCounts.cost.output_cost += chunkTokens.cost.output_cost || 0;
+                    accumulatedTokenCounts.cost.total_cost += chunkTokens.cost.total_cost || 0;
+                }
+
+                // Accumulate critic data
+                if (chunkTokens.critic) {
+                    accumulatedTokenCounts.critic.total += chunkTokens.critic.total || 0;
+                    accumulatedTokenCounts.critic.input += chunkTokens.critic.input || 0;
+                    accumulatedTokenCounts.critic.output += chunkTokens.critic.output || 0;
+                    accumulatedTokenCounts.critic.cost += chunkTokens.critic.cost || 0;
+
+                    // Set model info from first chunk
+                    if (!accumulatedTokenCounts.critic.model && chunkTokens.critic.model) {
+                        accumulatedTokenCounts.critic.model = chunkTokens.critic.model;
+                    }
+                }
+
+                // Set models info from first chunk
+                if (chunkTokens.models && Object.keys(accumulatedTokenCounts.models).length === 0) {
+                    accumulatedTokenCounts.models = chunkTokens.models;
+                }
+
+                // Accumulate estimates by updating them using the accumulated token counts
+                if (chunkTokens.estimates) {
+                    for (const [modelId, estimate] of Object.entries(chunkTokens.estimates)) {
+                        if (!accumulatedTokenCounts.estimates[modelId]) {
+                            accumulatedTokenCounts.estimates[modelId] = {
+                                name: estimate.name,
+                                cost: 0
+                            };
+                        }
+                        accumulatedTokenCounts.estimates[modelId].cost += estimate.cost || 0;
+                    }
+                }
+
+                // Store the accumulated counts as the final token counts
+                finalTokenCounts = accumulatedTokenCounts;
             }
 
             // Update the local ideasDb with the latest data from the server

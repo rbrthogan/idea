@@ -14,7 +14,9 @@
 - Split evolution population into multiple "islands" of ideas, which are evolved independently with only rare opportunity for cross-island communication.
 - Relook at genotype breeding. More explicit crossover and mutation. Idea creation should be similar to initial population.
 - introduce a concept of mutation to the genotype
+- let the most different idea survive to the next generation (perhaps with a new mutation)
 
 ## Bugs
 - When opening on "current evolution" the diversity chart initially appears with data but is then refreshed to empty. If saved it can be restored by selecting the saved evolution, but current evolution view should also work.
 - Is temperature been correcly passed to the generate_text function in each case?
+- I think the idea contrainst have been lost from some of the idea prompts - idea generation from a "specific_prompt" doesn't have the constraints. There is also possibly redundant template elements now e.g. breed
