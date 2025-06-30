@@ -816,6 +816,15 @@ function renderGenerations(gens) {
             const isOracleIdea = idea.oracle_generated && idea.oracle_analysis;
             const isEliteIdea = idea.elite_selected;
             
+            // Debug logging
+            console.log(`Idea ${ideaIndex} in generation ${index}:`, {
+                title: idea.title,
+                oracle_generated: idea.oracle_generated,
+                elite_selected: idea.elite_selected,
+                isOracleIdea,
+                isEliteIdea
+            });
+            
             let buttonText, buttonTitle, buttonClass;
             if (isOracleIdea) {
                 buttonText = '<i class="fas fa-eye"></i> Oracle';
