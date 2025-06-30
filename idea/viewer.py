@@ -324,6 +324,13 @@ def idea_to_dict(idea) -> dict:
         oracle_generated = idea.get('oracle_generated', False)
         oracle_analysis = idea.get('oracle_analysis', '')
 
+        # Get Elite/Creative metadata if it exists
+        elite_selected = idea.get('elite_selected', False)
+        elite_source_id = idea.get('elite_source_id')
+        elite_source_generation = idea.get('elite_source_generation')
+        elite_selected_source = idea.get('elite_selected_source', False)
+        elite_target_generation = idea.get('elite_target_generation')
+
         # If the idea object has title and content attributes
         if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'content'):
             result = {
@@ -339,6 +346,14 @@ def idea_to_dict(idea) -> dict:
             if oracle_generated:
                 result["oracle_generated"] = oracle_generated
                 result["oracle_analysis"] = oracle_analysis
+            # Add Elite/Creative metadata if present
+            if elite_selected:
+                result["elite_selected"] = elite_selected
+                result["elite_source_id"] = elite_source_id
+                result["elite_source_generation"] = elite_source_generation
+            if elite_selected_source:
+                result["elite_selected_source"] = elite_selected_source
+                result["elite_target_generation"] = elite_target_generation
             return result
         # If the idea object is a string
         elif isinstance(idea_obj, str):
@@ -355,6 +370,14 @@ def idea_to_dict(idea) -> dict:
             if oracle_generated:
                 result["oracle_generated"] = oracle_generated
                 result["oracle_analysis"] = oracle_analysis
+            # Add Elite/Creative metadata if present
+            if elite_selected:
+                result["elite_selected"] = elite_selected
+                result["elite_source_id"] = elite_source_id
+                result["elite_source_generation"] = elite_source_generation
+            if elite_selected_source:
+                result["elite_selected_source"] = elite_selected_source
+                result["elite_target_generation"] = elite_target_generation
             return result
         # If the idea object is already a dict
         elif isinstance(idea_obj, dict):
@@ -368,6 +391,14 @@ def idea_to_dict(idea) -> dict:
             if oracle_generated:
                 result["oracle_generated"] = oracle_generated
                 result["oracle_analysis"] = oracle_analysis
+            # Add Elite/Creative metadata if present
+            if elite_selected:
+                result["elite_selected"] = elite_selected
+                result["elite_source_id"] = elite_source_id
+                result["elite_source_generation"] = elite_source_generation
+            if elite_selected_source:
+                result["elite_selected_source"] = elite_selected_source
+                result["elite_target_generation"] = elite_target_generation
             return result
 
     # Legacy case: idea is a direct Idea object
@@ -420,10 +451,8 @@ def api_get_generations():
     for generation in engine.history:
         gen_list = []
         for prop in generation:
-            gen_list.append({
-                "title": prop.title,
-                "content": prop.content
-            })
+            # Use idea_to_dict to properly serialize the idea with all metadata
+            gen_list.append(idea_to_dict(prop))
         result.append(gen_list)
 
     # Store the result as the latest evolution data
@@ -439,7 +468,8 @@ def api_get_generation(gen_id: int):
     ideas = engine.get_ideas_by_generation(gen_id)
     if not ideas:
         return JSONResponse({"error": "Invalid generation index."}, status_code=404)
-    output = [{"title": i.title, "content": i.content} for i in ideas]
+    # Use idea_to_dict to properly serialize ideas with all metadata
+    output = [idea_to_dict(i) for i in ideas]
     return JSONResponse(output)
 
 @app.get("/test-static")
