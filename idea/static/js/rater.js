@@ -1426,10 +1426,11 @@ function createEloChart(ideas, ratingType) {
         generationGroups[gen].push(idea);
     });
 
-    // Calculate max and mean ELO for each generation
+    // Calculate max, mean, and median ELO for each generation
     const generations = Object.keys(generationGroups).sort((a, b) => a - b);
     const maxElos = [];
     const meanElos = [];
+    const medianElos = [];
 
     generations.forEach(gen => {
         const genIdeas = generationGroups[gen];
@@ -1451,8 +1452,15 @@ function createEloChart(ideas, ratingType) {
         const maxElo = Math.max(...ratings);
         const meanElo = ratings.reduce((sum, elo) => sum + elo, 0) / ratings.length;
 
+        // Calculate median ELO
+        const sortedRatings = [...ratings].sort((a, b) => a - b);
+        const medianElo = sortedRatings.length % 2 === 0
+            ? (sortedRatings[sortedRatings.length / 2 - 1] + sortedRatings[sortedRatings.length / 2]) / 2
+            : sortedRatings[Math.floor(sortedRatings.length / 2)];
+
         maxElos.push(maxElo);
         meanElos.push(meanElo);
+        medianElos.push(medianElo);
     });
 
     // Create the chart
@@ -1481,6 +1489,13 @@ function createEloChart(ideas, ratingType) {
                     data: meanElos,
                     borderColor: 'rgba(54, 162, 235, 1)',
                     backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                    tension: 0.1
+                },
+                {
+                    label: 'Median ELO',
+                    data: medianElos,
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
                     tension: 0.1
                 }
             ]
