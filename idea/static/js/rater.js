@@ -548,7 +548,7 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
                         id: idea.id || generateUUID(),
                         elo: idea.elo || idea.ratings?.auto || 1500,
                         // Add generation info if not present
-                        generation: idea.generation || Math.floor(index / (data.data.history[0]?.length || 1)) + 1
+                        generation: idea.generation !== undefined ? idea.generation : Math.floor(index / (data.data.history[0]?.length || 1))
                     }));
                     console.log('Processed ideas:', ideas);
 
@@ -934,7 +934,7 @@ function updateRankingsTable(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td>${autoRating}</td>
                 <td>${matchCount}</td>
-                <td>Gen ${idea.generation || '?'}</td>
+                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
             `;
         } else if (currentRatingType === 'manual') {
             matchCount = idea.manual_match_count || 0;
@@ -944,7 +944,7 @@ function updateRankingsTable(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td>${manualRating}</td>
                 <td>${matchCount}</td>
-                <td>Gen ${idea.generation || '?'}</td>
+                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
             `;
         } else {
             // For 'diff' or any other type, use the total match count
@@ -959,7 +959,7 @@ function updateRankingsTable(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td class="${diffClass}">${diffSign}${diffRating} (A:${autoRating}/M:${manualRating})</td>
                 <td>${matchCount}</td>
-                <td>Gen ${idea.generation || '?'}</td>
+                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
             `;
         }
 
@@ -994,7 +994,7 @@ function showIdeaDetails(ideaIndex) {
         <div class="card">
             <div class="card-body">
                 <h4>${idea.title || 'Untitled'}</h4>
-                <p><strong>Generation:</strong> ${idea.generation || '?'}</p>
+                <p><strong>Generation:</strong> ${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</p>
                 <p><strong>ELO Rating:</strong> ${idea.elo}</p>
                 <hr>
                 <div class="idea-content">
@@ -1317,7 +1317,7 @@ function showIdeaDetails(ideaIndex) {
         <div class="card">
             <div class="card-body">
                 <h4>${idea.title || 'Untitled'}</h4>
-                <p><strong>Generation:</strong> ${idea.generation || '?'}</p>
+                <p><strong>Generation:</strong> ${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</p>
                 <p><strong>Auto Rating:</strong> ${autoRating}</p>
                 <p><strong>Manual Rating:</strong> ${manualRating}</p>
                 <p><strong>Difference:</strong> <span class="${diffClass}">${diffSign}${diffRating}</span></p>
@@ -1349,7 +1349,7 @@ async function loadEvolution(evolutionId) {
         data.data.history.forEach((generation, genIndex) => {
             generation.forEach(idea => {
                 // Add generation info
-                idea.generation = genIndex + 1;
+                idea.generation = genIndex;
 
                 // Ensure idea has an ID
                 if (!idea.id) {
@@ -1390,6 +1390,14 @@ async function loadEvolution(evolutionId) {
         console.error('Error loading evolution:', error);
         return null;
     }
+}
+
+// Helper function to format generation labels consistently
+function formatGenerationLabel(generation) {
+    if (generation === 0 || generation === '0') {
+        return 'Initial Population';
+    }
+    return `Gen ${generation}`;
 }
 
 // Add this function to get a random pair of ideas
@@ -1475,7 +1483,7 @@ function createEloChart(ideas, ratingType) {
     window.eloChart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: generations.map(gen => `Gen ${gen}`),
+            labels: generations.map(gen => gen === '0' ? 'Initial Population' : `Gen ${gen}`),
             datasets: [
                 {
                     label: 'Max ELO',
