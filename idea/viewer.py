@@ -172,13 +172,13 @@ async def start_evolution(request: Request):
     # Get tournament parameters with defaults
     try:
         tournament_size = int(data.get('tournamentSize', 5))
-        tournament_comparisons = int(data.get('tournamentComparisons', 20))
+        tournament_comparisons = int(data.get('tournamentComparisons', 50))
         print(f"Parsed tournament values: size={tournament_size}, comparisons={tournament_comparisons}")
     except ValueError as e:
         print(f"Error parsing tournament values: {e}")
         # Use defaults if parsing fails
         tournament_size = 5
-        tournament_comparisons = 20
+        tournament_comparisons = 50
 
     # Get Oracle parameters with defaults
 
@@ -970,9 +970,23 @@ async def auto_rate(request: Request):
             match_count_b = idea_b.get('auto_match_count', 0)
             print(f"Comparing idea {idea_a.get('id')} (ELO: {elo_a}, Matches: {match_count_a}) vs {idea_b.get('id')} (ELO: {elo_b}, Matches: {match_count_b})")
 
-            # Use the critic to determine the winner - pass the idea_type parameter
-            winner = critic.compare_ideas(idea_a, idea_b, idea_type)
-            print(f"Winner: {winner}")
+            # Randomize presentation order to eliminate positional bias
+            if random.random() < 0.5:
+                # Present ideas in original order (A first, B second)
+                winner = critic.compare_ideas(idea_a, idea_b, idea_type)
+                order_swapped = False
+            else:
+                # Present ideas in swapped order (B first, A second)
+                winner = critic.compare_ideas(idea_b, idea_a, idea_type)
+                order_swapped = True
+                # Adjust winner interpretation for swapped order
+                if winner == "A":
+                    winner = "B"  # Model chose first position, but that was actually idea_b
+                elif winner == "B":
+                    winner = "A"  # Model chose second position, but that was actually idea_a
+                # "tie" remains "tie"
+
+            print(f"Winner: {winner} (order_swapped: {order_swapped})")
 
             # Skip this comparison if there was an error (winner is None)
             if winner is None:

@@ -24,26 +24,26 @@ def generate_comparison_prompt(item_type: str, criteria: List[str]) -> str:
     criteria_text = "\n".join(f"{i+1}. {criterion}" for i, criterion in enumerate(criteria))
 
     return f"""You are an expert evaluator of {item_type}. You will be presented with two {item_type}, and your task is to determine which one is better.
-
-Idea A:
+{item_type} A:
 Title: {{idea_a_title}}
 {{idea_a_content}}
 
-Idea B:
+{item_type} B:
 Title: {{idea_b_title}}
 {{idea_b_content}}
 
-Evaluate both ideas based on the following criteria:
+Evaluate both {item_type}s based on the following criteria:
 {criteria_text}
 
 Criterion 1 is the most important.
 
 After your evaluation, respond with exactly one of these three options:
-- "Result: A" if Idea A is better
-- "Result: B" if Idea B is better
-- "Result: tie" if both ideas are approximately equal in quality
+- "Result: A" if {item_type} A is better
+- "Result: B" if {item_type} B is better
+- "Result: tie" if both {item_type}s are approximately equal in quality
 
-Your response must contain exactly one of these three phrases and nothing else."""
+First pick a winner along each criterion (A or B) -- brief or no explanation required. Then provide 1-2 sentence summary of your evaluation. Then, provide your final verdict.
+Your response must contain exactly one of these three phrases"""
 
 
 class YAMLTemplateWrapper:

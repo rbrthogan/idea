@@ -35,7 +35,7 @@ class EvolutionEngine:
         creative_temp: float = DEFAULT_CREATIVE_TEMP,
         top_p: float = DEFAULT_TOP_P,
         tournament_size: int = 5,
-        tournament_comparisons: int = 20,
+        tournament_comparisons: int = 50,
         thinking_budget: Optional[int] = None,
     ):
         self.idea_type = idea_type or get_default_template_id()
@@ -53,7 +53,9 @@ class EvolutionEngine:
 
         self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
         self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
-        self.critic = Critic(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
+
+        critic_model_name = "gemini-2.5-flash" if model_type == "gemini-2.5-pro" else model_type
+        self.critic = Critic(provider="google_generative_ai", model_name=critic_model_name, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
         self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
 
         self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
@@ -357,7 +359,7 @@ class EvolutionEngine:
             # Run evolution for specified number of generations
             elite_idea = None
             elite_breeding_prompt = None
-            
+
             for gen in range(self.generations):
                 # Check for stop request at the beginning of each generation
                 if self.stop_requested:
@@ -395,15 +397,15 @@ class EvolutionEngine:
                 elite_processed = False
                 if elite_idea is not None:
                     print(f"🌟 Processing elite idea for generation {gen + 1}...")
-                    
+
                     # Refine and format the elite idea
                     refined_elite = self.critic.refine(elite_idea, self.idea_type)
                     formatted_elite = self.formatter.format_idea(refined_elite, self.idea_type)
-                    
+
                     # Mark this idea as elite (most creative/original) and preserve source
                     # Ensure formatted_elite is a dictionary (format_idea should return dict for dict input)
                     print(f"🌟 DEBUG: Elite idea before metadata: {type(formatted_elite)}, keys: {list(formatted_elite.keys()) if isinstance(formatted_elite, dict) else 'N/A'}")
-                    
+
                     if isinstance(formatted_elite, dict):
                         formatted_elite["elite_selected"] = True
                         formatted_elite["elite_source_id"] = elite_idea.get("id")
@@ -420,20 +422,20 @@ class EvolutionEngine:
                             "elite_source_generation": gen
                         }
                         print(f"🌟 DEBUG: Elite idea converted to dict with keys: {list(formatted_elite.keys())}")
-                    
+
                     print(f"🌟 DEBUG: Final elite idea has elite_selected: {formatted_elite.get('elite_selected')}")
-                    
+
                     # Add to new population
                     new_population.append(formatted_elite)
                     generation_breeding_prompts.append(elite_breeding_prompt)  # Use the original breeding prompt if available
-                    
+
                     # Extract title for logging
                     elite_title = "Unknown"
                     if isinstance(formatted_elite, dict) and "idea" in formatted_elite:
                         idea_obj = formatted_elite["idea"]
                         if hasattr(idea_obj, 'title'):
                             elite_title = idea_obj.title
-                    
+
                     print(f"🌟 Most creative idea '{elite_title}' added to generation {gen + 1}")
                     elite_processed = True
 
@@ -441,7 +443,7 @@ class EvolutionEngine:
                 current_pop_size = len(self.population)
                 ideas_to_breed = current_pop_size - (1 if elite_processed else 0)
                 print(f"Generating {ideas_to_breed} new ideas via breeding for generation {gen + 1} (plus {1 if elite_processed else 0} creative)")
-                
+
                 # Reset elite for next iteration
                 elite_idea = None
                 elite_breeding_prompt = None
@@ -688,7 +690,7 @@ class EvolutionEngine:
                         print(f"🌟 Performing elite selection for next generation...")
                         most_diverse_idx = await self._find_most_diverse_idea_idx(self.population)
                         elite_idea = self.population[most_diverse_idx].copy() if isinstance(self.population[most_diverse_idx], dict) else self.population[most_diverse_idx]
-                        
+
                         # Mark the SOURCE idea in the current generation as selected for elite
                         # This is what the frontend will see
                         if isinstance(self.population[most_diverse_idx], dict):
@@ -697,20 +699,20 @@ class EvolutionEngine:
                             # Update history to reflect this change
                             self.history[-1] = self.population.copy()
                             print(f"🌟 DEBUG: Marked source idea at index {most_diverse_idx} as elite_selected_source")
-                        
+
                         # Get the corresponding breeding prompt if available
                         if self.breeding_prompts and self.breeding_prompts[-1] and most_diverse_idx < len(self.breeding_prompts[-1]):
                             elite_breeding_prompt = self.breeding_prompts[-1][most_diverse_idx]
-                        
+
                         # Extract title for logging
                         elite_title = "Unknown"
                         if isinstance(elite_idea, dict) and "idea" in elite_idea:
                             idea_obj = elite_idea["idea"]
                             if hasattr(idea_obj, 'title'):
                                 elite_title = idea_obj.title
-                        
+
                         print(f"🌟 Most creative idea selected for next generation: '{elite_title}' (will be refined and formatted)")
-                        
+
                         # Send an update to notify frontend about elite selection
                         await progress_callback({
                             "current_generation": gen + 1,

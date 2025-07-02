@@ -432,18 +432,18 @@ class Critic(LLMWrapper):
                 result["parent_ids"] = idea["parent_ids"]
             else:
                 result["parent_ids"] = []
-            
+
             # Preserve Oracle metadata
             if idea.get("oracle_generated", False):
                 result["oracle_generated"] = idea["oracle_generated"]
                 result["oracle_analysis"] = idea.get("oracle_analysis", "")
-            
+
             # Preserve Elite metadata
             if idea.get("elite_selected", False):
                 result["elite_selected"] = idea["elite_selected"]
                 result["elite_source_id"] = idea.get("elite_source_id")
                 result["elite_source_generation"] = idea.get("elite_source_generation")
-            
+
             return result
         return refined_idea
 
@@ -508,7 +508,20 @@ class Critic(LLMWrapper):
             idea_a_dict = idea_a_obj.dict() if hasattr(idea_a_obj, 'dict') else idea_a_obj
             idea_b_dict = idea_b_obj.dict() if hasattr(idea_b_obj, 'dict') else idea_b_obj
 
-            winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
+            # Randomize presentation order to eliminate positional bias
+            if random.random() < 0.5:
+                # Present ideas in original order (A first, B second)
+                winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
+            else:
+                # Present ideas in swapped order (B first, A second)
+                winner = self.compare_ideas(idea_b_dict, idea_a_dict, idea_type)
+                # Adjust winner interpretation for swapped order
+                if winner == "A":
+                    winner = "B"  # Model chose first position, but that was actually idea_b
+                elif winner == "B":
+                    winner = "A"  # Model chose second position, but that was actually idea_a
+                # "tie" remains "tie"
+
             elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
             ranks[idea_idx_a] = elo_a
             ranks[idea_idx_b] = elo_b
