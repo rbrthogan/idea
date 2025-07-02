@@ -35,7 +35,7 @@ class EvolutionEngine:
         creative_temp: float = DEFAULT_CREATIVE_TEMP,
         top_p: float = DEFAULT_TOP_P,
         tournament_size: int = 5,
-        tournament_comparisons: int = 50,
+        tournament_comparisons: int = 35,
         thinking_budget: Optional[int] = None,
     ):
         self.idea_type = idea_type or get_default_template_id()
@@ -448,13 +448,39 @@ class EvolutionEngine:
                 elite_idea = None
                 elite_breeding_prompt = None
 
-                # Process population in chunks for breeding, but generate exactly ideas_to_breed ideas
-                ideas_generated = 0
+                # Step 1: Run tournaments on ALL groups to create global ranking
+                print(f"Running tournaments across {len(self.population)} ideas in groups of {actual_tournament_size}...")
+                global_ranks = {}
+                global_id_to_index = {}  # Map from original population index to idea
+
                 for i in range(0, len(self.population), actual_tournament_size):
-                    # Check for stop request during generation processing
+                    group = self.population[i : i + actual_tournament_size]
+                    group_ranks = self.critic.get_tournament_ranks(group, self.idea_type, self.tournament_comparisons)
+
+                    print(f"Tournament group {i//actual_tournament_size + 1} rankings:")
+                    for idea_idx, rank in sorted(group_ranks.items(), key=lambda x: x[1], reverse=True):
+                        # Extract title from the idea object within the dictionary
+                        idea_obj = group[idea_idx]["idea"]
+                        title = idea_obj.title if hasattr(idea_obj, 'title') else "Untitled"
+                        print(f"  {title} - ELO {rank}")
+
+                        # Map to global population index
+                        global_population_idx = i + idea_idx
+                        global_ranks[global_population_idx] = rank
+                        global_id_to_index[global_population_idx] = global_population_idx
+
+                # Step 2: Allocate parent slots globally across entire population
+                print(f"\nAllocating parent slots across entire population...")
+                global_parent_slots = self._allocate_parent_slots(global_ranks, ideas_to_breed)
+
+                # Step 3: Generate children using global parent selection
+                print(f"Generating {ideas_to_breed} children using global parent pool...")
+                ideas_generated = 0
+                while ideas_generated < ideas_to_breed:
+                    # Check for stop request during breeding
                     if self.stop_requested:
                         self.is_stopped = True
-                        print(f"Stop requested - evolution halted during generation {gen + 1}")
+                        print(f"Stop requested - evolution halted during breeding in generation {gen + 1}")
 
                         # If we have some new population, add it to history
                         if new_population:
@@ -476,104 +502,59 @@ class EvolutionEngine:
                         })
                         return
 
-                    group = self.population[i : i + actual_tournament_size]
-                    ranks = self.critic.get_tournament_ranks(group, self.idea_type, self.tournament_comparisons)
+                    # Select parents from global population using allocated slots
+                    if global_parent_slots:
+                        parent_indices = self._select_parents_from_slots(global_parent_slots, list(global_ranks.keys()))
+                        parent_ideas = [self.population[idx] for idx in parent_indices]
+                    else:
+                        # Fallback to random selection if allocation fails
+                        parent_indices = np.random.choice(list(global_ranks.keys()), size=self.breeder.parent_count, replace=False)
+                        parent_ideas = [self.population[idx] for idx in parent_indices]
 
-                    for idea_idx, rank in sorted(ranks.items(), key=lambda x: x[1]):
-                        # Extract title from the idea object within the dictionary
-                        idea_obj = group[idea_idx]["idea"]
-                        title = idea_obj.title if hasattr(idea_obj, 'title') else "Untitled"
-                        print(f"{title} - {rank}")
+                    new_idea = self.breeder.breed(parent_ideas, self.idea_type)
 
-                    # Generate ideas from this group until we reach ideas_to_breed total
-                    while ideas_generated < ideas_to_breed:
-                        # Check for stop request during breeding
-                        if self.stop_requested:
-                            self.is_stopped = True
-                            print(f"Stop requested - evolution halted during breeding in generation {gen + 1}")
+                    # Extract and store the breeding prompt before formatting
+                    if isinstance(new_idea, dict) and "specific_prompt" in new_idea:
+                        generation_breeding_prompts.append(new_idea["specific_prompt"])
+                    else:
+                        generation_breeding_prompts.append(None)  # Fallback
 
-                            # If we have some new population, add it to history
-                            if new_population:
-                                self.history.append(new_population)
+                    # refine the idea
+                    refined_idea = self.critic.refine(new_idea, self.idea_type)
 
-                            await progress_callback({
-                                "current_generation": gen + 1,
-                                "total_generations": self.generations,
-                                "is_running": False,
-                                "is_stopped": True,
-                                "history": self.history,
-                                "contexts": self.contexts,
-                                "specific_prompts": self.specific_prompts,
-                                "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
-                                "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
-                                "token_counts": self.get_total_token_count(),
-                                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                            })
-                            return
+                    # Format the idea and add to new population
+                    formatted_idea = self.formatter.format_idea(refined_idea, self.idea_type)
+                    new_population.append(formatted_idea)
+                    ideas_generated += 1
 
-                        # using tournament ranks, weighted sample from group
-                        weights = [ranks[i] for i in range(len(group))]
-                        # normalize weights to be between 0 and 1
-                        # Note: this shift will cause the lowest ranked idea to have a weight of 0, eliminating it from selection
-                        weight_range = max(weights) - min(weights)
-                        if weight_range == 0:
-                            # All weights are the same, use uniform distribution
-                            weights = [1.0 / len(weights) for _ in weights]
-                        else:
-                            weights = [(w - min(weights)) / weight_range + 1e-6 for w in weights]
-                            weights = [(w / sum(weights)) for w in weights]
+                    # Calculate overall progress
+                    total_ideas = self.pop_size * (self.generations + 1)
+                    completed_ideas = self.pop_size + (gen * self.pop_size) + len(new_population)
+                    progress_percent = (completed_ideas / total_ideas) * 100
 
-                        # Select parents and breed
-                        parent_indices = np.random.choice(list(ranks.keys()), size=self.breeder.parent_count, p=weights, replace=False)
-                        parent_ideas = [group[idx] for idx in parent_indices]
-                        new_idea = self.breeder.breed(parent_ideas, self.idea_type)
+                    # Create a copy of the history with the current generation's progress
+                    history_copy = self.history.copy()
+                    history_copy.append(new_population.copy())
 
-                        # Extract and store the breeding prompt before formatting
-                        if isinstance(new_idea, dict) and "specific_prompt" in new_idea:
-                            generation_breeding_prompts.append(new_idea["specific_prompt"])
-                        else:
-                            generation_breeding_prompts.append(None)  # Fallback
+                    # Include the current generation's breeding prompts for real-time updates
+                    breeding_prompts_with_current = self.breeding_prompts.copy()
+                    breeding_prompts_with_current.append(generation_breeding_prompts.copy())
 
-                        # refine the idea
-                        refined_idea = self.critic.refine(new_idea, self.idea_type)
+                    # Send progress update
+                    await progress_callback({
+                        "current_generation": gen + 1,
+                        "total_generations": self.generations,
+                        "is_running": True,
+                        "history": history_copy,
+                        "contexts": self.contexts,
+                        "specific_prompts": self.specific_prompts,
+                        "breeding_prompts": breeding_prompts_with_current,
+                        "progress": progress_percent,
+                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
+                    })
 
-                        # Format the idea and add to new population
-                        formatted_idea = self.formatter.format_idea(refined_idea, self.idea_type)
-                        new_population.append(formatted_idea)
-                        ideas_generated += 1
-
-                        # Calculate overall progress
-                        total_ideas = self.pop_size * (self.generations + 1)
-                        completed_ideas = self.pop_size + (gen * self.pop_size) + len(new_population)
-                        progress_percent = (completed_ideas / total_ideas) * 100
-
-                        # Create a copy of the history with the current generation's progress
-                        history_copy = self.history.copy()
-                        history_copy.append(new_population.copy())
-
-                        # Include the current generation's breeding prompts for real-time updates
-                        breeding_prompts_with_current = self.breeding_prompts.copy()
-                        breeding_prompts_with_current.append(generation_breeding_prompts.copy())
-
-                        # Send progress update
-                        await progress_callback({
-                            "current_generation": gen + 1,
-                            "total_generations": self.generations,
-                            "is_running": True,
-                            "history": history_copy,
-                            "contexts": self.contexts,
-                            "specific_prompts": self.specific_prompts,
-                            "breeding_prompts": breeding_prompts_with_current,
-                            "progress": progress_percent,
-                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                        })
-
-                        # Small delay to allow frontend to process updates and check for stop
-                        await asyncio.sleep(0.1)
-
-                        # Break out of group processing if we've generated enough ideas
-                        if ideas_generated >= ideas_to_breed:
-                            break
+                    # Small delay to allow frontend to process updates and check for stop
+                    await asyncio.sleep(0.1)
 
                 # Update population with new ideas
                 self.population = new_population
@@ -1010,3 +991,142 @@ class EvolutionEngine:
                         await self._store_embedding(idea_id, embedding)
 
         return embeddings
+
+    def _allocate_parent_slots(self, ranks, ideas_to_breed):
+        """
+        Allocate parent slots based on tournament ranks with caps to prevent convergence.
+
+        Args:
+            ranks: Dict mapping idea indices to ELO ratings
+            ideas_to_breed: Number of children to produce (determines total parent slots needed)
+
+        Returns:
+            Dict mapping idea indices to number of parent slots allocated
+        """
+        if not ranks or ideas_to_breed <= 0:
+            return {}
+
+        # Sort ideas by rank (higher ELO = better rank)
+        sorted_ideas = sorted(ranks.items(), key=lambda x: x[1], reverse=True)
+        num_ideas = len(sorted_ideas)
+
+        # Total parent slots needed (2 parents per child)
+        total_slots = ideas_to_breed * self.breeder.parent_count
+
+        # Define rank-based slot caps that scale with population size
+        # These caps ensure diversity while still rewarding good performance
+        if num_ideas <= 3:
+            # Small population: more equal distribution
+            caps = [max(1, total_slots // 2), max(1, total_slots // 3), max(1, total_slots // 4)]
+        elif num_ideas <= 5:
+            # Medium population: moderate hierarchy
+            caps = [max(1, total_slots // 3), max(1, total_slots // 4), max(1, total_slots // 5),
+                   max(1, total_slots // 6), max(1, total_slots // 7)]
+        else:
+            # Large population: steeper hierarchy but still capped
+            base_cap = max(1, total_slots // 4)
+            caps = []
+            for i in range(num_ideas):
+                if i == 0:  # Winner
+                    caps.append(min(base_cap, max(1, total_slots // 3)))
+                elif i < 3:  # Top 3
+                    caps.append(min(base_cap // 2, max(1, total_slots // 5)))
+                elif i < num_ideas // 2:  # Top half
+                    caps.append(max(1, total_slots // 8))
+                else:  # Bottom half
+                    caps.append(max(1, total_slots // 12))
+
+        # Ensure caps don't exceed available ideas
+        caps = caps[:num_ideas]
+
+        # Allocate slots with caps
+        allocation = {}
+        remaining_slots = total_slots
+
+        # First pass: allocate slots respecting caps
+        for i, (idea_idx, _) in enumerate(sorted_ideas):
+            if remaining_slots <= 0:
+                break
+
+            if i < len(caps):
+                slots_to_allocate = min(caps[i], remaining_slots)
+            else:
+                # For ideas beyond cap list, give minimal allocation
+                slots_to_allocate = min(1, remaining_slots)
+
+            allocation[idea_idx] = slots_to_allocate
+            remaining_slots -= slots_to_allocate
+
+        # Second pass: distribute remaining slots if any, starting from top
+        if remaining_slots > 0:
+            for i, (idea_idx, _) in enumerate(sorted_ideas):
+                if remaining_slots <= 0:
+                    break
+
+                # Add one more slot if under cap
+                current_cap = caps[i] if i < len(caps) else 1
+                if allocation.get(idea_idx, 0) < current_cap:
+                    allocation[idea_idx] = allocation.get(idea_idx, 0) + 1
+                    remaining_slots -= 1
+
+        # Log allocation for transparency
+        print(f"Parent slot allocation for {ideas_to_breed} children ({total_slots} slots):")
+        for i, (idea_idx, elo) in enumerate(sorted_ideas):
+            slots = allocation.get(idea_idx, 0)
+            print(f"  Rank {i+1} (ELO {elo:.0f}): {slots} slots")
+
+        return allocation
+
+    def _select_parents_from_slots(self, parent_slots, available_indices):
+        """
+        Select parents randomly from allocated slots.
+
+        Args:
+            parent_slots: Dict mapping idea indices to number of slots
+            available_indices: List of available idea indices
+
+        Returns:
+            List of parent indices for breeding
+        """
+        if not parent_slots:
+            return []
+
+        # Create a weighted pool based on allocated slots
+        parent_pool = []
+        for idea_idx, slots in parent_slots.items():
+            if idea_idx in available_indices:
+                parent_pool.extend([idea_idx] * slots)
+
+        if len(parent_pool) < self.breeder.parent_count:
+            # Fallback: if not enough parents in pool, use available indices
+            print(f"Warning: Only {len(parent_pool)} parents in pool, need {self.breeder.parent_count}")
+            return np.random.choice(available_indices, size=min(self.breeder.parent_count, len(available_indices)), replace=False).tolist()
+
+        # Simple random selection without replacement
+        selected_parents = []
+        pool_copy = parent_pool.copy()
+
+        for _ in range(self.breeder.parent_count):
+            if not pool_copy:
+                break
+
+            # Select random parent from pool
+            selected_idx = np.random.choice(len(pool_copy))
+            parent_idx = pool_copy.pop(selected_idx)
+
+            # Avoid selecting the same parent twice for this breeding
+            if parent_idx not in selected_parents:
+                selected_parents.append(parent_idx)
+            else:
+                # If we selected a duplicate, try to find a different one
+                available_alternatives = [p for p in set(pool_copy) if p not in selected_parents]
+                if available_alternatives:
+                    alternative = np.random.choice(available_alternatives)
+                    selected_parents.append(alternative)
+                    # Remove the alternative from pool
+                    pool_copy = [p for p in pool_copy if p != alternative]
+                else:
+                    # If no alternatives, allow the duplicate (shouldn't happen often)
+                    selected_parents.append(parent_idx)
+
+        return selected_parents

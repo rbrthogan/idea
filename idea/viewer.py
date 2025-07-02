@@ -172,13 +172,13 @@ async def start_evolution(request: Request):
     # Get tournament parameters with defaults
     try:
         tournament_size = int(data.get('tournamentSize', 5))
-        tournament_comparisons = int(data.get('tournamentComparisons', 50))
+        tournament_comparisons = int(data.get('tournamentComparisons', 35))
         print(f"Parsed tournament values: size={tournament_size}, comparisons={tournament_comparisons}")
     except ValueError as e:
         print(f"Error parsing tournament values: {e}")
         # Use defaults if parsing fails
         tournament_size = 5
-        tournament_comparisons = 50
+        tournament_comparisons = 35
 
     # Get Oracle parameters with defaults
 
