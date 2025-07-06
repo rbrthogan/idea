@@ -13,6 +13,11 @@ let currentRatingType = 'auto';
 let autoRatingInProgress = false;
 let currentModalIdea = null;
 
+// Sorting state
+let currentSortColumn = null;
+let currentSortDirection = 'asc';
+let originalIdeasOrder = [];
+
 // Fetch a random pair on load
 window.addEventListener("load", () => {
   // Show loading state
@@ -182,7 +187,7 @@ function renderMarkdown(text) {
     return lines.join('\n');
 }
 
-// Update refreshPair function to not show ratings in the title
+// Update refreshPair function to use the backend API for efficient pair selection
 async function refreshPair() {
     try {
         // Get all ideas
@@ -210,16 +215,63 @@ async function refreshPair() {
             btn.disabled = false;
         });
 
-        // Randomly select two different ideas
-        const [ideaA, ideaB] = getRandomPair(ideas);
-        currentPair = [ideaA, ideaB];
+        // Get efficient pair from backend API
+        const eloRangeInput = document.getElementById('manualEloRange');
+        const eloRange = eloRangeInput ? parseInt(eloRangeInput.value) || 100 : 100;
 
-        // Display the ideas without showing ratings
-        document.getElementById('titleA').textContent = ideaA.title || 'Untitled';
-        document.getElementById('titleB').textContent = ideaB.title || 'Untitled';
+        try {
+            const response = await fetch('/api/get-efficient-pair', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    evolution_id: currentEvolutionId,
+                    elo_range: eloRange
+                })
+            });
 
-        document.getElementById('contentA').innerHTML = renderMarkdown(ideaA.content || '');
-        document.getElementById('contentB').innerHTML = renderMarkdown(ideaB.content || '');
+            if (!response.ok) {
+                throw new Error(`Failed to get efficient pair: ${response.status}`);
+            }
+
+            const data = await response.json();
+            const ideaA = data.idea_a;
+            const ideaB = data.idea_b;
+
+            // Update local database with the returned ideas (they may have been modified)
+            if (ideaA && ideaA.id) {
+                ideasDb[ideaA.id] = ideaA;
+            }
+            if (ideaB && ideaB.id) {
+                ideasDb[ideaB.id] = ideaB;
+            }
+
+            currentPair = [ideaA, ideaB];
+
+            // Display the ideas without showing ratings
+            document.getElementById('titleA').textContent = ideaA.title || 'Untitled';
+            document.getElementById('titleB').textContent = ideaB.title || 'Untitled';
+
+            document.getElementById('contentA').innerHTML = renderMarkdown(ideaA.content || '');
+            document.getElementById('contentB').innerHTML = renderMarkdown(ideaB.content || '');
+
+            console.log(`Efficient pair selected: ${ideaA.id} vs ${ideaB.id}`);
+
+        } catch (error) {
+            console.error('Error getting efficient pair, falling back to random selection:', error);
+
+            // Fallback to random selection if API call fails
+            const [ideaA, ideaB] = getRandomPair(ideas);
+            currentPair = [ideaA, ideaB];
+
+            // Display the ideas without showing ratings
+            document.getElementById('titleA').textContent = ideaA.title || 'Untitled';
+            document.getElementById('titleB').textContent = ideaB.title || 'Untitled';
+
+            document.getElementById('contentA').innerHTML = renderMarkdown(ideaA.content || '');
+            document.getElementById('contentB').innerHTML = renderMarkdown(ideaB.content || '');
+        }
 
         // Show the comparison view
         document.querySelector('.ideas-container').style.display = 'flex';
@@ -913,6 +965,11 @@ function updateRankingsTable(ideas) {
     // Store ideas in a global variable for modal access
     window.rankedIdeas = ideas;
 
+    // Store original order for sorting
+    if (originalIdeasOrder.length === 0) {
+        originalIdeasOrder = [...ideas];
+    }
+
     ideas.forEach((idea, index) => {
         const row = document.createElement('tr');
         row.className = 'idea-row';
@@ -971,8 +1028,189 @@ function updateRankingsTable(ideas) {
         rankingsTable.appendChild(row);
     });
 
+    // Set up sorting event listeners
+    setupTableSorting();
+
     // Create the ELO chart
     createEloChart(ideas, currentRatingType);
+}
+
+// Table sorting functionality
+function setupTableSorting() {
+    const headers = document.querySelectorAll('.sortable-header');
+
+    headers.forEach(header => {
+        header.addEventListener('click', function(e) {
+            e.preventDefault();
+
+            const sortColumn = this.dataset.sort;
+
+            // If clicking the same column, toggle direction
+            if (currentSortColumn === sortColumn) {
+                currentSortDirection = currentSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSortColumn = sortColumn;
+                currentSortDirection = 'asc';
+            }
+
+            // Update visual indicators
+            updateSortIndicators();
+
+            // Sort the table
+            sortTable(sortColumn, currentSortDirection);
+        });
+    });
+}
+
+function updateSortIndicators() {
+    const headers = document.querySelectorAll('.sortable-header');
+
+    headers.forEach(header => {
+        const arrow = header.querySelector('.sort-arrow');
+        const column = header.dataset.sort;
+
+        if (column === currentSortColumn) {
+            arrow.className = `sort-arrow active ${currentSortDirection}`;
+        } else {
+            arrow.className = 'sort-arrow inactive';
+        }
+    });
+}
+
+function sortTable(column, direction) {
+    if (!window.rankedIdeas) return;
+
+    const ideas = [...window.rankedIdeas];
+
+    ideas.sort((a, b) => {
+        let aValue, bValue;
+
+        switch (column) {
+            case 'rank':
+                // Find the original index in the rankedIdeas array
+                aValue = window.rankedIdeas.indexOf(a);
+                bValue = window.rankedIdeas.indexOf(b);
+                break;
+
+            case 'title':
+                aValue = (a.title || 'Untitled').toLowerCase();
+                bValue = (b.title || 'Untitled').toLowerCase();
+                break;
+
+            case 'rating':
+                if (currentRatingType === 'auto') {
+                    aValue = a.ratings?.auto || a.elo || 1500;
+                    bValue = b.ratings?.auto || b.elo || 1500;
+                } else if (currentRatingType === 'manual') {
+                    aValue = a.ratings?.manual || 1500;
+                    bValue = b.ratings?.manual || 1500;
+                } else {
+                    // For diff, sort by absolute difference
+                    const aAuto = a.ratings?.auto || a.elo || 1500;
+                    const aManual = a.ratings?.manual || 1500;
+                    const bAuto = b.ratings?.auto || b.elo || 1500;
+                    const bManual = b.ratings?.manual || 1500;
+                    aValue = Math.abs(aAuto - aManual);
+                    bValue = Math.abs(bAuto - bManual);
+                }
+                break;
+
+            case 'matches':
+                if (currentRatingType === 'auto') {
+                    aValue = a.auto_match_count || 0;
+                    bValue = b.auto_match_count || 0;
+                } else if (currentRatingType === 'manual') {
+                    aValue = a.manual_match_count || 0;
+                    bValue = b.manual_match_count || 0;
+                } else {
+                    aValue = a.match_count || 0;
+                    bValue = b.match_count || 0;
+                }
+                break;
+
+            case 'generation':
+                aValue = a.generation !== undefined ? a.generation : -1;
+                bValue = b.generation !== undefined ? b.generation : -1;
+                break;
+
+            default:
+                return 0;
+        }
+
+        // Handle string vs numeric comparison
+        if (typeof aValue === 'string' && typeof bValue === 'string') {
+            return direction === 'asc' ? aValue.localeCompare(bValue) : bValue.localeCompare(aValue);
+        } else {
+            return direction === 'asc' ? aValue - bValue : bValue - aValue;
+        }
+    });
+
+    // Update the table with sorted ideas
+    window.rankedIdeas = ideas;
+    updateRankingsTableContent(ideas);
+}
+
+function updateRankingsTableContent(ideas) {
+    const rankingsTable = document.getElementById('rankingsTable');
+    rankingsTable.innerHTML = ''; // Clear existing content
+
+    ideas.forEach((idea, index) => {
+        const row = document.createElement('tr');
+        row.className = 'idea-row';
+        row.dataset.ideaIndex = index;
+        row.style.cursor = 'pointer';
+
+        // Get the appropriate rating values
+        const autoRating = idea.ratings?.auto || idea.elo || 1500;
+        const manualRating = idea.ratings?.manual || 1500;
+        const diffRating = autoRating - manualRating;
+
+        // Get the appropriate match count based on the current rating type
+        let matchCount = 0;
+        if (currentRatingType === 'auto') {
+            matchCount = idea.auto_match_count || 0;
+
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${idea.title || 'Untitled'}</td>
+                <td>${autoRating}</td>
+                <td>${matchCount}</td>
+                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+            `;
+        } else if (currentRatingType === 'manual') {
+            matchCount = idea.manual_match_count || 0;
+
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${idea.title || 'Untitled'}</td>
+                <td>${manualRating}</td>
+                <td>${matchCount}</td>
+                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+            `;
+        } else {
+            // For 'diff' or any other type, use the total match count
+            matchCount = idea.match_count || 0;
+
+            // Add color coding for diff
+            const diffClass = diffRating > 0 ? 'text-success' : (diffRating < 0 ? 'text-danger' : '');
+            const diffSign = diffRating > 0 ? '+' : '';
+
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${idea.title || 'Untitled'}</td>
+                <td class="${diffClass}">${diffSign}${diffRating} (A:${autoRating}/M:${manualRating})</td>
+                <td>${matchCount}</td>
+                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+            `;
+        }
+
+        // Add click event to show the idea details
+        row.addEventListener('click', function() {
+            showIdeaDetails(index);
+        });
+
+        rankingsTable.appendChild(row);
+    });
 }
 
 // Add this function to show idea details in a modal
@@ -1042,6 +1280,10 @@ function showComparisonView() {
 function toggleRatingType(type) {
     currentRatingType = type;
 
+    // Reset sorting state when switching rating types
+    currentSortColumn = null;
+    currentSortDirection = 'asc';
+
     // Update button states
     document.getElementById('autoRatingTypeBtn').classList.remove('active');
     document.getElementById('manualRatingTypeBtn').classList.remove('active');
@@ -1054,7 +1296,9 @@ function toggleRatingType(type) {
         // Update the rankings table without reloading everything
         if (window.rankedIdeas) {
             console.log(`Refreshing rankings table with rating type: ${type}`);
-            updateRankingsTable(window.rankedIdeas);
+            // Reset to original order first
+            originalIdeasOrder = [];
+            showRanking();
         } else {
             showRanking();
         }
@@ -1400,7 +1644,7 @@ function formatGenerationLabel(generation) {
     return `Gen ${generation}`;
 }
 
-// Add this function to get a random pair of ideas
+// Keep the original random pair function as a fallback
 function getRandomPair(ideas) {
     if (ideas.length < 2) {
         throw new Error('Not enough ideas to form a pair');

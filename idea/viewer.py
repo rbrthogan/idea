@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from datetime import datetime
 import numpy as np
 import uuid
+from typing import Dict, List, Tuple, Optional
 
 from idea.evolution import EvolutionEngine
 from idea.models import Idea
@@ -601,6 +602,8 @@ async def submit_rating(request: Request):
         outcome = data.get('outcome')
         evolution_id = data.get('evolution_id')
 
+        print(f"Submitting rating for {idea_a_id} vs {idea_b_id}, outcome: {outcome}")
+
         # Load the evolution data
         file_path = DATA_DIR / f"{evolution_id}.json"
         if not file_path.exists():
@@ -622,6 +625,10 @@ async def submit_rating(request: Request):
 
         if not idea_a or not idea_b:
             raise HTTPException(status_code=404, detail="Ideas not found")
+
+        # Log current state before update
+        print(f"Before update - Idea A ({idea_a_id}): manual_match_count={idea_a.get('manual_match_count', 0)}, manual_elo={idea_a.get('ratings', {}).get('manual', 1500)}")
+        print(f"Before update - Idea B ({idea_b_id}): manual_match_count={idea_b.get('manual_match_count', 0)}, manual_elo={idea_b.get('ratings', {}).get('manual', 1500)}")
 
         # Initialize ratings if not present
         if 'ratings' not in idea_a:
@@ -678,9 +685,15 @@ async def submit_rating(request: Request):
         idea_a['ratings']['manual'] = round(idea_a['ratings']['manual'] + k_factor * (outcome_value - expected_a))
         idea_b['ratings']['manual'] = round(idea_b['ratings']['manual'] + k_factor * (1 - outcome_value - expected_b))
 
+        # Log state after update
+        print(f"After update - Idea A ({idea_a_id}): manual_match_count={idea_a['manual_match_count']}, manual_elo={idea_a['ratings']['manual']}")
+        print(f"After update - Idea B ({idea_b_id}): manual_match_count={idea_b['manual_match_count']}, manual_elo={idea_b['ratings']['manual']}")
+
         # Save the updated data
         with open(file_path, 'w') as f:
             json.dump(evolution_data, f, indent=2)
+
+        print(f"Successfully saved rating data to {file_path}")
 
         # Return the updated ELO ratings
         return JSONResponse({
@@ -844,131 +857,19 @@ async def auto_rate(request: Request):
         # Maximum ELO difference for matching ideas - use the value from the request
         max_elo_diff = elo_range
 
-        # Track failed attempts to find suitable pairs
-        failed_attempts = 0
-        max_failed_attempts = 50  # Maximum number of attempts before relaxing constraints
-
         for i in range(num_comparisons):
             print(f"Comparison {i+1}/{num_comparisons}")
 
-            # Try to find a pair of ideas with similar ELO ratings
-            found_suitable_pair = False
-            current_max_elo_diff = max_elo_diff
+            # Use the shared efficient pair selection function
+            idea_a, idea_b = select_efficient_pair(all_ideas, rating_type='auto', max_elo_diff=max_elo_diff)
 
-            # Sort ideas by match count (ascending) to prioritize less-rated ideas
-            sorted_ideas = sorted(all_ideas, key=lambda x: x.get('auto_match_count', 0))
+            if idea_a is None or idea_b is None:
+                print("Failed to select suitable pair, skipping this comparison")
+                continue
 
-            # Take the bottom 50% of ideas (those with fewer matches)
-            candidate_pool_size = max(2, len(sorted_ideas) // 2)
-            candidate_pool = sorted_ideas[:candidate_pool_size]
-
-            print(f"Selected candidate pool of {len(candidate_pool)} ideas with fewest matches")
-
-            while not found_suitable_pair:
-                # If we've tried too many times, gradually relax the ELO difference constraint
-                if failed_attempts >= max_failed_attempts:
-                    current_max_elo_diff = current_max_elo_diff * 1.5  # Increase by 50%
-                    print(f"Relaxing ELO difference constraint to ±{current_max_elo_diff} after {failed_attempts} failed attempts")
-
-                    # Also expand the candidate pool if we're still struggling
-                    candidate_pool_size = min(len(sorted_ideas), candidate_pool_size + len(sorted_ideas) // 4)
-                    candidate_pool = sorted_ideas[:candidate_pool_size]
-                    print(f"Expanded candidate pool to {len(candidate_pool)} ideas")
-
-                    failed_attempts = 0  # Reset counter after relaxing
-
-                # Try to select from the candidate pool first
-                if len(candidate_pool) >= 2:
-                    try:
-                        # Select first idea from candidate pool (with fewest matches)
-                        idea_a = candidate_pool[0]
-
-                        # Find ideas within ELO range
-                        elo_a = idea_a['ratings']['auto']
-                        compatible_ideas = [
-                            idea for idea in all_ideas
-                            if idea['id'] != idea_a['id'] and
-                            abs(idea['ratings']['auto'] - elo_a) <= current_max_elo_diff
-                        ]
-
-                        if compatible_ideas:
-                            # Select a random compatible idea
-                            idea_b = random.choice(compatible_ideas)
-                            # Define elo_b here to ensure it's always set
-                            elo_b = idea_b['ratings']['auto']
-                            found_suitable_pair = True
-                        else:
-                            # If no compatible ideas, remove idea_a from candidate pool and try again
-                            candidate_pool.remove(idea_a)
-                            failed_attempts += 1
-                    except Exception as e:
-                        print(f"Error selecting from candidate pool: {e}")
-                        # Fallback to random selection
-                        idea_a, idea_b = random.sample(all_ideas, 2)
-                        elo_a = idea_a['ratings']['auto']
-                        elo_b = idea_b['ratings']['auto']
-                        failed_attempts += 1
-                else:
-                    try:
-                        # Fallback to random selection if candidate pool is depleted
-                        idea_a, idea_b = random.sample(all_ideas, 2)
-
-                        # Get their auto ELO ratings
-                        elo_a = idea_a['ratings']['auto']
-                        elo_b = idea_b['ratings']['auto']
-
-                        # Check if they're within the allowed ELO difference
-                        if abs(elo_a - elo_b) <= current_max_elo_diff:
-                            found_suitable_pair = True
-                            print(f"Found suitable pair with ELO difference: {abs(elo_a - elo_b)}")
-                        else:
-                            failed_attempts += 1
-                    except Exception as e:
-                        print(f"Error in random selection: {e}")
-                        # Just pick any two ideas as a last resort
-                        idea_a, idea_b = random.sample(all_ideas, 2)
-                        elo_a = idea_a['ratings']['auto']
-                        elo_b = idea_b['ratings']['auto']
-                        failed_attempts += 1
-
-                # If we've tried too many times, just use any random pair
-                if failed_attempts >= max_failed_attempts * 2:
-                    try:
-                        idea_a, idea_b = random.sample(all_ideas, 2)
-                        elo_a = idea_a['ratings']['auto']
-                        elo_b = idea_b['ratings']['auto']
-                        print(f"Using random pair with ELO difference {abs(elo_a - elo_b)} after {failed_attempts} failed attempts")
-                        found_suitable_pair = True
-                    except Exception as e:
-                        print(f"Error in last resort selection: {e}")
-                        # Absolute last resort - just pick the first two ideas
-                        idea_a = all_ideas[0]
-                        idea_b = all_ideas[1] if len(all_ideas) > 1 else all_ideas[0]
-                        elo_a = idea_a['ratings']['auto']
-                        elo_b = idea_b['ratings']['auto']
-                        found_suitable_pair = True
-
-            # Ensure elo_a and elo_b are defined
-            if 'elo_a' not in locals():
-                # Ensure idea_a has a proper ratings structure
-                if 'ratings' not in idea_a:
-                    idea_a['ratings'] = {'auto': 1500, 'manual': 1500}
-                elif 'auto' not in idea_a['ratings']:
-                    idea_a['ratings']['auto'] = 1500
-                elo_a = idea_a['ratings']['auto']
-
-            if 'elo_b' not in locals():
-                # Ensure idea_b has a proper ratings structure
-                if 'ratings' not in idea_b:
-                    idea_b['ratings'] = {'auto': 1500, 'manual': 1500}
-                elif 'auto' not in idea_b['ratings']:
-                    idea_b['ratings']['auto'] = 1500
-                elo_b = idea_b['ratings']['auto']
-
-            # Log match counts for transparency
-            match_count_a = idea_a.get('auto_match_count', 0)
-            match_count_b = idea_b.get('auto_match_count', 0)
-            print(f"Comparing idea {idea_a.get('id')} (ELO: {elo_a}, Matches: {match_count_a}) vs {idea_b.get('id')} (ELO: {elo_b}, Matches: {match_count_b})")
+            # Get ELO ratings for logging
+            elo_a = idea_a['ratings']['auto']
+            elo_b = idea_b['ratings']['auto']
 
             # Randomize presentation order to eliminate positional bias
             if random.random() < 0.5:
@@ -1221,6 +1122,291 @@ async def reset_ratings(request: Request):
             'status': 'error',
             'message': str(e)
         }, status_code=500)
+
+def select_efficient_pair(all_ideas: List[Dict], rating_type: str = 'auto', max_elo_diff: int = 100) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """
+    Select a pair of ideas efficiently, prioritizing those with fewer matches and similar ELO ratings.
+
+    Args:
+        all_ideas: List of all ideas to choose from
+        rating_type: 'auto' for auto ratings, 'manual' for manual ratings
+        max_elo_diff: Maximum ELO difference for matching ideas
+
+    Returns:
+        Tuple of (idea_a, idea_b) or (None, None) if no suitable pair found
+    """
+    if len(all_ideas) < 2:
+        return None, None
+
+    # Track failed attempts to find suitable pairs
+    failed_attempts = 0
+    max_failed_attempts = 50
+    current_max_elo_diff = max_elo_diff
+
+    # Choose the appropriate match count field based on rating type
+    match_count_field = 'auto_match_count' if rating_type == 'auto' else 'manual_match_count'
+    rating_field = 'auto' if rating_type == 'auto' else 'manual'
+
+    # Sort ideas by match count (ascending) to prioritize less-rated ideas
+    sorted_ideas = sorted(all_ideas, key=lambda x: x.get(match_count_field, 0))
+
+    # Take the bottom 50% of ideas (those with fewer matches)
+    candidate_pool_size = max(2, len(sorted_ideas) // 2)
+    candidate_pool = sorted_ideas[:candidate_pool_size]
+
+    # Find the minimum match count to identify truly underrated ideas
+    min_match_count = min(idea.get(match_count_field, 0) for idea in candidate_pool)
+
+    # Create a priority pool of ideas with the minimum match count
+    priority_pool = [idea for idea in candidate_pool if idea.get(match_count_field, 0) == min_match_count]
+
+    print(f"Selected candidate pool of {len(candidate_pool)} ideas with fewest {rating_type} matches")
+    print(f"Priority pool has {len(priority_pool)} ideas with {min_match_count} matches")
+
+    while True:
+        # If we've tried too many times, gradually relax the ELO difference constraint
+        if failed_attempts >= max_failed_attempts:
+            current_max_elo_diff = current_max_elo_diff * 1.5  # Increase by 50%
+            print(f"Relaxing ELO difference constraint to ±{current_max_elo_diff} after {failed_attempts} failed attempts")
+
+            # Also expand the candidate pool if we're still struggling
+            candidate_pool_size = min(len(sorted_ideas), candidate_pool_size + len(sorted_ideas) // 4)
+            candidate_pool = sorted_ideas[:candidate_pool_size]
+            # Update priority pool as well
+            min_match_count = min(idea.get(match_count_field, 0) for idea in candidate_pool)
+            priority_pool = [idea for idea in candidate_pool if idea.get(match_count_field, 0) == min_match_count]
+            print(f"Expanded candidate pool to {len(candidate_pool)} ideas")
+
+            failed_attempts = 0  # Reset counter after relaxing
+
+        # Try to select from the priority pool first (ideas with fewest matches)
+        if len(priority_pool) >= 2:
+            try:
+                # Randomly select from the priority pool instead of always picking the first
+                idea_a = random.choice(priority_pool)
+
+                # Find ideas within ELO range
+                elo_a = idea_a['ratings'][rating_field]
+                compatible_ideas = [
+                    idea for idea in all_ideas
+                    if idea['id'] != idea_a['id'] and
+                    abs(idea['ratings'][rating_field] - elo_a) <= current_max_elo_diff
+                ]
+
+                if compatible_ideas:
+                    # Select a random compatible idea
+                    idea_b = random.choice(compatible_ideas)
+                    elo_b = idea_b['ratings'][rating_field]
+
+                    # Log match counts for transparency
+                    match_count_a = idea_a.get(match_count_field, 0)
+                    match_count_b = idea_b.get(match_count_field, 0)
+                    print(f"Selected efficient pair: {idea_a.get('id')} (ELO: {elo_a}, Matches: {match_count_a}) vs {idea_b.get('id')} (ELO: {elo_b}, Matches: {match_count_b})")
+
+                    return idea_a, idea_b
+                else:
+                    # If no compatible ideas, remove idea_a from priority pool and try again
+                    priority_pool.remove(idea_a)
+                    failed_attempts += 1
+            except Exception as e:
+                print(f"Error selecting from priority pool: {e}")
+                # Fallback to random selection
+                if len(all_ideas) >= 2:
+                    idea_a, idea_b = random.sample(all_ideas, 2)
+                    return idea_a, idea_b
+                failed_attempts += 1
+        elif len(candidate_pool) >= 2:
+            try:
+                # Fallback to random selection from candidate pool
+                idea_a = random.choice(candidate_pool)
+
+                # Find ideas within ELO range
+                elo_a = idea_a['ratings'][rating_field]
+                compatible_ideas = [
+                    idea for idea in all_ideas
+                    if idea['id'] != idea_a['id'] and
+                    abs(idea['ratings'][rating_field] - elo_a) <= current_max_elo_diff
+                ]
+
+                if compatible_ideas:
+                    # Select a random compatible idea
+                    idea_b = random.choice(compatible_ideas)
+                    elo_b = idea_b['ratings'][rating_field]
+
+                    # Log match counts for transparency
+                    match_count_a = idea_a.get(match_count_field, 0)
+                    match_count_b = idea_b.get(match_count_field, 0)
+                    print(f"Selected efficient pair from candidate pool: {idea_a.get('id')} (ELO: {elo_a}, Matches: {match_count_a}) vs {idea_b.get('id')} (ELO: {elo_b}, Matches: {match_count_b})")
+
+                    return idea_a, idea_b
+                else:
+                    # If no compatible ideas, remove idea_a from candidate pool and try again
+                    candidate_pool.remove(idea_a)
+                    failed_attempts += 1
+            except Exception as e:
+                print(f"Error selecting from candidate pool: {e}")
+                # Fallback to random selection
+                if len(all_ideas) >= 2:
+                    idea_a, idea_b = random.sample(all_ideas, 2)
+                    return idea_a, idea_b
+                failed_attempts += 1
+        else:
+            try:
+                # Fallback to random selection if candidate pool is depleted
+                idea_a, idea_b = random.sample(all_ideas, 2)
+
+                # Get their ELO ratings
+                elo_a = idea_a['ratings'][rating_field]
+                elo_b = idea_b['ratings'][rating_field]
+
+                # Check if they're within the allowed ELO difference
+                if abs(elo_a - elo_b) <= current_max_elo_diff:
+                    print(f"Found suitable pair with ELO difference: {abs(elo_a - elo_b)}")
+                    return idea_a, idea_b
+                else:
+                    failed_attempts += 1
+            except Exception as e:
+                print(f"Error in random selection: {e}")
+                # Just pick any two ideas as a last resort
+                if len(all_ideas) >= 2:
+                    idea_a, idea_b = random.sample(all_ideas, 2)
+                    return idea_a, idea_b
+                failed_attempts += 1
+
+        # If we've tried too many times, just use any random pair
+        if failed_attempts >= max_failed_attempts * 2:
+            try:
+                idea_a, idea_b = random.sample(all_ideas, 2)
+                elo_a = idea_a['ratings'][rating_field]
+                elo_b = idea_b['ratings'][rating_field]
+                print(f"Using random pair with ELO difference {abs(elo_a - elo_b)} after {failed_attempts} failed attempts")
+                return idea_a, idea_b
+            except Exception as e:
+                print(f"Error in last resort selection: {e}")
+                # Absolute last resort - just pick the first two ideas
+                if len(all_ideas) >= 2:
+                    return all_ideas[0], all_ideas[1] if len(all_ideas) > 1 else all_ideas[0]
+                return None, None
+
+@app.post("/api/get-efficient-pair")
+async def get_efficient_pair(request: Request):
+    """Get an efficiently selected pair of ideas for manual rating"""
+    try:
+        data = await request.json()
+        evolution_id = data.get('evolution_id')
+        elo_range = data.get('elo_range', 100)
+
+        print(f"Getting efficient pair for evolution {evolution_id} with ELO range ±{elo_range}")
+
+        if not evolution_id:
+            raise HTTPException(status_code=400, detail="Evolution ID is required")
+
+        # Load the evolution data
+        file_path = DATA_DIR / f"{evolution_id}.json"
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Evolution not found")
+
+        with open(file_path) as f:
+            evolution_data = json.load(f)
+
+        # Collect all ideas from all generations, but only keep the latest version of each idea
+        all_ideas = []
+        idea_versions = {}  # Track the latest version of each idea
+
+        for generation in evolution_data.get('history', []):
+            for idea in generation:
+                # Initialize ratings and match counts if not present
+                if 'ratings' not in idea:
+                    idea['ratings'] = {'auto': 1500, 'manual': 1500}
+                elif isinstance(idea['ratings'], (int, float)):
+                    old_elo = idea['ratings']
+                    idea['ratings'] = {'auto': old_elo, 'manual': old_elo}
+                elif 'manual' not in idea['ratings']:
+                    idea['ratings']['manual'] = 1500
+
+                # Initialize match counts if not present
+                if 'match_count' not in idea:
+                    idea['match_count'] = 0
+                if 'manual_match_count' not in idea:
+                    idea['manual_match_count'] = 0
+                if 'auto_match_count' not in idea:
+                    idea['auto_match_count'] = 0
+
+                # Add ID if not present
+                if 'id' not in idea:
+                    idea['id'] = f"idea_{len(all_ideas)}"
+
+                # Always keep the latest version of each idea (overwrites previous versions)
+                idea_versions[idea['id']] = idea
+
+        # Convert to list of latest versions only
+        all_ideas = list(idea_versions.values())
+
+        # Log some sample match counts for debugging
+        print(f"Loaded {len(all_ideas)} ideas from file")
+        sample_ideas = all_ideas[:5]  # Show first 5 ideas
+        for i, idea in enumerate(sample_ideas):
+            print(f"  Sample idea {i+1} ({idea.get('id', 'no-id')}): manual_match_count={idea.get('manual_match_count', 0)}, manual_elo={idea.get('ratings', {}).get('manual', 1500)}")
+
+        if len(all_ideas) < 2:
+            raise HTTPException(status_code=400, detail="Not enough ideas for comparison")
+
+        # Select an efficient pair for manual rating
+        idea_a, idea_b = select_efficient_pair(all_ideas, rating_type='manual', max_elo_diff=elo_range)
+
+        if idea_a is None or idea_b is None:
+            raise HTTPException(status_code=500, detail="Failed to select suitable pair")
+
+        print(f"Selected pair: {idea_a.get('id')} (manual_match_count={idea_a.get('manual_match_count', 0)}) vs {idea_b.get('id')} (manual_match_count={idea_b.get('manual_match_count', 0)})")
+
+        return {
+            "idea_a": idea_a,
+            "idea_b": idea_b,
+            "status": "success"
+        }
+
+    except Exception as e:
+        print(f"Error in get_efficient_pair: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/debug/idea/{evolution_id}/{idea_id}")
+async def debug_idea_state(evolution_id: str, idea_id: str):
+    """Debug endpoint to check the current state of an idea"""
+    try:
+        # Load the evolution data
+        file_path = DATA_DIR / f"{evolution_id}.json"
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Evolution not found")
+
+        with open(file_path) as f:
+            evolution_data = json.load(f)
+
+        # Find the idea
+        found_idea = None
+        for generation in evolution_data.get('history', []):
+            for idea in generation:
+                if idea.get('id') == idea_id:
+                    found_idea = idea
+                    break
+            if found_idea:
+                break
+
+        if not found_idea:
+            raise HTTPException(status_code=404, detail="Idea not found")
+
+        return {
+            'id': found_idea.get('id'),
+            'title': found_idea.get('title', 'Untitled'),
+            'ratings': found_idea.get('ratings', {}),
+            'match_count': found_idea.get('match_count', 0),
+            'manual_match_count': found_idea.get('manual_match_count', 0),
+            'auto_match_count': found_idea.get('auto_match_count', 0),
+            'elo': found_idea.get('elo', 1500)
+        }
+
+    except Exception as e:
+        print(f"Error in debug_idea_state: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Run the server
 if __name__ == "__main__":

@@ -68,6 +68,42 @@
         border-bottom-right-radius: 4px;
       }
       /* Removed conflicting app-logo and app-header styles - now handled by external CSS */
+
+      /* Sorting styles */
+      .sortable-header {
+        cursor: pointer;
+        position: relative;
+        user-select: none;
+      }
+
+      .sortable-header:hover {
+        background-color: #f8f9fa;
+      }
+
+      .sort-arrow {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        opacity: 0.5;
+        font-size: 12px;
+      }
+
+      .sort-arrow.active {
+        opacity: 1;
+      }
+
+      .sort-arrow.desc::after {
+        content: "▼";
+      }
+
+      .sort-arrow.asc::after {
+        content: "▲";
+      }
+
+      .sort-arrow.inactive::after {
+        content: "⇅";
+      }
     </style>
   </head>
   <body>
@@ -127,6 +163,12 @@
 
             <!-- Manual Rating Controls -->
             <div id="manualRatingControls">
+              <label class="form-label">Manual Rating</label>
+              <div class="mb-3">
+                <label for="manualEloRange" class="form-label">ELO Matching Range (±)</label>
+                <input type="number" class="form-control" id="manualEloRange" value="100" min="0" max="500">
+                <small class="form-text text-muted">Ideas will be matched with others within this ELO range for more efficient comparisons</small>
+              </div>
               <label class="form-label">Vote</label>
               <button onclick="vote('A')" class="btn btn-primary w-100 mb-2 vote-btn">Vote for A</button>
               <button onclick="vote('B')" class="btn btn-primary w-100 mb-2 vote-btn">Vote for B</button>
@@ -226,11 +268,26 @@
                 <table class="table table-striped">
                   <thead>
                     <tr>
-                      <th>Rank</th>
-                      <th>Idea</th>
-                      <th>Elo</th>
-                      <th>Matches</th>
-                      <th>Generation</th>
+                      <th class="sortable-header" data-sort="rank">
+                        Rank
+                        <span class="sort-arrow inactive"></span>
+                      </th>
+                      <th class="sortable-header" data-sort="title">
+                        Idea
+                        <span class="sort-arrow inactive"></span>
+                      </th>
+                      <th class="sortable-header" data-sort="rating">
+                        Elo
+                        <span class="sort-arrow inactive"></span>
+                      </th>
+                      <th class="sortable-header" data-sort="matches">
+                        Matches
+                        <span class="sort-arrow inactive"></span>
+                      </th>
+                      <th class="sortable-header" data-sort="generation">
+                        Generation
+                        <span class="sort-arrow inactive"></span>
+                      </th>
                     </tr>
                   </thead>
                   <tbody id="rankingsTable">

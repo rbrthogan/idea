@@ -26,14 +26,14 @@ special_requirements: |
 prompts:
   context: |
     Generate a diverse list of 50 specific English words/concepts for creative writing inspiration. Mix concrete and abstract elements:
-    - SPECIFIC genres (noir, cosmic horror, slice-of-life, magical realism, cyberpunk, pastoral, etc.)
-    - CONCRETE settings (lighthouse, subway car, boarding school, space station, monastery, etc.)
-    - SPECIFIC character types (forensic accountant, street mime, lighthouse keeper, etc.)
-    - CONCRETE objects (music box, stethoscope, origami crane, etc.)
-    - UNUSUAL themes (impostor syndrome, collective memory, technological loneliness, etc.)
-    - SPECIFIC emotions (nostalgia, schadenfreude, saudade, etc.)
+    - SPECIFIC genres (noir, cosmic horror, slice-of-life, magical realism, western, historical, pastoral, comedy, etc.)
+    - CONCRETE settings (lighthouse, subway car, boarding school, space station, monastery, cafetaria, etc.)
+    - CHARACTER TYPES (single mother, desperate thief, up and coming sports star, firefighter, pensioner, a house cat, a pack mule, an ancient redwood tree, a talking dog, etc.)
+    - CONCRETE objects (music box, stethoscope, origami crane, a broken bicycle, a gas mask etc.)
+    - THEMES (loneliness, triumph, changing of the guard, betrayal, coming of age, revenge, personal growth, etc.)
+    - SPECIFIC emotions (nostalgia, schadenfreude, saudade, jealousy, embarrassment, etc.)
 
-    Avoid generic terms like "mystery", "fantasy", "love", "death", "hero", "conflict".
+    Don't just regurgitate this list, it is for illustration purposes only.
     Return the list as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
   specific_prompt: |

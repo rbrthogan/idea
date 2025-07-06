@@ -11,6 +11,7 @@ metadata:
 special_requirements: |
   The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
   The game complexity should similar in level to classic games like Breakout, Snake, Tetris, Pong, Pac-Man, Space Invaders, Frogger, Minesweeper, Tic Tac Toe, 2048, Wordle etc.
+  Ideally could be implemented in a few hundred lines of code.
   Avoid being derivative of these but limit the ambition to the level of complexity of these games.
   You should format your idea with enough specificity that a developer can implement it.
   The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate.
@@ -25,8 +26,8 @@ prompts:
     - CONCRETE objects (bouncing balls, sliding blocks, growing plants, melting ice, etc.)
     - UNIQUE genres (reverse tower defense, social deduction, asymmetric co-op, etc.)
     - DISTINCTIVE themes (microscopic world, paper craft, sound visualization, etc.)
-    - NOVEL interactions (breathing into microphone, eye tracking, rhythm tapping, etc.)
     - CREATIVE objectives (create harmony, spread rumors, solve mysteries, etc.)
+    - INTEREESTING varations on classic games (3D pong, bang bang with AI and more weapons, first person snake game, etc.)
 
     Avoid generic terms like "puzzle", "action", "shooting", "jumping", "collecting".
     Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
@@ -44,10 +45,11 @@ prompts:
 
   example_idea_prompts: |
     - "Design a puzzle game where the player manipulates gravity to solve challenges."
-    - "Create a concept for a role-playing game set in a world where music is magic."
-    - "Outline a strategy game where players build and manage a colony on Mars."
-    - "Design a mobile game that uses augmented reality to turn the real world into a fantasy RPG."
+    - "Create a concept for a platformer game set in a that utilises changing weather as a core mechanic."
+    - "Outline a strategy game where players control the immune system to fight off an infection."
+    - "Design a web browser game that puts a new twist on the classic breakout game."
     - "Create a narrative-driven game about a character who is losing their memories."
+    - "Create a spaceship shooter game where the player can control multiple ships at once."
 
   idea: |
     Your game design document must incorporate the following elements from the context pool:

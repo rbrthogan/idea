@@ -307,7 +307,7 @@ class Formatter(LLMWrapper):
 
     def __init__(self, **kwargs):
         # Use a default temperature only if not provided in kwargs
-        temp = kwargs.pop('temperature', 0.0)
+        temp = kwargs.pop('temperature', 1.0)
         top_p = kwargs.pop('top_p', 0.95)
         super().__init__(agent_name=self.agent_name, temperature=temp, top_p=top_p, **kwargs)
 
