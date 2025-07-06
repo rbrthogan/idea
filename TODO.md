@@ -14,6 +14,7 @@
 - Split evolution population into multiple "islands" of ideas, which are evolved independently with only rare opportunity for cross-island communication.
 - introduce a concept of mutation to the genotype
 - let the most different idea survive to the next generation (perhaps with a new mutation)
+- improve the tournament selection by using niching - group similar ideas to keep with each other -> maintain multiple directions of exploration -> similar to the "island" idea but more dynamic vs frozen in from the start.
 
 ## Bugs
 - When opening on "current evolution" the diversity chart initially appears with data but is then refreshed to empty. If saved it can be restored by selecting the saved evolution, but current evolution view should also work.
