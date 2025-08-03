@@ -415,6 +415,19 @@ function displayTemplateDetails(template, validation) {
                     </div>
                 </div>
             </div>
+
+            <div class="accordion-item">
+                <h2 class="accordion-header">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#genotypeEncodeDetail">
+                        <i class="fas fa-code me-2"></i>Genotype Encode Prompt
+                    </button>
+                </h2>
+                <div id="genotypeEncodeDetail" class="accordion-collapse collapse">
+                    <div class="accordion-body">
+                        <pre style="white-space: pre-wrap; font-size: 0.9rem;">${template.prompts.genotype_encode}</pre>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <h5 class="mt-5 mb-3"><i class="fas fa-balance-scale me-2"></i>Comparison Criteria</h5>
@@ -433,6 +446,9 @@ async function showCreateModal() {
     editMode = false;
     currentTemplateId = null;
     document.getElementById('editModalTitle').innerHTML = '<i class="fas fa-plus me-2"></i>Create New Template';
+
+    // Show the generate section for new templates
+    document.getElementById('generateSection').style.display = 'block';
 
     try {
         const response = await fetch('/api/templates/starter');
@@ -468,6 +484,9 @@ async function editTemplateBtn(templateId) {
     currentTemplateId = templateId;
     document.getElementById('editModalTitle').innerHTML = '<i class="fas fa-edit me-2"></i>Edit Template';
 
+    // Hide the generate section for editing existing templates
+    document.getElementById('generateSection').style.display = 'none';
+
     try {
         const response = await fetch(`/api/templates/${templateId}`);
         const data = await response.json();
@@ -498,11 +517,13 @@ function populateForm(template) {
     document.getElementById('specialRequirements').value = template.special_requirements || '';
 
     document.getElementById('contextPrompt').value = template.prompts?.context || '';
+    document.getElementById('specificPrompt').value = template.prompts?.specific_prompt || '';
     document.getElementById('ideaPrompt').value = template.prompts?.idea || '';
     document.getElementById('formatPrompt').value = template.prompts?.format || '';
     document.getElementById('critiquePrompt').value = template.prompts?.critique || '';
     document.getElementById('refinePrompt').value = template.prompts?.refine || '';
     document.getElementById('breedPrompt').value = template.prompts?.breed || '';
+    document.getElementById('genotypeEncodePrompt').value = template.prompts?.genotype_encode || '';
 
     // Populate criteria
     const criteriaContainer = document.getElementById('criteriaContainer');
@@ -524,6 +545,16 @@ function populateForm(template) {
 function clearForm() {
     document.getElementById('templateForm').reset();
     document.getElementById('criteriaContainer').innerHTML = '';
+
+    // Clear generation fields
+    document.getElementById('ideaTypeSuggestion').value = '';
+    document.getElementById('generateStatus').style.display = 'none';
+
+    // Reset generation section appearance
+    const generateSection = document.getElementById('generateSection');
+    generateSection.style.opacity = '1';
+    generateSection.style.transform = 'scale(1)';
+
     addCriterion();
 }
 
@@ -577,11 +608,13 @@ async function saveTemplate() {
             item_type: document.getElementById('templateItemType').value,
             special_requirements: document.getElementById('specialRequirements').value,
             context_prompt: document.getElementById('contextPrompt').value,
+            specific_prompt: document.getElementById('specificPrompt').value,
             idea_prompt: document.getElementById('ideaPrompt').value,
             format_prompt: document.getElementById('formatPrompt').value,
             critique_prompt: document.getElementById('critiquePrompt').value,
             refine_prompt: document.getElementById('refinePrompt').value,
             breed_prompt: document.getElementById('breedPrompt').value,
+            genotype_encode_prompt: document.getElementById('genotypeEncodePrompt').value,
             comparison_criteria: Array.from(document.querySelectorAll('input[name="criterion"]'))
                 .map(input => input.value.trim())
                 .filter(value => value.length > 0)
@@ -750,4 +783,95 @@ function showAlert(message, type) {
             }, 300);
         }
     }, 5000);
+}
+
+/**
+ * Generate template using AI (Gemini 2.5 Pro)
+ */
+async function generateTemplate() {
+    const ideaTypeSuggestion = document.getElementById('ideaTypeSuggestion').value.trim();
+
+    if (!ideaTypeSuggestion) {
+        showAlert('Please describe your idea type before generating a template.', 'warning');
+        document.getElementById('ideaTypeSuggestion').focus();
+        return;
+    }
+
+    const generateBtn = document.getElementById('generateTemplateBtn');
+    const statusDiv = document.getElementById('generateStatus');
+    const statusText = document.getElementById('generateStatusText');
+
+    // Show loading state
+    generateBtn.disabled = true;
+    generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Generating...';
+    statusDiv.style.display = 'block';
+    statusDiv.className = 'alert alert-info mt-3';
+    statusText.textContent = 'Generating template with Gemini 2.5 Pro... This may take a moment.';
+
+    try {
+        const response = await fetch('/api/templates/generate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                idea_type_suggestion: ideaTypeSuggestion
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            // Success - populate form with generated template
+            populateForm(data.template);
+
+            // Update status
+            statusDiv.className = 'alert alert-success mt-3';
+            statusText.textContent = data.message || 'Template generated successfully! Review and edit as needed.';
+
+            // Collapse the generation section to focus on editing
+            setTimeout(() => {
+                const generateSection = document.getElementById('generateSection');
+                generateSection.style.opacity = '0.5';
+                generateSection.style.transform = 'scale(0.98)';
+            }, 1000);
+
+            showAlert('Template generated successfully! Review and customize before saving.', 'success');
+        } else {
+            // Error
+            statusDiv.className = 'alert alert-danger mt-3';
+            statusText.textContent = data.message || 'Failed to generate template';
+            showAlert('Error generating template: ' + data.message, 'danger');
+        }
+    } catch (error) {
+        console.error('Error generating template:', error);
+        statusDiv.className = 'alert alert-danger mt-3';
+        statusText.textContent = 'Network error occurred while generating template';
+        showAlert('Error generating template: ' + error.message, 'danger');
+    } finally {
+        // Reset button
+        generateBtn.disabled = false;
+        generateBtn.innerHTML = '<i class="fas fa-magic me-1"></i>Generate Template';
+    }
+}
+
+/**
+ * Clear generation and reset form
+ */
+function clearGeneration() {
+    // Clear the generation input
+    document.getElementById('ideaTypeSuggestion').value = '';
+
+    // Hide status
+    document.getElementById('generateStatus').style.display = 'none';
+
+    // Reset generation section appearance
+    const generateSection = document.getElementById('generateSection');
+    generateSection.style.opacity = '1';
+    generateSection.style.transform = 'scale(1)';
+
+    // Clear the form
+    clearForm();
+
+    showAlert('Form cleared. Ready for new template generation.', 'info');
 }

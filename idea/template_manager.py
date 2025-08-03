@@ -13,6 +13,7 @@ from datetime import datetime
 
 from idea.prompts.loader import list_available_templates, validate_template
 from idea.prompts.validation import validate_template_file, TemplateValidator
+from idea.llm import LLMWrapper
 
 # Create router for template management
 router = APIRouter(prefix="/api/templates", tags=["templates"])
@@ -30,11 +31,13 @@ class TemplateCreateRequest(BaseModel):
     item_type: str = Field(..., description="Type of items generated")
     special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")
     context_prompt: str = Field(..., description="Context generation prompt")
+    specific_prompt: str = Field(..., description="Specific prompt generation from context")
     idea_prompt: str = Field(..., description="Idea generation prompt")
     format_prompt: str = Field(..., description="Format prompt")
     critique_prompt: str = Field(..., description="Critique prompt")
     refine_prompt: str = Field(..., description="Refine prompt")
     breed_prompt: str = Field(..., description="Breed prompt")
+    genotype_encode_prompt: str = Field(..., description="Genotype encoding prompt")
     comparison_criteria: List[str] = Field(..., description="Comparison criteria")
 
 
@@ -46,12 +49,19 @@ class TemplateUpdateRequest(BaseModel):
     item_type: Optional[str] = None
     special_requirements: Optional[str] = None
     context_prompt: Optional[str] = None
+    specific_prompt: Optional[str] = None
     idea_prompt: Optional[str] = None
     format_prompt: Optional[str] = None
     critique_prompt: Optional[str] = None
     refine_prompt: Optional[str] = None
     breed_prompt: Optional[str] = None
+    genotype_encode_prompt: Optional[str] = None
     comparison_criteria: Optional[List[str]] = None
+
+
+class TemplateGenerateRequest(BaseModel):
+    """Request model for generating a draft template"""
+    idea_type_suggestion: str = Field(..., description="Brief description of the idea type to generate a template for")
 
 
 def get_template_starter() -> Dict[str, Any]:
@@ -72,6 +82,10 @@ def get_template_starter() -> Dict[str, Any]:
             "context": "Generate a list of 50 concepts relevant to the domain. These concepts should include:\n"
                       "techniques, methods, objects, themes, styles, or approaches.\n"
                       "Return the list as: CONCEPTS:<concept1>, <concept2>, <concept3>...",
+            "specific_prompt": "From the following concepts, randomly select 2 or 3 that would create an interesting combination:\n\n"
+                              "{context_pool}\n\n"
+                              "Create a brief, focused prompt that combines these concepts in an interesting way.\n"
+                              "Your concise prompt:",
             "idea": "Using the above context for inspiration, generate a creative and innovative idea.\n"
                    "Keep it detailed enough to be useful but concise enough to be clear.\n"
                    "\n{requirements}",
@@ -92,7 +106,13 @@ def get_template_starter() -> Dict[str, Any]:
                     "This can be a combination of existing ideas or something completely new that they inspired.\n"
                     "Focus on originality and bringing something new to the table.\n"
                     "Think outside the box and be creative.\n"
-                    "\n{requirements}"
+                    "\n{requirements}",
+            "genotype_encode": "You are an expert at analyzing ideas and extracting their fundamental building blocks.\n"
+                              "Your task is to convert a full idea into its basic genetic elements (genotype).\n\n"
+                              "Extract the essential components that define this idea - strip away specific details and examples.\n"
+                              "Think of it as the 'DNA' of the idea.\n\n"
+                              "Format the genotype as a condensed list of basic elements, separated by semicolons.\n\n"
+                              "Idea to encode:\n{idea_content}\n\nGenotype:"
         },
         "comparison_criteria": [
             "originality and creativity",
@@ -196,11 +216,13 @@ async def create_template(request: TemplateCreateRequest):
             },
             "prompts": {
                 "context": request.context_prompt,
+                "specific_prompt": request.specific_prompt,
                 "idea": request.idea_prompt,
                 "format": request.format_prompt,
                 "critique": request.critique_prompt,
                 "refine": request.refine_prompt,
-                "breed": request.breed_prompt
+                "breed": request.breed_prompt,
+                "genotype_encode": request.genotype_encode_prompt
             },
             "comparison_criteria": request.comparison_criteria
         }
@@ -261,6 +283,8 @@ async def update_template(template_id: str, request: TemplateUpdateRequest):
         # Update prompts
         if request.context_prompt is not None:
             template_data["prompts"]["context"] = request.context_prompt
+        if request.specific_prompt is not None:
+            template_data["prompts"]["specific_prompt"] = request.specific_prompt
         if request.idea_prompt is not None:
             template_data["prompts"]["idea"] = request.idea_prompt
         if request.format_prompt is not None:
@@ -271,6 +295,8 @@ async def update_template(template_id: str, request: TemplateUpdateRequest):
             template_data["prompts"]["refine"] = request.refine_prompt
         if request.breed_prompt is not None:
             template_data["prompts"]["breed"] = request.breed_prompt
+        if request.genotype_encode_prompt is not None:
+            template_data["prompts"]["genotype_encode"] = request.genotype_encode_prompt
         if request.comparison_criteria is not None:
             template_data["comparison_criteria"] = request.comparison_criteria
 
@@ -378,3 +404,264 @@ async def validate_template_endpoint(template_id: str):
             "status": "error",
             "message": str(e)
         }, status_code=500)
+
+
+@router.post("/generate")
+async def generate_template(request: TemplateGenerateRequest):
+    """Generate a draft template using Gemini 2.5 Pro based on user's idea type suggestion"""
+    try:
+        # Get the existing 3 core templates as examples
+        example_templates = {}
+        for template_id in ['airesearch', 'drabble', 'game_design']:
+            template_path = TEMPLATES_DIR / f"{template_id}.yaml"
+            if template_path.exists():
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    example_templates[template_id] = yaml.safe_load(f)
+
+        if len(example_templates) < 3:
+            return JSONResponse({
+                "status": "error",
+                "message": "Unable to load all required example templates"
+            }, status_code=500)
+
+        # Create the few-shot prompt using existing templates
+        prompt = create_template_generation_prompt(request.idea_type_suggestion, example_templates)
+
+        # Use Gemini 2.5 Pro to generate the template
+        llm = LLMWrapper(
+            provider="google_generative_ai",
+            model_name="gemini-2.5-pro",
+            temperature=0.7,  # Balanced creativity and consistency
+            top_p=0.9
+        )
+
+        response = llm.generate_text(prompt)
+
+        # Parse the response into a template structure
+        generated_template = parse_generated_template(response, request.idea_type_suggestion)
+
+        return JSONResponse({
+            "status": "success",
+            "template": generated_template,
+            "message": "Draft template generated successfully. Please review and edit before saving."
+        })
+
+    except Exception as e:
+        print(f"Error generating template: {e}")
+        return JSONResponse({
+            "status": "error",
+            "message": f"Failed to generate template: {str(e)}"
+        }, status_code=500)
+
+
+def create_template_generation_prompt(idea_type_suggestion: str, example_templates: Dict[str, Any]) -> str:
+    """Create a few-shot prompt using existing templates as examples"""
+
+    # Format the examples
+    examples_text = ""
+    for template_id, template_data in example_templates.items():
+        examples_text += f"\n--- EXAMPLE {template_id.upper()} TEMPLATE ---\n"
+        examples_text += f"Name: {template_data['name']}\n"
+        examples_text += f"Description: {template_data['description']}\n"
+        examples_text += f"Item Type: {template_data['metadata']['item_type']}\n"
+
+        if 'special_requirements' in template_data:
+            examples_text += f"Special Requirements: {template_data['special_requirements']}\n"
+
+        examples_text += f"Context Prompt: {template_data['prompts']['context']}\n"
+        examples_text += f"Specific Prompt: {template_data['prompts']['specific_prompt']}\n"
+        examples_text += f"Idea Prompt: {template_data['prompts']['idea']}\n"
+        examples_text += f"Format Prompt: {template_data['prompts']['format']}\n"
+        examples_text += f"Critique Prompt: {template_data['prompts']['critique']}\n"
+        examples_text += f"Refine Prompt: {template_data['prompts']['refine']}\n"
+        examples_text += f"Breed Prompt: {template_data['prompts']['breed']}\n"
+        examples_text += f"Genotype Encode Prompt: {template_data['prompts']['genotype_encode']}\n"
+        examples_text += f"Comparison Criteria: {', '.join(template_data['comparison_criteria'])}\n"
+
+    # Create the main prompt
+    prompt = f"""You are an expert at creating prompt templates for AI idea generation systems. I will show you three existing templates as examples, and then ask you to create a new template based on a user's idea type suggestion.
+
+Here are the existing template examples:
+{examples_text}
+
+Now, please create a new template for the following idea type:
+"{idea_type_suggestion}"
+
+Guidelines:
+1. Follow the same structure as the examples above
+2. Create prompts that are specific to the requested idea type
+3. Make the context prompt generate 50 relevant concepts for that domain
+4. Make the specific_prompt create focused prompts from the context pool using {{context_pool}} placeholder
+5. Ensure the idea prompt incorporates context and includes {{requirements}} placeholder
+6. Make the format prompt include {{input_text}} placeholder
+7. Make the critique prompt include {{idea}} placeholder
+8. Make the refine prompt include {{idea}} and {{critique}} placeholders
+9. Make the breed prompt include {{ideas}} placeholder
+10. Make the genotype_encode prompt extract fundamental elements using {{idea_content}} placeholder
+11. Choose appropriate comparison criteria for evaluating ideas in this domain
+12. If the idea type has specific constraints (like word limits, format requirements, etc.), include them in special_requirements
+
+Please provide your response in this exact format:
+
+Name: [Template name]
+Description: [Template description]
+Item Type: [Type of items generated]
+Special Requirements: [Any special constraints or requirements, or "None" if not applicable]
+Context Prompt: [Context generation prompt]
+Specific Prompt: [Specific prompt creation - must include {{context_pool}}]
+Idea Prompt: [Idea generation prompt - must include {{requirements}}]
+Format Prompt: [Format prompt - must include {{input_text}}]
+Critique Prompt: [Critique prompt - must include {{idea}}]
+Refine Prompt: [Refine prompt - must include {{idea}} and {{critique}}]
+Breed Prompt: [Breed prompt - must include {{ideas}}]
+Genotype Encode Prompt: [Genotype encoding prompt - must include {{idea_content}}]
+Comparison Criteria: [Comma-separated list of criteria]
+
+Be creative and adapt the prompts to be highly relevant to the specific idea type requested."""
+
+    return prompt
+
+
+def parse_generated_template(response: str, idea_type_suggestion: str) -> Dict[str, Any]:
+    """Parse the LLM response into a template structure"""
+
+    template = {
+        "name": "Generated Template",
+        "description": f"AI-generated template for {idea_type_suggestion}",
+        "version": "1.0.0",
+        "author": "AI Assistant",
+        "created_date": datetime.now().strftime("%Y-%m-%d"),
+        "metadata": {
+            "item_type": idea_type_suggestion
+        },
+        "prompts": {},
+        "comparison_criteria": []
+    }
+
+    try:
+        lines = response.strip().split('\n')
+        current_field = None
+        current_content = []
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check for field headers
+            if line.startswith('Name:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'name'
+                current_content = [line[5:].strip()]
+            elif line.startswith('Description:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'description'
+                current_content = [line[12:].strip()]
+            elif line.startswith('Item Type:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'item_type'
+                current_content = [line[10:].strip()]
+            elif line.startswith('Special Requirements:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'special_requirements'
+                current_content = [line[21:].strip()]
+            elif line.startswith('Context Prompt:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'context_prompt'
+                current_content = [line[15:].strip()]
+            elif line.startswith('Specific Prompt:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'specific_prompt'
+                current_content = [line[16:].strip()]
+            elif line.startswith('Idea Prompt:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'idea_prompt'
+                current_content = [line[12:].strip()]
+            elif line.startswith('Format Prompt:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'format_prompt'
+                current_content = [line[14:].strip()]
+            elif line.startswith('Critique Prompt:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'critique_prompt'
+                current_content = [line[16:].strip()]
+            elif line.startswith('Refine Prompt:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'refine_prompt'
+                current_content = [line[14:].strip()]
+            elif line.startswith('Breed Prompt:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'breed_prompt'
+                current_content = [line[13:].strip()]
+            elif line.startswith('Genotype Encode Prompt:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'genotype_encode_prompt'
+                current_content = [line[23:].strip()]
+            elif line.startswith('Comparison Criteria:'):
+                if current_field:
+                    _save_field(template, current_field, current_content)
+                current_field = 'comparison_criteria'
+                current_content = [line[20:].strip()]
+            else:
+                # Continuation of current field
+                if current_field and line:
+                    current_content.append(line)
+
+        # Save the last field
+        if current_field:
+            _save_field(template, current_field, current_content)
+
+    except Exception as e:
+        print(f"Error parsing generated template: {e}")
+        # Return a basic template with error indication
+        template["name"] = f"Generated Template (Parse Error)"
+        template["description"] = f"AI-generated template for {idea_type_suggestion} - Please review and edit"
+
+    return template
+
+
+def _save_field(template: Dict[str, Any], field: str, content: List[str]):
+    """Helper function to save parsed field content to template"""
+    content_str = '\n'.join(content).strip()
+
+    if field == 'name':
+        template['name'] = content_str
+    elif field == 'description':
+        template['description'] = content_str
+    elif field == 'item_type':
+        template['metadata']['item_type'] = content_str
+    elif field == 'special_requirements':
+        if content_str.lower() not in ['none', 'n/a', 'not applicable', '']:
+            template['special_requirements'] = content_str
+    elif field == 'context_prompt':
+        template['prompts']['context'] = content_str
+    elif field == 'specific_prompt':
+        template['prompts']['specific_prompt'] = content_str
+    elif field == 'idea_prompt':
+        template['prompts']['idea'] = content_str
+    elif field == 'format_prompt':
+        template['prompts']['format'] = content_str
+    elif field == 'critique_prompt':
+        template['prompts']['critique'] = content_str
+    elif field == 'refine_prompt':
+        template['prompts']['refine'] = content_str
+    elif field == 'breed_prompt':
+        template['prompts']['breed'] = content_str
+    elif field == 'genotype_encode_prompt':
+        template['prompts']['genotype_encode'] = content_str
+    elif field == 'comparison_criteria':
+        # Split by comma and clean up
+        criteria = [c.strip() for c in content_str.split(',') if c.strip()]
+        template['comparison_criteria'] = criteria

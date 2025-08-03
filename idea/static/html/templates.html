@@ -402,6 +402,56 @@
                 </div>
                 <div class="modal-body">
                     <form id="templateForm">
+                        <!-- Generate Template Section -->
+                        <div class="card border-primary mb-4" id="generateSection">
+                            <div class="card-header bg-primary text-white">
+                                <h6 class="mb-0">
+                                    <i class="fas fa-magic me-2"></i>Generate Template with AI
+                                    <span class="badge bg-light text-primary ms-2">Gemini 2.5 Pro</span>
+                                </h6>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted mb-3">
+                                    Let AI generate a draft template based on your idea type. The AI will use our existing templates as examples to create a customized template for your specific needs.
+                                </p>
+
+                                <div class="mb-3">
+                                    <label for="ideaTypeSuggestion" class="form-label">
+                                        <i class="fas fa-lightbulb me-1"></i>Describe your idea type
+                                    </label>
+                                    <textarea class="form-control" id="ideaTypeSuggestion" rows="3"
+                                              placeholder="Brief description of the type of ideas you want to generate..."></textarea>
+                                    <div class="form-text">
+                                        <strong>Examples of good idea specifications:</strong>
+                                        <div class="mt-2">
+                                            <span class="badge bg-secondary me-1 mb-1">GPU-poor AI research proposals</span>
+                                            <span class="badge bg-secondary me-1 mb-1">100-word creative stories</span>
+                                            <span class="badge bg-secondary me-1 mb-1">Simple browser game designs</span>
+                                            <span class="badge bg-secondary me-1 mb-1">Mobile app concepts</span>
+                                            <span class="badge bg-secondary me-1 mb-1">Marketing campaign ideas</span>
+                                            <span class="badge bg-secondary me-1 mb-1">Recipe variations</span>
+                                            <span class="badge bg-secondary me-1 mb-1">Travel itineraries</span>
+                                            <span class="badge bg-secondary me-1 mb-1">Product design concepts</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="d-flex gap-2">
+                                    <button type="button" class="btn btn-primary" id="generateTemplateBtn" onclick="generateTemplate()">
+                                        <i class="fas fa-magic me-1"></i>Generate Template
+                                    </button>
+                                    <button type="button" class="btn btn-outline-secondary" onclick="clearGeneration()">
+                                        <i class="fas fa-eraser me-1"></i>Clear & Start Fresh
+                                    </button>
+                                </div>
+
+                                <div class="alert alert-info mt-3" style="display: none;" id="generateStatus">
+                                    <i class="fas fa-info-circle me-2"></i>
+                                    <span id="generateStatusText">Generation status will appear here</span>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Basic Information -->
                         <div class="row mb-4">
                             <div class="col-md-6">
@@ -489,14 +539,14 @@
                             <div class="accordion-item">
                                 <h2 class="accordion-header">
                                     <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
-                                            data-bs-target="#newIdeaPromptCollapse">
-                                        <i class="fas fa-plus-circle me-2"></i>New Idea Prompt
+                                            data-bs-target="#specificPromptCollapse">
+                                        <i class="fas fa-target me-2"></i>Specific Prompt
                                     </button>
                                 </h2>
-                                <div id="newIdeaPromptCollapse" class="accordion-collapse collapse">
+                                <div id="specificPromptCollapse" class="accordion-collapse collapse">
                                     <div class="accordion-body">
-                                        <textarea class="form-control" id="newIdeaPrompt" rows="4" required></textarea>
-                                        <div class="form-text">Generates new ideas from existing ones</div>
+                                        <textarea class="form-control" id="specificPrompt" rows="4" required></textarea>
+                                        <div class="form-text">Creates focused prompts from context pool - must include {context_pool} placeholder</div>
                                     </div>
                                 </div>
                             </div>
@@ -557,6 +607,21 @@
                                     <div class="accordion-body">
                                         <textarea class="form-control" id="breedPrompt" rows="4" required></textarea>
                                         <div class="form-text">Must include {ideas} placeholder</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="accordion-item">
+                                <h2 class="accordion-header">
+                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                            data-bs-target="#genotypeEncodePromptCollapse">
+                                        <i class="fas fa-code me-2"></i>Genotype Encode Prompt
+                                    </button>
+                                </h2>
+                                <div id="genotypeEncodePromptCollapse" class="accordion-collapse collapse">
+                                    <div class="accordion-body">
+                                        <textarea class="form-control" id="genotypeEncodePrompt" rows="4" required></textarea>
+                                        <div class="form-text">Must include {idea_content} placeholder - extracts fundamental elements for breeding</div>
                                     </div>
                                 </div>
                             </div>
