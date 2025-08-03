@@ -470,7 +470,7 @@ class EvolutionEngine:
                         global_id_to_index[global_population_idx] = global_population_idx
 
                 # Step 2: Allocate parent slots globally across entire population
-                print(f"\nAllocating parent slots across entire population...")
+                print("\nAllocating parent slots across entire population...")
                 global_parent_slots = self._allocate_parent_slots(global_ranks, ideas_to_breed)
 
                 # Step 3: Generate children using global parent selection

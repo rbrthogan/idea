@@ -61,7 +61,7 @@ comparison_criteria:
 ## Available Templates
 
 - **drabble.yaml**: Generate 100-word short stories
-- **airesearch.yaml**: Generate AI research proposals
+- **airesearch.yaml**: Generate GPU poor AI research proposals
 - **game_design.yaml**: Generate browser game design concepts
 
 ## Creating New Templates

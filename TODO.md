@@ -15,6 +15,7 @@
 - introduce a concept of mutation to the genotype
 - let the most different idea survive to the next generation (perhaps with a new mutation)
 - improve the tournament selection by using niching - group similar ideas to keep with each other -> maintain multiple directions of exploration -> similar to the "island" idea but more dynamic vs frozen in from the start.
+- There is still too much dependency on the intital context prompt - similar themes are often generated --> inject more true randomness e.g return to original idea of random words but now just augment the prompt with these random words. Or ideally something better.
 
 ## Bugs
 - When opening on "current evolution" the diversity chart initially appears with data but is then refreshed to empty. If saved it can be restored by selecting the saved evolution, but current evolution view should also work.

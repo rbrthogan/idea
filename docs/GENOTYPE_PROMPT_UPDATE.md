@@ -5,7 +5,7 @@
 ### 1. Updated Core Template Files
 Added domain-specific genotype prompts to all existing templates:
 
-- **`airesearch.yaml`**: AI research-focused genotype prompts targeting techniques, domains, applications, and methods
+- **`airesearch.yaml`**: GPU poor AI research-focused genotype prompts targeting efficient techniques, resource constraints, and feasible applications
 - **`game_design.yaml`**: Game design-focused genotype prompts targeting mechanics, genres, interactions, and objectives
 - **`drabble.yaml`**: Creative writing-focused genotype prompts targeting genres, conflicts, characters, and themes
 

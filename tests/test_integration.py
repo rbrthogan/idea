@@ -122,7 +122,7 @@ class TestSystemCompatibility:
         """Test that item types are consistent and appropriate"""
         expected_item_types = {
             'drabble': 'stories',
-            'airesearch': 'AI research proposals',
+            'airesearch': 'GPU poor AI research proposals',
             'game_design': 'game designs'
         }
 

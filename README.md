@@ -64,7 +64,7 @@ pytest
 
 Example YAML templates live in `idea/prompts/templates`:
 
-- `airesearch.yaml` – AI research proposals
+- `airesearch.yaml` – GPU poor AI research proposals
 - `game_design.yaml` – Browser game designs
 - `drabble.yaml` – 100‑word stories
 

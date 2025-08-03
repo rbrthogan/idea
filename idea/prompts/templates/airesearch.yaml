@@ -1,62 +1,92 @@
-name: "AI Research Proposals"
-description: "Generate novel AI research proposals and ideas"
+name: "GPU Poor AI Research Proposals"
+description: "Generate practical AI research proposals feasible for a single researcher with a single GPU"
 version: "1.0.0"
 author: "Original Idea App"
 created_date: "2024-01-15"
 
 metadata:
-  item_type: "AI research proposals"
+  item_type: "GPU poor AI research proposals"
 
 # Special requirements for this template type
 special_requirements: |
   The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate.
+  The research must be feasible for a single researcher with a single GPU (RTX 4090 or similar).
+  Focus on efficient methods, pre-trained models, and small-scale experiments.
   Also please include a title, returning:
   Title: [Your creative title]
   Content: [Your research proposal]
 
 prompts:
   context: |
-    Generate a diverse list of 50 specific AI research concepts. Mix cutting-edge and foundational elements:
-    - SPECIFIC techniques (few-shot learning, diffusion models, neural architecture search, etc.)
-    - CONCRETE applications (protein folding, autonomous navigation, music generation, etc.)
-    - EMERGING areas (neurosymbolic AI, quantum ML, AI safety, etc.)
-    - INTERDISCIPLINARY domains (computational biology, digital humanities, climate modeling, etc.)
-    - NOVEL architectures (transformers, graph neural networks, mixture of experts, etc.)
-    - EVALUATION methods (human preference learning, causal inference, robustness testing, etc.)
+    Generate a diverse list of 50 specific AI research concepts that are feasible with limited computational resources. Focus on efficiency and clever approaches rather than scale:
+    - EFFICIENT techniques (parameter-efficient fine-tuning, knowledge distillation, quantization, pruning, etc.)
+    - SMALL-SCALE applications (few-shot learning, meta-learning, transfer learning, data-efficient methods, online learning, online reinforcement learning, etc.)
+    - PRE-TRAINED model usage (adapting foundation models, prompt engineering, in-context learning, etc.)
+    - RESOURCE-CONSCIOUS domains (edge AI, mobile deployment, low-power inference, etc.)
+    - CLEVER architectures (MobileNets, EfficientNets, lightweight transformers, depthwise convolutions, etc.)
+    - EVALUATION methods (synthetic data generation, data augmentation, cross-validation, statistical analysis, etc.)
+    - ANALYSIS techniques (mechanistic interpretability, probing, attention visualization, gradient analysis, etc.)
+    - OPTIMIZATION approaches (learning rate scheduling, gradient accumulation, mixed precision, etc.)
 
-    Avoid generic terms like "deep learning", "AI", "machine learning", "neural networks", "classification".
+    Avoid resource-intensive terms like "large-scale training", "distributed computing", "massive datasets", "foundation model training".
+    Focus on concepts that leverage existing resources cleverly rather than requiring massive compute.
     Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
   specific_prompt: |
-    From the following AI research concepts, randomly select 2 or 3 that would create an interesting combination and create a single concise research request:
+    From the following AI research concepts, randomly select 2 or 3 that would create an interesting combination for a GPU-poor research project:
 
     {context_pool}
 
-    SELECTION STRATEGY: Pick concepts that create surprising interdisciplinary connections. Avoid obvious pairings like "neural networks + computer vision". Look for unusual cross-domain combinations.
+    SELECTION STRATEGY: Pick concepts that create feasible research projects for a single researcher with one GPU. Examples include:
+    - Leveraging pre-trained models efficiently
+    - Novel evaluation or analysis methods
+    - Parameter-efficient adaptations
+    - Creative use of limited data
+    - Interpretability and understanding
+    - Toy problems for novel techniques
+    - Techniques that generate synthetic data
 
-    Create a brief research direction like: "Develop research combining [technique] with [application area] to address [problem/challenge]."
+    Create a brief research direction like: "Investigate [efficient technique] for [specific application] using [resource-conscious approach]."
 
-    Avoid adding too many concepts that would make the request to complex.
+    Ensure the research can be completed with:
+    - Single GPU (RTX 4090 or similar)
+    - [Optionally] Pre-trained models as starting points if appropriate
+    - Small to medium datasets
+    - 3-6 month timeline for one researcher
 
     Your concise research prompt:
 
   example_idea_prompts: |
-    - "Develop a research proposal on using generative adversarial networks (GANs) for creating realistic synthetic data for training autonomous vehicles."
-    - "Propose a new method for explainable AI (XAI) in medical diagnosis, focusing on transformer models."
-    - "Investigate the use of reinforcement learning for optimizing supply chain management in a post-pandemic world."
-    - "Explore the intersection of AI and art, creating a system that can generate novel pieces of music in the style of a given composer."
-    - "Design a study to assess the ethical implications of using AI in hiring and recruitment processes."
+    - "Write a proposal for parameter-efficient fine-tuning of pre-trained vision transformers for medical image classification with limited labeled data."
+    - "Write a proposal for developing interpretability methods for understanding how pre-trained language models process scientific text using attention visualization."
+    - "Write a proposal for exploring few-shot learning approaches for adapting pre-trained speech models to low-resource languages using meta-learning."
+    - "Write a proposal for studying knowledge distillation techniques for compressing large multimodal models to run efficiently on edge devices."
+    - "Write a proposal for analyzing the effectiveness of synthetic data generation for training small-scale computer vision models in specialized domains."
+    - "Write a proposal for dataset curation based on pruning of redundant data using teacher-student learning dynamics."
 
   idea: |
-    Your research proposal must incorporate 3-4 specific concepts from the context above as foundational elements. Choose concepts that create interesting intersections or novel combinations.
+    Your research proposal must incorporate 3-4 specific concepts from the context above as foundational elements. Choose concepts that create interesting intersections while remaining feasible for single-GPU research.
 
-    Develop a research proposal where the methodology, problem domain, and expected contributions all stem from these chosen context elements.
+    Develop a research proposal where the methodology emphasizes:
+    - Efficient use of computational resources
+    - Leveraging pre-trained models and transfer learning
+    - Creative approaches to limited data scenarios
+    - Novel evaluation methods that don't require massive datasets
+    - Techniques that can be implemented and tested on a single GPU
+
+    The proposal should be scoped for a single researcher working 3-6 months with one high-end consumer GPU.
 
     {requirements}
 
   format: |
     Take the following idea and rewrite it in a clear,
     structured format. The content of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate:
+
+    Ensure the proposal clearly addresses:
+    - Computational feasibility (single GPU constraints)
+    - Use of pre-trained models or efficient architectures
+    - Expected dataset sizes and sources
+    - Timeline and resource requirements
 
     The input may be in the format:
     Title: [title text]
@@ -69,13 +99,20 @@ prompts:
 
 
   critique: |
-    You are a helpful AI that refines ideas.
+    You are a helpful AI that refines ideas for GPU-poor research.
     Current Idea:
     {idea}
 
-    Please consider the above proposal. Offer critical feedback.
-    Pointing out potential pitfalls as well as strengths. If the idea doesn't have a clear structure,
-    or sufficient detail, please suggest how to improve it and ask for elaboration of specific points of interest.
+    Please consider the above proposal with specific attention to computational feasibility. Offer critical feedback on:
+    - Whether it's truly feasible with a single GPU
+    - If it relies too heavily on large-scale computation or data
+    - Whether the timeline and scope are realistic for one researcher
+    - If it leverages pre-trained models and efficient techniques appropriately
+    - Potential pitfalls related to resource constraints as well as strengths
+    - Whether the idea is novel and interesting
+
+    If the idea doesn't have sufficient detail about computational requirements or feasibility,
+    please suggest how to improve it and ask for elaboration on resource usage.
     No additional text, just the critique.
 
   refine: |
@@ -86,9 +123,13 @@ prompts:
 
     Please review both, consider your own opinion and create your own proposal.
     This could be a refinement of the original proposal or a fresh take on it.
+    Ensure the refined proposal is explicitly feasible for single-GPU research:
+    - Has realistic data and computational requirements
+    - Can be completed in 3-6 months by one researcher
+
     No additional text, just the refined idea on its own.
     Try have a sensible structure to the idea with markdown headings.
-    It should be sufficient detailed to convey main idea to someone in the field.
+    It should be sufficiently detailed to convey the main idea and feasibility constraints.
 
     {requirements}
 
@@ -104,14 +145,15 @@ prompts:
     - Targets application domains not heavily covered
     - Addresses research questions that emerge from combining diverse elements in novel ways
 
-    Focus on research directions that maximize novelty while maintaining technical soundness.
+    Focus on research directions that maximize novelty while maintaining strict feasibility for single-GPU research.
+    The proposal must be completable by one researcher in 3-6 months with consumer hardware.
 
     {requirements}
 
 # Note: Comparison prompt is now generated dynamically from comparison_criteria
 
   genotype_encode: |
-    You are an expert at analyzing AI research proposals and extracting their fundamental building blocks. Your task is to convert a full research proposal into its basic genetic elements (genotype).
+    You are an expert at analyzing GPU-poor AI research proposals and extracting their fundamental building blocks. Your task is to convert a full research proposal into its basic genetic elements (genotype).
 
     For AI research proposals, the genotype should capture the essential components:
     - Core AI technique/method (e.g., "neural networks", "reinforcement learning", "transformer architecture")
@@ -125,9 +167,13 @@ prompts:
 
     Format the genotype as a condensed list of these basic elements, separated by semicolons.
 
-    Example:
+    Example 1:
     Input: "A novel transformer architecture for multi-modal medical image analysis that combines CT and MRI scans to improve diagnostic accuracy for neurological conditions using attention-based fusion mechanisms"
     Output: "transformer architecture; multi-modal learning; medical imaging; CT scans; MRI scans; attention fusion; neurological diagnosis; diagnostic accuracy"
+
+    Example 2:
+       Input: "Parameter-efficient fine-tuning of pre-trained vision transformers for few-shot medical image classification using LoRA adapters on a single RTX 4090"
+    Output: "parameter-efficient fine-tuning; LoRA adapters; vision transformer; few-shot learning; medical imaging; single GPU; transfer learning"
 
     Research proposal to encode:
     {idea_content}
@@ -136,7 +182,7 @@ prompts:
 
 
 comparison_criteria:
+  - "computational feasibility and resource efficiency for single GPU researcher"
   - "originality and novelty"
   - "potential impact and significance"
-  - "feasibility and practicality"
   - "clarity and coherence"

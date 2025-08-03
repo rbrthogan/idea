@@ -17,7 +17,7 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
     Load prompts for the specified idea type
 
     Args:
-        idea_type (str): Type of idea (airesearch, game_design, drabble)
+        idea_type (str): Type of idea (airesearch [GPU poor AI research], game_design, drabble)
         use_yaml (bool): Whether to prefer YAML templates over Python modules
 
     Returns:
