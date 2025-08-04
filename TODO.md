@@ -5,11 +5,6 @@
 - Add an Idea type that focuses on field cross-pollination, e.g. "Idea from field X that could be applied to problem Y from field Z".
 - For slower models with high latency it seems like nothing is happening for a while, and a some more verbosity to the UI e.g. One line of grey text under the progress bar that reports the current log activity. e.g. "Generating initial context for idea x of y ... ", "rated limited, backing off for X seconds", etc. This will whizz by quickly for fast models, but be more visible for slow models.
 - Add download button for to charts (diversity and ELO ratings) to allow easy use later.
-- Add another diversity metric (inter-generation diversity; compute centroids of each generation and compute distance between them)
-- Move template management into the main page, next to "Use" have an "Edit" button that opens a modal with the templates with editor that is currently in the template management page.
-- Is "Idea Type" redundant? Seems to be "unknown" for all templates. Deprecate?
-- Add template search to main page also.
-- Deprecate the Template Management page.
 
 ## Research Ideas
 - Have an evolution variant to take human ratings as input during evolution

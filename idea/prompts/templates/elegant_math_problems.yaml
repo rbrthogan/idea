@@ -1,0 +1,229 @@
+name: Elegant Math Problems
+description: Generate interesting math problems solvable by high schoolers in under
+  5 minutes with elegant solutions
+version: 1.0.0
+author: AI Assistant
+created_date: '2025-08-04'
+metadata:
+  item_type: math problems
+prompts:
+  context: 'Generate a diverse list of 50 specific concepts for creating elegant high
+    school math problems. Mix fields and techniques:
+
+    - GEOMETRIC concepts (similar triangles, circle properties, Pythagorean triples,
+    geometric transformations like rotation/reflection, area dissection, 3D visualization,
+    vectors)
+
+    - ALGEBRAIC techniques (telescoping series, Vieta''s formulas, AM-GM inequality,
+    Cauchy-Schwarz, functional equations, polynomial roots, logarithms)
+
+    - NUMBER THEORY concepts (modular arithmetic, divisibility rules, prime factorization,
+    Diophantine equations, Fermat''s Little Theorem)
+
+    - COMBINATORICS concepts (pigeonhole principle, inclusion-exclusion, constructive
+    counting, coloring proofs, invariants)
+
+    - LOGIC/STRATEGY concepts (working backwards, considering extreme cases, proof
+    by contradiction, finding a pattern)
+
+    - PROBABILITY concepts (geometric probability, expected value, conditional probability)
+
+    Avoid overly complex or graduate-level topics. Focus on concepts that can be combined
+    in surprising ways.
+
+    Return the list as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>,
+    ....'
+  specific_prompt: 'From the following mathematical concepts, randomly select 2 or
+    3 that could be combined to create a single, elegant problem:
+
+    {context_pool}
+
+    SELECTION STRATEGY: Pick concepts from different mathematical fields that don''t
+    obviously belong together. The goal is to inspire a problem where the solution
+    is non-obvious. For example, a geometry problem solved with number theory, or
+    an algebra problem solved with a coloring argument.
+
+    Create a brief request like: "Create a geometry problem involving [concept 1]
+    whose solution uses the [concept 2]." or "Design a number theory problem about
+    [concept 1] that can be visualized using [concept 2]."
+
+    Your concise problem design prompt:'
+  idea: 'Your response must be a math problem and its corresponding elegant solution.
+    It must incorporate the following elements from the context pool:
+
+    {context_pool}
+
+    The problem must be:
+
+    - Solvable by a high school student.
+
+    - Designed to be solved in under 5 minutes.
+
+    - Have a solution that is insightful and elegant, avoiding brute-force calculation.
+
+    - Stated clearly and unambiguously.
+
+    {requirements}'
+  format: 'Please take this math problem and solution and format it correctly. The
+    input may or may not have a title.
+
+    The input may be in the format:
+
+    Title: [title text]
+
+    Problem: [problem text]
+
+    Solution: [solution text]
+
+    If no explicit title is provided, create an appropriate one based on the problem''s
+    content.
+
+    The output should be:
+
+    Title: [Your creative title]
+
+    Problem: [The problem statement]
+
+    Solution: [The elegant solution, explained step-by-step]
+
+    Input to format:
+
+    {input_text}'
+  critique: 'You are a seasoned math competition coach reviewing a problem for an
+    upcoming event.
+
+    Proposed Problem:
+
+    {idea}
+
+    Please provide a critical review of this problem. Focus on:
+
+    - **Clarity:** Is the problem statement unambiguous?
+
+    - **Difficulty:** Is it appropriately challenging for a high school student? Is
+    the "under 5 minutes" claim realistic?
+
+    - **Elegance:** Is the intended solution genuinely elegant, or is it a standard
+    procedure? Are there non-elegant brute-force solutions that are too easy?
+
+    - **Soundness:** Is the problem mathematically correct? Are there any unstated
+    assumptions?
+
+    - **Originality:** Is the problem interesting and fresh, or is it a minor variation
+    of a well-known classic?
+
+    Provide your feedback concisely. No additional text, just the critique.'
+  refine: 'Original Problem:
+
+    {idea}
+
+    Critique: {critique}
+
+    You are an expert problem designer. Review the original problem and the critique.
+    Now, create a refined version of the problem and its solution.
+
+    Your refined version should:
+
+    - Address the weaknesses identified in the critique (e.g., clarify wording, adjust
+    difficulty, enhance elegance).
+
+    - Preserve the core mathematical insight that made the original problem interesting.
+
+    - Adhere strictly to the requirements: high school level, <5 min solve time, elegant
+    solution.
+
+    No additional text, just the refined problem and solution.
+
+    {requirements}'
+  breed: '{ideas}
+
+    Analyze the above math problems to identify patterns:
+
+    1. Which mathematical fields (Geometry, Algebra, etc.) are most common?
+
+    2. Which specific concepts or solution tricks (e.g., AM-GM, pigeonhole principle)
+    are overused?
+
+    3. What types of problems are underrepresented (e.g., functional equations, geometric
+    probability)?
+
+    Based on your analysis, create a new, novel math problem that:
+
+    - Combines concepts from fields that were not previously combined.
+
+    - Uses an underrepresented technique or concept.
+
+    - Presents a familiar concept in a completely new context.
+
+    The new problem must still be solvable by a high schooler in under 5 minutes with
+    an elegant solution.
+
+    {requirements}'
+  genotype_encode: 'You are an expert mathematician skilled at deconstructing problems
+    to their core components. Your task is to convert a full math problem (including
+    its solution) into its basic genetic elements (genotype).
+
+    The genotype for a math problem should capture:
+
+    - Primary Math Field (e.g., "Geometry", "Algebra", "Number Theory")
+
+    - Secondary Math Field (The field the solution technique comes from, if different,
+    e.g., "Combinatorics")
+
+    - Key Concepts (The specific theorems or ideas needed, e.g., "Vieta''s Formulas",
+    "Similar Triangles", "Modular Arithmetic")
+
+    - Solution Technique (The core insight or trick, e.g., "Symmetry Argument", "Telescoping
+    Sum", "Invariance", "Geometric Transformation")
+
+    - Problem Type (What is being asked, e.g., "Find a value", "Proof", "Optimization",
+    "Locus")
+
+    - Required Knowledge (The high-school curriculum area, e.g., "Algebra II", "Pre-Calculus",
+    "Euclidean Geometry")
+
+    Extract only the most fundamental elements.
+
+    Example:
+
+    Input:
+
+    Problem: Find the area of the largest circle that can be inscribed in a sector
+    of a circle of radius 1 and angle 60 degrees.
+
+    Solution: The solution uses similar triangles formed by the center of the large
+    circle, the center of the inscribed circle, and the point of tangency. This sets
+    up a simple ratio to find the inscribed circle''s radius.
+
+    Output: "Geometry; Euclidean Geometry; Circles; Tangency; Similar Triangles; Ratio
+    Setup; Find a value"
+
+    Problem to encode:
+
+    {idea_content}
+
+    Genotype:'
+comparison_criteria:
+- Elegance of solution
+- Clarity of problem statement
+- Appropriateness for audience
+- Originality/Creativity
+- Feasibility (under 5 mins)
+special_requirements: 'The problem must be solvable by a typical high school student
+  (up to pre-calculus/basic calculus knowledge).
+
+  The solution should be "elegant" - meaning it relies on a clever insight, a beautiful
+  geometric argument, or a surprising algebraic trick, rather than tedious calculation
+  or brute force.
+
+  The problem statement must be clear, concise, and unambiguous.
+
+  The expected solve time for a prepared student should be under 5 minutes
+
+  Format your response as:
+
+  Title: [Your creative title]
+
+  Problem: [The problem statement]
+
+  Solution: [The elegant solution, explained step-by-step]'

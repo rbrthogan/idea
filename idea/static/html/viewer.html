@@ -389,6 +389,13 @@
                     </h6>
                   </div>
                   <div class="card-body">
+                    <!-- Warning about auto-generated templates -->
+                    <div class="alert alert-warning mb-3">
+                      <i class="fas fa-exclamation-triangle me-2"></i>
+                      <strong>Important:</strong> Templates have a large effect on evolution quality. This auto-generation is only meant to speed you up -
+                      please review and edit the generated prompts for best results.
+                    </div>
+
                     <div id="templatePreviewContent">
                       <!-- Template preview will be populated here -->
                     </div>
@@ -593,6 +600,7 @@
   <script>
     // State management
     let currentGeneratedTemplate = null;
+    let currentGeneratedTemplateId = null;  // Track if the generated template has been saved
     let currentMode = 'new'; // 'new' or 'evolution'
 
     document.addEventListener('DOMContentLoaded', function() {
@@ -860,6 +868,7 @@
 
         if (data.status === 'success') {
           currentGeneratedTemplate = data.template;
+          currentGeneratedTemplateId = null;  // Reset saved template tracking for new generation
           showTemplatePreview(data.template);
           hideStatus();
         } else {
@@ -909,6 +918,12 @@
     async function saveAndUseTemplate() {
       if (!currentGeneratedTemplate) return;
 
+      // If template was already saved, just select it
+      if (currentGeneratedTemplateId) {
+        selectNewTemplate(currentGeneratedTemplateId, currentGeneratedTemplate.name);
+        return;
+      }
+
       const btn = document.getElementById('saveTemplateBtn');
       const originalText = btn.innerHTML;
 
@@ -940,6 +955,9 @@
         const data = await response.json();
 
         if (data.status === 'success') {
+          // Track that this template has been saved
+          currentGeneratedTemplateId = data.template_id;
+
           showSimpleAlert(`Template "${currentGeneratedTemplate.name}" saved successfully!`, 'success');
 
           // Auto-select the new template
@@ -957,15 +975,27 @@
       }
     }
 
-    async function reviewAndEditTemplate() {
+        async function reviewAndEditTemplate() {
       if (!currentGeneratedTemplate) return;
 
-      // Store the template temporarily and redirect to template manager
-      sessionStorage.setItem('pendingTemplate', JSON.stringify(currentGeneratedTemplate));
-      showSimpleAlert('Opening template editor...', 'info');
+      // If template was already saved, set up as editing existing template
+      if (currentGeneratedTemplateId) {
+        currentEditingTemplateId = currentGeneratedTemplateId;
+        document.getElementById('templateEditModalTitle').innerHTML = '<i class="fas fa-edit me-2"></i>Edit Template';
+        document.getElementById('deleteTemplateMainPageBtn').style.display = 'inline-block';
+      } else {
+        // Set up as new template
+        currentEditingTemplateId = null;
+        document.getElementById('templateEditModalTitle').innerHTML = '<i class="fas fa-magic me-2"></i>Review Generated Template';
+        document.getElementById('deleteTemplateMainPageBtn').style.display = 'none';
+      }
 
-      // Open template manager in new tab with indication that there's a pending template
-      window.open('/templates?pending=true', '_blank');
+      // Populate the form with the generated template data
+      populateTemplateEditForm(currentGeneratedTemplate);
+
+      // Show the modal
+      const modal = new bootstrap.Modal(document.getElementById('templateEditModal'));
+      modal.show();
     }
 
     function selectNewTemplate(templateId, templateName) {
@@ -984,6 +1014,7 @@
       document.getElementById('ideaTypeInput').value = '';
       hideTemplatePreview();
       currentGeneratedTemplate = null;
+      currentGeneratedTemplateId = null;
 
       // Reload the existing templates to include the new one
       loadExistingTemplates();
@@ -1208,9 +1239,14 @@
 
         const data = await response.json();
 
-        if (data.status === 'success') {
+                if (data.status === 'success') {
           const modal = bootstrap.Modal.getInstance(document.getElementById('templateEditModal'));
           modal.hide();
+
+          // If this was a generated template being saved for the first time, track its ID
+          if (!currentEditingTemplateId && currentGeneratedTemplate) {
+            currentGeneratedTemplateId = data.template_id;
+          }
 
           // Reload templates to show changes
           await loadExistingTemplates();
