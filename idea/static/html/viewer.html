@@ -1038,8 +1038,11 @@
       const alertClass = type === 'error' ? 'danger' : type;
       const icon = type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle';
 
+      // Generate a unique ID for this alert
+      const alertId = 'alert-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+
       const alertHtml = `
-        <div class="alert alert-${alertClass} alert-dismissible fade show position-fixed"
+        <div id="${alertId}" class="alert alert-${alertClass} alert-dismissible fade show position-fixed"
              style="top: 20px; right: 20px; z-index: 9999; max-width: 400px;">
           <i class="fas fa-${icon} me-2"></i>${message}
           <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
@@ -1047,6 +1050,29 @@
       `;
 
       document.body.insertAdjacentHTML('beforeend', alertHtml);
+
+      // Auto-dismiss after 4 seconds
+      const timeoutId = setTimeout(() => {
+        const alertElement = document.getElementById(alertId);
+        if (alertElement) {
+          // Use Bootstrap's fade out animation
+          alertElement.classList.remove('show');
+          // Remove from DOM after animation completes
+          setTimeout(() => {
+            if (alertElement.parentNode) {
+              alertElement.parentNode.removeChild(alertElement);
+            }
+          }, 150); // Bootstrap fade transition is 150ms
+        }
+      }, 4000);
+
+      // Clear timeout if user manually closes the alert
+      const alertElement = document.getElementById(alertId);
+      if (alertElement) {
+        alertElement.addEventListener('closed.bs.alert', () => {
+          clearTimeout(timeoutId);
+        });
+      }
     }
     // Template editing functions for main page
     let currentEditingTemplateId = null;
