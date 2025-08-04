@@ -85,10 +85,7 @@ def serve_rater(request: Request):
     """Serves the rater page"""
     return templates.TemplateResponse("rater.html", {"request": request, "api_key_missing": API_KEY_MISSING})
 
-@app.get("/templates")
-def serve_template_manager(request: Request):
-    """Serves the template management page"""
-    return templates.TemplateResponse("templates.html", {"request": request, "api_key_missing": API_KEY_MISSING})
+
 
 @app.get("/api/template-types")
 async def get_template_types():
