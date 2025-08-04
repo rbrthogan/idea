@@ -23,7 +23,7 @@
 
   <style>
     .controls-panel {
-      width: 300px;  /* Made wider for configuration controls */
+      width: 300px;
       padding: 20px;
       background: #f8f9fa;
       border-right: 1px solid #dee2e6;
@@ -34,7 +34,7 @@
     .main-content {
       flex: 1;
       padding: 20px;
-      margin-left: 300px;  /* Match sidebar width */
+      margin-left: 300px;
     }
     .layout-container {
       display: flex;
@@ -84,7 +84,7 @@
     .context-wrapper p {
       margin: 0;
       line-height: 1.4;
-      white-space: pre-wrap; /* Preserve line breaks but wrap text */
+      white-space: pre-wrap;
     }
     .context-navigation {
       margin-top: 0.5rem;
@@ -101,16 +101,49 @@
       border-radius: 4px;
       border: 1px solid rgba(0,0,0,.125);
       padding: 1rem;
+      min-height: 600px;
     }
-    .context-section {
-      border-bottom: 1px solid #dee2e6;
+
+    /* Template Entry Section - Clean and Simple */
+    .template-entry-section {
+      margin-bottom: 2rem;
     }
-    .section-title {
-      font-size: 1rem;
-      font-weight: 500;
+
+    .entry-card {
+      background: white;
+      border: 1px solid #dee2e6;
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .entry-card h3 {
+      color: #495057;
       margin-bottom: 0.5rem;
+      font-size: 1.25rem;
     }
-    /* Removed conflicting app-logo and app-header styles - now handled by external CSS */
+
+    .entry-input {
+      border: 1px solid #ced4da;
+      border-radius: 4px;
+      font-size: 1rem;
+    }
+
+    .entry-input:focus {
+      border-color: #007bff;
+      box-shadow: 0 0 0 0.2rem rgba(0,123,255,0.25);
+    }
+
+    .example-link {
+      color: #007bff;
+      cursor: pointer;
+      text-decoration: underline;
+      margin-right: 1rem;
+    }
+
+    .example-link:hover {
+      color: #0056b3;
+    }
   </style>
 </head>
 <body>
@@ -151,9 +184,14 @@
 
         <!-- Evolution selector -->
         <div class="controls-section">
-          <label class="form-label">Evolution</label>
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <label class="form-label mb-0">Evolution History</label>
+            <button class="btn btn-sm btn-outline-primary" id="newEvolutionBtn" style="display: none;">
+              <i class="fas fa-plus me-1"></i>New
+            </button>
+          </div>
           <select id="evolutionSelect" class="form-select mb-3">
-            <option value="">Current Evolution</option>
+            <option value="">Select a previous evolution...</option>
           </select>
         </div>
 
@@ -163,10 +201,11 @@
 
           <!-- Idea Type Selection -->
           <div class="mb-3">
-            <label for="ideaType" class="form-label">Idea Type</label>
-            <select id="ideaType" class="form-select">
-              <!-- Templates will be loaded dynamically -->
-            </select>
+            <label for="ideaTypeDisplay" class="form-label">Selected Template</label>
+            <div class="form-control bg-light" id="ideaTypeDisplay" style="color: #6c757d; font-style: italic;">
+              No template selected
+            </div>
+            <input type="hidden" id="ideaType" value="">
           </div>
           <div class="mb-3">
             <label for="modelType" class="form-label">Model Type</label>
@@ -305,6 +344,98 @@
           <h1>Open-Ended Idea Evolution</h1>
         </div>
 
+        <!-- Template Generation Entry Point -->
+        <div id="templateEntry" class="template-entry-section">
+          <div class="entry-card">
+            <h3>
+              <i class="fas fa-magic me-2"></i>
+              What kind of ideas do you want to generate?
+            </h3>
+
+            <div class="entry-form">
+              <textarea
+                class="form-control entry-input"
+                id="ideaTypeInput"
+                placeholder="Describe the ideas you want to generate and evolve, specifying any important constraints and/or evaluation criteria"
+                rows="3"
+              ></textarea>
+
+              <div class="entry-actions mt-3">
+                <button class="btn btn-primary" id="generateTemplateBtn">
+                  <i class="fas fa-magic me-2"></i>Generate Evolution Template
+                </button>
+                <div class="entry-examples mt-2">
+                  <small class="text-muted">
+                    <strong>Try:</strong>
+                    <span class="example-link" onclick="setEntryText('Arduino project tutorials for beginners using only common components under $20')">Arduino projects</span>
+                    <span class="example-link" onclick="setEntryText('Data visualization concepts that explain climate trends in under 60 seconds')">Climate visualizations</span>
+                    <span class="example-link" onclick="setEntryText('Math problems solvable by high schoolers in under 5 minutes with elegant solutions')">Math problems</span>
+                    <span class="example-link" onclick="setEntryText('Python code optimization tips demonstrable in under 10 lines of code')">Code optimizations</span>
+                    <span class="example-link" onclick="setEntryText('Home science experiments using only kitchen materials and measurable results')">Kitchen science</span>
+                  </small>
+                </div>
+              </div>
+
+              <!-- Generation Status -->
+              <div id="generationStatus" class="mt-3" style="display: none;">
+                <div class="alert" id="statusAlert">
+                  <span id="statusText"></span>
+                </div>
+              </div>
+
+              <!-- Template Preview Section -->
+              <div id="templatePreview" class="mt-4" style="display: none;">
+                <div class="card">
+                  <div class="card-header bg-success text-white">
+                    <h6 class="mb-0">
+                      <i class="fas fa-check-circle me-2"></i>
+                      Template Generated Successfully!
+                    </h6>
+                  </div>
+                  <div class="card-body">
+                    <div id="templatePreviewContent">
+                      <!-- Template preview will be populated here -->
+                    </div>
+                    <div class="template-actions mt-3">
+                      <button class="btn btn-primary me-2" id="saveTemplateBtn">
+                        <i class="fas fa-save me-2"></i>Save & Use Template
+                      </button>
+                      <button class="btn btn-outline-secondary" id="reviewEditBtn">
+                        <i class="fas fa-edit me-2"></i>Review & Edit
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Existing Templates Section -->
+          <div id="existingTemplates" class="mt-4" style="display: none;">
+            <div class="entry-card">
+              <h5 class="mb-3">
+                <i class="fas fa-folder-open me-2"></i>
+                Or choose from existing templates:
+              </h5>
+              <div class="table-responsive">
+                <table class="table table-hover">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Template Name</th>
+                      <th>Description</th>
+                      <th>Item Type</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="templatesTableBody">
+                    <!-- Templates will be loaded here -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Evolution content container -->
         <div class="evolution-content">
           <!-- Hidden context container that will be used by JavaScript -->
@@ -403,11 +534,10 @@
 
   <!-- Sidebar Toggle Script -->
   <script>
-    // Sidebar toggle functionality
+    // Simple sidebar toggle for mobile only
     document.addEventListener('DOMContentLoaded', function() {
       const sidebarToggle = document.getElementById('sidebarToggle');
       const controlsPanel = document.getElementById('controlsPanel');
-      const mainContent = document.getElementById('mainContent');
 
       function isMobile() {
         return window.innerWidth <= 576;
@@ -415,87 +545,382 @@
 
       sidebarToggle.addEventListener('click', function() {
         if (isMobile()) {
-          // On mobile, toggle the 'show' class for slide-in/out effect
           controlsPanel.classList.toggle('show');
-        } else {
-          // On desktop, toggle the 'collapsed' class for expand/collapse
-          controlsPanel.classList.toggle('collapsed');
-          mainContent.classList.toggle('sidebar-collapsed');
         }
 
-        // Update toggle button icon
+        // Update icon for mobile
         const icon = sidebarToggle.querySelector('i');
         if (isMobile()) {
-          // On mobile, always show hamburger when sidebar is hidden, X when shown
           if (controlsPanel.classList.contains('show')) {
             icon.className = 'fas fa-times';
           } else {
             icon.className = 'fas fa-bars';
           }
         } else {
-          // On desktop, show left arrow when expanded, right arrow when collapsed
-          if (controlsPanel.classList.contains('collapsed')) {
-            icon.className = 'fas fa-chevron-right';
-          } else {
-            icon.className = 'fas fa-chevron-left';
-          }
+          icon.className = 'fas fa-chevron-left';
         }
       });
 
-      // Handle window resize to reset states appropriately
-      window.addEventListener('resize', function() {
-        const icon = sidebarToggle.querySelector('i');
-
-        if (isMobile()) {
-          // Reset to mobile behavior
-          controlsPanel.classList.remove('collapsed');
-          mainContent.classList.remove('sidebar-collapsed');
-          if (!controlsPanel.classList.contains('show')) {
-            icon.className = 'fas fa-bars';
-          }
-        } else {
-          // Reset to desktop behavior
-          controlsPanel.classList.remove('show');
-          if (!controlsPanel.classList.contains('collapsed')) {
-            icon.className = 'fas fa-chevron-left';
-          }
-        }
-      });
-
-      // Initialize icon based on screen size
+      // Initialize icon
       const icon = sidebarToggle.querySelector('i');
-      if (isMobile()) {
-        icon.className = 'fas fa-bars';
-      } else {
-        icon.className = 'fas fa-chevron-left';
-      }
+      icon.className = isMobile() ? 'fas fa-bars' : 'fas fa-chevron-left';
+    });
+  </script>
+
+  <!-- Template Generation JavaScript -->
+  <script>
+    // State management
+    let currentGeneratedTemplate = null;
+    let currentMode = 'new'; // 'new' or 'evolution'
+
+    document.addEventListener('DOMContentLoaded', function() {
+      initializeInterface();
+
+      // Template generation event listeners
+      document.getElementById('generateTemplateBtn').addEventListener('click', handleTemplateGeneration);
+      document.getElementById('saveTemplateBtn').addEventListener('click', saveAndUseTemplate);
+      document.getElementById('reviewEditBtn').addEventListener('click', reviewAndEditTemplate);
+
+      // State management event listeners
+      document.getElementById('newEvolutionBtn').addEventListener('click', showNewEvolutionMode);
+      document.getElementById('evolutionSelect').addEventListener('change', handleEvolutionSelection);
+
+      // Enter key support
+      document.getElementById('ideaTypeInput').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          handleTemplateGeneration();
+        }
+      });
     });
 
-    // Generation collapse functionality
-    function toggleGeneration(generationId) {
-      const content = document.getElementById(`generation-content-${generationId}`);
-      const button = document.querySelector(`[onclick="toggleGeneration('${generationId}')"]`);
-      const icon = button.querySelector('i');
+    async function initializeInterface() {
+      // Start in new evolution mode
+      await showNewEvolutionMode();
+    }
 
-      if (content.style.display === 'none') {
-        content.style.display = 'block';
-        icon.className = 'fas fa-chevron-up';
-        button.setAttribute('aria-expanded', 'true');
-      } else {
-        content.style.display = 'none';
-        icon.className = 'fas fa-chevron-down';
-        button.setAttribute('aria-expanded', 'false');
+    async function showNewEvolutionMode() {
+      currentMode = 'new';
+
+      // Show template entry section
+      document.getElementById('templateEntry').style.display = 'block';
+
+      // Hide new evolution button
+      document.getElementById('newEvolutionBtn').style.display = 'none';
+
+      // Clear evolution selector
+      document.getElementById('evolutionSelect').value = '';
+
+      // Clear evolution content
+      document.getElementById('generations-container').innerHTML = '';
+      document.getElementById('diversity-plot-section').style.display = 'none';
+
+      // Load and show existing templates
+      await loadExistingTemplates();
+
+      // Clear any selected template in sidebar
+      const display = document.getElementById('ideaTypeDisplay');
+      display.textContent = 'No template selected';
+      display.style.color = '#6c757d';
+      display.style.fontStyle = 'italic';
+      display.classList.remove('bg-success', 'text-white');
+      display.classList.add('bg-light');
+      document.getElementById('ideaType').value = '';
+    }
+
+    async function showEvolutionMode(evolutionId = null) {
+      currentMode = 'evolution';
+
+      // Hide template entry section
+      document.getElementById('templateEntry').style.display = 'none';
+
+      // Show new evolution button
+      document.getElementById('newEvolutionBtn').style.display = 'inline-block';
+
+      // If viewing a specific evolution, load it
+      if (evolutionId) {
+        // This would load the historical evolution data
+        // For now, just show that we're in evolution mode
+        document.getElementById('generations-container').innerHTML = `
+          <div class="alert alert-info">
+            <i class="fas fa-info-circle me-2"></i>
+            Loading evolution ${evolutionId}... (Historical evolution viewing to be implemented)
+          </div>
+        `;
       }
     }
 
-    // Test script
-    console.log("Inline script test");
-    document.getElementById('startButton').onclick = function() {
-      console.log("Button clicked from inline script!");
+    function handleEvolutionSelection() {
+      const evolutionId = document.getElementById('evolutionSelect').value;
+
+      if (evolutionId) {
+        showEvolutionMode(evolutionId);
+      } else {
+        showNewEvolutionMode();
+      }
+    }
+
+    // Hook for viewer.js to call when evolution starts
+    window.onEvolutionStart = function() {
+      if (currentMode === 'new') {
+        showEvolutionMode();
+      }
     };
+
+    async function loadExistingTemplates() {
+      try {
+        const response = await fetch('/api/templates/');
+        const data = await response.json();
+
+        if (data.status === 'success') {
+          displayExistingTemplates(data.templates);
+          document.getElementById('existingTemplates').style.display = 'block';
+        }
+      } catch (error) {
+        console.error('Error loading templates:', error);
+      }
+    }
+
+    function displayExistingTemplates(templates) {
+      const tbody = document.getElementById('templatesTableBody');
+      tbody.innerHTML = '';
+
+      Object.entries(templates).forEach(([id, template]) => {
+        if (!template.error) {
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td>
+              <strong>${template.name || id}</strong>
+            </td>
+            <td>
+              <span class="text-muted">${(template.description || '').substring(0, 80)}${(template.description || '').length > 80 ? '...' : ''}</span>
+            </td>
+            <td>
+              <span class="badge bg-secondary">${template.metadata?.item_type || 'Unknown'}</span>
+            </td>
+            <td>
+              <button class="btn btn-sm btn-primary" onclick="selectExistingTemplate('${id}', '${template.name || id}')">
+                <i class="fas fa-arrow-right me-1"></i>Use
+              </button>
+            </td>
+          `;
+          tbody.appendChild(row);
+        }
+      });
+    }
+
+    function selectExistingTemplate(templateId, templateName) {
+      // Set the hidden field value
+      document.getElementById('ideaType').value = templateId;
+
+      // Update the display
+      const display = document.getElementById('ideaTypeDisplay');
+      display.textContent = templateName;
+      display.style.color = '#212529';
+      display.style.fontStyle = 'normal';
+      display.classList.remove('bg-light');
+      display.classList.add('bg-success', 'text-white');
+
+      // Scroll to configuration panel on mobile
+      if (window.innerWidth <= 768) {
+        document.getElementById('controlsPanel').scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+
+    function setEntryText(text) {
+      document.getElementById('ideaTypeInput').value = text;
+      document.getElementById('ideaTypeInput').focus();
+    }
+
+    async function handleTemplateGeneration() {
+      const ideaType = document.getElementById('ideaTypeInput').value.trim();
+
+      if (!ideaType) {
+        showSimpleAlert('Please describe the type of ideas you want to generate.', 'warning');
+        document.getElementById('ideaTypeInput').focus();
+        return;
+      }
+
+      const btn = document.getElementById('generateTemplateBtn');
+      const originalText = btn.innerHTML;
+
+      try {
+        // Show loading state
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
+        showStatus('Generating template with Gemini 2.5 Pro...', 'info');
+        hideTemplatePreview();
+
+        // Generate template
+        const response = await fetch('/api/templates/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idea_type_suggestion: ideaType })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+          currentGeneratedTemplate = data.template;
+          showTemplatePreview(data.template);
+          hideStatus();
+        } else {
+          showStatus('Error: ' + (data.message || 'Failed to generate template'), 'danger');
+        }
+      } catch (error) {
+        showStatus('Error: ' + error.message, 'danger');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
+    }
+
+    function showTemplatePreview(template) {
+      const preview = document.getElementById('templatePreview');
+      const content = document.getElementById('templatePreviewContent');
+
+      // Show key details about the generated template
+      content.innerHTML = `
+        <div class="row mb-3">
+          <div class="col-md-8">
+            <h5 class="text-success">${template.name}</h5>
+            <p class="text-muted mb-2">${template.description}</p>
+            <small class="text-muted">
+              <strong>Item Type:</strong> ${template.metadata.item_type} |
+              <strong>Criteria:</strong> ${template.comparison_criteria.slice(0, 2).join(', ')}${template.comparison_criteria.length > 2 ? '...' : ''}
+            </small>
+          </div>
+          <div class="col-md-4">
+            <div class="bg-light p-2 rounded">
+              <small class="text-muted">
+                <i class="fas fa-cog me-1"></i> Ready to save and use<br>
+                <i class="fas fa-edit me-1"></i> Or review and customize
+              </small>
+            </div>
+          </div>
+        </div>
+      `;
+
+      preview.style.display = 'block';
+    }
+
+    function hideTemplatePreview() {
+      document.getElementById('templatePreview').style.display = 'none';
+    }
+
+    async function saveAndUseTemplate() {
+      if (!currentGeneratedTemplate) return;
+
+      const btn = document.getElementById('saveTemplateBtn');
+      const originalText = btn.innerHTML;
+
+      try {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Saving...';
+
+        const response = await fetch('/api/templates/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: currentGeneratedTemplate.name,
+            description: currentGeneratedTemplate.description,
+            author: currentGeneratedTemplate.author,
+            item_type: currentGeneratedTemplate.metadata.item_type,
+            special_requirements: currentGeneratedTemplate.special_requirements || '',
+            context_prompt: currentGeneratedTemplate.prompts.context,
+            specific_prompt: currentGeneratedTemplate.prompts.specific_prompt,
+            idea_prompt: currentGeneratedTemplate.prompts.idea,
+            format_prompt: currentGeneratedTemplate.prompts.format,
+            critique_prompt: currentGeneratedTemplate.prompts.critique,
+            refine_prompt: currentGeneratedTemplate.prompts.refine,
+            breed_prompt: currentGeneratedTemplate.prompts.breed,
+            genotype_encode_prompt: currentGeneratedTemplate.prompts.genotype_encode,
+            comparison_criteria: currentGeneratedTemplate.comparison_criteria
+          })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+          showSimpleAlert(`Template "${currentGeneratedTemplate.name}" saved successfully!`, 'success');
+
+          // Auto-select the new template
+          setTimeout(() => {
+            selectNewTemplate(data.template_id, currentGeneratedTemplate.name);
+          }, 500);
+        } else {
+          showSimpleAlert('Error saving: ' + data.message, 'error');
+        }
+      } catch (error) {
+        showSimpleAlert('Error saving: ' + error.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
+    }
+
+    async function reviewAndEditTemplate() {
+      if (!currentGeneratedTemplate) return;
+
+      // Store the template temporarily and redirect to template manager
+      sessionStorage.setItem('pendingTemplate', JSON.stringify(currentGeneratedTemplate));
+      showSimpleAlert('Opening template editor...', 'info');
+
+      // Open template manager in new tab with indication that there's a pending template
+      window.open('/templates?pending=true', '_blank');
+    }
+
+    function selectNewTemplate(templateId, templateName) {
+      // Set the hidden field value
+      document.getElementById('ideaType').value = templateId;
+
+      // Update the display
+      const display = document.getElementById('ideaTypeDisplay');
+      display.textContent = templateName;
+      display.style.color = '#212529';
+      display.style.fontStyle = 'normal';
+      display.classList.remove('bg-light');
+      display.classList.add('bg-success', 'text-white');
+
+      // Clear the interface
+      document.getElementById('ideaTypeInput').value = '';
+      hideTemplatePreview();
+      currentGeneratedTemplate = null;
+
+      // Reload the existing templates to include the new one
+      loadExistingTemplates();
+    }
+
+    function showStatus(message, type) {
+      const statusDiv = document.getElementById('generationStatus');
+      const alertDiv = document.getElementById('statusAlert');
+      const textSpan = document.getElementById('statusText');
+
+      alertDiv.className = `alert alert-${type}`;
+      textSpan.innerHTML = message;
+      statusDiv.style.display = 'block';
+    }
+
+    function hideStatus() {
+      document.getElementById('generationStatus').style.display = 'none';
+    }
+
+    function showSimpleAlert(message, type) {
+      const alertClass = type === 'error' ? 'danger' : type;
+      const icon = type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle';
+
+      const alertHtml = `
+        <div class="alert alert-${alertClass} alert-dismissible fade show position-fixed"
+             style="top: 20px; right: 20px; z-index: 9999; max-width: 400px;">
+          <i class="fas fa-${icon} me-2"></i>${message}
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+      `;
+
+      document.body.insertAdjacentHTML('beforeend', alertHtml);
+    }
   </script>
 
-  <!-- Regular scripts -->
+  <!-- Include original viewer.js for evolution functionality -->
   <script src="/static/js/viewer.js"></script>
 </body>
 </html>

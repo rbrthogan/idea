@@ -12,6 +12,9 @@ let currentSearch = '';
 document.addEventListener('DOMContentLoaded', function() {
     showLoadingState();
     loadTemplates();
+
+    // Check for pending template from main interface
+    checkForPendingTemplate();
 });
 
 /**
@@ -874,4 +877,67 @@ function clearGeneration() {
     clearForm();
 
     showAlert('Form cleared. Ready for new template generation.', 'info');
+}
+
+/**
+ * Check if there's a pending template to edit from the main interface
+ */
+function checkForPendingTemplate() {
+    const pendingTemplate = sessionStorage.getItem('pendingTemplate');
+    const urlParams = new URLSearchParams(window.location.search);
+
+    if (pendingTemplate && urlParams.get('pending') === 'true') {
+        try {
+            const template = JSON.parse(pendingTemplate);
+
+            // Clear the session storage
+            sessionStorage.removeItem('pendingTemplate');
+
+            // Show create modal with the pending template
+            setTimeout(() => {
+                showCreateModalWithTemplate(template);
+            }, 500);
+
+        } catch (error) {
+            console.error('Error parsing pending template:', error);
+        }
+    }
+}
+
+/**
+ * Show create modal pre-populated with a template
+ */
+function showCreateModalWithTemplate(template) {
+    editMode = false;
+    currentTemplateId = null;
+    document.getElementById('editModalTitle').innerHTML = '<i class="fas fa-edit me-2"></i>Review & Edit Generated Template';
+
+    // Show the generate section but collapsed
+    const generateSection = document.getElementById('generateSection');
+    if (generateSection) {
+        generateSection.style.display = 'none';
+    }
+
+    // Populate with the generated template
+    populateForm(template);
+
+    // Add a notice about the generated template
+    const modal = document.getElementById('editModal');
+    const existingNotice = modal.querySelector('.generated-template-notice');
+    if (!existingNotice) {
+        const notice = document.createElement('div');
+        notice.className = 'alert alert-info generated-template-notice';
+        notice.innerHTML = `
+            <i class="fas fa-info-circle me-2"></i>
+            <strong>Generated Template:</strong> This template was created by AI. Review and customize as needed before saving.
+        `;
+
+        const modalBody = modal.querySelector('.modal-body');
+        modalBody.insertBefore(notice, modalBody.firstChild);
+    }
+
+    const bootstrapModal = new bootstrap.Modal(modal);
+    bootstrapModal.show();
+
+    showAlert('Generated template loaded for review. Customize as needed and save when ready.', 'success');
 }

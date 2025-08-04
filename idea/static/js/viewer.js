@@ -277,6 +277,11 @@ document.addEventListener("DOMContentLoaded", () => {
             // Reset UI state
             resetUIState();
 
+            // Hook for state management
+            if (window.onEvolutionStart) {
+                window.onEvolutionStart();
+            }
+
             // Update button states
             startButton.disabled = true;
             startButton.textContent = 'Running...';
