@@ -476,42 +476,63 @@ async function loadCurrentEvolution() {
     try {
         console.log("Loading current evolution...");
 
-        // First, check localStorage for current evolution data
-        const storedData = localStorage.getItem('currentEvolutionData');
-        if (storedData) {
-            try {
-                const evolutionState = JSON.parse(storedData);
-                console.log("Loaded evolution state from localStorage:", evolutionState);
+        // First check if there's actually an evolution running on the server
+        let shouldRestoreFromLocalStorage = false;
+        try {
+            const progressResponse = await fetch('/api/progress');
+            if (progressResponse.ok) {
+                const progressData = await progressResponse.json();
+                console.log("Evolution status from server:", progressData);
 
-                // Handle both old format (just history array) and new format (object with history and diversity_history)
-                let generationsData;
-                if (Array.isArray(evolutionState)) {
-                    // Old format - just the history array
-                    generationsData = evolutionState;
-                } else if (evolutionState && evolutionState.history) {
-                    // New format - object with history and diversity_history
-                    generationsData = evolutionState.history;
+                // Only restore localStorage data if evolution is actually running
+                if (progressData.is_running) {
+                    shouldRestoreFromLocalStorage = true;
                 } else {
-                    console.error("Invalid evolution data format");
-                    // Continue to API call if localStorage parsing fails
-                    throw new Error("Invalid evolution data format");
+                    console.log("No evolution is currently running, skipping localStorage restoration");
                 }
+            }
+        } catch (e) {
+            console.log("Could not check evolution status, skipping localStorage restoration:", e);
+        }
 
-                if (generationsData && generationsData.length > 0) {
-                    // Flatten all generations into a single array of ideas
-                    const ideas = generationsData.flat().map(idea => ({
-                        ...idea,
-                        id: generateUUID(),
-                        elo: 1500
-                    }));
-                                    console.log("Processed ideas from localStorage:", ideas);
-                await initializeRating(ideas, false);
-                await refreshPair(); // Ensure refreshPair is called
-                return; // Exit early if we successfully loaded from localStorage
+        // Check localStorage for current evolution data (only if evolution is running)
+        if (shouldRestoreFromLocalStorage) {
+            const storedData = localStorage.getItem('currentEvolutionData');
+            if (storedData) {
+                try {
+                    const evolutionState = JSON.parse(storedData);
+                    console.log("Loaded evolution state from localStorage:", evolutionState);
+
+                    // Handle both old format (just history array) and new format (object with history and diversity_history)
+                    let generationsData;
+                    if (Array.isArray(evolutionState)) {
+                        // Old format - just the history array
+                        generationsData = evolutionState;
+                    } else if (evolutionState && evolutionState.history) {
+                        // New format - object with history and diversity_history
+                        generationsData = evolutionState.history;
+                    } else {
+                        console.error("Invalid evolution data format");
+                        // Continue to API call if localStorage parsing fails
+                        throw new Error("Invalid evolution data format");
+                    }
+
+                    if (generationsData && generationsData.length > 0) {
+                        // Flatten all generations into a single array of ideas
+                        const ideas = generationsData.flat().map(idea => ({
+                            ...idea,
+                            id: generateUUID(),
+                            elo: 1500
+                        }));
+                        console.log("Processed ideas from localStorage:", ideas);
+                        await initializeRating(ideas, false);
+                        await refreshPair(); // Ensure refreshPair is called
+                        return; // Exit early if we successfully loaded from localStorage
+                    }
+                } catch (e) {
+                    console.error("Error parsing localStorage data:", e);
+                    // Continue to API call if localStorage parsing fails
                 }
-            } catch (e) {
-                console.error("Error parsing localStorage data:", e);
-                // Continue to API call if localStorage parsing fails
             }
         }
 

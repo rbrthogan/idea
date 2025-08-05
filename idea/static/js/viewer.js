@@ -419,6 +419,24 @@ async function restoreCurrentEvolution() {
     try {
         console.log("Attempting to restore current evolution from localStorage...");
 
+        // First check if there's actually an evolution running on the server
+        try {
+            const progressResponse = await fetch('/api/progress');
+            if (progressResponse.ok) {
+                const progressData = await progressResponse.json();
+                console.log("Evolution status from server:", progressData);
+
+                // Only restore if evolution is actually running
+                if (!progressData.is_running) {
+                    console.log("No evolution is currently running, skipping localStorage restoration");
+                    return false;
+                }
+            }
+        } catch (e) {
+            console.log("Could not check evolution status, skipping restoration:", e);
+            return false;
+        }
+
         // Check localStorage for current evolution data
         const storedData = localStorage.getItem('currentEvolutionData');
         if (storedData) {
