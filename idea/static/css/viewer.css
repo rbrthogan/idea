@@ -1709,6 +1709,69 @@ body::before {
   }
   }
 
+/* ==========================================
+   TEMPLATE ENTRY + GENERATOR SECTION
+   ========================================== */
+
+.template-entry-section {
+  margin-bottom: 2rem;
+}
+
+.entry-card {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.25rem 1rem 1.25rem;
+  box-shadow: var(--shadow-soft);
+  transition: var(--transition);
+}
+
+.entry-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+
+.entry-card h3 {
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.entry-input {
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 0.95rem;
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
+.entry-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(139, 124, 246, 0.12);
+}
+
+.entry-actions .btn {
+  box-shadow: var(--shadow-soft);
+}
+
+.entry-examples small {
+  color: var(--text-secondary);
+}
+
+.example-link {
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: none;
+  margin-right: 1rem;
+  font-weight: 600;
+}
+
+.example-link:hover {
+  color: var(--primary-dark);
+  text-decoration: underline;
+}
+
 /* Existing Templates Table */
 #existingTemplates .table {
   margin-bottom: 0;
