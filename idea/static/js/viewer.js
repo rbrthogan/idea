@@ -824,13 +824,13 @@ function renderGenerations(gens) {
 
             // Add "Prompt" button for initial generation cards
             const viewPromptButton = index === 0 ?
-                `<button class="btn btn-outline-info btn-sm view-prompt me-2" title="View Initial Prompt">
+                `<button class="btn btn-outline-info btn-sm view-prompt" title="View Initial Prompt">
                     <i class="fas fa-lightbulb"></i> Prompt
                 </button>` : '';
 
             // Add "Prompt" button for breeding generation cards (if we have breeding prompts)
             const breedingPromptButton = index > 0 ?
-                `<button class="btn btn-outline-info btn-sm view-breeding-prompt me-2" title="View Breeding Prompt">
+                `<button class="btn btn-outline-info btn-sm view-breeding-prompt" title="View Breeding Prompt">
                     <i class="fas fa-lightbulb"></i> Prompt
                 </button>` : '';
 
@@ -867,7 +867,7 @@ function renderGenerations(gens) {
             }
 
             const viewLineageButton = index > 0 ?
-                `<button class="btn btn-outline-secondary btn-sm ${buttonClass}" title="${buttonTitle}" style="margin-left: auto;">
+                `<button class="btn btn-outline-secondary btn-sm ${buttonClass}" title="${buttonTitle}">
                     ${buttonText}
                 </button>` : '';
 
@@ -2258,7 +2258,7 @@ function createAncestorCard(ancestor, index, ancestorType) {
                 <button class="btn btn-sm btn-primary view-ancestor-idea"
                     data-idea-index="${index}"
                     data-ancestor-type="${ancestorType}">
-                    View Full Idea
+                    <i class="fas fa-expand"></i> View Full Idea
                 </button>
             </div>
         </div>
