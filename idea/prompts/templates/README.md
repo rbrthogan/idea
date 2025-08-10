@@ -30,9 +30,8 @@ prompts:
     Prompt for generating initial ideas
     Can reference {requirements} for template-specific constraints
 
-  new_idea: |
-    Prompt for generating new ideas from existing ones
-    Can reference {requirements} for template-specific constraints
+  # (No separate new_idea key; new ideas during breeding are produced via
+  # context -> specific_prompt -> idea pipeline)
 
   format: |
     Prompt for formatting raw ideas
@@ -82,7 +81,7 @@ Templates are automatically validated when loaded. The system checks for:
 - Valid semantic versioning
 - Proper date formatting
 
-## Template Placeholders
+## Template Placeholders (required at authoring time)
 
 ### Required Placeholders
 - `{input_text}` in format prompts
@@ -90,8 +89,8 @@ Templates are automatically validated when loaded. The system checks for:
 - `{idea}` and `{critique}` in refine prompts
 - `{ideas}` in breed prompts
 
-### Optional Placeholders
-- `{requirements}` - Interpolates the special_requirements field
+### Optional Interpolation
+- `{requirements}` in idea/refine/breed prompts is replaced with the `special_requirements` block if present
 
 ## Special Requirements
 

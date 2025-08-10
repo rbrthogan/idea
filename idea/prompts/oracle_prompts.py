@@ -8,8 +8,8 @@ Your task is to GENERATE a new diverse idea to enrich the current generation wit
 ANALYSIS REQUIRED:
 1. Identify the most common patterns, themes, approaches, and methodologies across ALL generations
 2. Spot repetitive concepts, similar problem-solving approaches, or overused techniques
-3. Find gaps in the idea space that haven't been explored - not just a twist on what there's, think of valid idea that are completely disjoint from current ideas
-4. Generate a prompt for areplacement idea that deliberately avoids the overused patterns
+3. Find gaps in the idea space that haven't been explored — not just a twist on what's there; think of valid ideas that are completely disjoint from current ideas
+4. Generate a prompt for a replacement idea that deliberately avoids the overused patterns
 
 OUTPUT: Provide your analysis of patterns and your new diverse idea prompt that would add the most value to the population.
 """

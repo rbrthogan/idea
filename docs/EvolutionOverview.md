@@ -2,29 +2,26 @@
 
 This document describes the main algorithm implemented in `idea/evolution.py` and how the supporting components interact.
 
+![Evolution Engine Overview](evolution_overview.png)
 
 ## Key Components
 
 - **Ideator** (`llm.py`)
-  - Generates initial context and specific prompts for idea creation.
+  - Generates initial context and specific prompts; seeds Gen 0 ideas.
 - **Formatter** (`llm.py`)
-  - Cleans and structures raw ideas into `Idea` objects.
+  - Converts raw LLM output into structured `Idea` objects.
 - **Critic** (`llm.py`)
-  - Provides critique and refinement for ideas and runs pairwise comparisons.
+  - Critiques, refines, and runs pairwise comparisons; updates ELO.
 - **Breeder** (`llm.py`)
-  - Encodes ideas to a genotype, performs crossover and produces new ideas.
+  - Encodes to genotypes and breeds new ideas via a prompt‑driven pipeline.
 - **Oracle** (`llm.py`)
-  - Analyzes the whole population and proposes a new idea to increase diversity.
+  - Analyzes all generations and proposes a replacement prompt to diversify.
 - **DiversityCalculator** (`diversity.py`)
-  - Uses Gemini embeddings to measure population diversity and centroid distance.
+  - Uses Gemini embeddings for diversity metrics and centroid calculations.
 
 These agents are wrapped around Gemini models and share token accounting.
 
-Below is a simplified animation of the evolution loop described in this document.
-Each step is highlighted sequentially so you can follow how ideas move through
-the engine:
-
-![Evolution process animation](idea/static/img/evolution_process.gif)
+Below is a simplified outline of how ideas move through the engine each generation.
 
 ## Algorithm Flow
 
@@ -35,13 +32,13 @@ the engine:
    - Diversity metrics are computed for the initial population.
 
 2. **Evolution Loop** (`generations` iterations)
-   - **Tournament Ranking**: ideas are grouped and compared via the Critic to assign ELO ratings.
-   - **Parent Allocation**: `_allocate_parent_slots` distributes breeding opportunities based on rankings while capping dominance to maintain diversity.
-   - **Breeding**: selected parents are encoded to genotypes, combined and converted back to new ideas using Ideator and Breeder helper logic. Each child is refined and formatted.
-   - **Oracle Diversification**: after breeding, the Oracle inspects all generations and generates a new idea. It replaces the current idea closest to the population centroid.
-   - **Elite Selection**: the most diverse idea (farthest from the centroid) is marked and carried over unchanged into the next generation where it is simply refined and formatted.
-   - **Diversity Calculation**: after updates the DiversityCalculator records metrics and embeddings for the entire history.
-   - Progress updates are sent to the UI throughout the loop.
+   - **Tournament Ranking**: ideas are compared via the Critic to update ELO.
+   - **Parent Allocation**: `_allocate_parent_slots` caps dominance and spreads breeding chances.
+   - **Breeding**: parents → genotypes → context → specific prompt → new idea; then refine + format.
+   - **Oracle Diversification**: Oracle generates a replacement prompt; the least interesting idea (closest to the all‑history centroid) is replaced and then refined + formatted.
+   - **Creative Selection**: the most diverse idea (farthest from centroid) is preserved into the next generation and shown with a ⭐ in the UI.
+   - **Diversity Calculation**: metrics recorded every generation; embeddings cached.
+   - Progress updates go to the UI throughout.
 
 3. **Completion**
    - When all generations are finished (or a stop is requested) a final update is sent including diversity statistics and token counts for each agent.
@@ -66,6 +63,10 @@ Embeddings are cached so that centroid calculations across all generations are e
 
 Reading these files together will give a full picture of how ideas evolve over time.
 
-The animation in this document was generated with
-`scripts/generate_evolution_animation.py` which can be run to regenerate the GIF
-if needed.
+## Practical Tips
+
+- Use the Template section on the main page to generate or pick a template.
+- Increase creative temperature and top_p for more exploration; use Oracle + creative selection to avoid convergence.
+- Save results and use the Rater to compare runs; auto‑rating shows estimated LLM token costs.
+
+Note: the UI visualizes progress and diversity live.
