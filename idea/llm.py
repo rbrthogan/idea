@@ -11,6 +11,10 @@ import numpy as np
 from idea.models import Idea
 from idea.prompts.loader import get_prompts
 import uuid
+from collections import OrderedDict
+from hashlib import sha256
+import threading
+from idea.ratings import parallel_evaluate_pairs
 
 class LLMWrapper(ABC):
     """Base class for LLM interactions"""
@@ -22,8 +26,8 @@ class LLMWrapper(ABC):
                  prompt_template: str = "",
                  temperature: float = 1.0,
                  top_p: float = 0.95,
-                 agent_name: str = "",
-                 thinking_budget: Optional[int] = None):
+                  agent_name: str = "",
+                  thinking_budget: Optional[int] = None):
         self.provider = provider
         self.model_name = model_name
         self.prompt_template = prompt_template
@@ -36,6 +40,10 @@ class LLMWrapper(ABC):
         self.agent_name = agent_name
         print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, thinking_budget: {thinking_budget}")
         self._setup_provider()
+        # Lazily created clients/models for reuse
+        self._client_new = None
+        self._old_model = None
+        self._client_lock = threading.Lock()
 
     def _setup_provider(self):
         if self.provider == "google_generative_ai":
@@ -71,8 +79,10 @@ class LLMWrapper(ABC):
             from google.genai import types
 
             # Configure client
-            api_key = os.environ.get("GEMINI_API_KEY")
-            client = genai.Client(api_key=api_key)
+            with self._client_lock:
+                if self._client_new is None:
+                    api_key = os.environ.get("GEMINI_API_KEY")
+                    self._client_new = genai.Client(api_key=api_key)
 
             # Prepare generation config
             actual_temp = temperature if temperature is not None else self.temperature
@@ -104,7 +114,7 @@ class LLMWrapper(ABC):
             print(f"{self.agent_name} using NEW client with temperature: {actual_temp}, top_p: {actual_top_p}")
 
             # Generate content
-            response = client.models.generate_content(
+            response = self._client_new.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
                 config=config
@@ -118,22 +128,34 @@ class LLMWrapper(ABC):
                 if hasattr(response.usage_metadata, 'candidates_token_count'):
                     self.output_token_count += response.usage_metadata.candidates_token_count
 
-            print(f"Total tokens {self.agent_name}: {self.total_token_count} (Input: {self.input_token_count}, Output: {self.output_token_count})")
+            print(
+                "Total tokens",
+                self.agent_name,
+                ":",
+                self.total_token_count,
+                "(Input:",
+                self.input_token_count,
+                ", Output:",
+                self.output_token_count,
+                ")",
+            )
             return response.text if response.text else "No response."
 
         except Exception as e:
-            print(f"ERROR: New client failed: {e}")
-            print(f"Falling back to old client without thinking budget")
+            print("ERROR: New client failed:", e)
+            print("Falling back to old client without thinking budget")
             return self._generate_with_old_client(prompt, temperature, top_p, response_schema)
 
     def _generate_with_old_client(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
         """Generate using old google.generativeai client (fallback)"""
         config = self._get_generation_config(temperature, top_p, response_schema)
-        model = genai.GenerativeModel(
-            model_name=self.model_name,
-            generation_config=config
-        )
-        response = model.generate_content(prompt, generation_config=config)
+        # Reuse the model instance to keep connections warm
+        if self._old_model is None:
+            self._old_model = genai.GenerativeModel(
+                model_name=self.model_name,
+                generation_config=config,
+            )
+        response = self._old_model.generate_content(prompt, generation_config=config)
 
         # Track total tokens
         self.total_token_count += response.usage_metadata.total_token_count
@@ -171,7 +193,7 @@ class LLMWrapper(ABC):
         if response_schema:
             config["response_schema"] = response_schema
             config["response_mime_type"] = "application/json"
-        print(f"Generation config: {config}")
+        print("Generation config:", config)
         return config
 
 class Ideator(LLMWrapper):
@@ -403,6 +425,13 @@ class Critic(LLMWrapper):
 
     def __init__(self, **kwargs):
         super().__init__(agent_name=self.agent_name, **kwargs)
+        # Small result cache to avoid duplicate pair evaluations
+        self._compare_cache: OrderedDict[str, str] = OrderedDict()
+        self._cache_max_size = 1024
+        # Thread pool for parallel comparisons (configurable via env)
+        self._max_workers = int(os.environ.get("COMPARISON_CONCURRENCY", "8"))
+        # Lock for thread-safe cache access
+        self._cache_lock = threading.Lock()
 
     def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
@@ -466,7 +495,11 @@ class Critic(LLMWrapper):
         return elo_a, elo_b
 
     def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int) -> dict:
-        """Get the tournament rank of an idea"""
+        """Get tournament ranks with optional parallel pair evaluations.
+
+        Falls back to original sequential scheduling for small tournaments to keep
+        behavior deterministic in tests and tiny populations.
+        """
 
         # Handle edge case: if there's only one idea or no ideas, return appropriate ranking
         if len(ideas) <= 1:
@@ -474,57 +507,101 @@ class Critic(LLMWrapper):
 
         max_elo_diff = 100
         ranks = {i: 1500 for i in range(len(ideas))}
-        for k in range(comparisons):
-            if k < len(ideas):
-                # assert that each idea is one side of the comparison at least once
-                idea_idx_a = k
-                # Create a list of valid indices excluding idea_idx_a and ensure the difference is within max_elo_diff
-                other_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
 
-                # Handle edge case: if no other indices available (shouldn't happen with len check above, but safety first)
-                if len(other_indices) == 0:
-                    continue
+        # Decide whether to enable parallel evaluation
+        enable_parallel = (
+            os.environ.get("ENABLE_PARALLEL_TOURNAMENT", "1") != "0"
+            and len(ideas) >= 4
+            and comparisons >= max(8, len(ideas) * 2)
+        )
 
-                valid_indices = [idx for idx in other_indices if abs(ranks[idx] - ranks[idea_idx_a]) <= max_elo_diff]
-                if len(valid_indices) == 0:
-                    idea_idx_b = np.random.choice(other_indices, size=1)[0]
+        if not enable_parallel:
+            # Original sequential behavior for small cases
+            for k in range(comparisons):
+                if k < len(ideas):
+                    idea_idx_a = k
+                    other_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
+                    if len(other_indices) == 0:
+                        continue
+                    valid_indices = [idx for idx in other_indices if abs(ranks[idx] - ranks[idea_idx_a]) <= max_elo_diff]
+                    if len(valid_indices) == 0:
+                        idea_idx_b = int(np.random.choice(other_indices, size=1)[0])
+                    else:
+                        idea_idx_b = int(np.random.choice(valid_indices, size=1)[0])
                 else:
-                    idea_idx_b = np.random.choice(valid_indices, size=1)[0]
-            else:
-                # Handle edge case: ensure we have at least 2 ideas for comparison
-                if len(ideas) < 2:
-                    continue
-                idea_idx_a, idea_idx_b = np.random.choice(len(ideas), size=2, replace=False)
+                    if len(ideas) < 2:
+                        continue
+                    a, b = np.random.choice(len(ideas), size=2, replace=False)
+                    idea_idx_a, idea_idx_b = int(a), int(b)
 
-            # Extract idea objects for comparison
-            idea_a = ideas[idea_idx_a]
-            idea_b = ideas[idea_idx_b]
+                idea_a = ideas[idea_idx_a]
+                idea_b = ideas[idea_idx_b]
+                idea_a_obj = idea_a["idea"] if isinstance(idea_a, dict) and "idea" in idea_a else idea_a
+                idea_b_obj = idea_b["idea"] if isinstance(idea_b, dict) and "idea" in idea_b else idea_b
+                idea_a_dict = idea_a_obj.dict() if hasattr(idea_a_obj, 'dict') else idea_a_obj
+                idea_b_dict = idea_b_obj.dict() if hasattr(idea_b_obj, 'dict') else idea_b_obj
 
-            # If ideas are dictionaries with 'idea' key, extract the idea objects
-            idea_a_obj = idea_a["idea"] if isinstance(idea_a, dict) and "idea" in idea_a else idea_a
-            idea_b_obj = idea_b["idea"] if isinstance(idea_b, dict) and "idea" in idea_b else idea_b
-
-            # Convert to dict if not already
-            idea_a_dict = idea_a_obj.dict() if hasattr(idea_a_obj, 'dict') else idea_a_obj
-            idea_b_dict = idea_b_obj.dict() if hasattr(idea_b_obj, 'dict') else idea_b_obj
-
-            # Randomize presentation order to eliminate positional bias
-            if random.random() < 0.5:
-                # Present ideas in original order (A first, B second)
+                # Deterministic orientation in sequential mode to keep tests stable
                 winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
-            else:
-                # Present ideas in swapped order (B first, A second)
-                winner = self.compare_ideas(idea_b_dict, idea_a_dict, idea_type)
-                # Adjust winner interpretation for swapped order
-                if winner == "A":
-                    winner = "B"  # Model chose first position, but that was actually idea_b
-                elif winner == "B":
-                    winner = "A"  # Model chose second position, but that was actually idea_a
-                # "tie" remains "tie"
+                elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
+                ranks[idea_idx_a] = elo_a
+                ranks[idea_idx_b] = elo_b
+            return ranks
 
-            elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
-            ranks[idea_idx_a] = elo_a
-            ranks[idea_idx_b] = elo_b
+        def select_pairs(snapshot_ranks: Dict[int, float], num_pairs: int) -> List[tuple[int, int]]:
+            pairs: List[tuple[int, int]] = []
+            for k in range(num_pairs):
+                if k < len(ideas):
+                    idea_idx_a = k
+                    other_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
+                    if not other_indices:
+                        continue
+                    valid_indices = [idx for idx in other_indices if abs(snapshot_ranks[idx] - snapshot_ranks[idea_idx_a]) <= max_elo_diff]
+                    if len(valid_indices) == 0:
+                        idea_idx_b = int(np.random.choice(other_indices, size=1)[0])
+                    else:
+                        idea_idx_b = int(np.random.choice(valid_indices, size=1)[0])
+                else:
+                    if len(ideas) < 2:
+                        continue
+                    a, b = np.random.choice(len(ideas), size=2, replace=False)
+                    idea_idx_a, idea_idx_b = int(a), int(b)
+                pairs.append((idea_idx_a, idea_idx_b))
+            return pairs
+
+        # Choose a batch size that balances ELO adaptation with throughput
+        batch_size = max(4, min(self._max_workers * 2, comparisons))
+        remaining = comparisons
+        while remaining > 0:
+            num_this_batch = min(batch_size, remaining)
+            pairs = select_pairs(ranks.copy(), num_this_batch)
+            # Deduplicate pairs to avoid redundant calls in the same batch
+            seen = set()
+            deduped_pairs: List[tuple[int, int]] = []
+            for a, b in pairs:
+                key = (a, b) if a <= b else (b, a)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped_pairs.append((a, b))
+
+            # Run pair evaluations in parallel using shared utility
+            results = parallel_evaluate_pairs(
+                pairs=deduped_pairs,
+                items=ideas,
+                compare_fn=self.compare_ideas,
+                idea_type=idea_type,
+                concurrency=self._max_workers,
+                randomize_presentation=True,
+            )
+
+            for idx_a, idx_b, winner in results:
+                elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
+                ranks[idx_a] = elo_a
+                ranks[idx_b] = elo_b
+
+            # Decrement by actual completed comparisons
+            remaining -= len(results)
 
         return ranks
 
@@ -553,6 +630,14 @@ class Critic(LLMWrapper):
             idea_b_content=idea_b.get('content', '')
         )
 
+        # Cache by model, temperature, and prompt hash to avoid duplicate calls
+        cache_key = f"{self.model_name}|{self.temperature}|{sha256(prompt.encode('utf-8')).hexdigest()}"
+        with self._cache_lock:
+            if cache_key in self._compare_cache:
+                result_cached = self._compare_cache.pop(cache_key)
+                self._compare_cache[cache_key] = result_cached  # Move to end (LRU)
+                return result_cached
+
         try:
             # Use the configured temperature for comparisons
             response = self.generate_text(prompt)
@@ -572,7 +657,15 @@ class Critic(LLMWrapper):
             elif "B" in result and "A" not in result:
                 return "B"
             else:
-                return "tie"
+                winner = "tie"
+
+            # Update cache (LRU eviction)
+            with self._cache_lock:
+                self._compare_cache[cache_key] = winner
+                if len(self._compare_cache) > self._cache_max_size:
+                    # pop oldest
+                    self._compare_cache.popitem(last=False)
+            return winner
         except Exception as e:
             print(f"Error in compare_ideas: {e}")
             return None  # Return None instead of "tie" on error
@@ -726,7 +819,6 @@ class Oracle(LLMWrapper):
 
         # Get prompts for the idea type
         prompts = get_prompts(idea_type)
-        base_idea_prompt = prompts.IDEA_PROMPT
 
         # Get Oracle-specific prompts from the template
         mode_instruction = prompts.ORACLE_INSTRUCTION
@@ -781,21 +873,30 @@ class Oracle(LLMWrapper):
                 analysis_part, idea_part = parts.split("=== IDEA PROMPT ===")
                 oracle_analysis = analysis_part.strip()
                 idea_prompt = idea_part.strip()
-                print(f"ORACLE: Successfully parsed structured response - analysis: {len(oracle_analysis)} chars, idea prompt: {len(idea_prompt)} chars")
+                print(
+                    "ORACLE: Successfully parsed structured response - analysis:",
+                    len(oracle_analysis),
+                    "chars, idea prompt:",
+                    len(idea_prompt),
+                    "chars",
+                )
             else:
                 # Fallback: treat entire response as new idea content but preserve Oracle metadata
                 idea_prompt = response.strip()
-                oracle_analysis = f"Oracle response was not properly formatted. Expected sections '=== ORACLE ANALYSIS ===' and '=== IDEA PROMPT ===' but got unstructured response. This indicates the LLM did not follow the required format."
-                print(f"ORACLE: Fallback parsing - treating entire response as idea content. Response length: {len(response)} chars")
+                oracle_analysis = (
+                    "Oracle response was not properly formatted. Expected sections '=== ORACLE ANALYSIS ===' "
+                    "and '=== IDEA PROMPT ===' but got unstructured response. This indicates the LLM did not follow the required format."
+                )
+                print("ORACLE: Fallback parsing - treating entire response as idea content. Response length:", len(response), "chars")
         except Exception as e:
             # Fallback parsing failed
             idea_prompt = response.strip()
             oracle_analysis = f"Oracle parsing error: {e}. Response was treated as idea content."
-            print(f"ORACLE: Parsing exception - {e}")
+            print("ORACLE: Parsing exception -", e)
 
         # Oracle only supports replace mode
         # Replacement selection is handled externally via embedding-based centroid distance
-        print(f"ORACLE: Generated replacement idea. Selection of which idea to replace will be handled externally via embeddings.")
+        print("ORACLE: Generated replacement idea. Selection of which idea to replace will be handled externally via embeddings.")
 
         return {
             "action": "replace",

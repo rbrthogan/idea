@@ -13,12 +13,10 @@ from pathlib import Path
 import json
 from pydantic import BaseModel
 from datetime import datetime
-import numpy as np
 import uuid
 from typing import Dict, List, Tuple, Optional
 
 from idea.evolution import EvolutionEngine
-from idea.models import Idea
 from idea.llm import Critic
 from idea.config import LLM_MODELS, DEFAULT_MODEL, DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
 from idea.template_manager import router as template_router
@@ -854,48 +852,123 @@ async def auto_rate(request: Request):
         # Maximum ELO difference for matching ideas - use the value from the request
         max_elo_diff = elo_range
 
-        for i in range(num_comparisons):
-            print(f"Comparison {i+1}/{num_comparisons}")
+        enable_parallel_autorate = os.environ.get("ENABLE_PARALLEL_AUTORATE", "1") != "0"
 
-            # Use the shared efficient pair selection function
-            idea_a, idea_b = select_efficient_pair(all_ideas, rating_type='auto', max_elo_diff=max_elo_diff)
+        if enable_parallel_autorate and num_comparisons > 1 and len(all_ideas) >= 4:
+            # Build pairs using the existing selection strategy on a snapshot
+            pairs = []
+            for _ in range(num_comparisons):
+                idea_a, idea_b = select_efficient_pair(all_ideas, rating_type='auto', max_elo_diff=max_elo_diff)
+                if idea_a is None or idea_b is None:
+                    continue
+                idx_a = all_ideas.index(idea_a)
+                idx_b = all_ideas.index(idea_b)
+                pairs.append((idx_a, idx_b))
 
-            if idea_a is None or idea_b is None:
-                print("Failed to select suitable pair, skipping this comparison")
-                continue
+            from idea.ratings import parallel_evaluate_pairs
+            concurrency = int(os.environ.get("AUTORATE_CONCURRENCY", "8"))
+            results_parallel = parallel_evaluate_pairs(
+                pairs=pairs,
+                items=all_ideas,
+                compare_fn=lambda a, b, _: critic.compare_ideas(a, b, idea_type),
+                idea_type=idea_type,
+                concurrency=concurrency,
+                randomize_presentation=True,
+            )
 
-            # Get ELO ratings for logging
-            elo_a = idea_a['ratings']['auto']
-            elo_b = idea_b['ratings']['auto']
+            for idx_a, idx_b, winner in results_parallel:
+                idea_a = all_ideas[idx_a]
+                idea_b = all_ideas[idx_b]
+                if winner is None:
+                    continue
+                idea_a['match_count'] += 1
+                idea_b['match_count'] += 1
+                idea_a['auto_match_count'] += 1
+                idea_b['auto_match_count'] += 1
 
-            # Randomize presentation order to eliminate positional bias
-            if random.random() < 0.5:
-                # Present ideas in original order (A first, B second)
-                winner = critic.compare_ideas(idea_a, idea_b, idea_type)
-                order_swapped = False
-            else:
-                # Present ideas in swapped order (B first, A second)
-                winner = critic.compare_ideas(idea_b, idea_a, idea_type)
-                order_swapped = True
-                # Adjust winner interpretation for swapped order
+                # ELO update identical to sequential path below
+                k_factor = 32
+                expected_a = 1 / (1 + 10 ** ((idea_b['ratings']['auto'] - idea_a['ratings']['auto']) / 400))
+                expected_b = 1 / (1 + 10 ** ((idea_a['ratings']['auto'] - idea_b['ratings']['auto']) / 400))
                 if winner == "A":
-                    winner = "B"  # Model chose first position, but that was actually idea_b
+                    idea_a['ratings']['auto'] = round(idea_a['ratings']['auto'] + k_factor * (1 - expected_a))
+                    idea_b['ratings']['auto'] = round(idea_b['ratings']['auto'] + k_factor * (0 - expected_b))
                 elif winner == "B":
-                    winner = "A"  # Model chose second position, but that was actually idea_a
-                # "tie" remains "tie"
+                    idea_a['ratings']['auto'] = round(idea_a['ratings']['auto'] + k_factor * (0 - expected_a))
+                    idea_b['ratings']['auto'] = round(idea_b['ratings']['auto'] + k_factor * (1 - expected_b))
+                else:
+                    idea_a['ratings']['auto'] = round(idea_a['ratings']['auto'] + k_factor * (0.5 - expected_a))
+                    idea_b['ratings']['auto'] = round(idea_b['ratings']['auto'] + k_factor * (0.5 - expected_b))
 
-            print(f"Winner: {winner} (order_swapped: {order_swapped})")
+                # Back-compat field
+                idea_a['elo'] = idea_a['ratings']['auto']
+                idea_b['elo'] = idea_b['ratings']['auto']
 
-            # Skip this comparison if there was an error (winner is None)
-            if winner is None:
-                print("Skipping this comparison due to an error")
-                continue
+                # Update original evolution data structure
+                if idea_a['id'] in idea_map:
+                    gen_idx, idea_idx = idea_map[idea_a['id']]
+                    evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_a['ratings']
+                    evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_a['elo']
+                    evolution_data['history'][gen_idx][idea_idx]['match_count'] = idea_a['match_count']
+                    evolution_data['history'][gen_idx][idea_idx]['auto_match_count'] = idea_a['auto_match_count']
+                if idea_b['id'] in idea_map:
+                    gen_idx, idea_idx = idea_map[idea_b['id']]
+                    evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_b['ratings']
+                    evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_b['elo']
+                    evolution_data['history'][gen_idx][idea_idx]['match_count'] = idea_b['match_count']
+                    evolution_data['history'][gen_idx][idea_idx]['auto_match_count'] = idea_b['auto_match_count']
 
-            # Increment match counts
-            idea_a['match_count'] += 1
-            idea_b['match_count'] += 1
+                # Record the result for API response accounting
+                results.append({
+                    'idea_a': idea_a.get('id', 'unknown'),
+                    'idea_b': idea_b.get('id', 'unknown'),
+                    'outcome': winner,
+                    'new_elo_a': idea_a['ratings']['auto'],
+                    'new_elo_b': idea_b['ratings']['auto']
+                })
+        else:
+            for i in range(num_comparisons):
+                print(f"Comparison {i+1}/{num_comparisons}")
 
-            # Increment auto match counts specifically
+                # Use the shared efficient pair selection function
+                idea_a, idea_b = select_efficient_pair(all_ideas, rating_type='auto', max_elo_diff=max_elo_diff)
+
+                if idea_a is None or idea_b is None:
+                    print("Failed to select suitable pair, skipping this comparison")
+                    continue
+
+                # Get ELO ratings (kept for potential logging/future use)
+                # elo_a = idea_a['ratings']['auto']
+                # elo_b = idea_b['ratings']['auto']
+
+                # Randomize presentation order to eliminate positional bias
+                if random.random() < 0.5:
+                    # Present ideas in original order (A first, B second)
+                    winner = critic.compare_ideas(idea_a, idea_b, idea_type)
+                    order_swapped = False
+                else:
+                    # Present ideas in swapped order (B first, A second)
+                    winner = critic.compare_ideas(idea_b, idea_a, idea_type)
+                    order_swapped = True
+                    # Adjust winner interpretation for swapped order
+                    if winner == "A":
+                        winner = "B"  # Model chose first position, but that was actually idea_b
+                    elif winner == "B":
+                        winner = "A"  # Model chose second position, but that was actually idea_a
+                    # "tie" remains "tie"
+
+                print(f"Winner: {winner} (order_swapped: {order_swapped})")
+
+                # Skip this comparison if there was an error (winner is None)
+                if winner is None:
+                    print("Skipping this comparison due to an error")
+                    continue
+
+                # Increment match counts
+                idea_a['match_count'] += 1
+                idea_b['match_count'] += 1
+
+                # Increment auto match counts specifically
             idea_a['auto_match_count'] += 1
             idea_b['auto_match_count'] += 1
 
