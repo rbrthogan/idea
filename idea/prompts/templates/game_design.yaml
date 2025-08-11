@@ -1,6 +1,6 @@
 name: "Game Design"
-description: "Generate creative browser game design concepts"
-version: "1.0.0"
+description: "Generate implementable browser game concepts with fresh twists on classic archetypes"
+version: "1.1.0"
 author: "Original Idea App"
 created_date: "2024-01-15"
 
@@ -10,52 +10,79 @@ metadata:
 # Special requirements for this template type
 special_requirements: |
   The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
-  The game complexity should similar in level to classic games like Breakout, Snake, Tetris, Pong, Pac-Man, Space Invaders, Frogger, Minesweeper, Tic Tac Toe, 2048, Wordle etc.
-  Ideally could be implemented in a few hundred lines of code.
-  Avoid being derivative of these but limit the ambition to the level of complexity of these games.
-  You should format your idea with enough specificity that a developer can implement it.
-  The body of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate.
-  Also please include a title, returning:
+  Anchor each concept in one recognizable classic browser/arcade archetype and add 1-2 focused twists. Keep scope tight and implementation-friendly.
+
+  Implementation guardrails:
+  - Technology: HTML5 Canvas + vanilla JavaScript (or minimal DOM). No heavy engines, no networking, no server state.
+  - Scope: Prototype should be feasible in <1000 LOC. Avoid content-heavy assets; use geometric shapes and simple sounds.
+  - Input: Keyboard arrows/WASD and/or mouse only. No multi-touch, no complex gestures.
+  - Systems: Prefer grid-based logic or simple AABB collisions. No complex physics, pathfinding, or ML. Minimal randomness.
+  - UX: Single-screen or simple level progression. Pause/reset/undo optional but simple.
+
+  Required sections (use markdown headings):
+  - Base Game & Twists: Name the classic base (e.g., "Base: Snake" or "Base: Tetris", etc) and list 1-2 specific twists.
+  - Overview: One short paragraph.
+  - Core Loop: 3-5 bullets describing repeatable player actions and feedback.
+  - Mechanics: Entities, rules, collisions, state changes.
+  - Controls: Precise key/mouse mapping.
+  - Level/Progression: How difficulty increases without new complex systems.
+  - Scoring/Win/Lose: Clear conditions.
+  - Visuals & Audio: Low-asset approach.
+  - Minimum Prototype: The absolute smallest slice to implement first.
+  - Stretch Ideas (optional): 1-2 sensible extensions that do not explode scope.
+
+  Format your response as:
   Title: [Your creative title]
   Content: [Your game design]
 
 prompts:
   context: |
-    Generate a diverse list of 50 specific game design concepts. Mix concrete and abstract elements:
-    - SPECIFIC mechanics (gravity manipulation, color switching, time reversal, magnetic attraction, etc.)
-    - CONCRETE objects (bouncing balls, sliding blocks, growing plants, melting ice, etc.)
-    - UNIQUE genres (reverse tower defense, social deduction, asymmetric co-op, etc.)
-    - DISTINCTIVE themes (microscopic world, paper craft, sound visualization, etc.)
-    - CREATIVE objectives (create harmony, spread rumors, solve mysteries, etc.)
-    - INTEREESTING varations on classic games (3D pong, bang bang with AI and more weapons, first person snake game, etc.)
+    Generate a diverse list of 60 specific concepts framed as "classic base + focused twist(s)" suitable for quick browser implementation.
 
-    Avoid generic terms like "puzzle", "action", "shooting", "jumping", "collecting".
+    Choose from these classic bases (non-exhaustive):
+    - Breakout/Arkanoid, Snake, Tetris, Pong, Pac-Man, Space Invaders/Asteroids, Frogger, Minesweeper, Sokoban, Pipe Mania, 2048/Threes, Wordle, Simon/Memory, 15-Puzzle/Sliding, Lunar Lander, Flappy Bird, Endless Runner, Match-3 (minimal), Single-screen platformer, Tower Defense (very simple lanes), Connect Four/Reversi (no advanced AI), Columns/Dr. Mario.
+
+    Example twist axes (pick 1-2 per concept):
+    - Wrapping edges; gravity flip; limited rewind/undo; push/pull; single special tile type; rotating board; shrink/expand playfield; dual-control with mirrored input; line-of-sight fog; timed gates; one enemy type with deterministic pattern; resource as timer; combo chains with caps.
+
+    Light-weight themes to vary flavor only (no heavy asset burden):
+    - Neon circuits, paper cutouts, monochrome LCD, underwater, cave chalk, starfield, emoji tiles.
+
+    Output each concept as a short phrase using this schema:
+    - Base: <classic>; Twist: <twist 1>[, <twist 2>]; Constraints: <1-2 concrete implementation constraints>
+
     Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
 
   specific_prompt: |
-    From the following game design concepts, randomly select 2 or 3 that would create an interesting combination and create 1 concise design request:
+    From the following concepts, select exactly ONE classic base and ONE (optionally TWO) focused twist(s) that combine cleanly without adding new systems. Produce a concise design request:
 
     {context_pool}
 
-    SELECTION STRATEGY: Pick concepts that create surprising gameplay synergies. Avoid predictable pairings like "puzzle + matching" or "action + shooting". Don't include too many concepts that would make the game too complex.
+    SELECTION STRATEGY:
+    - Prefer bases that map directly to canvas and simple collisions/grids.
+    - Prefer twists that modify constraints (inputs, space, timing) over adding complexsystems (inventory, crafting, dialogue, multi-agent AI).
+    - Avoid scope creep combinations (e.g., platformer + tower defense + crafting).
+    - Ensure the result is prototypeable in <1000 LOC.
 
-    Create a brief design direction like: "Design a [genre/type] game that combines [mechanic] where players [objective]." Or "Design a game that combines [interaction] with [theme/setting]."
+    Create a brief design direction, e.g.:
+    - "Design a fresh take on Snake with wrap-around edges and one 'ghost' segment that must be avoided as it replays the previous path."
+    - "Design a Breakout variant where bricks slide horizontally each volley, creating shifting lanes."
+    - "Design a Sokoban inspired games on a hex grid with one-time ice tiles."
 
     Your concise game design prompt:
 
   example_idea_prompts: |
-    - "Design a puzzle game where the player manipulates gravity to solve challenges."
-    - "Create a concept for a platformer game set in a that utilises changing weather as a core mechanic."
-    - "Outline a strategy game where players control the immune system to fight off an infection."
-    - "Design a web browser game that puts a new twist on the classic breakout game."
-    - "Create a narrative-driven game about a character who is losing their memories."
-    - "Create a spaceship shooter game where the player can control multiple ships at once."
+    - "Design a fresh take on Tetris where cleared lines drop as obstacles into the next round (single-screen loop)."
+    - "Design a Pong inspired game with triangular paddles that deflect at angle-dependent speeds."
+    - "Design a game like Frogger with lane swapping and a limited-use freeze."
+    - "Design a Minesweeper variant where flagged tiles slowly spread if not confirmed."
+    - "Design a 2048 variant on a hex grid with a once-per-level rotate action."
+    - "Design a twist on Sokoban where boxes are magnets with simple attract/repel rules."
 
   idea: |
-    Your game design document must incorporate the following elements from the context pool:
+    Your game design document must incorporate the selected classic base and twist(s) from the context pool and follow the required sections. Keep the scope small and implementation-focused.
     {context_pool}
-    The document should be well-structured and provide a clear overview of the game concept.
-    It should include sections on gameplay mechanics, art style, and target audience.
+    The document should be well-structured and provide: Base & Twists, Overview, Core Loop, Mechanics, Controls, Level/Progression, Scoring/Win/Lose, Visuals & Audio, Technical Notes, Minimum Prototype, Stretch Ideas.
     No additional text, just the game design document.
     {requirements}
 
@@ -77,8 +104,7 @@ prompts:
     {idea}
 
     Please consider the above proposal. Offer critical feedback.
-    Pointing out potential pitfalls as well as strengths. If the idea doesn't have a clear structure,
-    or sufficient detail, please suggest how to improve it and ask for elaboration of specific points of interest.
+    Focus on: unclear core loop, unnecessary systems, ambiguous controls, and implementation feasibility on Canvas in 300-600 LOC. If structure or detail is lacking, request specifics.
     No additional text, just the critique.
 
   refine: |
@@ -88,6 +114,7 @@ prompts:
     Critique: {critique}
 
     Please review both, consider your own opinion and create your own proposal.
+    Prefer tightening scope, clarifying the core loop, simplifying systems.
     This could be a refinement of the original proposal or a fresh take on it.
     No additional text, just the refined idea on its own.
 
@@ -96,16 +123,16 @@ prompts:
   breed: |
     {ideas}
     Analyze the above game designs to identify patterns:
-    1. Which gameplay mechanics and styles appear repeatedly
-    2. What themes and genres are overused
-    3. Which design elements remain unexplored
+    1. Which classic bases are overused vs underused
+    2. Which twists are overused
+    3. Which possibilities are not being explored
 
     Create a new game design that either:
-    - Uses mechanics underrepresented in the designs above
-    - Explores themes and genres not heavily covered
-    - Combines elements in ways that haven't been tried yet
+    - Uses a classic base that is underrepresented above, OR
+    - Applies a fresh twist to a common base while keeping systems minimal, OR
+    - Combines a known base with a single constraint-changing twist
 
-    Focus on designs that maximize originality while maintaining browser-game feasibility.
+    Focus on designs that maximize originality while maintaining strict browser-game feasibility and tight scope.
 
     {requirements}
 
@@ -136,7 +163,9 @@ prompts:
 
 
 comparison_criteria:
-  - "originality and creativity"
-  - "simplicity"
-  - "fun factor"
-  - "feasibility for simple standard browser implementation"
+  - "clarity and strength of the core loop"
+  - "originality of the twist(s)"
+  - "fun factor added by the twist(s)"
+  - "implementability on HTML5 Canvas in ~300-600 LOC"
+  - "simplicity and readability of mechanics"
+  - "feasibility for standard browser implementation (no heavy assets/engines)"
