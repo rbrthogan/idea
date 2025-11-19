@@ -186,11 +186,23 @@ async def start_evolution(request: Request):
     else:
         print("No thinking budget specified (non-2.5 model or not set)")
 
+    # Get max budget parameter
+    max_budget = data.get('maxBudget')
+    if max_budget is not None:
+        try:
+            max_budget = float(max_budget)
+            print(f"Parsed max budget: ${max_budget}")
+        except ValueError:
+            print(f"Error parsing max budget: {max_budget}")
+            max_budget = None
+    else:
+        print("No max budget specified")
+
     print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
           f"idea_type={idea_type}, model_type={model_type}, "
           f"creative_temp={creative_temp}, top_p={top_p}, "
           f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"thinking_budget={thinking_budget}")
+          f"thinking_budget={thinking_budget}, max_budget={max_budget}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -203,6 +215,7 @@ async def start_evolution(request: Request):
         tournament_size=tournament_size,
         tournament_comparisons=tournament_comparisons,
         thinking_budget=thinking_budget,
+        max_budget=max_budget,
     )
 
     # Generate contexts for each idea
@@ -812,15 +825,15 @@ async def auto_rate(request: Request):
             """Get the default thinking budget for a model, same as main app logic"""
             from idea.config import THINKING_BUDGET_CONFIG
 
-            # Only 2.5 models support thinking budget
-            if "2.5" not in model_name:
+            # Only 2.5 and 3.0 models support thinking budget
+            if "2.5" not in model_name and "3-pro" not in model_name:
                 return None
 
             # Get the config for this model and use its default value
             # This matches the main app logic:
             # - gemini-2.5-pro: default = 128 (minimum, can't disable)
             # - gemini-2.5-flash: default = 0 (disabled)
-            # - gemini-2.5-flash-lite-preview-06-17: default = 0 (disabled)
+            # - gemini-2.5-flash-lite: default = 0 (disabled)
             config = THINKING_BUDGET_CONFIG.get(model_name, {})
             return config.get('default', 0)  # Default to 0 (disabled) if not found
 

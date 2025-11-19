@@ -243,7 +243,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const stopButton = document.getElementById('stopButton');
 
     if (startButton) {
-        startButton.onclick = async function() {
+        startButton.onclick = async function () {
             console.log("Starting evolution...");
             const popSize = parseInt(document.getElementById('popSize').value);
             const generations = parseInt(document.getElementById('generations').value);
@@ -260,6 +260,10 @@ document.addEventListener("DOMContentLoaded", () => {
             // Get thinking budget value (only for Gemini 2.5 models)
             const thinkingBudget = getThinkingBudgetValue();
 
+            // Get max budget
+            const maxBudgetInput = document.getElementById('maxBudget');
+            const maxBudget = maxBudgetInput && maxBudgetInput.value ? parseFloat(maxBudgetInput.value) : null;
+
             const requestBody = {
                 popSize,
                 generations,
@@ -270,6 +274,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 tournamentSize,
                 tournamentComparisons,
                 thinkingBudget,
+                maxBudget
             };
 
             console.log("Request body JSON:", JSON.stringify(requestBody));
@@ -336,7 +341,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     if (stopButton) {
-        stopButton.onclick = async function() {
+        stopButton.onclick = async function () {
             console.log("Stopping evolution...");
 
             // Disable stop button and show stopping state
@@ -376,7 +381,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const downloadButton = document.getElementById('downloadButton');
     if (downloadButton) {
         console.log("Found download button in DOMContentLoaded, adding click listener");
-        downloadButton.addEventListener('click', function() {
+        downloadButton.addEventListener('click', function () {
             console.log("Download button clicked directly");
             if (currentEvolutionData) {
                 console.log("Using currentEvolutionData:", currentEvolutionData);
@@ -545,7 +550,7 @@ function setupDownloadButton(data) {
     updatedButton.textContent = 'Save Results';
 
     // Add a single click handler
-    updatedButton.onclick = function(event) {
+    updatedButton.onclick = function (event) {
         event.preventDefault();
         console.log("Download button clicked, calling downloadResults with data:", data);
         downloadResults(data);
@@ -563,11 +568,11 @@ function renderMarkdown(text) {
 
     // Escape HTML to prevent XSS
     text = text.replace(/&/g, '&amp;')
-               .replace(/</g, '&lt;')
-               .replace(/>/g, '&gt;');
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 
     // Process code blocks first
-    text = text.replace(/```([\s\S]*?)```/g, function(match, code) {
+    text = text.replace(/```([\s\S]*?)```/g, function (match, code) {
         return '<pre><code>' + code.trim() + '</code></pre>';
     });
 
@@ -575,7 +580,7 @@ function renderMarkdown(text) {
     text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
 
     // Process headings - ensure they're at the start of a line
-    text = text.replace(/^(#{1,6})\s+(.*?)$/gm, function(match, hashes, content) {
+    text = text.replace(/^(#{1,6})\s+(.*?)$/gm, function (match, hashes, content) {
         const level = hashes.length;
         return `<h${level}>${content.trim()}</h${level}>`;
     });
@@ -655,7 +660,7 @@ function renderMarkdown(text) {
 
             if (inParagraph) {
                 // Close the paragraph before this line
-                lines[i-1] += '</p>';
+                lines[i - 1] += '</p>';
                 inParagraph = false;
             }
             continue;
@@ -665,7 +670,7 @@ function renderMarkdown(text) {
         if (!inParagraph) {
             lines[i] = '<p>' + lines[i];
             inParagraph = true;
-        } else if (i === lines.length - 1 || lines[i+1].trim() === '') {
+        } else if (i === lines.length - 1 || lines[i + 1].trim() === '') {
             // If this is the last line or next line is empty, close paragraph
             lines[i] += '</p>';
             inParagraph = false;
@@ -998,7 +1003,7 @@ function showIdeaModal(idea) {
 
         // Add event listener to clean up when modal is hidden
         // Use a named function so we can check if it already exists
-        const cleanupFunction = function(event) {
+        const cleanupFunction = function (event) {
             // Remove any lingering backdrop elements
             const backdrops = document.querySelectorAll('.modal-backdrop');
             backdrops.forEach(backdrop => {
@@ -1142,31 +1147,31 @@ function downloadResults(data) {
             filename: filename
         })
     })
-    .then(response => {
-        console.log("Save response:", response);
-        if (!response.ok) {
-            throw new Error(`Save failed: ${response.status} ${response.statusText}`);
-        }
-        return response.json();
-    })
-    .then(result => {
-        console.log("Save successful:", result);
-        alert('Save successful!');
-    })
-    .catch(error => {
-        console.error("Save error:", error);
-        alert(`Error saving: ${error.message}`);
-    })
-    .finally(() => {
-        // Re-enable the button
-        if (downloadButton) {
-            downloadButton.disabled = false;
-        }
-    });
+        .then(response => {
+            console.log("Save response:", response);
+            if (!response.ok) {
+                throw new Error(`Save failed: ${response.status} ${response.statusText}`);
+            }
+            return response.json();
+        })
+        .then(result => {
+            console.log("Save successful:", result);
+            alert('Save successful!');
+        })
+        .catch(error => {
+            console.error("Save error:", error);
+            alert(`Error saving: ${error.message}`);
+        })
+        .finally(() => {
+            // Re-enable the button
+            if (downloadButton) {
+                downloadButton.disabled = false;
+            }
+        });
 }
 
 function generateUUID() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
         const r = Math.random() * 16 | 0;
         const v = c == 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
@@ -1320,6 +1325,11 @@ async function pollProgress() {
             handleDiversityUpdate(data);
         }
 
+        // Display token counts if available (Live updates)
+        if (data.token_counts) {
+            displayTokenCounts(data.token_counts);
+        }
+
         if (data.contexts && data.contexts.length > 0) {
             contexts = data.contexts;
             specificPrompts = data.specific_prompts || [];
@@ -1402,6 +1412,16 @@ async function pollProgress() {
                 }, 2000);
             }
         }
+
+        // Handle explicit errors from backend
+        if (data.error) {
+            console.error("Evolution error:", data.error);
+            showErrorMessage(`Evolution Error: ${data.error}`);
+            if (progressStatus) {
+                progressStatus.textContent = `Error: ${data.error}`;
+                progressStatus.classList.add('text-danger');
+            }
+        }
     } catch (error) {
         console.error('Error polling progress:', error);
         // Continue polling even if there's an error, but only if evolution is still running
@@ -1413,186 +1433,186 @@ async function pollProgress() {
 
 // Add debouncing to save operations
 function debounce(func, wait) {
-  let timeout;
-  return function(...args) {
-    clearTimeout(timeout);
-    timeout = setTimeout(() => func.apply(this, args), wait);
-  };
+    let timeout;
+    return function (...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), wait);
+    };
 }
 
 // Use debounced version of save function
 const debouncedSave = debounce(saveEvolution, 300);
 
 async function handleSave() {
-  // Show loading indicator
-  showLoadingIndicator();
+    // Show loading indicator
+    showLoadingIndicator();
 
-  try {
-    // Perform save operation
-    await saveEvolution();
+    try {
+        // Perform save operation
+        await saveEvolution();
 
-    // Update UI after save completes
-    updateUIAfterSave();
-  } catch (error) {
-    console.error("Save failed:", error);
-    showErrorMessage("Save failed. Please try again.");
-  } finally {
-    // Always hide loading indicator
-    hideLoadingIndicator();
-  }
+        // Update UI after save completes
+        updateUIAfterSave();
+    } catch (error) {
+        console.error("Save failed:", error);
+        showErrorMessage("Save failed. Please try again.");
+    } finally {
+        // Always hide loading indicator
+        hideLoadingIndicator();
+    }
 }
 
 // Add these utility functions for modal overlay management
 function showLoadingOverlay() {
-  const overlay = document.createElement('div');
-  overlay.id = 'loading-overlay';
-  overlay.style.position = 'fixed';
-  overlay.style.top = '0';
-  overlay.style.left = '0';
-  overlay.style.width = '100%';
-  overlay.style.height = '100%';
-  overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-  overlay.style.zIndex = '1000';
-  overlay.style.display = 'flex';
-  overlay.style.justifyContent = 'center';
-  overlay.style.alignItems = 'center';
+    const overlay = document.createElement('div');
+    overlay.id = 'loading-overlay';
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+    overlay.style.zIndex = '1000';
+    overlay.style.display = 'flex';
+    overlay.style.justifyContent = 'center';
+    overlay.style.alignItems = 'center';
 
-  const spinner = document.createElement('div');
-  spinner.className = 'spinner';
-  spinner.style.width = '50px';
-  spinner.style.height = '50px';
-  spinner.style.border = '5px solid #f3f3f3';
-  spinner.style.borderTop = '5px solid #3498db';
-  spinner.style.borderRadius = '50%';
-  spinner.style.animation = 'spin 1s linear infinite';
+    const spinner = document.createElement('div');
+    spinner.className = 'spinner';
+    spinner.style.width = '50px';
+    spinner.style.height = '50px';
+    spinner.style.border = '5px solid #f3f3f3';
+    spinner.style.borderTop = '5px solid #3498db';
+    spinner.style.borderRadius = '50%';
+    spinner.style.animation = 'spin 1s linear infinite';
 
-  // Add keyframes for spinner animation
-  const style = document.createElement('style');
-  style.textContent = `
+    // Add keyframes for spinner animation
+    const style = document.createElement('style');
+    style.textContent = `
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
   `;
-  document.head.appendChild(style);
+    document.head.appendChild(style);
 
-  overlay.appendChild(spinner);
-  document.body.appendChild(overlay);
+    overlay.appendChild(spinner);
+    document.body.appendChild(overlay);
 }
 
 function hideLoadingOverlay() {
-  const overlay = document.getElementById('loading-overlay');
-  if (overlay) {
-    document.body.removeChild(overlay);
-  }
+    const overlay = document.getElementById('loading-overlay');
+    if (overlay) {
+        document.body.removeChild(overlay);
+    }
 }
 
 // Replace the existing showLoadingIndicator and hideLoadingIndicator functions
 function showLoadingIndicator() {
-  showLoadingOverlay();
-  // Disable all interactive elements
-  document.querySelectorAll('button, input, select').forEach(el => {
-    el.dataset.wasDisabled = el.disabled;
-    el.disabled = true;
-  });
+    showLoadingOverlay();
+    // Disable all interactive elements
+    document.querySelectorAll('button, input, select').forEach(el => {
+        el.dataset.wasDisabled = el.disabled;
+        el.disabled = true;
+    });
 }
 
 function hideLoadingIndicator() {
-  hideLoadingOverlay();
-  // Re-enable elements that weren't disabled before
-  document.querySelectorAll('button, input, select').forEach(el => {
-    if (el.dataset.wasDisabled !== 'true') {
-      el.disabled = false;
-    }
-    delete el.dataset.wasDisabled;
-  });
+    hideLoadingOverlay();
+    // Re-enable elements that weren't disabled before
+    document.querySelectorAll('button, input, select').forEach(el => {
+        if (el.dataset.wasDisabled !== 'true') {
+            el.disabled = false;
+        }
+        delete el.dataset.wasDisabled;
+    });
 }
 
 // Add a function to show error messages
 function showErrorMessage(message) {
-  const errorDiv = document.createElement('div');
-  errorDiv.className = 'error-message';
-  errorDiv.style.position = 'fixed';
-  errorDiv.style.top = '20px';
-  errorDiv.style.left = '50%';
-  errorDiv.style.transform = 'translateX(-50%)';
-  errorDiv.style.backgroundColor = '#f44336';
-  errorDiv.style.color = 'white';
-  errorDiv.style.padding = '15px';
-  errorDiv.style.borderRadius = '5px';
-  errorDiv.style.zIndex = '1001';
-  errorDiv.textContent = message;
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'error-message';
+    errorDiv.style.position = 'fixed';
+    errorDiv.style.top = '20px';
+    errorDiv.style.left = '50%';
+    errorDiv.style.transform = 'translateX(-50%)';
+    errorDiv.style.backgroundColor = '#f44336';
+    errorDiv.style.color = 'white';
+    errorDiv.style.padding = '15px';
+    errorDiv.style.borderRadius = '5px';
+    errorDiv.style.zIndex = '1001';
+    errorDiv.textContent = message;
 
-  document.body.appendChild(errorDiv);
+    document.body.appendChild(errorDiv);
 
-  // Remove after 3 seconds
-  setTimeout(() => {
-    if (document.body.contains(errorDiv)) {
-      document.body.removeChild(errorDiv);
-    }
-  }, 3000);
+    // Remove after 3 seconds
+    setTimeout(() => {
+        if (document.body.contains(errorDiv)) {
+            document.body.removeChild(errorDiv);
+        }
+    }, 3000);
 }
 
 // Update the saveEvolution function to use the new overlay
 async function saveEvolution(data) {
-  showLoadingIndicator();
+    showLoadingIndicator();
 
-  try {
-    // Get the filename from the UI or generate one
-    const filename = document.getElementById('saveFilename')?.value ||
-                     `evolution_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    try {
+        // Get the filename from the UI or generate one
+        const filename = document.getElementById('saveFilename')?.value ||
+            `evolution_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
 
-    const response = await fetch('/api/save-evolution', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        data: data || currentEvolutionData,
-        filename: filename
-      })
-    });
+        const response = await fetch('/api/save-evolution', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                data: data || currentEvolutionData,
+                filename: filename
+            })
+        });
 
-    if (!response.ok) {
-      throw new Error(`Save failed: ${response.statusText}`);
+        if (!response.ok) {
+            throw new Error(`Save failed: ${response.statusText}`);
+        }
+
+        // Show success message
+        showSuccessMessage('Evolution saved successfully!');
+
+        return await response.json();
+    } catch (error) {
+        console.error('Error saving evolution:', error);
+        showErrorMessage(`Save failed: ${error.message}`);
+        throw error;
+    } finally {
+        hideLoadingIndicator();
     }
-
-    // Show success message
-    showSuccessMessage('Evolution saved successfully!');
-
-    return await response.json();
-  } catch (error) {
-    console.error('Error saving evolution:', error);
-    showErrorMessage(`Save failed: ${error.message}`);
-    throw error;
-  } finally {
-    hideLoadingIndicator();
-  }
 }
 
 // Add a success message function
 function showSuccessMessage(message) {
-  const successDiv = document.createElement('div');
-  successDiv.className = 'success-message';
-  successDiv.style.position = 'fixed';
-  successDiv.style.top = '20px';
-  successDiv.style.left = '50%';
-  successDiv.style.transform = 'translateX(-50%)';
-  successDiv.style.backgroundColor = '#4CAF50';
-  successDiv.style.color = 'white';
-  successDiv.style.padding = '15px';
-  successDiv.style.borderRadius = '5px';
-  successDiv.style.zIndex = '1001';
-  successDiv.textContent = message;
+    const successDiv = document.createElement('div');
+    successDiv.className = 'success-message';
+    successDiv.style.position = 'fixed';
+    successDiv.style.top = '20px';
+    successDiv.style.left = '50%';
+    successDiv.style.transform = 'translateX(-50%)';
+    successDiv.style.backgroundColor = '#4CAF50';
+    successDiv.style.color = 'white';
+    successDiv.style.padding = '15px';
+    successDiv.style.borderRadius = '5px';
+    successDiv.style.zIndex = '1001';
+    successDiv.textContent = message;
 
-  document.body.appendChild(successDiv);
+    document.body.appendChild(successDiv);
 
-  // Remove after 3 seconds
-  setTimeout(() => {
-    if (document.body.contains(successDiv)) {
-      document.body.removeChild(successDiv);
-    }
-  }, 3000);
+    // Remove after 3 seconds
+    setTimeout(() => {
+        if (document.body.contains(successDiv)) {
+            document.body.removeChild(successDiv);
+        }
+    }, 3000);
 }
 
 // Function to reset button states
@@ -1741,7 +1761,7 @@ function showContextModal(ideaIndex) {
     if (contexts.length > 0) {
         // Use the provided ideaIndex if available, otherwise use currentContextIndex
         const contextIndex = (ideaIndex !== undefined && ideaIndex < contexts.length) ?
-                            ideaIndex : currentContextIndex;
+            ideaIndex : currentContextIndex;
 
         // Use specific prompts if available (translation layer), otherwise use raw contexts (legacy)
         const displayContent = specificPrompts.length > 0 && specificPrompts[contextIndex]
@@ -1767,8 +1787,8 @@ function showContextModal(ideaIndex) {
             <div class="context-content">
                 <div class="alert alert-info mb-3">
                     <strong>${displayTitle}:</strong> ${specificPrompts.length > 0 ?
-                        'This is the specific prompt generated from the context pool to create this idea.' :
-                        'This is the raw context pool used to inspire this idea.'}
+                'This is the specific prompt generated from the context pool to create this idea.' :
+                'This is the raw context pool used to inspire this idea.'}
                 </div>
                 ${contextItems}
             </div>
@@ -1785,7 +1805,7 @@ function showContextModal(ideaIndex) {
 
         // Add event listener to clean up when modal is hidden
         // Use a named function so we can check if it already exists
-        const cleanupFunction = function(event) {
+        const cleanupFunction = function (event) {
             // Remove any lingering backdrop elements
             const backdrops = document.querySelectorAll('.modal-backdrop');
             backdrops.forEach(backdrop => {
@@ -1883,15 +1903,15 @@ function showLineageModal(idea, generationIndex) {
             const sourceGenerationIndex = idea.elite_source_generation;
             const sourceIdeaId = idea.elite_source_id;
 
-                         let sourceIdea = null;
-             if (sourceGenerationIndex !== undefined && sourceIdeaId && generations[sourceGenerationIndex]) {
-                 sourceIdea = generations[sourceGenerationIndex].find(sourceCandidate => sourceCandidate.id === sourceIdeaId);
-             }
+            let sourceIdea = null;
+            if (sourceGenerationIndex !== undefined && sourceIdeaId && generations[sourceGenerationIndex]) {
+                sourceIdea = generations[sourceGenerationIndex].find(sourceCandidate => sourceCandidate.id === sourceIdeaId);
+            }
 
-             let originHtml;
-        if (sourceIdea) {
-            const sourcePreview = createCardPreview(sourceIdea.content, 200);
-            originHtml = `
+            let originHtml;
+            if (sourceIdea) {
+                const sourcePreview = createCardPreview(sourceIdea.content, 200);
+                originHtml = `
                 <div class="elite-origin-section">
                     <div class="alert alert-success mb-3">
                         <h6><i class="fas fa-star"></i> Most Creative Idea Selected</h6>
@@ -1913,8 +1933,8 @@ function showLineageModal(idea, generationIndex) {
                     </div>
                 </div>
             `;
-        } else {
-            originHtml = `
+            } else {
+                originHtml = `
                 <div class="elite-origin-section">
                     <div class="alert alert-success mb-3">
                         <h6><i class="fas fa-star"></i> Most Creative Idea Selected</h6>
@@ -1925,55 +1945,55 @@ function showLineageModal(idea, generationIndex) {
                     </div>
                 </div>
             `;
-        }
+            }
 
-        lineageModalContent.innerHTML = originHtml;
+            lineageModalContent.innerHTML = originHtml;
 
-        // Add event listener for the view source button if it exists
-        const viewSourceBtn = lineageModalContent.querySelector('.view-source-idea');
-        if (viewSourceBtn && sourceIdea) {
-            viewSourceBtn.addEventListener('click', () => {
-                // Store current idea for reopening
-                const currentIdea = idea;
-                const currentGenIndex = generationIndex;
+            // Add event listener for the view source button if it exists
+            const viewSourceBtn = lineageModalContent.querySelector('.view-source-idea');
+            if (viewSourceBtn && sourceIdea) {
+                viewSourceBtn.addEventListener('click', () => {
+                    // Store current idea for reopening
+                    const currentIdea = idea;
+                    const currentGenIndex = generationIndex;
 
-                // Close the lineage modal
-                if (window.bootstrap) {
-                    const lineageModalInstance = bootstrap.Modal.getInstance(lineageModal);
-                    if (lineageModalInstance) {
-                        lineageModalInstance.hide();
+                    // Close the lineage modal
+                    if (window.bootstrap) {
+                        const lineageModalInstance = bootstrap.Modal.getInstance(lineageModal);
+                        if (lineageModalInstance) {
+                            lineageModalInstance.hide();
+                        }
+                    } else {
+                        lineageModal.style.display = 'none';
                     }
-                } else {
-                    lineageModal.style.display = 'none';
-                }
 
-                // Add event listener to reopen lineage modal when idea modal closes
-                setTimeout(() => {
-                    const ideaModalElement = document.getElementById('ideaModal');
-                    const reopenLineage = function() {
-                        ideaModalElement.removeEventListener('hidden.bs.modal', reopenLineage);
-                        setTimeout(() => {
-                            showLineageModal(currentIdea, currentGenIndex);
-                        }, 150);
-                    };
-                    ideaModalElement.addEventListener('hidden.bs.modal', reopenLineage);
+                    // Add event listener to reopen lineage modal when idea modal closes
+                    setTimeout(() => {
+                        const ideaModalElement = document.getElementById('ideaModal');
+                        const reopenLineage = function () {
+                            ideaModalElement.removeEventListener('hidden.bs.modal', reopenLineage);
+                            setTimeout(() => {
+                                showLineageModal(currentIdea, currentGenIndex);
+                            }, 150);
+                        };
+                        ideaModalElement.addEventListener('hidden.bs.modal', reopenLineage);
 
-                    // Show the source idea modal
-                    showIdeaModal(sourceIdea);
-                }, 150);
-            });
-        }
+                        // Show the source idea modal
+                        showIdeaModal(sourceIdea);
+                    }, 150);
+                });
+            }
 
-        // Show the modal
-        let modal;
-        if (window.bootstrap) {
-            modal = new bootstrap.Modal(lineageModal);
-        } else {
-            lineageModal.style.display = 'block';
-        }
-        modal.show();
+            // Show the modal
+            let modal;
+            if (window.bootstrap) {
+                modal = new bootstrap.Modal(lineageModal);
+            } else {
+                lineageModal.style.display = 'block';
+            }
+            modal.show();
 
-        return; // Exit early for elite ideas
+            return; // Exit early for elite ideas
         }
     } else if (idea.oracle_generated && idea.oracle_analysis) {
         // Show Oracle analysis instead of lineage
@@ -2176,7 +2196,7 @@ function showLineageModal(idea, generationIndex) {
                         const ideaModalElement = document.getElementById('ideaModal');
 
                         // Add one-time event listener to reopen lineage modal when idea modal is closed
-                        const reopenLineage = function() {
+                        const reopenLineage = function () {
                             // Remove this event listener to prevent multiple reopenings
                             ideaModalElement.removeEventListener('hidden.bs.modal', reopenLineage);
 
@@ -2217,7 +2237,7 @@ function showLineageModal(idea, generationIndex) {
 
         // Add event listener to clean up when modal is hidden
         // Use a named function so we can check if it already exists
-        const cleanupFunction = function(event) {
+        const cleanupFunction = function (event) {
             // Remove any lingering backdrop elements
             const backdrops = document.querySelectorAll('.modal-backdrop');
             backdrops.forEach(backdrop => {
@@ -2295,15 +2315,28 @@ function displayTokenCounts(tokenCounts) {
     const totalCost = tokenCounts.cost.total_cost.toFixed(4);
     const totalTokens = tokenCounts.total.toLocaleString();
 
+    // Get estimated total cost if available
+    let estimatedCostHtml = '';
+    if (tokenCounts.cost.estimated_total_cost !== undefined) {
+        const estimatedCost = tokenCounts.cost.estimated_total_cost.toFixed(4);
+        estimatedCostHtml = `<div class="ms-3 border-start ps-3">
+            <h6 class="mb-0">Est. Total: <strong>$${estimatedCost}</strong></h6>
+            <small class="text-muted">Projected</small>
+        </div>`;
+    }
+
     // Store the token data for the modal
     tokenCountsContainer.dataset.tokenCounts = JSON.stringify(tokenCounts);
 
     // Update the container content with a simple cost display
     tokenCountsContainer.innerHTML = `
         <div class="card-body d-flex justify-content-between align-items-center p-3">
-            <div>
-                <h6 class="mb-0">Cost: <strong>$${totalCost}</strong></h6>
-                <small class="text-muted">${totalTokens} tokens</small>
+            <div class="d-flex">
+                <div>
+                    <h6 class="mb-0">Cost: <strong>$${totalCost}</strong></h6>
+                    <small class="text-muted">${totalTokens} tokens</small>
+                </div>
+                ${estimatedCostHtml}
             </div>
             <button id="token-details-btn" class="btn btn-sm btn-outline-primary">
                 <i class="fas fa-info-circle"></i> Details
@@ -2312,7 +2345,7 @@ function displayTokenCounts(tokenCounts) {
     `;
 
     // Add event listener to the details button
-    document.getElementById('token-details-btn').addEventListener('click', function() {
+    document.getElementById('token-details-btn').addEventListener('click', function () {
         showTokenDetailsModal(tokenCounts);
     });
 }
@@ -2368,7 +2401,7 @@ function showTokenDetailsModal(tokenCounts) {
             componentData.push({
                 name: componentName.charAt(0).toUpperCase() + componentName.slice(1).replace('_', ' '),
                 displayName: componentName === 'genotype_encoder' ? 'Genotype Encoder' :
-                            componentName.charAt(0).toUpperCase() + componentName.slice(1),
+                    componentName.charAt(0).toUpperCase() + componentName.slice(1),
                 total: component.total.toLocaleString(),
                 input: component.input.toLocaleString(),
                 output: component.output.toLocaleString(),
@@ -2533,7 +2566,7 @@ function showTokenDetailsModal(tokenCounts) {
                     y: {
                         beginAtZero: true,
                         ticks: {
-                            callback: function(value) {
+                            callback: function (value) {
                                 return '$' + value.toFixed(4);
                             }
                         }
@@ -2575,7 +2608,7 @@ function showTokenDetailsModal(tokenCounts) {
                     y: {
                         beginAtZero: true,
                         ticks: {
-                            callback: function(value) {
+                            callback: function (value) {
                                 return '$' + value.toFixed(4);
                             }
                         }
@@ -2623,7 +2656,7 @@ function getDiversityChartScales() {
                 font: {
                     size: 12
                 },
-                callback: function(value, index, values) {
+                callback: function (value, index, values) {
                     const generation = this.getLabelForValue(value);
                     return generation === '0' ? 'Initial' : `Gen ${generation}`;
                 }
@@ -2850,11 +2883,11 @@ function initializeDiversityChart() {
                         },
                         padding: 12,
                         callbacks: {
-                            title: function(context) {
+                            title: function (context) {
                                 const generation = context[0].label;
                                 return generation === '0' ? 'Initial Population' : `Generation ${generation}`;
                             },
-                            label: function(context) {
+                            label: function (context) {
                                 const value = parseFloat(context.parsed.y).toFixed(4);
                                 const axisLabel = isSplitAxes && context.datasetIndex === 2 ?
                                     ' (right axis)' : (isSplitAxes ? ' (left axis)' : '');
@@ -2878,7 +2911,7 @@ function initializeDiversityChart() {
                         borderJoinStyle: 'round'
                     }
                 },
-                onResize: function(chart, size) {
+                onResize: function (chart, size) {
                     // Ensure proper sizing on resize
                     chart.canvas.style.height = '400px';
                     chart.canvas.style.width = '100%';
@@ -2935,8 +2968,8 @@ function processDiversityData(diversityHistory) {
 
         // Try different property names for diversity score
         const overallScore = diversityData.diversity_score ||
-                           diversityData.overall_diversity ||
-                           diversityData.score || 0;
+            diversityData.overall_diversity ||
+            diversityData.score || 0;
         overallScores.push(overallScore);
 
         // Try to find per-generation diversity
@@ -3194,7 +3227,7 @@ function initializeDiversityPlot() {
 }
 
 // Add event listeners when the document is ready
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     // Initialize diversity chart when page loads
     setTimeout(() => {
         initializeDiversityChart();
@@ -3203,7 +3236,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Enhance the start evolution function to reset diversity plot
     const startButton = document.getElementById('startButton');
     if (startButton) {
-        startButton.addEventListener('click', function() {
+        startButton.addEventListener('click', function () {
             // Reset diversity plot when starting new evolution
             resetDiversityPlot();
             showDiversityPlotLoading();
@@ -3361,8 +3394,8 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
                 <div class="alert alert-info mb-3">
                     <strong>${promptType === 'initial' ? 'Initial' : 'Breeding'} Prompt:</strong>
                     ${promptType === 'initial'
-                        ? 'This is the specific prompt used to create this initial idea from the context pool.'
-                        : 'This is the specific prompt generated from parent concepts to create this bred idea.'}
+                ? 'This is the specific prompt used to create this initial idea from the context pool.'
+                : 'This is the specific prompt generated from parent concepts to create this bred idea.'}
                 </div>
                 ${contentItems}
             </div>
@@ -3376,7 +3409,7 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
         const modal = new bootstrap.Modal(promptModal);
 
         // Add cleanup event listener
-        const cleanupFunction = function(event) {
+        const cleanupFunction = function (event) {
             const backdrops = document.querySelectorAll('.modal-backdrop');
             backdrops.forEach(backdrop => backdrop.remove());
             document.body.classList.remove('modal-open');
@@ -3402,7 +3435,7 @@ function setupModelChangeListener() {
     const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
 
     if (modelSelect && thinkingBudgetContainer) {
-        modelSelect.addEventListener('change', function() {
+        modelSelect.addEventListener('change', function () {
             updateThinkingBudgetVisibility();
         });
 
@@ -3423,9 +3456,9 @@ function updateThinkingBudgetVisibility() {
     if (!modelSelect || !thinkingBudgetContainer) return;
 
     const selectedModel = modelSelect.value;
-    const isGemini25 = selectedModel.includes('2.5');
+    const supportsThinking = selectedModel.includes('2.5') || selectedModel.includes('3-pro');
 
-    if (isGemini25) {
+    if (supportsThinking) {
         thinkingBudgetContainer.style.display = 'block';
 
         // Reset to dynamic mode when switching models
@@ -3464,6 +3497,14 @@ function configureThinkingBudgetForModel(modelName) {
             canDisable: false,
             help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
         },
+        'gemini-3-pro-preview': {
+            min: 128,
+            max: 32768,
+            default: 128,  // Minimum possible since can't disable
+            defaultMode: 'custom',  // Use custom mode with minimum value
+            canDisable: false,
+            help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
+        },
         'gemini-2.5-flash': {
             min: 128,  // Custom range starts at 128
             max: 24576,
@@ -3472,7 +3513,7 @@ function configureThinkingBudgetForModel(modelName) {
             canDisable: true,
             help: 'Thinking disabled by default (0-24576 tokens available for custom)'
         },
-        'gemini-2.5-flash-lite-preview-06-17': {
+        'gemini-2.5-flash-lite': {
             min: 512,  // Custom range starts at 512
             max: 24576,
             default: 0,  // Disabled by default
@@ -3485,7 +3526,7 @@ function configureThinkingBudgetForModel(modelName) {
     const config = configs[modelName];
     if (!config) return;
 
-        // Show/hide disabled option based on model capability
+    // Show/hide disabled option based on model capability
     if (config.canDisable) {
         thinkingDisabledOption.style.display = 'block';
     } else {
@@ -3597,10 +3638,10 @@ function getThinkingBudgetValue() {
     if (!modelSelect) return null;
 
     const selectedModel = modelSelect.value;
-    const isGemini25 = selectedModel.includes('2.5');
+    const supportsThinking = selectedModel.includes('2.5') || selectedModel.includes('3-pro');
 
-    if (!isGemini25) {
-        return null; // Don't send thinking budget for non-2.5 models
+    if (!supportsThinking) {
+        return null; // Don't send thinking budget for non-thinking models
     }
 
     // Determine value based on selected mode

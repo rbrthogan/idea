@@ -1,7 +1,9 @@
 from abc import ABC
+import re
 import random
 import os
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import json
 from pydantic import BaseModel
 from typing import Type, Optional, Dict, Any, List
@@ -39,18 +41,21 @@ class LLMWrapper(ABC):
         self.output_token_count = 0
         self.agent_name = agent_name
         print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, thinking_budget: {thinking_budget}")
-        self._setup_provider()
-        # Lazily created clients/models for reuse
-        self._client_new = None
-        self._old_model = None
+
+        self.client = None
         self._client_lock = threading.Lock()
+        self._setup_provider()
 
     def _setup_provider(self):
         if self.provider == "google_generative_ai":
-            if genai is None:
-                raise ImportError("google.generativeai is not installed")
             api_key = os.environ.get("GEMINI_API_KEY")
-            genai.configure(api_key=api_key)
+            if not api_key:
+                print("Warning: GEMINI_API_KEY not set")
+
+            # Initialize client once
+            with self._client_lock:
+                if self.client is None:
+                    self.client = genai.Client(api_key=api_key)
         # Add other providers here
 
     @retry(
@@ -65,25 +70,12 @@ class LLMWrapper(ABC):
                      response_schema: Type[BaseModel] = None) -> str:
         """Base method for generating text with retry logic built in"""
         if self.provider == "google_generative_ai":
-            # Use newer google.genai client if thinking budget is specified for 2.5 models
-            if self.thinking_budget is not None and "2.5" in self.model_name:
-                return self._generate_with_new_client(prompt, temperature, top_p, response_schema)
-            else:
-                return self._generate_with_old_client(prompt, temperature, top_p, response_schema)
+            return self._generate_content(prompt, temperature, top_p, response_schema)
         return "Not implemented"
 
-    def _generate_with_new_client(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
-        """Generate using new google.genai client with thinking budget support"""
+    def _generate_content(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
+        """Generate using google.genai client"""
         try:
-            from google import genai
-            from google.genai import types
-
-            # Configure client
-            with self._client_lock:
-                if self._client_new is None:
-                    api_key = os.environ.get("GEMINI_API_KEY")
-                    self._client_new = genai.Client(api_key=api_key)
-
             # Prepare generation config
             actual_temp = temperature if temperature is not None else self.temperature
             actual_top_p = top_p if top_p is not None else self.top_p
@@ -94,16 +86,17 @@ class LLMWrapper(ABC):
                 "max_output_tokens": self.MAX_TOKENS,
             }
 
-            # Add thinking config
-            if self.thinking_budget == -1:
-                config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=-1)
-                print(f"{self.agent_name} using dynamic thinking budget")
-            elif self.thinking_budget == 0:
-                config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-                print(f"{self.agent_name} thinking disabled")
-            else:
-                config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=self.thinking_budget)
-                print(f"{self.agent_name} using thinking budget: {self.thinking_budget}")
+            # Add thinking config if applicable
+            if self.thinking_budget is not None:
+                if self.thinking_budget == -1:
+                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=-1) # Dynamic
+                    # print(f"{self.agent_name} using dynamic thinking budget")
+                elif self.thinking_budget == 0:
+                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=0) # Disabled
+                    # print(f"{self.agent_name} thinking disabled")
+                else:
+                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=self.thinking_budget)
+                    # print(f"{self.agent_name} using thinking budget: {self.thinking_budget}")
 
             if response_schema:
                 config_dict["response_schema"] = response_schema
@@ -111,16 +104,16 @@ class LLMWrapper(ABC):
 
             config = types.GenerateContentConfig(**config_dict)
 
-            print(f"{self.agent_name} using NEW client with temperature: {actual_temp}, top_p: {actual_top_p}")
+            print(f"{self.agent_name} using client with temperature: {actual_temp}, top_p: {actual_top_p}")
 
             # Generate content
-            response = self._client_new.models.generate_content(
+            response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
                 config=config
             )
 
-            # Track tokens (new client has different structure)
+            # Track tokens
             if hasattr(response, 'usage_metadata') and response.usage_metadata:
                 self.total_token_count += response.usage_metadata.total_token_count
                 if hasattr(response.usage_metadata, 'prompt_token_count'):
@@ -139,62 +132,16 @@ class LLMWrapper(ABC):
                 self.output_token_count,
                 ")",
             )
-            return response.text if response.text else "No response."
+
+            try:
+                return response.text
+            except ValueError:
+                print(f"Warning: Client response blocked or empty.")
+                return "No response."
 
         except Exception as e:
-            print("ERROR: New client failed:", e)
-            print("Falling back to old client without thinking budget")
-            return self._generate_with_old_client(prompt, temperature, top_p, response_schema)
-
-    def _generate_with_old_client(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
-        """Generate using old google.generativeai client (fallback)"""
-        config = self._get_generation_config(temperature, top_p, response_schema)
-        # Reuse the model instance to keep connections warm
-        if self._old_model is None:
-            self._old_model = genai.GenerativeModel(
-                model_name=self.model_name,
-                generation_config=config,
-            )
-        response = self._old_model.generate_content(prompt, generation_config=config)
-
-        # Track total tokens
-        self.total_token_count += response.usage_metadata.total_token_count
-
-        # Try to get input and output tokens if available
-        try:
-            if hasattr(response.usage_metadata, 'prompt_token_count'):
-                self.input_token_count += response.usage_metadata.prompt_token_count
-            if hasattr(response.usage_metadata, 'candidates_token_count'):
-                self.output_token_count += response.usage_metadata.candidates_token_count
-        except AttributeError:
-            # If detailed token counts aren't available, estimate based on total
-            # Assuming a typical 1:4 ratio of input:output tokens
-            self.input_token_count += int(response.usage_metadata.total_token_count * 0.2)
-            self.output_token_count += int(response.usage_metadata.total_token_count * 0.8)
-
-        print(f"Total tokens {self.agent_name}: {self.total_token_count} (Input: {self.input_token_count}, Output: {self.output_token_count})")
-        return response.text if response.text else "No response."
-
-    def _get_generation_config(self,
-                             temperature: Optional[float],
-                             top_p: Optional[float],
-                             response_schema: Optional[Type[BaseModel]] = None) -> Dict[str, Any]:
-        actual_temp = temperature if temperature is not None else self.temperature
-        actual_top_p = top_p if top_p is not None else self.top_p
-        print(f"{self.agent_name} using OLD client with temperature: {actual_temp} (override: {temperature}, default: {self.temperature})")
-        print(f"{self.agent_name} using top_p: {actual_top_p} (override: {top_p}, default: {self.top_p})")
-
-        config = {
-            "temperature": actual_temp,
-            "top_p": actual_top_p,
-            "max_output_tokens": self.MAX_TOKENS,
-        }
-
-        if response_schema:
-            config["response_schema"] = response_schema
-            config["response_mime_type"] = "application/json"
-        print("Generation config:", config)
-        return config
+            print(f"ERROR: Client generation failed: {e}")
+            raise e
 
 class Ideator(LLMWrapper):
     """Generates and manages ideas"""
@@ -360,17 +307,63 @@ class Formatter(LLMWrapper):
             prompt = prompts.FORMAT_PROMPT.format(input_text=idea_text)
 
         print(f"Prompt:\n {prompt}")
-        response = self.generate_text(prompt, response_schema=Idea)
+
+        # Force JSON response schema for structured output
+        # Use response_schema for structured output with the new client
+        response = self.generate_text(
+            prompt,
+            response_schema=Idea,
+            # Ensure we're using a temperature that favors structured output
+            temperature=0.7
+        )
+
+        # Clean up markdown code blocks if present
+        clean_response = response.strip()
+        if clean_response.startswith("```json"):
+            clean_response = clean_response[7:]
+        elif clean_response.startswith("```"):
+            clean_response = clean_response[3:]
+
+        if clean_response.endswith("```"):
+            clean_response = clean_response[:-3]
+
+        clean_response = clean_response.strip()
 
         try:
-            formatted_idea = Idea(**json.loads(response))
-        except (json.JSONDecodeError, ValueError) as e:
+            formatted_idea = Idea(**json.loads(clean_response))
+
+            # Double check that content is not empty if it was required
+            if not formatted_idea.content or formatted_idea.content.strip() == "":
+                 raise ValueError("Content field is empty in formatted idea")
+
+        except (json.JSONDecodeError, ValueError, Exception) as e:
             print(f"FORMATTER: JSON parsing failed: {e}")
             print(f"FORMATTER: Raw response: {response}")
 
             # Fallback: Try to extract title and content manually
             title = "Untitled"
             content = response.strip()
+
+            # If raw response is just JSON-like but failed parsing, try to clean it
+            if response.strip().startswith('{') and response.strip().endswith('}'):
+                try:
+                     # Try to be lenient with newlines in strings
+                     import re
+                     # Basic fix for unescaped newlines in JSON values
+                     cleaned = re.sub(r'(?<=: ")(.*?)(?=")', lambda m: m.group(1).replace('\n', '\\n'), response, flags=re.DOTALL)
+                     data = json.loads(cleaned)
+                     if 'title' in data:
+                         title = data['title']
+                     if 'content' in data:
+                         content = data['content']
+                     # If successful, create idea and return
+                     if content and content.strip():
+                         formatted_idea = Idea(title=title, content=content)
+                         # Skip to return block...
+                         # But since we can't easily jump, we'll just fall through to manual extraction if this fails
+                except Exception as e:
+                    print(f"FORMATTER: JSON fallback cleaning failed: {e}")
+                    pass
 
             # Try to parse "Title: X\nContent: Y" format
             if "Title:" in response and "Content:" in response:

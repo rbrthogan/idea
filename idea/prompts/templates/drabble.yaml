@@ -64,13 +64,10 @@ prompts:
     {requirements}
 
   format: |
-    Please take this drabble and parse it into the correct JSON format.
+    You are a formatting assistant. Your task is to take the input text and structure it into a JSON object with "title" and "content" fields.
 
-    The input may be in the format:
-    Title: [title text]
-    Content: [content text]
-
-    If no explicit title is provided, create an appropriate one based on the content.
+    If the input has a clear title (e.g. "Title: X"), use it. If not, generate a suitable title based on the content.
+    The "content" field should contain the body of the story.
 
     Input to format:
     {input_text}
