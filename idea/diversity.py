@@ -4,7 +4,6 @@ from typing import List, Dict, Any, Optional
 from google import genai
 from google.genai import types
 import asyncio
-from functools import lru_cache
 import logging
 
 # Set up logging

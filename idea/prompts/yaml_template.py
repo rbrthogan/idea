@@ -2,7 +2,7 @@
 YAML Template Wrapper - makes YAML templates behave like Python modules
 """
 
-from typing import Optional, List
+from typing import List
 from .validation import PromptTemplate
 
 

@@ -2,17 +2,16 @@
 Template Manager API endpoints for CRUD operations on YAML prompt templates
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 import yaml
-import os
 from datetime import datetime
 
 from idea.prompts.loader import list_available_templates, validate_template
-from idea.prompts.validation import validate_template_file, TemplateValidator
+from idea.prompts.validation import TemplateValidator
 from idea.llm import LLMWrapper
 
 # Create router for template management
@@ -626,7 +625,7 @@ def parse_generated_template(response: str, idea_type_suggestion: str) -> Dict[s
     except Exception as e:
         print(f"Error parsing generated template: {e}")
         # Return a basic template with error indication
-        template["name"] = f"Generated Template (Parse Error)"
+        template["name"] = "Generated Template (Parse Error)"
         template["description"] = f"AI-generated template for {idea_type_suggestion} - Please review and edit"
 
     return template

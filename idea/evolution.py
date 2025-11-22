@@ -8,7 +8,6 @@ from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates, get_prompts
 from idea.diversity import DiversityCalculator
-from tqdm import tqdm
 
 
 def get_default_template_id():
@@ -698,7 +697,7 @@ class EvolutionEngine:
                 # Apply Oracle for diversity enhancement (if enabled)
                 if self.oracle:
                     try:
-                        print(f"Oracle analyzing population for diversity enhancement...")
+                        print("Oracle analyzing population for diversity enhancement...")
                         print(f"Population size before Oracle: {len(self.population)}")
                         print(f"History generations: {len(self.history)}")
 
@@ -796,7 +795,7 @@ class EvolutionEngine:
                 # Elite selection: Pass the most diverse idea directly to the next generation (if not the last generation)
                 if gen < self.generations - 1:  # Only do elite selection if there's a next generation
                     try:
-                        print(f"🌟 Performing elite selection for next generation...")
+                        print("🌟 Performing elite selection for next generation...")
                         most_diverse_idx = await self._find_most_diverse_idea_idx(self.population)
                         elite_idea = self.population[most_diverse_idx].copy() if isinstance(self.population[most_diverse_idx], dict) else self.population[most_diverse_idx]
 

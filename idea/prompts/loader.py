@@ -5,11 +5,9 @@ Supports both YAML templates and legacy Python modules
 
 from importlib import import_module
 from pathlib import Path
-import os
-from typing import Union, Optional
-from .validation import TemplateValidator, validate_template_file
+from typing import Optional
+from .validation import validate_template_file
 from .yaml_template import YAMLTemplateWrapper
-import copy
 
 
 def get_prompts(idea_type: str, use_yaml: bool = True):
