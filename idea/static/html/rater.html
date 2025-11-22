@@ -96,77 +96,87 @@
           <h2>Controls</h2>
         </div>
 
-        <!-- Navigation -->
-        <div class="nav-section">
-          <div class="nav-buttons">
-            <a href="/" class="btn btn-outline-primary">Evolution</a>
-            <a href="/rate" class="btn btn-primary">Rate Ideas</a>
-          </div>
-        </div>
-
-        <!-- Controls Section -->
-        <div class="controls-section">
-          <!-- Evolution selector -->
-          <div class="mb-3">
-            <label class="form-label">Evolution</label>
-            <select id="evolutionSelect" class="form-select mb-3">
-              <option value="">Current Evolution</option>
-              <!-- Previous evolutions will be populated here -->
-            </select>
-          </div>
-
-          <!-- Rating mode toggle -->
-          <div class="mb-3">
-            <label class="form-label">Rating Mode</label>
-            <div class="btn-group w-100" role="group">
-              <button id="manualModeBtn" type="button" class="btn btn-outline-primary active"
-                onclick="toggleRatingMode('manual')">Manual</button>
-              <button id="autoModeBtn" type="button" class="btn btn-outline-primary"
-                onclick="toggleRatingMode('auto')">Automated</button>
-            </div>
-          </div>
-
-          <div class="controls-buttons">
-            <button onclick="refreshPair()" class="btn btn-outline-primary">Next Pair</button>
-            <button onclick="showRanking()" class="btn btn-outline-primary">Show Ranking</button>
-
-            <hr>
-
-            <!-- Manual Rating Controls -->
-            <div id="manualRatingControls">
-              <label class="form-label">Manual Rating</label>
-              <div class="mb-3">
-                <label for="manualEloRange" class="form-label">ELO Matching Range (±)</label>
-                <input type="number" class="form-control" id="manualEloRange" value="100" min="0" max="500">
-                <small class="form-text text-muted">Ideas will be matched with others within this ELO range for more
-                  efficient comparisons</small>
+        <!-- Sidebar Views Container -->
+        <div class="sidebar-views-container">
+          <div class="sidebar-view active" id="view-main">
+            <!-- Navigation -->
+            <div class="nav-section">
+              <div class="nav-buttons">
+                <a href="/" class="btn">Evolution</a>
+                <a href="/rate" class="btn btn-primary">Rate Ideas</a>
               </div>
-              <label class="form-label">Vote</label>
-              <button onclick="vote('A')" class="btn btn-primary w-100 mb-2 vote-btn">Vote for A</button>
-              <button onclick="vote('B')" class="btn btn-primary w-100 mb-2 vote-btn">Vote for B</button>
-              <button onclick="vote('tie')" class="btn btn-secondary w-100 vote-btn">Tie</button>
             </div>
 
-            <!-- Automated Rating Controls -->
-            <div id="autoRatingControls" style="display: none;">
-              <label class="form-label">Automated Rating</label>
+            <!-- Controls Section -->
+            <div class="controls-section">
+              <!-- Evolution selector -->
               <div class="mb-3">
-                <label for="numComparisons" class="form-label">Number of Comparisons</label>
-                <input type="number" class="form-control" id="numComparisons" value="10" min="1" max="100">
-              </div>
-              <div class="mb-3">
-                <label for="eloRange" class="form-label">ELO Matching Range (±)</label>
-                <input type="number" class="form-control" id="eloRange" value="100" min="0" max="500">
-                <small class="form-text text-muted">Ideas will be matched with others within this ELO range for more
-                  efficient comparisons</small>
-              </div>
-              <div class="mb-3">
-                <label for="modelSelect" class="form-label">Model</label>
-                <select id="modelSelect" class="form-select">
-                  <!-- Models will be populated here -->
+                <label class="form-label">Evolution</label>
+                <select id="evolutionSelect" class="form-select form-select-sm mb-3">
+                  <option value="">Current Evolution</option>
+                  <!-- Previous evolutions will be populated here -->
                 </select>
               </div>
-              <button id="startAutoRating" class="btn btn-primary w-100">Start Auto Rating</button>
+
+              <!-- Rating mode toggle -->
+              <div class="mb-3">
+                <label class="form-label">Rating Mode</label>
+                <div class="btn-group w-100" role="group">
+                  <button id="manualModeBtn" type="button" class="btn btn-sm btn-outline-primary active"
+                    onclick="toggleRatingMode('manual')">Manual</button>
+                  <button id="autoModeBtn" type="button" class="btn btn-sm btn-outline-primary"
+                    onclick="toggleRatingMode('auto')">Automated</button>
+                </div>
+              </div>
+
+              <div class="controls-buttons">
+                <button onclick="refreshPair()" class="btn btn-sm btn-outline-primary w-100">Next Pair</button>
+                <button onclick="showRanking()" class="btn btn-sm btn-outline-primary w-100">Show Ranking</button>
+
+                <hr>
+
+                <!-- Manual Rating Controls -->
+                <div id="manualRatingControls">
+                  <label class="form-label">Manual Rating</label>
+                  <div class="mb-3">
+                    <label for="manualEloRange" class="form-label">ELO Matching Range (±)</label>
+                    <input type="number" class="form-control form-control-sm" id="manualEloRange" value="100" min="0"
+                      max="500">
+                    <small class="form-text text-muted" style="font-size: 0.75rem;">Ideas will be matched with others
+                      within this ELO range for more
+                      efficient comparisons</small>
+                  </div>
+                  <label class="form-label">Vote</label>
+                  <button onclick="vote('A')" class="btn btn-sm btn-primary w-100 mb-2 vote-btn">Vote for A</button>
+                  <button onclick="vote('B')" class="btn btn-sm btn-primary w-100 mb-2 vote-btn">Vote for B</button>
+                  <button onclick="vote('tie')" class="btn btn-sm btn-secondary w-100 vote-btn">Tie</button>
+                </div>
+
+                <!-- Automated Rating Controls -->
+                <div id="autoRatingControls" style="display: none;">
+                  <label class="form-label">Automated Rating</label>
+                  <div class="mb-3">
+                    <label for="numComparisons" class="form-label">Number of Comparisons</label>
+                    <input type="number" class="form-control form-control-sm" id="numComparisons" value="10" min="1"
+                      max="100">
+                  </div>
+                  <div class="mb-3">
+                    <label for="eloRange" class="form-label">ELO Matching Range (±)</label>
+                    <input type="number" class="form-control form-control-sm" id="eloRange" value="100" min="0"
+                      max="500">
+                    <small class="form-text text-muted" style="font-size: 0.75rem;">Ideas will be matched with others
+                      within this ELO range for more
+                      efficient comparisons</small>
+                  </div>
+                  <div class="mb-3">
+                    <label for="modelSelect" class="form-label">Model</label>
+                    <select id="modelSelect" class="form-select form-select-sm">
+                      <!-- Models will be populated here -->
+                    </select>
+                  </div>
+                  <button id="startAutoRating" class="btn btn-sm btn-primary w-100">Start Auto Rating</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

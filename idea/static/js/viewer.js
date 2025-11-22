@@ -19,255 +19,344 @@ let currentModalIdea = null;
 /**
  * Load available templates and populate the idea type dropdown
  */
+let allTemplates = []; // Store templates globally
+
+/**
+ * Load available templates and populate the sidebar list
+ */
 async function loadTemplateTypes() {
     try {
         const response = await fetch('/api/template-types');
         const data = await response.json();
 
         if (data.status === 'success') {
-            const ideaTypeSelect = document.getElementById('ideaType');
-            ideaTypeSelect.innerHTML = ''; // Clear existing options
+            allTemplates = data.templates;
+            renderTemplateList(allTemplates);
 
-            data.templates.forEach(template => {
-                const option = document.createElement('option');
-                option.value = template.id;
-                option.textContent = template.name;
-                if (template.description) {
-                    option.title = template.description;
-                }
-                ideaTypeSelect.appendChild(option);
-            });
-
-            // Set default selection to first template
-            if (data.templates.length > 0) {
-                ideaTypeSelect.value = data.templates[0].id;
+            // Set default selection if none selected
+            const currentType = document.getElementById('ideaType').value;
+            if (!currentType && allTemplates.length > 0) {
+                selectTemplate(allTemplates[0].id, false); // Don't slide back on initial load
             }
         } else {
             console.error('Error loading template types:', data.message);
-            // Fall back to hardcoded options if API fails
-            populateFallbackTemplates();
+            renderTemplateList([]);
         }
     } catch (error) {
         console.error('Error loading template types:', error);
-        populateFallbackTemplates();
+        renderTemplateList([]);
     }
 }
 
-/**
- * Fallback template population if API fails
- */
-function populateFallbackTemplates() {
-    const ideaTypeSelect = document.getElementById('ideaType');
+function renderTemplateList(templates) {
+    const container = document.getElementById('templatesList');
+    if (!container) return;
 
-    // Instead of hardcoded templates, try to populate with basic core templates
-    // If this also fails, at least we have some options
-    ideaTypeSelect.innerHTML = `
-        <option value="">Loading templates...</option>
-    `;
+    container.innerHTML = '';
 
-    // Try once more after a short delay
-    setTimeout(() => {
-        loadTemplateTypes();
-    }, 1000);
+    if (templates.length === 0) {
+        container.innerHTML = '<div class="text-muted text-center p-3">No templates found</div>';
+        return;
+    }
 
-    // If that fails too, show a basic message
-    setTimeout(() => {
-        if (ideaTypeSelect.options.length <= 1) {
-            ideaTypeSelect.innerHTML = `
-                <option value="">No templates available - check Template Manager</option>
-            `;
-        }
-    }, 3000);
+    const currentType = document.getElementById('ideaType').value;
+
+    templates.forEach(template => {
+        const div = document.createElement('div');
+        div.className = `template-list-item ${template.id === currentType ? 'active' : ''}`;
+        div.onclick = (e) => {
+            // Prevent triggering if clicking action buttons
+            if (e.target.closest('.btn')) return;
+            selectTemplate(template.id);
+        };
+
+        div.innerHTML = `
+            <h6>${template.name}</h6>
+            <p>${template.description || 'No description'}</p>
+            <div class="template-actions">
+                <button class="btn btn-xs btn-outline-secondary" onclick="editTemplate('${template.id}')">
+                    <i class="fas fa-edit"></i> Edit
+                </button>
+            </div>
+        `;
+
+        container.appendChild(div);
+    });
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-    console.log("viewer.js loaded!");
+function selectTemplate(id, slideBack = true) {
+    const template = allTemplates.find(t => t.id === id);
+    if (!template) return;
 
-    // Load available templates
-    loadTemplateTypes();
+    // Update hidden input
+    document.getElementById('ideaType').value = id;
 
-    // Load evolutions dropdown
-    loadEvolutions();
+    // Update selector text
+    const display = document.getElementById('ideaTypeDisplay');
+    if (display) {
+        display.textContent = template.name;
+        display.classList.remove('text-muted', 'fst-italic');
+    }
 
-    // Set up model change listener for thinking budget
-    setupModelChangeListener();
+    // Re-render list to update active state
+    renderTemplateList(allTemplates);
 
-    // Try to restore current evolution from localStorage
-    restoreCurrentEvolution();
+    if (slideBack) {
+        showSidebarView('main');
+    }
+}
 
-    const startButton = document.getElementById('startButton');
-    const stopButton = document.getElementById('stopButton');
+async function editTemplate(id) {
+    try {
+        const response = await fetch(`/api/templates/${id}`);
+        if (response.ok) {
+            const template = await response.json();
+            currentTemplate = template;
+            document.getElementById('templateEditor').value = JSON.stringify(template, null, 2);
+            const modal = new bootstrap.Modal(document.getElementById('templateModal'));
+            modal.show();
+        }
+    } catch (e) {
+        console.error("Error fetching template:", e);
+    }
+}
 
-    if (startButton) {
-        startButton.onclick = async function () {
-            console.log("Starting evolution...");
-            const popSize = parseInt(document.getElementById('popSize').value);
-            const generations = parseInt(document.getElementById('generations').value);
-            const ideaType = document.getElementById('ideaType').value;
-            const modelType = document.getElementById('modelType').value;
+function filterTemplates(query) {
+    if (!query) {
+        renderTemplateList(allTemplates);
+        return;
+    }
 
-            const creativeTemp = parseFloat(document.getElementById('creativeTemp').value);
-            const topP = parseFloat(document.getElementById('topP').value);
+    const lower = query.toLowerCase();
+    const filtered = allTemplates.filter(t =>
+        t.name.toLowerCase().includes(lower) ||
+        (t.description && t.description.toLowerCase().includes(lower))
+    );
+    renderTemplateList(filtered);
+}
 
-            // Get tournament values
-            const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
-            const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
+// Expose to window
+window.selectTemplate = selectTemplate;
+window.editTemplate = editTemplate;
+window.filterTemplates = filterTemplates;
 
-            // Get thinking budget value (only for Gemini 2.5 models)
-            const thinkingBudget = getThinkingBudgetValue();
+// Initialize
+// Initialize
+document.addEventListener('DOMContentLoaded', async () => {
+    // Load initial data
+    await loadTemplateTypes();
+    await loadEvolutions();
 
-            // Get max budget
-            const maxBudgetInput = document.getElementById('maxBudget');
-            const maxBudget = maxBudgetInput && maxBudgetInput.value ? parseFloat(maxBudgetInput.value) : null;
+    // Check if we have a current evolution running or saved
+    await restoreCurrentEvolution();
 
-            const requestBody = {
-                popSize,
-                generations,
-                ideaType,
-                modelType,
-                creativeTemp,
-                topP,
-                tournamentSize,
-                tournamentComparisons,
-                thinkingBudget,
-                maxBudget
-            };
+    // Start polling for progress
+    // pollProgress(); // Managed by restoreCurrentEvolution / startEvolution
+    // setInterval(pollProgress, 1000);
 
-            console.log("Request body JSON:", JSON.stringify(requestBody));
+    // Helper for safe event listeners
+    const addListener = (id, event, handler) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener(event, handler);
+    };
 
-            // Reset UI state
-            resetUIState();
+    // --- Evolution Controls ---
 
-            // Hook for state management
-            if (window.onEvolutionStart) {
-                window.onEvolutionStart();
-            }
+    addListener('startButton', 'click', async function () {
+        console.log("Starting evolution...");
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
 
-            // Update button states
+        const popSize = parseInt(document.getElementById('popSize').value);
+        const generations = parseInt(document.getElementById('generations').value);
+        const ideaType = document.getElementById('ideaType').value;
+        const modelType = document.getElementById('modelType').value;
+
+        const creativeTemp = parseFloat(document.getElementById('creativeTemp').value);
+        const topP = parseFloat(document.getElementById('topP').value);
+
+        // Get tournament values
+        const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
+        const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
+
+        // Get thinking budget value (only for Gemini 2.5 models)
+        const thinkingBudget = getThinkingBudgetValue();
+
+        // Get max budget
+        const maxBudgetInput = document.getElementById('maxBudget');
+        const maxBudget = maxBudgetInput && maxBudgetInput.value ? parseFloat(maxBudgetInput.value) : null;
+
+        const requestBody = {
+            popSize,
+            generations,
+            ideaType,
+            modelType,
+            creativeTemp,
+            topP,
+            tournamentSize,
+            tournamentComparisons,
+            thinkingBudget,
+            maxBudget
+        };
+
+        console.log("Request body JSON:", JSON.stringify(requestBody));
+
+        // Reset UI state
+        resetUIState();
+
+        // Hook for state management
+        if (window.onEvolutionStart) {
+            window.onEvolutionStart();
+        }
+
+        // Update button states
+        if (startButton) {
             startButton.disabled = true;
             startButton.textContent = 'Running...';
+        }
+        if (stopButton) {
             stopButton.disabled = false;
             stopButton.style.display = 'block';
+        }
 
-            try {
-                console.log("Sending request with:", {
-                    popSize, generations, ideaType, modelType,
-                    creativeTemp, topP
-                });
+        try {
+            const response = await fetch('/api/start-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody)
+            });
 
-                const response = await fetch('/api/start-evolution', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(requestBody)
-                });
+            if (response.ok) {
+                const data = await response.json();
 
-                if (response.ok) {
-                    const data = await response.json();
-                    console.log("Received response data:", data);
+                // Reset contexts and index
+                contexts = data.contexts || [];
+                specificPrompts = data.specific_prompts || [];
+                breedingPrompts = data.breeding_prompts || [];
+                currentContextIndex = 0;
 
-                    // Reset contexts and index
-                    contexts = data.contexts || [];
-                    specificPrompts = data.specific_prompts || [];
-                    breedingPrompts = data.breeding_prompts || [];
-                    currentContextIndex = 0;
-                    console.log("Loaded contexts:", contexts);
-                    console.log("Loaded specific prompts:", specificPrompts);
-
-                    // Create progress bar container if it doesn't exist
-                    if (!document.getElementById('progress-container')) {
-                        createProgressBar();
-                    }
-
-                    // Start polling for updates
-                    isEvolutionRunning = true;
-                    pollProgress();
-
-                    updateContextDisplay();  // Update context display after loading new data
-                } else {
-                    console.error("Failed to run evolution:", await response.text());
-                    resetButtonStates();
+                // Create progress bar container if it doesn't exist
+                if (!document.getElementById('progress-container')) {
+                    createProgressBar();
                 }
-            } catch (error) {
-                console.error("Error running evolution:", error);
+
+                // Start polling for updates
+                isEvolutionRunning = true;
+                pollProgress();
+
+                updateContextDisplay();
+            } else {
+                console.error("Failed to run evolution:", await response.text());
                 resetButtonStates();
             }
-        };
-    }
+        } catch (error) {
+            console.error("Error running evolution:", error);
+            resetButtonStates();
+        }
+    });
 
-    if (stopButton) {
-        stopButton.onclick = async function () {
-            console.log("Stopping evolution...");
+    addListener('stopButton', 'click', async function () {
+        console.log("Stopping evolution...");
+        const stopButton = document.getElementById('stopButton');
 
-            // Disable stop button and show stopping state
+        if (stopButton) {
             stopButton.disabled = true;
             stopButton.textContent = 'Stopping...';
+        }
 
-            try {
-                const response = await fetch('/api/stop-evolution', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    }
-                });
+        try {
+            const response = await fetch('/api/stop-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
 
-                if (response.ok) {
-                    const data = await response.json();
-                    console.log("Stop request sent:", data.message);
-
-                    // Update button text to indicate stop is in progress
-                    stopButton.textContent = 'Stopping...';
-
-                    // The polling will handle the final button state reset when evolution actually stops
-                } else {
-                    console.error("Failed to stop evolution:", await response.text());
+            if (response.ok) {
+                const data = await response.json();
+                console.log("Stop request sent:", data.message);
+                // Polling will handle final reset
+            } else {
+                console.error("Failed to stop evolution:", await response.text());
+                if (stopButton) {
                     stopButton.disabled = false;
                     stopButton.textContent = 'Stop Evolution';
                 }
-            } catch (error) {
-                console.error("Error stopping evolution:", error);
+            }
+        } catch (error) {
+            console.error("Error stopping evolution:", error);
+            if (stopButton) {
                 stopButton.disabled = false;
                 stopButton.textContent = 'Stop Evolution';
             }
-        };
+        }
+    });
+
+    addListener('downloadButton', 'click', function () {
+        if (currentEvolutionData) {
+            downloadResults(currentEvolutionData);
+        } else {
+            alert("No evolution data available to save");
+        }
+    });
+
+    // --- Template Generation ---
+    addListener('generateTemplateBtn', 'click', handleTemplateGeneration);
+    addListener('saveTemplateBtn', 'click', saveAndUseTemplate);
+    addListener('reviewEditBtn', 'click', reviewAndEditTemplate);
+
+    // --- State Management ---
+    addListener('newEvolutionBtn', 'click', showNewEvolutionMode);
+    addListener('evolutionSelect', 'change', handleEvolutionSelection);
+
+    // --- Settings ---
+    addListener('saveSettingsBtn', 'click', saveSettings);
+    addListener('toggleApiKeyVisibility', 'click', toggleApiKeyVisibility);
+
+    // Setup button in alert (if present)
+    const setupBtn = document.getElementById('setupApiKeyBtn');
+    if (setupBtn) {
+        setupBtn.addEventListener('click', () => showSidebarView('settings'));
     }
 
-    // Add direct event listener to download button
-    const downloadButton = document.getElementById('downloadButton');
-    if (downloadButton) {
-        console.log("Found download button in DOMContentLoaded, adding click listener");
-        downloadButton.addEventListener('click', function () {
-            console.log("Download button clicked directly");
-            if (currentEvolutionData) {
-                console.log("Using currentEvolutionData:", currentEvolutionData);
-                downloadResults(currentEvolutionData);
+    // Nav buttons
+    const navEvolutionBtn = document.getElementById('navEvolutionBtn');
+    if (navEvolutionBtn) {
+        navEvolutionBtn.addEventListener('click', (e) => {
+            e.preventDefault(); // Prevent default anchor behavior if it's an <a> tag
+            const select = document.getElementById('evolutionSelect');
+            if (select && select.value) {
+                showEvolutionMode(select.value);
             } else {
-                console.error("No evolution data available");
-                alert("No evolution data available to save");
+                showNewEvolutionMode();
             }
         });
-    } else {
-        console.error("Download button not found in DOMContentLoaded");
     }
 
-    const copyButton = document.getElementById('copyIdeaButton');
-    if (copyButton) {
-        copyButton.addEventListener('click', () => {
-            if (!currentModalIdea) return;
-            const text = `${currentModalIdea.title || ''}\n\n${currentModalIdea.content || ''}`;
-            navigator.clipboard.writeText(text).catch(err => console.error('Copy failed', err));
+    // --- Keyboard Shortcuts ---
+    const ideaTypeInput = document.getElementById('ideaTypeInput');
+    if (ideaTypeInput) {
+        ideaTypeInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                handleTemplateGeneration();
+            }
         });
     }
 
-    document.getElementById('prevContext')?.addEventListener('click', () => {
+    // --- Copy Button ---
+    addListener('copyIdeaButton', 'click', () => {
+        if (!currentModalIdea) return;
+        const text = `${currentModalIdea.title || ''}\n\n${currentModalIdea.content || ''}`;
+        navigator.clipboard.writeText(text).catch(err => console.error('Copy failed', err));
+    });
+
+    // --- Context Navigation ---
+    addListener('prevContext', 'click', () => {
         if (currentContextIndex > 0) {
             currentContextIndex--;
             updateContextDisplay();
         }
     });
 
-    document.getElementById('nextContext')?.addEventListener('click', () => {
+    addListener('nextContext', 'click', () => {
         if (currentContextIndex < contexts.length - 1) {
             currentContextIndex++;
             updateContextDisplay();
@@ -3511,4 +3600,165 @@ function getThinkingBudgetValue() {
 
     // Default to dynamic if nothing selected
     return -1;
+}
+
+// Sidebar View Navigation
+function showSidebarView(viewName) {
+    // Hide all views first (move to right)
+    document.querySelectorAll('.sidebar-view').forEach(view => {
+        view.classList.remove('active');
+        view.classList.remove('slide-left');
+    });
+
+    // Logic for transitions
+    const mainView = document.getElementById('view-main');
+    const targetView = document.getElementById(`view-${viewName}`);
+
+    if (viewName === 'main') {
+        mainView.classList.add('active');
+    } else {
+        // Move main view to left (parallax)
+        mainView.classList.add('slide-left');
+        // Bring target view in
+        if (targetView) targetView.classList.add('active');
+    }
+
+    // Special handling for settings
+    if (viewName === 'settings') {
+        checkSettingsStatus();
+    }
+}
+
+// Expose to window for HTML onclick attributes
+window.showSidebarView = showSidebarView;
+
+async function checkSettingsStatus() {
+    try {
+        const response = await fetch('/api/settings/status');
+        const data = await response.json();
+
+        const input = document.getElementById('apiKeyInput');
+        if (data.masked_key && input) {
+            input.placeholder = "API Key is set (" + data.masked_key + ")";
+        }
+    } catch (e) {
+        console.error("Error checking settings:", e);
+    }
+}
+
+async function saveSettings() {
+    const keyInput = document.getElementById('apiKeyInput');
+    const key = keyInput ? keyInput.value.trim() : '';
+
+    if (!key) {
+        showStatusInSettings('Please enter an API key', 'warning');
+        return;
+    }
+
+    const btn = document.getElementById('saveSettingsBtn');
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Saving...';
+
+    try {
+        const response = await fetch('/api/settings/api-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_key: key })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            showStatusInSettings('API Key saved successfully! Reloading...', 'success');
+            setTimeout(() => {
+                window.location.reload();
+            }, 1500);
+        } else {
+            showStatusInSettings('Error: ' + data.message, 'danger');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        }
+    } catch (e) {
+        showStatusInSettings('Error: ' + e.message, 'danger');
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    }
+}
+
+async function handleTemplateGeneration() {
+    const ideaTypeInput = document.getElementById('ideaTypeInput');
+    const ideaType = ideaTypeInput.value.trim();
+    if (!ideaType) return;
+
+    const generateBtn = document.getElementById('generateTemplateBtn');
+    const originalText = generateBtn.innerHTML;
+    generateBtn.disabled = true;
+    generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
+
+    try {
+        const response = await fetch('/api/generate-template', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idea_type: ideaType })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            // Update hidden input
+            document.getElementById('ideaType').value = ideaType;
+
+            // Update new status card
+            const display = document.getElementById('ideaTypeDisplay');
+
+            if (display) {
+                display.textContent = ideaType;
+                display.classList.remove('text-muted', 'fst-italic');
+            }
+
+            // Show editor
+            currentTemplate = data.template;
+            document.getElementById('templateEditor').value = JSON.stringify(data.template, null, 2);
+
+            // Show modal
+            const modal = new bootstrap.Modal(document.getElementById('templateModal'));
+            modal.show();
+        } else {
+            alert('Error generating template: ' + data.message);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error generating template');
+    } finally {
+        generateBtn.disabled = false;
+        generateBtn.innerHTML = originalText;
+    }
+}
+
+function showStatusInSettings(msg, type) {
+    const el = document.getElementById('settingsStatus');
+    if (el) {
+        el.className = `alert alert-${type}`;
+        el.textContent = msg;
+        el.style.display = 'block';
+    }
+}
+
+function toggleApiKeyVisibility() {
+    const input = document.getElementById('apiKeyInput');
+    const btn = document.getElementById('toggleApiKeyVisibility');
+    const icon = btn ? btn.querySelector('i') : null;
+
+    if (input && icon) {
+        if (input.type === 'password') {
+            input.type = 'text';
+            icon.classList.remove('fa-eye');
+            icon.classList.add('fa-eye-slash');
+        } else {
+            input.type = 'password';
+            icon.classList.remove('fa-eye-slash');
+            icon.classList.add('fa-eye');
+        }
+    }
 }
