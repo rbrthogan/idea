@@ -1588,6 +1588,32 @@ async def debug_idea_state(evolution_id: str, idea_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Run the server
+@app.delete("/api/settings/api-key")
+async def delete_api_key():
+    """Delete the API key from .env and environment variables"""
+    try:
+        # Remove from environment
+        if "GEMINI_API_KEY" in os.environ:
+            del os.environ["GEMINI_API_KEY"]
+
+        # Remove from .env file
+        env_path = Path(".env")
+        if env_path.exists():
+            # Read all lines
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+
+            # Filter out the key
+            new_lines = [line for line in lines if not line.strip().startswith("GEMINI_API_KEY=")]
+
+            # Write back
+            with open(env_path, "w") as f:
+                f.writelines(new_lines)
+
+        return JSONResponse({"status": "success", "message": "API Key deleted successfully"})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
 if __name__ == "__main__":
     uvicorn.run(
         "idea.viewer:app", host="127.0.0.1", port=8000, reload=True

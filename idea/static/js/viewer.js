@@ -157,7 +157,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Helper for safe event listeners
     const addListener = (id, event, handler) => {
         const el = document.getElementById(id);
-        if (el) el.addEventListener(event, handler);
+        if (el) {
+            // Remove existing listener to prevent duplicates
+            el.removeEventListener(event, handler);
+            el.addEventListener(event, handler);
+        }
     };
 
     // --- Evolution Controls ---
@@ -309,7 +313,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // --- Settings ---
     addListener('saveSettingsBtn', 'click', saveSettings);
-    addListener('toggleApiKeyVisibility', 'click', toggleApiKeyVisibility);
+    addListener('deleteApiKeyBtn', 'click', deleteApiKey);
+    addListener('copyApiKeyBtn', 'click', copyApiKey);
 
     // Setup button in alert (if present)
     const setupBtn = document.getElementById('setupApiKeyBtn');
@@ -3632,20 +3637,39 @@ function showSidebarView(viewName) {
 // Expose to window for HTML onclick attributes
 window.showSidebarView = showSidebarView;
 
+/**
+ * Check if API key is set and update UI
+ */
 async function checkSettingsStatus() {
     try {
         const response = await fetch('/api/settings/status');
         const data = await response.json();
 
-        const input = document.getElementById('apiKeyInput');
-        if (data.masked_key && input) {
-            input.placeholder = "API Key is set (" + data.masked_key + ")";
+        const inputContainer = document.getElementById('apiKeyInputContainer');
+        const configuredContainer = document.getElementById('apiKeyConfiguredContainer');
+        const maskedDisplay = document.getElementById('maskedKeyDisplay');
+
+        if (data.masked_key) {
+            // Key is set
+            if (inputContainer) inputContainer.style.display = 'none';
+            if (configuredContainer) configuredContainer.style.display = 'block';
+            if (maskedDisplay) maskedDisplay.textContent = data.masked_key;
+
+            // Store masked key for copy function
+            window.maskedApiKey = data.masked_key;
+        } else {
+            // No key set
+            if (inputContainer) inputContainer.style.display = 'block';
+            if (configuredContainer) configuredContainer.style.display = 'none';
         }
     } catch (e) {
         console.error("Error checking settings:", e);
     }
 }
 
+/**
+ * Save API Key
+ */
 async function saveSettings() {
     const keyInput = document.getElementById('apiKeyInput');
     const key = keyInput ? keyInput.value.trim() : '';
@@ -3670,10 +3694,15 @@ async function saveSettings() {
         const data = await response.json();
 
         if (data.status === 'success') {
-            showStatusInSettings('API Key saved successfully! Reloading...', 'success');
+            showStatusInSettings('API Key saved successfully!', 'success');
+            // Clear input
+            keyInput.value = '';
+            // Refresh status to switch view
+            await checkSettingsStatus();
+            // Reload page after a short delay to apply changes
             setTimeout(() => {
                 window.location.reload();
-            }, 1500);
+            }, 1000);
         } else {
             showStatusInSettings('Error: ' + data.message, 'danger');
             btn.disabled = false;
@@ -3684,6 +3713,70 @@ async function saveSettings() {
         btn.disabled = false;
         btn.innerHTML = originalText;
     }
+}
+
+/**
+ * Delete API Key
+ */
+async function deleteApiKey() {
+    if (!confirm('Are you sure you want to delete the API key? You will need to enter it again to use the app.')) {
+        return;
+    }
+
+    const btn = document.getElementById('deleteApiKeyBtn');
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Deleting...';
+
+    try {
+        const response = await fetch('/api/settings/api-key', {
+            method: 'DELETE'
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            showStatusInSettings('API Key deleted.', 'success');
+            // Refresh status to switch view
+            await checkSettingsStatus();
+            // Reload page to clear state
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        } else {
+            showStatusInSettings('Error: ' + data.message, 'danger');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        }
+    } catch (e) {
+        showStatusInSettings('Error: ' + e.message, 'danger');
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    }
+}
+
+/**
+ * Copy API Key (Masked)
+ */
+function copyApiKey() {
+    const textToCopy = window.maskedApiKey || "API Key is set";
+    navigator.clipboard.writeText(textToCopy).then(() => {
+        const btn = document.getElementById('copyApiKeyBtn');
+        const originalHTML = btn.innerHTML;
+
+        btn.innerHTML = '<i class="fas fa-check me-2"></i>Copied!';
+        btn.classList.remove('btn-outline-secondary');
+        btn.classList.add('btn-success');
+
+        setTimeout(() => {
+            btn.innerHTML = originalHTML;
+            btn.classList.remove('btn-success');
+            btn.classList.add('btn-outline-secondary');
+        }, 2000);
+    }).catch(err => {
+        console.error('Failed to copy: ', err);
+        showStatusInSettings('Failed to copy to clipboard', 'danger');
+    });
 }
 
 async function handleTemplateGeneration() {
