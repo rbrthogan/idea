@@ -95,6 +95,7 @@ body {
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
 }
 
 /* Layout Structure */
@@ -103,7 +104,7 @@ body {
 }
 
 .layout-container {
-  display: flex;
+  display: block;
   min-height: 100vh;
 }
 
@@ -330,6 +331,8 @@ body {
   padding: 2rem;
   max-width: calc(100% - var(--sidebar-width));
   transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1), max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
 }
 
 .main-content.sidebar-collapsed {
@@ -337,11 +340,34 @@ body {
   max-width: calc(100% - var(--sidebar-collapsed-width));
 }
 
+.evolution-content {
+  margin-left: var(--sidebar-width);
+  max-width: calc(100% - var(--sidebar-width));
+  padding: 0 2rem 3rem;
+  transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1), max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.evolution-content.sidebar-collapsed {
+  margin-left: var(--sidebar-collapsed-width);
+  max-width: calc(100% - var(--sidebar-collapsed-width));
+}
+
+.generations-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
 .main-header {
   margin-bottom: 2rem;
   border-bottom: none;
   padding: 0;
   background: transparent;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  position: relative;
+  flex-shrink: 0;
 }
 
 .main-header h1 {
@@ -350,6 +376,9 @@ body {
   color: var(--text-primary);
   margin: 0;
   letter-spacing: -0.025em;
+  white-space: normal;
+  line-height: 1.2;
+  flex: 1;
 }
 
 /* Typography & Elements */
@@ -547,7 +576,8 @@ small {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 1.5rem;
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
+  /* Reduced from 2rem */
   box-shadow: var(--shadow-sm);
 }
 
@@ -602,19 +632,25 @@ small {
 /* Scroll Container for Cards */
 .scroll-wrapper {
   width: 100%;
-  overflow-x: auto;
-  padding-bottom: 1rem;
-  /* Custom scrollbar */
+  max-width: 100%;
+  max-height: clamp(360px, 70vh, 820px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 1rem;
+  margin-right: -1rem;
   scrollbar-width: thin;
   scrollbar-color: var(--border-focus) transparent;
 }
 
-.scroll-wrapper::-webkit-scrollbar {
-  height: 8px;
+.scroll-wrapper[data-no-scroll="true"] {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+  margin-right: 0;
 }
 
-.scroll-wrapper::-webkit-scrollbar-track {
-  background: transparent;
+.scroll-wrapper::-webkit-scrollbar {
+  width: 8px;
 }
 
 .scroll-wrapper::-webkit-scrollbar-thumb {
@@ -623,22 +659,24 @@ small {
 }
 
 .scroll-container {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 1.5rem;
-  padding: 0.25rem;
-  min-width: min-content;
+  padding: 0.25rem 0;
+  align-items: stretch;
 }
 
 /* Idea Card */
 .gen-card {
-  width: 360px;
-  flex-shrink: 0;
+  width: 100%;
+  min-width: 0;
   background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
-  height: 400px;
+  min-height: 200px;
+  height: auto;
   transition: var(--transition);
   position: relative;
 }
@@ -976,6 +1014,12 @@ small {
     margin-left: 0;
     max-width: 100%;
     padding: 1rem;
+  }
+
+  .evolution-content {
+    margin-left: 0;
+    max-width: 100%;
+    padding: 0 1rem 2rem;
   }
 
   .sidebar-toggle {

@@ -176,7 +176,8 @@ async def get_settings_status():
 
     return JSONResponse({
         "api_key_missing": is_missing,
-        "masked_key": masked_key
+        "masked_key": masked_key,
+        "api_key": key if not is_missing else None
     })
 
 

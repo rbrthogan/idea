@@ -37,6 +37,7 @@ class EvolutionEngine:
         tournament_comparisons: int = 35,
         thinking_budget: Optional[int] = None,
         max_budget: Optional[float] = None,
+        mutation_rate: float = 0.2,
     ):
         self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
@@ -60,7 +61,7 @@ class EvolutionEngine:
 
         critic_model_name = "gemini-2.5-flash" if model_type == "gemini-2.5-pro" else model_type
         self.critic = Critic(provider="google_generative_ai", model_name=critic_model_name, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
-        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
+        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, mutation_rate=mutation_rate)
 
         self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
 

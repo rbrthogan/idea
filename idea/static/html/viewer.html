@@ -527,6 +527,25 @@
   </div>
   </div>
 
+  <!-- Delete Key Confirmation Modal -->
+  <div class="modal fade" id="deleteKeyModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Delete API Key</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p>Are you sure you want to delete the API key? You will need to enter it again to use the app.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger" id="confirmDeleteKeyBtn">Delete Key</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Save Modal -->
   <div class="modal fade" id="saveDataModal" tabindex="-1">
     <div class="modal-dialog">
@@ -586,6 +605,7 @@
       const sidebarToggle = document.getElementById('sidebarToggle');
       const controlsPanel = document.getElementById('controlsPanel');
       const mainContent = document.getElementById('mainContent');
+      const evolutionContent = document.querySelector('.evolution-content');
 
       function isMobile() {
         return window.innerWidth <= 576;
@@ -596,6 +616,9 @@
       if (!isMobile() && savedCollapsed) {
         controlsPanel.classList.add('collapsed');
         mainContent.classList.add('sidebar-collapsed');
+        if (evolutionContent) {
+          evolutionContent.classList.add('sidebar-collapsed');
+        }
       }
 
       function updateIcon() {
@@ -613,6 +636,9 @@
         } else {
           controlsPanel.classList.toggle('collapsed');
           mainContent.classList.toggle('sidebar-collapsed');
+          if (evolutionContent) {
+            evolutionContent.classList.toggle('sidebar-collapsed');
+          }
           localStorage.setItem('sidebarCollapsed', controlsPanel.classList.contains('collapsed'));
         }
         updateIcon();
@@ -1682,7 +1708,7 @@ Output: condensed list of basic elements, separated by semicolons"></textarea>
   </div>
 
   <!-- Include original viewer.js for evolution functionality -->
-  <script src="/static/js/viewer.js"></script>
+  <script src="/static/js/viewer.js?v=2"></script>
 </body>
 
 </html>

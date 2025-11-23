@@ -301,6 +301,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // --- Settings ---
     addListener('saveSettingsBtn', 'click', saveSettings);
     addListener('deleteApiKeyBtn', 'click', deleteApiKey);
+    addListener('confirmDeleteKeyBtn', 'click', confirmDeleteApiKey);
     addListener('copyApiKeyBtn', 'click', copyApiKey);
 
     // Setup button in alert (if present)
@@ -713,8 +714,6 @@ function renderGenerations(gens) {
             const scrollWrapper = document.createElement('div');
             scrollWrapper.className = 'scroll-wrapper';
             scrollWrapper.id = `scroll-wrapper-${index}`;
-            scrollWrapper.style.width = '100%';
-            scrollWrapper.style.overflow = 'auto';
 
             scrollWrapper.appendChild(scrollContainer);
             contentDiv.appendChild(scrollWrapper);
@@ -3644,6 +3643,7 @@ async function checkSettingsStatus() {
 
             // Store masked key for copy function
             window.maskedApiKey = data.masked_key;
+            window.fullApiKey = data.api_key;
         } else {
             // No key set
             if (inputContainer) inputContainer.style.display = 'block';
@@ -3708,11 +3708,13 @@ async function saveSettings() {
 async function deleteApiKey(e) {
     if (e) e.preventDefault();
 
-    if (!confirm('Are you sure you want to delete the API key? You will need to enter it again to use the app.')) {
-        return;
-    }
+    // Show the Bootstrap modal
+    const deleteModal = new bootstrap.Modal(document.getElementById('deleteKeyModal'));
+    deleteModal.show();
+}
 
-    const btn = document.getElementById('deleteApiKeyBtn');
+async function confirmDeleteApiKey() {
+    const btn = document.getElementById('confirmDeleteKeyBtn');
     const originalText = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Deleting...';
@@ -3725,6 +3727,11 @@ async function deleteApiKey(e) {
         const data = await response.json();
 
         if (data.status === 'success') {
+            // Hide modal
+            const deleteModalEl = document.getElementById('deleteKeyModal');
+            const modal = bootstrap.Modal.getInstance(deleteModalEl);
+            if (modal) modal.hide();
+
             showStatusInSettings('API Key deleted.', 'success');
             // Refresh status to switch view
             await checkSettingsStatus();
@@ -3749,7 +3756,7 @@ async function deleteApiKey(e) {
  * Copy API Key (Masked)
  */
 function copyApiKey() {
-    const textToCopy = window.maskedApiKey || "API Key is set";
+    const textToCopy = window.fullApiKey || window.maskedApiKey || "";
     navigator.clipboard.writeText(textToCopy).then(() => {
         const btn = document.getElementById('copyApiKeyBtn');
         const originalHTML = btn.innerHTML;
