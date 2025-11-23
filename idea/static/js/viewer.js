@@ -74,7 +74,7 @@ function renderTemplateList(templates) {
             <h6>${template.name}</h6>
             <p>${template.description || 'No description'}</p>
             <div class="template-actions">
-                <button class="btn btn-xs btn-outline-secondary" onclick="editTemplate('${template.id}')">
+                <button class="btn btn-xs btn-outline-secondary" onclick="editTemplateMainPage('${template.id}')">
                     <i class="fas fa-edit"></i> Edit
                 </button>
             </div>
@@ -106,20 +106,7 @@ function selectTemplate(id, slideBack = true) {
     }
 }
 
-async function editTemplate(id) {
-    try {
-        const response = await fetch(`/api/templates/${id}`);
-        if (response.ok) {
-            const template = await response.json();
-            currentTemplate = template;
-            document.getElementById('templateEditor').value = JSON.stringify(template, null, 2);
-            const modal = new bootstrap.Modal(document.getElementById('templateModal'));
-            modal.show();
-        }
-    } catch (e) {
-        console.error("Error fetching template:", e);
-    }
-}
+
 
 function filterTemplates(query) {
     if (!query) {
@@ -137,7 +124,7 @@ function filterTemplates(query) {
 
 // Expose to window
 window.selectTemplate = selectTemplate;
-window.editTemplate = editTemplate;
+window.editTemplate = editTemplateMainPage;
 window.filterTemplates = filterTemplates;
 
 // Initialize
