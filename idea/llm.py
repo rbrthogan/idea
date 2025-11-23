@@ -165,9 +165,16 @@ class Ideator(LLMWrapper):
             context_text = text.strip()
 
         # Use more of the context - sample 30-50% instead of 10%
-        words = [word.strip() for word in context_text.split(',')]
+        words = [word.strip() for word in context_text.split(',') if word.strip()]
+
+        if not words:
+            print(f"Warning: No valid concepts found in text: '{text}'")
+            return text.strip() or "general concepts"
+
         # Use between 30-50% of the words to maintain diversity while avoiding overwhelming context
-        sample_size = max(3, min(int(len(words) * 0.4), 15))  # 40% but cap at 15 words
+        target_size = max(3, min(int(len(words) * 0.4), 15))  # 40% but cap at 15 words
+        sample_size = min(len(words), target_size)
+
         subset = random.sample(words, sample_size)
         return ", ".join(subset)
 

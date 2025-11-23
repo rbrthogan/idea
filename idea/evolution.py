@@ -325,7 +325,31 @@ class EvolutionEngine:
 
             # Seed the initial population
             print("Generating initial population (Generation 0)...")
-            self.population, self.specific_prompts = self.ideator.seed_ideas(self.pop_size, self.idea_type)
+            self.population = []
+            self.specific_prompts = []
+
+            # Calculate total steps: Gen 0 (Seed + Refine) + Gen 1..N (Breed+Refine)
+            # Gen 0 has 2 phases of work per idea. Subsequent gens have 1 phase (breeding includes refinement).
+            total_steps = self.pop_size * (self.generations + 2)
+
+            for i in range(self.pop_size):
+                # Send status update
+                # Seeding is the first phase
+                current_step = i + 1
+                await progress_callback({
+                    "current_generation": 0,
+                    "total_generations": self.generations,
+                    "is_running": True,
+                    "progress": (current_step / total_steps) * 100,
+                    "status_message": f"Seeding idea {i+1}/{self.pop_size}..."
+                })
+
+                # Generate context and idea in thread to avoid blocking event loop
+                context_pool = await asyncio.to_thread(self.ideator.generate_context, self.idea_type)
+                idea_text, specific_prompt = await asyncio.to_thread(self.ideator.generate_idea_from_context, context_pool, self.idea_type)
+
+                self.specific_prompts.append(specific_prompt)
+                self.population.append({"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []})
 
             # Process and update each idea as it's completed
             print("Refining initial population...")
@@ -349,12 +373,23 @@ class EvolutionEngine:
                     })
                     return
 
-                refined_idea = self.critic.refine(idea, self.idea_type)
-                formatted_idea = self.formatter.format_idea(refined_idea, self.idea_type)
+                # Send status update for refinement
+                # Refinement is the second phase, so we start after pop_size steps
+                current_step = self.pop_size + i + 1
+                await progress_callback({
+                    "current_generation": 0,
+                    "total_generations": self.generations,
+                    "is_running": True,
+                    "progress": (current_step / total_steps) * 100,
+                    "status_message": f"Refining idea {i+1}/{self.pop_size}..."
+                })
+
+                refined_idea = await asyncio.to_thread(self.critic.refine, idea, self.idea_type)
+                formatted_idea = await asyncio.to_thread(self.formatter.format_idea, refined_idea, self.idea_type)
                 self.population[i] = formatted_idea
 
                 # Calculate progress
-                progress_percent = (i + 1) / (self.pop_size * (self.generations + 1)) * 100
+                progress_percent = (current_step / total_steps) * 100
 
                 # Update average idea cost
                 token_counts = self.get_total_token_count()
@@ -463,8 +498,8 @@ class EvolutionEngine:
                     print(f"🌟 Processing elite idea for generation {gen + 1}...")
 
                     # Refine and format the elite idea
-                    refined_elite = self.critic.refine(elite_idea, self.idea_type)
-                    formatted_elite = self.formatter.format_idea(refined_elite, self.idea_type)
+                    refined_elite = await asyncio.to_thread(self.critic.refine, elite_idea, self.idea_type)
+                    formatted_elite = await asyncio.to_thread(self.formatter.format_idea, refined_elite, self.idea_type)
 
                     # Mark this idea as elite (most creative/original) and preserve source
                     # Ensure formatted_elite is a dictionary (format_idea should return dict for dict input)
@@ -522,8 +557,22 @@ class EvolutionEngine:
                 global_id_to_index = {}  # Map from original population index to idea
 
                 for i in range(0, len(self.population), actual_tournament_size):
+                    # Send status update for tournament
+                    # Tournaments happen at the start of each generation loop (Gen 1..N)
+                    # Base steps = Gen 0 (2*pop) + Previous Gens (gen*pop)
+                    base_steps = (2 * self.pop_size) + (gen * self.pop_size)
+                    tournament_progress = (base_steps / total_steps) * 100
+
+                    await progress_callback({
+                        "current_generation": gen + 1,
+                        "total_generations": self.generations,
+                        "is_running": True,
+                        "progress": tournament_progress,
+                        "status_message": f"Running tournament group {i//actual_tournament_size + 1}..."
+                    })
+
                     group = self.population[i : i + actual_tournament_size]
-                    group_ranks = self.critic.get_tournament_ranks(group, self.idea_type, self.tournament_comparisons)
+                    group_ranks = await asyncio.to_thread(self.critic.get_tournament_ranks, group, self.idea_type, self.tournament_comparisons)
 
                     print(f"Tournament group {i//actual_tournament_size + 1} rankings:")
                     for idea_idx, rank in sorted(group_ranks.items(), key=lambda x: x[1], reverse=True):
@@ -591,7 +640,24 @@ class EvolutionEngine:
                         parent_indices = np.random.choice(list(global_ranks.keys()), size=self.breeder.parent_count, replace=False)
                         parent_ideas = [self.population[idx] for idx in parent_indices]
 
-                    new_idea = self.breeder.breed(parent_ideas, self.idea_type)
+                    # Send status update for breeding
+                    # Base steps = Gen 0 (2*pop) + Previous Gens (gen*pop)
+                    base_steps = (2 * self.pop_size) + (gen * self.pop_size)
+                    # Add current gen progress: elite (if any) + generated ideas
+                    current_gen_progress = (1 if elite_processed else 0) + ideas_generated
+                    current_step = base_steps + current_gen_progress
+
+                    breeding_progress = (current_step / total_steps) * 100
+
+                    await progress_callback({
+                        "current_generation": gen + 1,
+                        "total_generations": self.generations,
+                        "is_running": True,
+                        "progress": breeding_progress,
+                        "status_message": f"Breeding and refining idea {ideas_generated+1}/{ideas_to_breed}..."
+                    })
+
+                    new_idea = await asyncio.to_thread(self.breeder.breed, parent_ideas, self.idea_type)
 
                     # Extract and store the breeding prompt before formatting
                     if isinstance(new_idea, dict) and "specific_prompt" in new_idea:
@@ -600,17 +666,17 @@ class EvolutionEngine:
                         generation_breeding_prompts.append(None)  # Fallback
 
                     # refine the idea
-                    refined_idea = self.critic.refine(new_idea, self.idea_type)
+                    refined_idea = await asyncio.to_thread(self.critic.refine, new_idea, self.idea_type)
 
                     # Format the idea and add to new population
-                    formatted_idea = self.formatter.format_idea(refined_idea, self.idea_type)
+                    formatted_idea = await asyncio.to_thread(self.formatter.format_idea, refined_idea, self.idea_type)
                     new_population.append(formatted_idea)
                     ideas_generated += 1
 
                     # Calculate overall progress
-                    total_ideas = self.pop_size * (self.generations + 1)
-                    completed_ideas = self.pop_size + (gen * self.pop_size) + len(new_population)
-                    progress_percent = (completed_ideas / total_ideas) * 100
+                    # We already calculated current_step above, but need to increment for the idea just finished
+                    current_step += 1
+                    progress_percent = (current_step / total_steps) * 100
 
                     # Update average idea cost (using cost since start of breeding for this gen to avoid tournament noise)
                     # Actually, simpler to just use global average but weighted?
@@ -626,6 +692,8 @@ class EvolutionEngine:
                     token_counts = self.get_total_token_count()
                     current_cost = token_counts['cost']['total_cost']
 
+                    total_ideas = self.pop_size * (self.generations + 1)
+                    completed_ideas = self.pop_size + (gen * self.pop_size) + len(new_population)
                     remaining_ideas_in_run = total_ideas - completed_ideas
                     remaining_tournaments = self.generations - 1 - gen
 

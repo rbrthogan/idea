@@ -395,8 +395,8 @@ async def run_evolution_task(engine):
                 update_data['token_counts'] = engine.get_total_token_count()
                 print(f"Evolution complete. Total tokens: {update_data['token_counts']['total']}")
 
-        # Update the evolution status
-        evolution_status = update_data
+        # Update the evolution status by merging the new data
+        evolution_status.update(update_data)
 
         # Clear the queue before adding new update to avoid backlog
         while not evolution_queue.empty():
@@ -406,13 +406,20 @@ async def run_evolution_task(engine):
                 break
 
         # Add the update to the queue
-        await evolution_queue.put(update_data)
+        # We put the full evolution_status (copy) into the queue to ensure
+        # the frontend gets the complete state, not just the partial update.
+        await evolution_queue.put(evolution_status.copy())
 
         # Log progress
         gen = update_data.get('current_generation', 0)
         progress = update_data.get('progress', 0)
+        status = update_data.get('status_message', '')
         gen_label = "0 (Initial)" if gen == 0 else gen
-        print(f"Progress update: Generation {gen_label}, Progress: {progress:.2f}%")
+
+        log_msg = f"Progress update: Generation {gen_label}, Progress: {progress:.2f}%"
+        if status:
+            log_msg += f" - {status}"
+        print(log_msg)
 
     # Run the evolution with progress updates
     await engine.run_evolution_with_updates(progress_callback)

@@ -1232,7 +1232,9 @@ async function pollProgress() {
             progressBar.setAttribute('aria-valuenow', progress);
             progressBar.textContent = `${Math.round(progress)}%`;
 
-            if (data.current_generation === 0) {
+            if (data.status_message) {
+                progressStatus.textContent = `${data.status_message} (${Math.round(progress)}%)`;
+            } else if (data.current_generation === 0) {
                 progressStatus.textContent = `Generating Generation 0 (Initial Population)... (${Math.round(progress)}%)`;
             } else {
                 progressStatus.textContent = `Generating Generation ${data.current_generation}... (${Math.round(progress)}%)`;
