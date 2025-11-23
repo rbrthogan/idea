@@ -3044,7 +3044,7 @@ function showDiversityPlotLoading() {
     const plotContainer = document.querySelector('.diversity-plot-container');
 
     if (plotSection && plotContainer) {
-        plotSection.style.display = 'block';
+        // plotSection.style.display = 'block'; // Don't show until we have data
 
         // Don't replace the entire content - just add loading overlay
         const existingCanvas = plotContainer.querySelector('#diversity-chart');
