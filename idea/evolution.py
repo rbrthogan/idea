@@ -8,7 +8,6 @@ from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates, get_prompts
 from idea.diversity import DiversityCalculator
-from tqdm import tqdm
 
 
 def get_default_template_id():
@@ -21,7 +20,7 @@ def get_default_template_id():
                 return template_id
         # Fallback to airesearch if nothing else works
         return 'airesearch'
-    except:
+    except Exception:
         return 'airesearch'
 
 
@@ -37,6 +36,7 @@ class EvolutionEngine:
         tournament_size: int = 5,
         tournament_comparisons: int = 35,
         thinking_budget: Optional[int] = None,
+        max_budget: Optional[float] = None,
     ):
         self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
@@ -44,6 +44,7 @@ class EvolutionEngine:
         self.tournament_size = tournament_size
         self.tournament_comparisons = tournament_comparisons
         self.thinking_budget = thinking_budget
+        self.max_budget = max_budget
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
@@ -52,7 +53,10 @@ class EvolutionEngine:
         print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}, thinking_budget={thinking_budget}")
 
         self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
-        self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-1.5-flash")
+
+        # Always use 2.5 Flash for formatting as it has better instruction following for structured output
+        # than 2.0 Flash or older models
+        self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-2.5-flash")
 
         critic_model_name = "gemini-2.5-flash" if model_type == "gemini-2.5-pro" else model_type
         self.critic = Critic(provider="google_generative_ai", model_name=critic_model_name, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
@@ -80,6 +84,10 @@ class EvolutionEngine:
         self.all_embeddings = []  # List[np.ndarray]
         # Track which ideas have embeddings to handle removals efficiently
         self.embedding_id_to_index = {}  # Dict[str, int] - maps idea ID to index in all_embeddings
+
+        # Cost tracking for better estimation
+        self.avg_idea_cost = 0.0
+        self.avg_tournament_cost = 0.0
 
     def generate_contexts(self):
         """Generate contexts for the initial population"""
@@ -288,6 +296,21 @@ class EvolutionEngine:
             print("Defaulting to first idea for creative selection")
             return 0
 
+    def check_budget(self) -> bool:
+        """
+        Check if the max budget has been exceeded.
+
+        Returns:
+            True if budget exceeded, False otherwise
+        """
+        if self.max_budget is None:
+            return False
+
+        token_counts = self.get_total_token_count()
+        current_cost = token_counts['cost']['total_cost']
+
+        return current_cost >= self.max_budget
+
     async def run_evolution_with_updates(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
         """
         Runs the evolution process with progress updates
@@ -332,6 +355,43 @@ class EvolutionEngine:
                 # Calculate progress
                 progress_percent = (i + 1) / (self.pop_size * (self.generations + 1)) * 100
 
+                # Update average idea cost
+                token_counts = self.get_total_token_count()
+                current_cost = token_counts['cost']['total_cost']
+                if i + 1 > 0:
+                    self.avg_idea_cost = current_cost / (i + 1)
+
+                # Calculate estimated total cost
+                # For initial generation, we only have idea costs. We project idea costs and add estimated tournament costs if available (or 0)
+                total_ideas_to_generate = self.pop_size * (self.generations + 1)
+                remaining_ideas = total_ideas_to_generate - (i + 1)
+                remaining_tournaments = self.generations
+
+                estimated_total_cost = current_cost + (remaining_ideas * self.avg_idea_cost) + (remaining_tournaments * self.avg_tournament_cost)
+
+                token_counts['cost']['estimated_total_cost'] = estimated_total_cost
+
+                # Check budget
+                if self.check_budget():
+                    print(f"Budget limit reached: ${current_cost:.4f} >= ${self.max_budget:.4f}")
+                    self.stop_requested = True
+                    self.is_stopped = True
+                    await progress_callback({
+                        "current_generation": 0,
+                        "total_generations": self.generations,
+                        "is_running": False,
+                        "is_stopped": True,
+                        "history": [self.population[:i+1]], # Include the current idea in history for budget stop
+                        "contexts": self.contexts,
+                        "specific_prompts": self.specific_prompts,
+                        "breeding_prompts": self.breeding_prompts,
+                        "progress": progress_percent,
+                        "stop_message": f"Evolution stopped: Budget limit reached (${current_cost:.2f} / ${self.max_budget:.2f})",
+                        "token_counts": token_counts,
+                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
+                    })
+                    return
+
                 # Create a partial history for the progress update
                 current_history = [self.population[:i+1]]
 
@@ -345,6 +405,7 @@ class EvolutionEngine:
                     "specific_prompts": self.specific_prompts,
                     "breeding_prompts": self.breeding_prompts,
                     "progress": progress_percent,
+                    "token_counts": token_counts,
                     "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                 })
 
@@ -365,6 +426,8 @@ class EvolutionEngine:
                 if self.stop_requested:
                     self.is_stopped = True
                     print(f"Stop requested - evolution halted after generation {gen}")
+                    # Calculate token counts for the final update
+                    token_counts = self.get_total_token_count()
                     await progress_callback({
                         "current_generation": gen,
                         "total_generations": self.generations,
@@ -376,7 +439,7 @@ class EvolutionEngine:
                         "breeding_prompts": self.breeding_prompts,
                         "progress": ((self.pop_size + gen * self.pop_size) / (self.pop_size * (self.generations + 1))) * 100,
                         "stop_message": f"Evolution stopped after completing generation {gen}",
-                        "token_counts": self.get_total_token_count(),
+                        "token_counts": token_counts,
                         "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                     })
                     return
@@ -450,6 +513,10 @@ class EvolutionEngine:
 
                 # Step 1: Run tournaments on ALL groups to create global ranking
                 print(f"Running tournaments across {len(self.population)} ideas in groups of {actual_tournament_size}...")
+
+                # Measure tournament cost
+                tournament_start_cost = self.get_total_token_count()['cost']['total_cost']
+
                 global_ranks = {}
                 global_id_to_index = {}  # Map from original population index to idea
 
@@ -469,6 +536,17 @@ class EvolutionEngine:
                         global_ranks[global_population_idx] = rank
                         global_id_to_index[global_population_idx] = global_population_idx
 
+                # Update average tournament cost
+                tournament_end_cost = self.get_total_token_count()['cost']['total_cost']
+                current_tournament_cost = tournament_end_cost - tournament_start_cost
+
+                # Update moving average (or just set it if it's the first one)
+                if self.avg_tournament_cost == 0:
+                    self.avg_tournament_cost = current_tournament_cost
+                else:
+                    # Simple moving average
+                    self.avg_tournament_cost = (self.avg_tournament_cost + current_tournament_cost) / 2
+
                 # Step 2: Allocate parent slots globally across entire population
                 print("\nAllocating parent slots across entire population...")
                 global_parent_slots = self._allocate_parent_slots(global_ranks, ideas_to_breed)
@@ -485,7 +563,8 @@ class EvolutionEngine:
                         # If we have some new population, add it to history
                         if new_population:
                             self.history.append(new_population)
-
+                        # Calculate token counts for the final update
+                        token_counts = self.get_total_token_count()
                         await progress_callback({
                             "current_generation": gen + 1,
                             "total_generations": self.generations,
@@ -497,7 +576,7 @@ class EvolutionEngine:
                             "breeding_prompts": self.breeding_prompts,
                             "progress": ((self.pop_size + gen * self.pop_size + len(new_population)) / (self.pop_size * (self.generations + 1))) * 100,
                             "stop_message": f"Evolution stopped during generation {gen + 1} (completed {len(new_population)}/{current_pop_size} ideas)",
-                            "token_counts": self.get_total_token_count(),
+                            "token_counts": token_counts,
                             "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                         })
                         return
@@ -532,6 +611,51 @@ class EvolutionEngine:
                     completed_ideas = self.pop_size + (gen * self.pop_size) + len(new_population)
                     progress_percent = (completed_ideas / total_ideas) * 100
 
+                    # Update average idea cost (using cost since start of breeding for this gen to avoid tournament noise)
+                    # Actually, simpler to just use global average but weighted?
+                    # Let's stick to the global average idea cost we established in initial gen,
+                    # but maybe update it?
+                    # Updating it is tricky because current_cost includes tournaments.
+                    # We can calculate cost of THIS idea:
+                    # But we don't have per-idea cost easily here without tracking start/end of loop.
+                    # Let's assume avg_idea_cost from initial gen is a good enough baseline,
+                    # or we could refine it if we tracked breeding start cost.
+
+                    # Calculate estimated total cost
+                    token_counts = self.get_total_token_count()
+                    current_cost = token_counts['cost']['total_cost']
+
+                    remaining_ideas_in_run = total_ideas - completed_ideas
+                    remaining_tournaments = self.generations - 1 - gen
+
+                    estimated_total_cost = current_cost + (remaining_ideas_in_run * self.avg_idea_cost) + (remaining_tournaments * self.avg_tournament_cost)
+
+                    token_counts['cost']['estimated_total_cost'] = estimated_total_cost
+
+                    # Check budget
+                    if self.check_budget():
+                        print(f"Budget limit reached: ${current_cost:.4f} >= ${self.max_budget:.4f}")
+                        self.stop_requested = True
+                        self.is_stopped = True
+                        # If we have some new population, add it to history
+                        if new_population:
+                            self.history.append(new_population)
+                        await progress_callback({
+                            "current_generation": gen + 1,
+                            "total_generations": self.generations,
+                            "is_running": False,
+                            "is_stopped": True,
+                            "history": self.history,
+                            "contexts": self.contexts,
+                            "specific_prompts": self.specific_prompts,
+                            "breeding_prompts": self.breeding_prompts,
+                            "progress": progress_percent,
+                            "stop_message": f"Evolution stopped: Budget limit reached (${current_cost:.2f} / ${self.max_budget:.2f})",
+                            "token_counts": token_counts,
+                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
+                        })
+                        return
+
                     # Create a copy of the history with the current generation's progress
                     history_copy = self.history.copy()
                     history_copy.append(new_population.copy())
@@ -550,6 +674,7 @@ class EvolutionEngine:
                         "specific_prompts": self.specific_prompts,
                         "breeding_prompts": breeding_prompts_with_current,
                         "progress": progress_percent,
+                        "token_counts": token_counts,
                         "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                     })
 
@@ -572,7 +697,7 @@ class EvolutionEngine:
                 # Apply Oracle for diversity enhancement (if enabled)
                 if self.oracle:
                     try:
-                        print(f"Oracle analyzing population for diversity enhancement...")
+                        print("Oracle analyzing population for diversity enhancement...")
                         print(f"Population size before Oracle: {len(self.population)}")
                         print(f"History generations: {len(self.history)}")
 
@@ -646,6 +771,8 @@ class EvolutionEngine:
                         self.history[-1] = self.population.copy()
                         print(f"Updated history with Oracle changes. Final population size: {len(self.population)}")
 
+                        # Calculate token counts for the update
+                        token_counts = self.get_total_token_count()
                         # Immediately update the UI with Oracle changes
                         await progress_callback({
                             "current_generation": gen + 1,
@@ -657,7 +784,7 @@ class EvolutionEngine:
                             "breeding_prompts": self.breeding_prompts,
                             "progress": ((gen + 1) / self.generations) * 100,
                             "oracle_update": True,  # Flag to indicate this is an Oracle update
-                            "token_counts": self.get_total_token_count(),
+                            "token_counts": token_counts,
                             "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                         })
                     except Exception as e:
@@ -668,7 +795,7 @@ class EvolutionEngine:
                 # Elite selection: Pass the most diverse idea directly to the next generation (if not the last generation)
                 if gen < self.generations - 1:  # Only do elite selection if there's a next generation
                     try:
-                        print(f"🌟 Performing elite selection for next generation...")
+                        print("🌟 Performing elite selection for next generation...")
                         most_diverse_idx = await self._find_most_diverse_idea_idx(self.population)
                         elite_idea = self.population[most_diverse_idx].copy() if isinstance(self.population[most_diverse_idx], dict) else self.population[most_diverse_idx]
 
@@ -694,6 +821,8 @@ class EvolutionEngine:
 
                         print(f"🌟 Most creative idea selected for next generation: '{elite_title}' (will be refined and formatted)")
 
+                        # Calculate token counts for the update
+                        token_counts = self.get_total_token_count()
                         # Send an update to notify frontend about elite selection
                         await progress_callback({
                             "current_generation": gen + 1,
@@ -705,7 +834,7 @@ class EvolutionEngine:
                             "breeding_prompts": self.breeding_prompts,
                             "progress": ((gen + 1) / self.generations) * 100,
                             "elite_selection_update": True,  # Flag to indicate elite selection update
-                            "token_counts": self.get_total_token_count(),
+                            "token_counts": token_counts,
                             "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                         })
                     except Exception as e:
@@ -714,30 +843,80 @@ class EvolutionEngine:
 
             # Mark evolution as complete (only if not stopped)
             if not self.stop_requested:
+                # Calculate progress
+                progress_percent = ((self.pop_size + (gen + 1) * self.pop_size) / (self.pop_size * (self.generations + 1))) * 100
+
+                # Calculate estimated total cost
+                token_counts = self.get_total_token_count()
+                current_cost = token_counts['cost']['total_cost']
+                estimated_total_cost = 0
+                if progress_percent > 0:
+                    estimated_total_cost = current_cost / (progress_percent / 100)
+
+                token_counts['cost']['estimated_total_cost'] = estimated_total_cost
+
+                # Check budget
+                if self.check_budget():
+                    print(f"Budget limit reached: ${current_cost:.4f} >= ${self.max_budget:.4f}")
+                    self.stop_requested = True
+                    self.is_stopped = True
+                    await progress_callback({
+                        "current_generation": gen + 1,
+                        "total_generations": self.generations,
+                        "is_running": False,
+                        "is_stopped": True,
+                        "history": self.history,
+                        "contexts": self.contexts,
+                        "specific_prompts": self.specific_prompts,
+                        "breeding_prompts": self.breeding_prompts,
+                        "progress": progress_percent,
+                        "stop_message": f"Evolution stopped: Budget limit reached (${current_cost:.2f} / ${self.max_budget:.2f})",
+                        "token_counts": token_counts,
+                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
+                    })
+                    return
+
                 await progress_callback({
-                    "current_generation": self.generations,
+                    "current_generation": gen + 1,
                     "total_generations": self.generations,
-                    "is_running": False,
+                    "is_running": True,
                     "history": self.history,
                     "contexts": self.contexts,
                     "specific_prompts": self.specific_prompts,
                     "breeding_prompts": self.breeding_prompts,
-                    "progress": 100,
-                    "token_counts": self.get_total_token_count(),
+                    "progress": progress_percent,
+                    "token_counts": token_counts,
                     "diversity_history": self.diversity_history.copy() if self.diversity_history else []
                 })
-                print("Evolution complete!")
 
-                # Print final diversity summary
-                if self.diversity_history:
-                    print("\n🎯 FINAL DIVERSITY SUMMARY 🎯")
-                    print("Evolution complete! Here's how diversity evolved:")
-                    for i, div_data in enumerate(self.diversity_history):
-                        if div_data.get("enabled", False) and "error" not in div_data:
-                            gen_label = "Initial" if i == 0 else f"Gen {i}"
-                            score = div_data.get("diversity_score", 0.0)
-                            print(f"  {gen_label}: Diversity = {score:.4f}")
-                    print("=" * 50)
+            print("Evolution complete!")
+
+            # Final update with complete stats
+            token_counts = self.get_total_token_count()
+            token_counts['cost']['estimated_total_cost'] = token_counts['cost']['total_cost'] # Final cost is actual cost
+
+            await progress_callback({
+                "current_generation": self.generations,
+                "total_generations": self.generations,
+                "is_running": False,
+                "history": self.history,
+                "contexts": self.contexts,
+                "specific_prompts": self.specific_prompts,
+                "breeding_prompts": self.breeding_prompts,
+                "progress": 100,
+                "token_counts": token_counts,
+                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
+            })
+            # Print final diversity summary
+            if self.diversity_history:
+                print("\n🎯 FINAL DIVERSITY SUMMARY 🎯")
+                print("Evolution complete! Here's how diversity evolved:")
+                for i, div_data in enumerate(self.diversity_history):
+                    if div_data.get("enabled", False) and "error" not in div_data:
+                        gen_label = "Initial" if i == 0 else f"Gen {i}"
+                        score = div_data.get("diversity_score", 0.0)
+                        print(f"  {gen_label}: Diversity = {score:.4f}")
+                print("=" * 50)
 
         except Exception as e:
             import traceback

@@ -1,5 +1,5 @@
 function generateUUID() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
         const r = Math.random() * 16 | 0;
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
@@ -20,30 +20,30 @@ let originalIdeasOrder = [];
 
 // Fetch a random pair on load
 window.addEventListener("load", () => {
-  // Show loading state
-  document.getElementById('titleA').textContent = "Loading ideas...";
-  document.getElementById('contentA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
-  document.getElementById('titleB').textContent = "";
-  document.getElementById('contentB').innerHTML = "";
+    // Show loading state
+    document.getElementById('titleA').textContent = "Loading ideas...";
+    document.getElementById('contentA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
+    document.getElementById('titleB').textContent = "";
+    document.getElementById('contentB').innerHTML = "";
 
-  // Disable voting buttons initially
-  document.querySelectorAll('.vote-btn').forEach(btn => {
-    btn.disabled = true;
-  });
+    // Disable voting buttons initially
+    document.querySelectorAll('.vote-btn').forEach(btn => {
+        btn.disabled = true;
+    });
 
-  // Load data
-  loadEvolutions();
-  loadCurrentEvolution();
-  loadModels();
-  toggleRatingMode('manual'); // Start in manual mode
+    // Load data
+    loadEvolutions();
+    loadCurrentEvolution();
+    loadModels();
+    toggleRatingMode('manual'); // Start in manual mode
 
-  // Set up retry mechanism for refreshPair
-  setTimeout(() => {
-    if (Object.keys(ideasDb).length < 2) {
-      console.log("No ideas loaded yet, retrying refreshPair...");
-      refreshPair();
-    }
-  }, 3000);
+    // Set up retry mechanism for refreshPair
+    setTimeout(() => {
+        if (Object.keys(ideasDb).length < 2) {
+            console.log("No ideas loaded yet, retrying refreshPair...");
+            refreshPair();
+        }
+    }, 3000);
 });
 
 async function initializeRating(ideas, shouldRefreshPair = true) {
@@ -75,11 +75,11 @@ function renderMarkdown(text) {
 
     // Escape HTML to prevent XSS
     text = text.replace(/&/g, '&amp;')
-               .replace(/</g, '&lt;')
-               .replace(/>/g, '&gt;');
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 
     // Process code blocks first
-    text = text.replace(/```([\s\S]*?)```/g, function(match, code) {
+    text = text.replace(/```([\s\S]*?)```/g, function (match, code) {
         return '<pre><code>' + code.trim() + '</code></pre>';
     });
 
@@ -87,7 +87,7 @@ function renderMarkdown(text) {
     text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
 
     // Process headings - ensure they're at the start of a line
-    text = text.replace(/^(#{1,6})\s+(.*?)$/gm, function(match, hashes, content) {
+    text = text.replace(/^(#{1,6})\s+(.*?)$/gm, function (match, hashes, content) {
         const level = hashes.length;
         return `<h${level}>${content.trim()}</h${level}>`;
     });
@@ -166,7 +166,7 @@ function renderMarkdown(text) {
 
             // Close paragraph if we were in one
             if (inParagraph) {
-                lines[i-1] += '</p>';
+                lines[i - 1] += '</p>';
                 inParagraph = false;
             }
             continue;
@@ -429,47 +429,47 @@ function toggleRatingMode(mode) {
 }
 
 function showMeanElo() {
-  fetch("/mean-elo-per-generation")
-    .then((res) => {
-      if (!res.ok) {
-        throw new Error("Failed to get mean ELO: " + res.statusText);
-      }
-      return res.json();
-    })
-    .then((meanElo) => {
-      const resultsContainer = document.getElementById("results-container");
-      resultsContainer.innerHTML = "<h2>Mean ELO per Generation</h2>";
+    fetch("/mean-elo-per-generation")
+        .then((res) => {
+            if (!res.ok) {
+                throw new Error("Failed to get mean ELO: " + res.statusText);
+            }
+            return res.json();
+        })
+        .then((meanElo) => {
+            const resultsContainer = document.getElementById("results-container");
+            resultsContainer.innerHTML = "<h2>Mean ELO per Generation</h2>";
 
-      const list = document.createElement("ul");
-      for (const genIndex in meanElo) {
-        const item = document.createElement("li");
-        item.textContent = `Generation ${genIndex}: ${meanElo[genIndex].toFixed(2)}`;
-        list.appendChild(item);
-      }
-      resultsContainer.appendChild(list);
-    })
-    .catch((error) => {
-      console.error(error);
-      alert(error.message);
-    });
+            const list = document.createElement("ul");
+            for (const genIndex in meanElo) {
+                const item = document.createElement("li");
+                item.textContent = `Generation ${genIndex}: ${meanElo[genIndex].toFixed(2)}`;
+                list.appendChild(item);
+            }
+            resultsContainer.appendChild(list);
+        })
+        .catch((error) => {
+            console.error(error);
+            alert(error.message);
+        });
 }
 
 // Add event listener for keydown events
 document.addEventListener("keydown", (event) => {
-  switch (event.key) {
-    case "ArrowLeft":
-      vote("A");
-      break;
-    case "ArrowRight":
-      vote("B");
-      break;
-    case " ":
-      event.preventDefault(); // Prevent default spacebar scrolling
-      vote("tie");
-      break;
-    default:
-      break;
-  }
+    switch (event.key) {
+        case "ArrowLeft":
+            vote("A");
+            break;
+        case "ArrowRight":
+            vote("B");
+            break;
+        case " ":
+            event.preventDefault(); // Prevent default spacebar scrolling
+            vote("tie");
+            break;
+        default:
+            break;
+    }
 });
 
 async function loadCurrentEvolution() {
@@ -562,11 +562,8 @@ async function loadCurrentEvolution() {
                 document.getElementById("titleB").textContent = "";
                 document.getElementById("contentB").textContent = "";
 
-                // Retry after a delay if no ideas were found
-                setTimeout(() => {
-                    console.log("Retrying to load current evolution...");
-                    loadCurrentEvolution();
-                }, 2000);
+                // Do not retry automatically to avoid overwriting user selection
+                console.log("No running evolution found. Waiting for user selection.");
             }
         } else {
             console.error("Failed to load generations:", await response.text());
@@ -710,7 +707,7 @@ function updateProgressBar(percent) {
 
 // Update the auto-rating event listener to include clickable ideas and generation info
 const startAutoRatingBtn = document.getElementById('startAutoRating');
-startAutoRatingBtn.addEventListener('click', async function() {
+startAutoRatingBtn.addEventListener('click', async function () {
     if (autoRatingInProgress) {
         return; // prevent multiple simultaneous runs
     }
@@ -828,7 +825,7 @@ startAutoRatingBtn.addEventListener('click', async function() {
             // Store the latest ideas data
             finalIdeas = data.ideas || [];
 
-                        // Accumulate token count data from each chunk
+            // Accumulate token count data from each chunk
             if (data.token_counts) {
                 const chunkTokens = data.token_counts;
 
@@ -962,7 +959,7 @@ startAutoRatingBtn.addEventListener('click', async function() {
         // Add event listener for cost details button if it exists
         const costDetailsBtn = document.getElementById('autorating-cost-details-btn');
         if (costDetailsBtn && finalTokenCounts) {
-            costDetailsBtn.addEventListener('click', function() {
+            costDetailsBtn.addEventListener('click', function () {
                 showAutoratingCostModal(finalTokenCounts);
             });
         }
@@ -1042,7 +1039,7 @@ function updateRankingsTable(ideas) {
         }
 
         // Add click event to show the idea details
-        row.addEventListener('click', function() {
+        row.addEventListener('click', function () {
             showIdeaDetails(index);
         });
 
@@ -1061,7 +1058,7 @@ function setupTableSorting() {
     const headers = document.querySelectorAll('.sortable-header');
 
     headers.forEach(header => {
-        header.addEventListener('click', function(e) {
+        header.addEventListener('click', function (e) {
             e.preventDefault();
 
             const sortColumn = this.dataset.sort;
@@ -1226,7 +1223,7 @@ function updateRankingsTableContent(ideas) {
         }
 
         // Add click event to show the idea details
-        row.addEventListener('click', function() {
+        row.addEventListener('click', function () {
             showIdeaDetails(index);
         });
 
@@ -1269,7 +1266,7 @@ function showIdeaDetails(ideaIndex) {
 }
 
 // Add event listener for the return button when the document loads
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     // Connect the return button to the showComparisonView function
     const returnButton = document.getElementById('returnToComparison');
     if (returnButton) {
@@ -1498,7 +1495,7 @@ function showAutoratingCostModal(tokenCounts) {
                     y: {
                         beginAtZero: true,
                         ticks: {
-                            callback: function(value) {
+                            callback: function (value) {
                                 return '$' + value.toFixed(4);
                             }
                         }
@@ -1782,7 +1779,7 @@ function createEloChart(ideas, ratingType) {
                 },
                 tooltip: {
                     callbacks: {
-                        label: function(context) {
+                        label: function (context) {
                             return `${context.dataset.label}: ${Math.round(context.raw)}`;
                         }
                     }

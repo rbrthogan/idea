@@ -1,153 +1,9 @@
 // static/js/viewer.js
 
-// Add CSS styles for lineage modal and buttons
-const lineageStyles = document.createElement('style');
-lineageStyles.textContent = `
-    .lineage-parent-cards {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 15px;
-        margin-top: 15px;
-    }
+// static/js/viewer.js
 
-    .lineage-parent-card {
-        flex: 1 1 300px;
-        max-width: 100%;
-        border: 1px solid #ddd;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
+// CSS styles for lineage modal and buttons are now in viewer.css
 
-    .lineage-parent-card .card-title {
-        font-size: 1rem;
-        font-weight: bold;
-        margin-bottom: 10px;
-    }
-
-    .lineage-parent-card .card-preview {
-        font-size: 0.9rem;
-        margin-bottom: 15px;
-        color: #555;
-    }
-
-    /* Ensure consistent button styling */
-    .view-lineage, .view-context {
-        width: auto;
-        min-width: 90px;
-        text-align: center;
-        font-weight: normal;
-        transition: all 0.2s ease;
-    }
-
-    /* Match hover behavior exactly */
-    .view-lineage:hover, .view-context:hover {
-        background-color: #6c757d;
-        color: white;
-    }
-
-    /* Lineage section styling */
-    .lineage-section {
-        border-bottom: 1px solid #eee;
-        padding-bottom: 20px;
-    }
-
-    .lineage-section:last-child {
-        border-bottom: none;
-    }
-
-    .lineage-generation-title {
-        font-weight: bold;
-        color: #495057;
-        margin-bottom: 15px;
-        padding-left: 10px;
-        border-left: 4px solid #6c757d;
-    }
-
-    /* Different border colors for different generations */
-    .lineage-section:nth-child(1) .lineage-generation-title {
-        border-left-color: #007bff;
-    }
-
-    .lineage-section:nth-child(2) .lineage-generation-title {
-        border-left-color: #6610f2;
-    }
-
-    .lineage-section:nth-child(3) .lineage-generation-title {
-        border-left-color: #6f42c1;
-    }
-
-    .lineage-section:nth-child(4) .lineage-generation-title {
-        border-left-color: #e83e8c;
-    }
-
-    .lineage-section:nth-child(5) .lineage-generation-title {
-        border-left-color: #dc3545;
-    }
-
-    @media (max-width: 768px) {
-        .lineage-parent-card {
-            flex: 1 1 100%;
-        }
-    }
-
-    /* Elite idea styling */
-    .elite-origin-section .alert-success {
-        border-left: 4px solid #28a745;
-    }
-
-    .elite-source-card {
-        border: 2px solid #28a745;
-        border-radius: 0.5rem;
-        background-color: #f8fff9;
-    }
-
-    .elite-source-card .card-title {
-        color: #155724;
-        font-weight: 600;
-    }
-
-    .elite-source-card .card-preview {
-        color: #495057;
-    }
-
-    /* Visual indicator for elite ideas in the main view */
-    .card[data-elite="true"] {
-        border: 2px solid #ffd700 !important;
-        background: linear-gradient(135deg, #fff9e6 0%, #ffffff 100%) !important;
-        box-shadow: 0 4px 8px rgba(255, 215, 0, 0.2) !important;
-        position: relative;
-    }
-
-    .card[data-elite="true"]::before {
-        content: "⭐";
-        position: absolute;
-        top: -8px;
-        right: -8px;
-        background: #ffd700;
-        border-radius: 50%;
-        width: 24px;
-        height: 24px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 12px;
-        z-index: 1;
-        border: 2px solid white;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-
-    .card[data-elite="true"] .btn.view-lineage {
-        background-color: #ffd700;
-        border-color: #ffd700;
-        color: #000;
-    }
-
-    .card[data-elite="true"] .btn.view-lineage:hover {
-        background-color: #e6c200;
-        border-color: #e6c200;
-    }
-`;
-document.head.appendChild(lineageStyles);
 
 let pollingInterval;
 let isEvolutionRunning = false;
@@ -163,250 +19,336 @@ let currentModalIdea = null;
 /**
  * Load available templates and populate the idea type dropdown
  */
+let allTemplates = []; // Store templates globally
+
+/**
+ * Load available templates and populate the sidebar list
+ */
 async function loadTemplateTypes() {
     try {
         const response = await fetch('/api/template-types');
         const data = await response.json();
 
         if (data.status === 'success') {
-            const ideaTypeSelect = document.getElementById('ideaType');
-            ideaTypeSelect.innerHTML = ''; // Clear existing options
+            allTemplates = data.templates;
+            renderTemplateList(allTemplates);
 
-            data.templates.forEach(template => {
-                const option = document.createElement('option');
-                option.value = template.id;
-                option.textContent = template.name;
-                if (template.description) {
-                    option.title = template.description;
-                }
-                ideaTypeSelect.appendChild(option);
-            });
-
-            // Set default selection to first template
-            if (data.templates.length > 0) {
-                ideaTypeSelect.value = data.templates[0].id;
+            // Set default selection if none selected
+            const currentType = document.getElementById('ideaType').value;
+            if (!currentType && allTemplates.length > 0) {
+                selectTemplate(allTemplates[0].id, false); // Don't slide back on initial load
             }
         } else {
             console.error('Error loading template types:', data.message);
-            // Fall back to hardcoded options if API fails
-            populateFallbackTemplates();
+            renderTemplateList([]);
         }
     } catch (error) {
         console.error('Error loading template types:', error);
-        populateFallbackTemplates();
+        renderTemplateList([]);
     }
 }
 
-/**
- * Fallback template population if API fails
- */
-function populateFallbackTemplates() {
-    const ideaTypeSelect = document.getElementById('ideaType');
+function renderTemplateList(templates) {
+    const container = document.getElementById('templatesList');
+    if (!container) return;
 
-    // Instead of hardcoded templates, try to populate with basic core templates
-    // If this also fails, at least we have some options
-    ideaTypeSelect.innerHTML = `
-        <option value="">Loading templates...</option>
-    `;
+    container.innerHTML = '';
 
-    // Try once more after a short delay
-    setTimeout(() => {
-        loadTemplateTypes();
-    }, 1000);
+    if (templates.length === 0) {
+        container.innerHTML = '<div class="text-muted text-center p-3">No templates found</div>';
+        return;
+    }
 
-    // If that fails too, show a basic message
-    setTimeout(() => {
-        if (ideaTypeSelect.options.length <= 1) {
-            ideaTypeSelect.innerHTML = `
-                <option value="">No templates available - check Template Manager</option>
-            `;
-        }
-    }, 3000);
+    const currentType = document.getElementById('ideaType').value;
+
+    templates.forEach(template => {
+        const div = document.createElement('div');
+        div.className = `template-list-item ${template.id === currentType ? 'active' : ''}`;
+        div.onclick = (e) => {
+            // Prevent triggering if clicking action buttons
+            if (e.target.closest('.btn')) return;
+            selectTemplate(template.id);
+        };
+
+        div.innerHTML = `
+            <h6>${template.name}</h6>
+            <p>${template.description || 'No description'}</p>
+            <div class="template-actions">
+                <button class="btn btn-xs btn-outline-secondary" onclick="editTemplateMainPage('${template.id}')">
+                    <i class="fas fa-edit"></i> Edit
+                </button>
+            </div>
+        `;
+
+        container.appendChild(div);
+    });
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-    console.log("viewer.js loaded!");
+function selectTemplate(id, slideBack = true) {
+    const template = allTemplates.find(t => t.id === id);
+    if (!template) return;
 
-    // Load available templates
-    loadTemplateTypes();
+    // Update hidden input
+    document.getElementById('ideaType').value = id;
 
-    // Load evolutions dropdown
-    loadEvolutions();
+    // Update selector text
+    const display = document.getElementById('ideaTypeDisplay');
+    if (display) {
+        display.textContent = template.name;
+        display.classList.remove('text-muted', 'fst-italic');
+    }
 
-    // Set up model change listener for thinking budget
-    setupModelChangeListener();
+    // Re-render list to update active state
+    renderTemplateList(allTemplates);
 
-    // Try to restore current evolution from localStorage
-    restoreCurrentEvolution();
+    if (slideBack) {
+        showSidebarView('main');
+    }
+}
 
-    const startButton = document.getElementById('startButton');
-    const stopButton = document.getElementById('stopButton');
 
-    if (startButton) {
-        startButton.onclick = async function() {
-            console.log("Starting evolution...");
-            const popSize = parseInt(document.getElementById('popSize').value);
-            const generations = parseInt(document.getElementById('generations').value);
-            const ideaType = document.getElementById('ideaType').value;
-            const modelType = document.getElementById('modelType').value;
 
-            const creativeTemp = parseFloat(document.getElementById('creativeTemp').value);
-            const topP = parseFloat(document.getElementById('topP').value);
+function filterTemplates(query) {
+    if (!query) {
+        renderTemplateList(allTemplates);
+        return;
+    }
 
-            // Get tournament values
-            const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
-            const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
+    const lower = query.toLowerCase();
+    const filtered = allTemplates.filter(t =>
+        t.name.toLowerCase().includes(lower) ||
+        (t.description && t.description.toLowerCase().includes(lower))
+    );
+    renderTemplateList(filtered);
+}
 
-            // Get thinking budget value (only for Gemini 2.5 models)
-            const thinkingBudget = getThinkingBudgetValue();
+// Expose to window
+window.selectTemplate = selectTemplate;
+window.editTemplate = editTemplateMainPage;
+window.filterTemplates = filterTemplates;
 
-            const requestBody = {
-                popSize,
-                generations,
-                ideaType,
-                modelType,
-                creativeTemp,
-                topP,
-                tournamentSize,
-                tournamentComparisons,
-                thinkingBudget,
-            };
+// Initialize
+// Initialize
+document.addEventListener('DOMContentLoaded', async () => {
+    // Load initial data
+    await loadTemplateTypes();
+    await loadEvolutions();
 
-            console.log("Request body JSON:", JSON.stringify(requestBody));
+    // Check if we have a current evolution running or saved
+    await restoreCurrentEvolution();
 
-            // Reset UI state
-            resetUIState();
+    // Start polling for progress
+    // pollProgress(); // Managed by restoreCurrentEvolution / startEvolution
+    // setInterval(pollProgress, 1000);
 
-            // Hook for state management
-            if (window.onEvolutionStart) {
-                window.onEvolutionStart();
-            }
+    // Helper for safe event listeners
+    const addListener = (id, event, handler) => {
+        const el = document.getElementById(id);
+        if (el) {
+            // Remove existing listener to prevent duplicates
+            el.removeEventListener(event, handler);
+            el.addEventListener(event, handler);
+        }
+    };
 
-            // Update button states
+    // --- Evolution Controls ---
+
+    addListener('startButton', 'click', async function () {
+        console.log("Starting evolution...");
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+
+        const popSize = parseInt(document.getElementById('popSize').value);
+        const generations = parseInt(document.getElementById('generations').value);
+        const ideaType = document.getElementById('ideaType').value;
+        const modelType = document.getElementById('modelType').value;
+
+        const creativeTemp = parseFloat(document.getElementById('creativeTemp').value);
+        const topP = parseFloat(document.getElementById('topP').value);
+
+        // Get tournament values
+        const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
+        const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
+
+        // Get thinking budget value (only for Gemini 2.5 models)
+        const thinkingBudget = getThinkingBudgetValue();
+
+        // Get max budget
+        const maxBudgetInput = document.getElementById('maxBudget');
+        const maxBudget = maxBudgetInput && maxBudgetInput.value ? parseFloat(maxBudgetInput.value) : null;
+
+        const requestBody = {
+            popSize,
+            generations,
+            ideaType,
+            modelType,
+            creativeTemp,
+            topP,
+            tournamentSize,
+            tournamentComparisons,
+            thinkingBudget,
+            maxBudget
+        };
+
+        console.log("Request body JSON:", JSON.stringify(requestBody));
+
+        // Reset UI state
+        resetUIState();
+
+        // Hook for state management
+        if (window.onEvolutionStart) {
+            window.onEvolutionStart();
+        }
+
+        // Update button states
+        if (startButton) {
             startButton.disabled = true;
             startButton.textContent = 'Running...';
+        }
+        if (stopButton) {
             stopButton.disabled = false;
             stopButton.style.display = 'block';
+        }
 
-            try {
-                console.log("Sending request with:", {
-                    popSize, generations, ideaType, modelType,
-                    creativeTemp, topP
-                });
+        try {
+            const response = await fetch('/api/start-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody)
+            });
 
-                const response = await fetch('/api/start-evolution', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(requestBody)
-                });
+            if (response.ok) {
+                const data = await response.json();
 
-                if (response.ok) {
-                    const data = await response.json();
-                    console.log("Received response data:", data);
+                // Reset contexts and index
+                contexts = data.contexts || [];
+                specificPrompts = data.specific_prompts || [];
+                breedingPrompts = data.breeding_prompts || [];
+                currentContextIndex = 0;
 
-                    // Reset contexts and index
-                    contexts = data.contexts || [];
-                    specificPrompts = data.specific_prompts || [];
-                    breedingPrompts = data.breeding_prompts || [];
-                    currentContextIndex = 0;
-                    console.log("Loaded contexts:", contexts);
-                    console.log("Loaded specific prompts:", specificPrompts);
-
-                    // Create progress bar container if it doesn't exist
-                    if (!document.getElementById('progress-container')) {
-                        createProgressBar();
-                    }
-
-                    // Start polling for updates
-                    isEvolutionRunning = true;
-                    pollProgress();
-
-                    updateContextDisplay();  // Update context display after loading new data
-                } else {
-                    console.error("Failed to run evolution:", await response.text());
-                    resetButtonStates();
+                // Create progress bar container if it doesn't exist
+                if (!document.getElementById('progress-container')) {
+                    createProgressBar();
                 }
-            } catch (error) {
-                console.error("Error running evolution:", error);
+
+                // Start polling for updates
+                isEvolutionRunning = true;
+                pollProgress();
+
+                updateContextDisplay();
+            } else {
+                console.error("Failed to run evolution:", await response.text());
                 resetButtonStates();
             }
-        };
-    }
+        } catch (error) {
+            console.error("Error running evolution:", error);
+            resetButtonStates();
+        }
+    });
 
-    if (stopButton) {
-        stopButton.onclick = async function() {
-            console.log("Stopping evolution...");
+    addListener('stopButton', 'click', async function () {
+        console.log("Stopping evolution...");
+        const stopButton = document.getElementById('stopButton');
 
-            // Disable stop button and show stopping state
+        if (stopButton) {
             stopButton.disabled = true;
             stopButton.textContent = 'Stopping...';
+        }
 
-            try {
-                const response = await fetch('/api/stop-evolution', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    }
-                });
+        try {
+            const response = await fetch('/api/stop-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
 
-                if (response.ok) {
-                    const data = await response.json();
-                    console.log("Stop request sent:", data.message);
-
-                    // Update button text to indicate stop is in progress
-                    stopButton.textContent = 'Stopping...';
-
-                    // The polling will handle the final button state reset when evolution actually stops
-                } else {
-                    console.error("Failed to stop evolution:", await response.text());
+            if (response.ok) {
+                const data = await response.json();
+                console.log("Stop request sent:", data.message);
+                // Polling will handle final reset
+            } else {
+                console.error("Failed to stop evolution:", await response.text());
+                if (stopButton) {
                     stopButton.disabled = false;
                     stopButton.textContent = 'Stop Evolution';
                 }
-            } catch (error) {
-                console.error("Error stopping evolution:", error);
+            }
+        } catch (error) {
+            console.error("Error stopping evolution:", error);
+            if (stopButton) {
                 stopButton.disabled = false;
                 stopButton.textContent = 'Stop Evolution';
             }
-        };
+        }
+    });
+
+    addListener('downloadButton', 'click', function () {
+        if (currentEvolutionData) {
+            downloadResults(currentEvolutionData);
+        } else {
+            alert("No evolution data available to save");
+        }
+    });
+
+    // --- Template Generation ---
+    addListener('generateTemplateBtn', 'click', handleTemplateGeneration);
+    addListener('saveTemplateBtn', 'click', saveAndUseTemplate);
+    addListener('reviewEditBtn', 'click', reviewAndEditTemplate);
+
+    // --- State Management ---
+    addListener('newEvolutionBtn', 'click', showNewEvolutionMode);
+    addListener('evolutionSelect', 'change', handleEvolutionSelection);
+
+    // --- Settings ---
+    addListener('saveSettingsBtn', 'click', saveSettings);
+    addListener('deleteApiKeyBtn', 'click', deleteApiKey);
+    addListener('copyApiKeyBtn', 'click', copyApiKey);
+
+    // Setup button in alert (if present)
+    const setupBtn = document.getElementById('setupApiKeyBtn');
+    if (setupBtn) {
+        setupBtn.addEventListener('click', () => showSidebarView('settings'));
     }
 
-    // Add direct event listener to download button
-    const downloadButton = document.getElementById('downloadButton');
-    if (downloadButton) {
-        console.log("Found download button in DOMContentLoaded, adding click listener");
-        downloadButton.addEventListener('click', function() {
-            console.log("Download button clicked directly");
-            if (currentEvolutionData) {
-                console.log("Using currentEvolutionData:", currentEvolutionData);
-                downloadResults(currentEvolutionData);
+    // Nav buttons
+    const navEvolutionBtn = document.getElementById('navEvolutionBtn');
+    if (navEvolutionBtn) {
+        navEvolutionBtn.addEventListener('click', (e) => {
+            e.preventDefault(); // Prevent default anchor behavior if it's an <a> tag
+            const select = document.getElementById('evolutionSelect');
+            if (select && select.value) {
+                showEvolutionMode(select.value);
             } else {
-                console.error("No evolution data available");
-                alert("No evolution data available to save");
+                showNewEvolutionMode();
             }
         });
-    } else {
-        console.error("Download button not found in DOMContentLoaded");
     }
 
-    const copyButton = document.getElementById('copyIdeaButton');
-    if (copyButton) {
-        copyButton.addEventListener('click', () => {
-            if (!currentModalIdea) return;
-            const text = `${currentModalIdea.title || ''}\n\n${currentModalIdea.content || ''}`;
-            navigator.clipboard.writeText(text).catch(err => console.error('Copy failed', err));
+    // --- Keyboard Shortcuts ---
+    const ideaTypeInput = document.getElementById('ideaTypeInput');
+    if (ideaTypeInput) {
+        ideaTypeInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                handleTemplateGeneration();
+            }
         });
     }
 
-    document.getElementById('prevContext')?.addEventListener('click', () => {
+    // --- Copy Button ---
+    addListener('copyIdeaButton', 'click', () => {
+        if (!currentModalIdea) return;
+        const text = `${currentModalIdea.title || ''}\n\n${currentModalIdea.content || ''}`;
+        navigator.clipboard.writeText(text).catch(err => console.error('Copy failed', err));
+    });
+
+    // --- Context Navigation ---
+    addListener('prevContext', 'click', () => {
         if (currentContextIndex > 0) {
             currentContextIndex--;
             updateContextDisplay();
         }
     });
 
-    document.getElementById('nextContext')?.addEventListener('click', () => {
+    addListener('nextContext', 'click', () => {
         if (currentContextIndex < contexts.length - 1) {
             currentContextIndex++;
             updateContextDisplay();
@@ -545,7 +487,7 @@ function setupDownloadButton(data) {
     updatedButton.textContent = 'Save Results';
 
     // Add a single click handler
-    updatedButton.onclick = function(event) {
+    updatedButton.onclick = function (event) {
         event.preventDefault();
         console.log("Download button clicked, calling downloadResults with data:", data);
         downloadResults(data);
@@ -563,11 +505,11 @@ function renderMarkdown(text) {
 
     // Escape HTML to prevent XSS
     text = text.replace(/&/g, '&amp;')
-               .replace(/</g, '&lt;')
-               .replace(/>/g, '&gt;');
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 
     // Process code blocks first
-    text = text.replace(/```([\s\S]*?)```/g, function(match, code) {
+    text = text.replace(/```([\s\S]*?)```/g, function (match, code) {
         return '<pre><code>' + code.trim() + '</code></pre>';
     });
 
@@ -575,7 +517,7 @@ function renderMarkdown(text) {
     text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
 
     // Process headings - ensure they're at the start of a line
-    text = text.replace(/^(#{1,6})\s+(.*?)$/gm, function(match, hashes, content) {
+    text = text.replace(/^(#{1,6})\s+(.*?)$/gm, function (match, hashes, content) {
         const level = hashes.length;
         return `<h${level}>${content.trim()}</h${level}>`;
     });
@@ -655,7 +597,7 @@ function renderMarkdown(text) {
 
             if (inParagraph) {
                 // Close the paragraph before this line
-                lines[i-1] += '</p>';
+                lines[i - 1] += '</p>';
                 inParagraph = false;
             }
             continue;
@@ -665,7 +607,7 @@ function renderMarkdown(text) {
         if (!inParagraph) {
             lines[i] = '<p>' + lines[i];
             inParagraph = true;
-        } else if (i === lines.length - 1 || lines[i+1].trim() === '') {
+        } else if (i === lines.length - 1 || lines[i + 1].trim() === '') {
             // If this is the last line or next line is empty, close paragraph
             lines[i] += '</p>';
             inParagraph = false;
@@ -998,7 +940,7 @@ function showIdeaModal(idea) {
 
         // Add event listener to clean up when modal is hidden
         // Use a named function so we can check if it already exists
-        const cleanupFunction = function(event) {
+        const cleanupFunction = function (event) {
             // Remove any lingering backdrop elements
             const backdrops = document.querySelectorAll('.modal-backdrop');
             backdrops.forEach(backdrop => {
@@ -1142,31 +1084,31 @@ function downloadResults(data) {
             filename: filename
         })
     })
-    .then(response => {
-        console.log("Save response:", response);
-        if (!response.ok) {
-            throw new Error(`Save failed: ${response.status} ${response.statusText}`);
-        }
-        return response.json();
-    })
-    .then(result => {
-        console.log("Save successful:", result);
-        alert('Save successful!');
-    })
-    .catch(error => {
-        console.error("Save error:", error);
-        alert(`Error saving: ${error.message}`);
-    })
-    .finally(() => {
-        // Re-enable the button
-        if (downloadButton) {
-            downloadButton.disabled = false;
-        }
-    });
+        .then(response => {
+            console.log("Save response:", response);
+            if (!response.ok) {
+                throw new Error(`Save failed: ${response.status} ${response.statusText}`);
+            }
+            return response.json();
+        })
+        .then(result => {
+            console.log("Save successful:", result);
+            alert('Save successful!');
+        })
+        .catch(error => {
+            console.error("Save error:", error);
+            alert(`Error saving: ${error.message}`);
+        })
+        .finally(() => {
+            // Re-enable the button
+            if (downloadButton) {
+                downloadButton.disabled = false;
+            }
+        });
 }
 
 function generateUUID() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
         const r = Math.random() * 16 | 0;
         const v = c == 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
@@ -1320,6 +1262,11 @@ async function pollProgress() {
             handleDiversityUpdate(data);
         }
 
+        // Display token counts if available (Live updates)
+        if (data.token_counts) {
+            displayTokenCounts(data.token_counts);
+        }
+
         if (data.contexts && data.contexts.length > 0) {
             contexts = data.contexts;
             specificPrompts = data.specific_prompts || [];
@@ -1402,6 +1349,16 @@ async function pollProgress() {
                 }, 2000);
             }
         }
+
+        // Handle explicit errors from backend
+        if (data.error) {
+            console.error("Evolution error:", data.error);
+            showErrorMessage(`Evolution Error: ${data.error}`);
+            if (progressStatus) {
+                progressStatus.textContent = `Error: ${data.error}`;
+                progressStatus.classList.add('text-danger');
+            }
+        }
     } catch (error) {
         console.error('Error polling progress:', error);
         // Continue polling even if there's an error, but only if evolution is still running
@@ -1413,186 +1370,186 @@ async function pollProgress() {
 
 // Add debouncing to save operations
 function debounce(func, wait) {
-  let timeout;
-  return function(...args) {
-    clearTimeout(timeout);
-    timeout = setTimeout(() => func.apply(this, args), wait);
-  };
+    let timeout;
+    return function (...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), wait);
+    };
 }
 
 // Use debounced version of save function
 const debouncedSave = debounce(saveEvolution, 300);
 
 async function handleSave() {
-  // Show loading indicator
-  showLoadingIndicator();
+    // Show loading indicator
+    showLoadingIndicator();
 
-  try {
-    // Perform save operation
-    await saveEvolution();
+    try {
+        // Perform save operation
+        await saveEvolution();
 
-    // Update UI after save completes
-    updateUIAfterSave();
-  } catch (error) {
-    console.error("Save failed:", error);
-    showErrorMessage("Save failed. Please try again.");
-  } finally {
-    // Always hide loading indicator
-    hideLoadingIndicator();
-  }
+        // Update UI after save completes
+        updateUIAfterSave();
+    } catch (error) {
+        console.error("Save failed:", error);
+        showErrorMessage("Save failed. Please try again.");
+    } finally {
+        // Always hide loading indicator
+        hideLoadingIndicator();
+    }
 }
 
 // Add these utility functions for modal overlay management
 function showLoadingOverlay() {
-  const overlay = document.createElement('div');
-  overlay.id = 'loading-overlay';
-  overlay.style.position = 'fixed';
-  overlay.style.top = '0';
-  overlay.style.left = '0';
-  overlay.style.width = '100%';
-  overlay.style.height = '100%';
-  overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-  overlay.style.zIndex = '1000';
-  overlay.style.display = 'flex';
-  overlay.style.justifyContent = 'center';
-  overlay.style.alignItems = 'center';
+    const overlay = document.createElement('div');
+    overlay.id = 'loading-overlay';
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+    overlay.style.zIndex = '1000';
+    overlay.style.display = 'flex';
+    overlay.style.justifyContent = 'center';
+    overlay.style.alignItems = 'center';
 
-  const spinner = document.createElement('div');
-  spinner.className = 'spinner';
-  spinner.style.width = '50px';
-  spinner.style.height = '50px';
-  spinner.style.border = '5px solid #f3f3f3';
-  spinner.style.borderTop = '5px solid #3498db';
-  spinner.style.borderRadius = '50%';
-  spinner.style.animation = 'spin 1s linear infinite';
+    const spinner = document.createElement('div');
+    spinner.className = 'spinner';
+    spinner.style.width = '50px';
+    spinner.style.height = '50px';
+    spinner.style.border = '5px solid #f3f3f3';
+    spinner.style.borderTop = '5px solid #3498db';
+    spinner.style.borderRadius = '50%';
+    spinner.style.animation = 'spin 1s linear infinite';
 
-  // Add keyframes for spinner animation
-  const style = document.createElement('style');
-  style.textContent = `
+    // Add keyframes for spinner animation
+    const style = document.createElement('style');
+    style.textContent = `
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
   `;
-  document.head.appendChild(style);
+    document.head.appendChild(style);
 
-  overlay.appendChild(spinner);
-  document.body.appendChild(overlay);
+    overlay.appendChild(spinner);
+    document.body.appendChild(overlay);
 }
 
 function hideLoadingOverlay() {
-  const overlay = document.getElementById('loading-overlay');
-  if (overlay) {
-    document.body.removeChild(overlay);
-  }
+    const overlay = document.getElementById('loading-overlay');
+    if (overlay) {
+        document.body.removeChild(overlay);
+    }
 }
 
 // Replace the existing showLoadingIndicator and hideLoadingIndicator functions
 function showLoadingIndicator() {
-  showLoadingOverlay();
-  // Disable all interactive elements
-  document.querySelectorAll('button, input, select').forEach(el => {
-    el.dataset.wasDisabled = el.disabled;
-    el.disabled = true;
-  });
+    showLoadingOverlay();
+    // Disable all interactive elements
+    document.querySelectorAll('button, input, select').forEach(el => {
+        el.dataset.wasDisabled = el.disabled;
+        el.disabled = true;
+    });
 }
 
 function hideLoadingIndicator() {
-  hideLoadingOverlay();
-  // Re-enable elements that weren't disabled before
-  document.querySelectorAll('button, input, select').forEach(el => {
-    if (el.dataset.wasDisabled !== 'true') {
-      el.disabled = false;
-    }
-    delete el.dataset.wasDisabled;
-  });
+    hideLoadingOverlay();
+    // Re-enable elements that weren't disabled before
+    document.querySelectorAll('button, input, select').forEach(el => {
+        if (el.dataset.wasDisabled !== 'true') {
+            el.disabled = false;
+        }
+        delete el.dataset.wasDisabled;
+    });
 }
 
 // Add a function to show error messages
 function showErrorMessage(message) {
-  const errorDiv = document.createElement('div');
-  errorDiv.className = 'error-message';
-  errorDiv.style.position = 'fixed';
-  errorDiv.style.top = '20px';
-  errorDiv.style.left = '50%';
-  errorDiv.style.transform = 'translateX(-50%)';
-  errorDiv.style.backgroundColor = '#f44336';
-  errorDiv.style.color = 'white';
-  errorDiv.style.padding = '15px';
-  errorDiv.style.borderRadius = '5px';
-  errorDiv.style.zIndex = '1001';
-  errorDiv.textContent = message;
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'error-message';
+    errorDiv.style.position = 'fixed';
+    errorDiv.style.top = '20px';
+    errorDiv.style.left = '50%';
+    errorDiv.style.transform = 'translateX(-50%)';
+    errorDiv.style.backgroundColor = '#f44336';
+    errorDiv.style.color = 'white';
+    errorDiv.style.padding = '15px';
+    errorDiv.style.borderRadius = '5px';
+    errorDiv.style.zIndex = '1001';
+    errorDiv.textContent = message;
 
-  document.body.appendChild(errorDiv);
+    document.body.appendChild(errorDiv);
 
-  // Remove after 3 seconds
-  setTimeout(() => {
-    if (document.body.contains(errorDiv)) {
-      document.body.removeChild(errorDiv);
-    }
-  }, 3000);
+    // Remove after 3 seconds
+    setTimeout(() => {
+        if (document.body.contains(errorDiv)) {
+            document.body.removeChild(errorDiv);
+        }
+    }, 3000);
 }
 
 // Update the saveEvolution function to use the new overlay
 async function saveEvolution(data) {
-  showLoadingIndicator();
+    showLoadingIndicator();
 
-  try {
-    // Get the filename from the UI or generate one
-    const filename = document.getElementById('saveFilename')?.value ||
-                     `evolution_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    try {
+        // Get the filename from the UI or generate one
+        const filename = document.getElementById('saveFilename')?.value ||
+            `evolution_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
 
-    const response = await fetch('/api/save-evolution', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        data: data || currentEvolutionData,
-        filename: filename
-      })
-    });
+        const response = await fetch('/api/save-evolution', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                data: data || currentEvolutionData,
+                filename: filename
+            })
+        });
 
-    if (!response.ok) {
-      throw new Error(`Save failed: ${response.statusText}`);
+        if (!response.ok) {
+            throw new Error(`Save failed: ${response.statusText}`);
+        }
+
+        // Show success message
+        showSuccessMessage('Evolution saved successfully!');
+
+        return await response.json();
+    } catch (error) {
+        console.error('Error saving evolution:', error);
+        showErrorMessage(`Save failed: ${error.message}`);
+        throw error;
+    } finally {
+        hideLoadingIndicator();
     }
-
-    // Show success message
-    showSuccessMessage('Evolution saved successfully!');
-
-    return await response.json();
-  } catch (error) {
-    console.error('Error saving evolution:', error);
-    showErrorMessage(`Save failed: ${error.message}`);
-    throw error;
-  } finally {
-    hideLoadingIndicator();
-  }
 }
 
 // Add a success message function
 function showSuccessMessage(message) {
-  const successDiv = document.createElement('div');
-  successDiv.className = 'success-message';
-  successDiv.style.position = 'fixed';
-  successDiv.style.top = '20px';
-  successDiv.style.left = '50%';
-  successDiv.style.transform = 'translateX(-50%)';
-  successDiv.style.backgroundColor = '#4CAF50';
-  successDiv.style.color = 'white';
-  successDiv.style.padding = '15px';
-  successDiv.style.borderRadius = '5px';
-  successDiv.style.zIndex = '1001';
-  successDiv.textContent = message;
+    const successDiv = document.createElement('div');
+    successDiv.className = 'success-message';
+    successDiv.style.position = 'fixed';
+    successDiv.style.top = '20px';
+    successDiv.style.left = '50%';
+    successDiv.style.transform = 'translateX(-50%)';
+    successDiv.style.backgroundColor = '#4CAF50';
+    successDiv.style.color = 'white';
+    successDiv.style.padding = '15px';
+    successDiv.style.borderRadius = '5px';
+    successDiv.style.zIndex = '1001';
+    successDiv.textContent = message;
 
-  document.body.appendChild(successDiv);
+    document.body.appendChild(successDiv);
 
-  // Remove after 3 seconds
-  setTimeout(() => {
-    if (document.body.contains(successDiv)) {
-      document.body.removeChild(successDiv);
-    }
-  }, 3000);
+    // Remove after 3 seconds
+    setTimeout(() => {
+        if (document.body.contains(successDiv)) {
+            document.body.removeChild(successDiv);
+        }
+    }, 3000);
 }
 
 // Function to reset button states
@@ -1741,7 +1698,7 @@ function showContextModal(ideaIndex) {
     if (contexts.length > 0) {
         // Use the provided ideaIndex if available, otherwise use currentContextIndex
         const contextIndex = (ideaIndex !== undefined && ideaIndex < contexts.length) ?
-                            ideaIndex : currentContextIndex;
+            ideaIndex : currentContextIndex;
 
         // Use specific prompts if available (translation layer), otherwise use raw contexts (legacy)
         const displayContent = specificPrompts.length > 0 && specificPrompts[contextIndex]
@@ -1767,8 +1724,8 @@ function showContextModal(ideaIndex) {
             <div class="context-content">
                 <div class="alert alert-info mb-3">
                     <strong>${displayTitle}:</strong> ${specificPrompts.length > 0 ?
-                        'This is the specific prompt generated from the context pool to create this idea.' :
-                        'This is the raw context pool used to inspire this idea.'}
+                'This is the specific prompt generated from the context pool to create this idea.' :
+                'This is the raw context pool used to inspire this idea.'}
                 </div>
                 ${contextItems}
             </div>
@@ -1785,7 +1742,7 @@ function showContextModal(ideaIndex) {
 
         // Add event listener to clean up when modal is hidden
         // Use a named function so we can check if it already exists
-        const cleanupFunction = function(event) {
+        const cleanupFunction = function (event) {
             // Remove any lingering backdrop elements
             const backdrops = document.querySelectorAll('.modal-backdrop');
             backdrops.forEach(backdrop => {
@@ -1883,15 +1840,15 @@ function showLineageModal(idea, generationIndex) {
             const sourceGenerationIndex = idea.elite_source_generation;
             const sourceIdeaId = idea.elite_source_id;
 
-                         let sourceIdea = null;
-             if (sourceGenerationIndex !== undefined && sourceIdeaId && generations[sourceGenerationIndex]) {
-                 sourceIdea = generations[sourceGenerationIndex].find(sourceCandidate => sourceCandidate.id === sourceIdeaId);
-             }
+            let sourceIdea = null;
+            if (sourceGenerationIndex !== undefined && sourceIdeaId && generations[sourceGenerationIndex]) {
+                sourceIdea = generations[sourceGenerationIndex].find(sourceCandidate => sourceCandidate.id === sourceIdeaId);
+            }
 
-             let originHtml;
-        if (sourceIdea) {
-            const sourcePreview = createCardPreview(sourceIdea.content, 200);
-            originHtml = `
+            let originHtml;
+            if (sourceIdea) {
+                const sourcePreview = createCardPreview(sourceIdea.content, 200);
+                originHtml = `
                 <div class="elite-origin-section">
                     <div class="alert alert-success mb-3">
                         <h6><i class="fas fa-star"></i> Most Creative Idea Selected</h6>
@@ -1913,8 +1870,8 @@ function showLineageModal(idea, generationIndex) {
                     </div>
                 </div>
             `;
-        } else {
-            originHtml = `
+            } else {
+                originHtml = `
                 <div class="elite-origin-section">
                     <div class="alert alert-success mb-3">
                         <h6><i class="fas fa-star"></i> Most Creative Idea Selected</h6>
@@ -1925,55 +1882,55 @@ function showLineageModal(idea, generationIndex) {
                     </div>
                 </div>
             `;
-        }
+            }
 
-        lineageModalContent.innerHTML = originHtml;
+            lineageModalContent.innerHTML = originHtml;
 
-        // Add event listener for the view source button if it exists
-        const viewSourceBtn = lineageModalContent.querySelector('.view-source-idea');
-        if (viewSourceBtn && sourceIdea) {
-            viewSourceBtn.addEventListener('click', () => {
-                // Store current idea for reopening
-                const currentIdea = idea;
-                const currentGenIndex = generationIndex;
+            // Add event listener for the view source button if it exists
+            const viewSourceBtn = lineageModalContent.querySelector('.view-source-idea');
+            if (viewSourceBtn && sourceIdea) {
+                viewSourceBtn.addEventListener('click', () => {
+                    // Store current idea for reopening
+                    const currentIdea = idea;
+                    const currentGenIndex = generationIndex;
 
-                // Close the lineage modal
-                if (window.bootstrap) {
-                    const lineageModalInstance = bootstrap.Modal.getInstance(lineageModal);
-                    if (lineageModalInstance) {
-                        lineageModalInstance.hide();
+                    // Close the lineage modal
+                    if (window.bootstrap) {
+                        const lineageModalInstance = bootstrap.Modal.getInstance(lineageModal);
+                        if (lineageModalInstance) {
+                            lineageModalInstance.hide();
+                        }
+                    } else {
+                        lineageModal.style.display = 'none';
                     }
-                } else {
-                    lineageModal.style.display = 'none';
-                }
 
-                // Add event listener to reopen lineage modal when idea modal closes
-                setTimeout(() => {
-                    const ideaModalElement = document.getElementById('ideaModal');
-                    const reopenLineage = function() {
-                        ideaModalElement.removeEventListener('hidden.bs.modal', reopenLineage);
-                        setTimeout(() => {
-                            showLineageModal(currentIdea, currentGenIndex);
-                        }, 150);
-                    };
-                    ideaModalElement.addEventListener('hidden.bs.modal', reopenLineage);
+                    // Add event listener to reopen lineage modal when idea modal closes
+                    setTimeout(() => {
+                        const ideaModalElement = document.getElementById('ideaModal');
+                        const reopenLineage = function () {
+                            ideaModalElement.removeEventListener('hidden.bs.modal', reopenLineage);
+                            setTimeout(() => {
+                                showLineageModal(currentIdea, currentGenIndex);
+                            }, 150);
+                        };
+                        ideaModalElement.addEventListener('hidden.bs.modal', reopenLineage);
 
-                    // Show the source idea modal
-                    showIdeaModal(sourceIdea);
-                }, 150);
-            });
-        }
+                        // Show the source idea modal
+                        showIdeaModal(sourceIdea);
+                    }, 150);
+                });
+            }
 
-        // Show the modal
-        let modal;
-        if (window.bootstrap) {
-            modal = new bootstrap.Modal(lineageModal);
-        } else {
-            lineageModal.style.display = 'block';
-        }
-        modal.show();
+            // Show the modal
+            let modal;
+            if (window.bootstrap) {
+                modal = new bootstrap.Modal(lineageModal);
+            } else {
+                lineageModal.style.display = 'block';
+            }
+            modal.show();
 
-        return; // Exit early for elite ideas
+            return; // Exit early for elite ideas
         }
     } else if (idea.oracle_generated && idea.oracle_analysis) {
         // Show Oracle analysis instead of lineage
@@ -2176,7 +2133,7 @@ function showLineageModal(idea, generationIndex) {
                         const ideaModalElement = document.getElementById('ideaModal');
 
                         // Add one-time event listener to reopen lineage modal when idea modal is closed
-                        const reopenLineage = function() {
+                        const reopenLineage = function () {
                             // Remove this event listener to prevent multiple reopenings
                             ideaModalElement.removeEventListener('hidden.bs.modal', reopenLineage);
 
@@ -2217,7 +2174,7 @@ function showLineageModal(idea, generationIndex) {
 
         // Add event listener to clean up when modal is hidden
         // Use a named function so we can check if it already exists
-        const cleanupFunction = function(event) {
+        const cleanupFunction = function (event) {
             // Remove any lingering backdrop elements
             const backdrops = document.querySelectorAll('.modal-backdrop');
             backdrops.forEach(backdrop => {
@@ -2295,15 +2252,28 @@ function displayTokenCounts(tokenCounts) {
     const totalCost = tokenCounts.cost.total_cost.toFixed(4);
     const totalTokens = tokenCounts.total.toLocaleString();
 
+    // Get estimated total cost if available
+    let estimatedCostHtml = '';
+    if (tokenCounts.cost.estimated_total_cost !== undefined) {
+        const estimatedCost = tokenCounts.cost.estimated_total_cost.toFixed(4);
+        estimatedCostHtml = `<div class="ms-3 border-start ps-3">
+            <h6 class="mb-0">Est. Total: <strong>$${estimatedCost}</strong></h6>
+            <small class="text-muted">Projected</small>
+        </div>`;
+    }
+
     // Store the token data for the modal
     tokenCountsContainer.dataset.tokenCounts = JSON.stringify(tokenCounts);
 
     // Update the container content with a simple cost display
     tokenCountsContainer.innerHTML = `
         <div class="card-body d-flex justify-content-between align-items-center p-3">
-            <div>
-                <h6 class="mb-0">Cost: <strong>$${totalCost}</strong></h6>
-                <small class="text-muted">${totalTokens} tokens</small>
+            <div class="d-flex">
+                <div>
+                    <h6 class="mb-0">Cost: <strong>$${totalCost}</strong></h6>
+                    <small class="text-muted">${totalTokens} tokens</small>
+                </div>
+                ${estimatedCostHtml}
             </div>
             <button id="token-details-btn" class="btn btn-sm btn-outline-primary">
                 <i class="fas fa-info-circle"></i> Details
@@ -2312,7 +2282,7 @@ function displayTokenCounts(tokenCounts) {
     `;
 
     // Add event listener to the details button
-    document.getElementById('token-details-btn').addEventListener('click', function() {
+    document.getElementById('token-details-btn').addEventListener('click', function () {
         showTokenDetailsModal(tokenCounts);
     });
 }
@@ -2368,7 +2338,7 @@ function showTokenDetailsModal(tokenCounts) {
             componentData.push({
                 name: componentName.charAt(0).toUpperCase() + componentName.slice(1).replace('_', ' '),
                 displayName: componentName === 'genotype_encoder' ? 'Genotype Encoder' :
-                            componentName.charAt(0).toUpperCase() + componentName.slice(1),
+                    componentName.charAt(0).toUpperCase() + componentName.slice(1),
                 total: component.total.toLocaleString(),
                 input: component.input.toLocaleString(),
                 output: component.output.toLocaleString(),
@@ -2533,7 +2503,7 @@ function showTokenDetailsModal(tokenCounts) {
                     y: {
                         beginAtZero: true,
                         ticks: {
-                            callback: function(value) {
+                            callback: function (value) {
                                 return '$' + value.toFixed(4);
                             }
                         }
@@ -2575,7 +2545,7 @@ function showTokenDetailsModal(tokenCounts) {
                     y: {
                         beginAtZero: true,
                         ticks: {
-                            callback: function(value) {
+                            callback: function (value) {
                                 return '$' + value.toFixed(4);
                             }
                         }
@@ -2623,7 +2593,7 @@ function getDiversityChartScales() {
                 font: {
                     size: 12
                 },
-                callback: function(value, index, values) {
+                callback: function (value, index, values) {
                     const generation = this.getLabelForValue(value);
                     return generation === '0' ? 'Initial' : `Gen ${generation}`;
                 }
@@ -2850,11 +2820,11 @@ function initializeDiversityChart() {
                         },
                         padding: 12,
                         callbacks: {
-                            title: function(context) {
+                            title: function (context) {
                                 const generation = context[0].label;
                                 return generation === '0' ? 'Initial Population' : `Generation ${generation}`;
                             },
-                            label: function(context) {
+                            label: function (context) {
                                 const value = parseFloat(context.parsed.y).toFixed(4);
                                 const axisLabel = isSplitAxes && context.datasetIndex === 2 ?
                                     ' (right axis)' : (isSplitAxes ? ' (left axis)' : '');
@@ -2878,7 +2848,7 @@ function initializeDiversityChart() {
                         borderJoinStyle: 'round'
                     }
                 },
-                onResize: function(chart, size) {
+                onResize: function (chart, size) {
                     // Ensure proper sizing on resize
                     chart.canvas.style.height = '400px';
                     chart.canvas.style.width = '100%';
@@ -2935,8 +2905,8 @@ function processDiversityData(diversityHistory) {
 
         // Try different property names for diversity score
         const overallScore = diversityData.diversity_score ||
-                           diversityData.overall_diversity ||
-                           diversityData.score || 0;
+            diversityData.overall_diversity ||
+            diversityData.score || 0;
         overallScores.push(overallScore);
 
         // Try to find per-generation diversity
@@ -3194,7 +3164,7 @@ function initializeDiversityPlot() {
 }
 
 // Add event listeners when the document is ready
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     // Initialize diversity chart when page loads
     setTimeout(() => {
         initializeDiversityChart();
@@ -3203,7 +3173,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Enhance the start evolution function to reset diversity plot
     const startButton = document.getElementById('startButton');
     if (startButton) {
-        startButton.addEventListener('click', function() {
+        startButton.addEventListener('click', function () {
             // Reset diversity plot when starting new evolution
             resetDiversityPlot();
             showDiversityPlotLoading();
@@ -3361,8 +3331,8 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
                 <div class="alert alert-info mb-3">
                     <strong>${promptType === 'initial' ? 'Initial' : 'Breeding'} Prompt:</strong>
                     ${promptType === 'initial'
-                        ? 'This is the specific prompt used to create this initial idea from the context pool.'
-                        : 'This is the specific prompt generated from parent concepts to create this bred idea.'}
+                ? 'This is the specific prompt used to create this initial idea from the context pool.'
+                : 'This is the specific prompt generated from parent concepts to create this bred idea.'}
                 </div>
                 ${contentItems}
             </div>
@@ -3376,7 +3346,7 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
         const modal = new bootstrap.Modal(promptModal);
 
         // Add cleanup event listener
-        const cleanupFunction = function(event) {
+        const cleanupFunction = function (event) {
             const backdrops = document.querySelectorAll('.modal-backdrop');
             backdrops.forEach(backdrop => backdrop.remove());
             document.body.classList.remove('modal-open');
@@ -3402,7 +3372,7 @@ function setupModelChangeListener() {
     const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
 
     if (modelSelect && thinkingBudgetContainer) {
-        modelSelect.addEventListener('change', function() {
+        modelSelect.addEventListener('change', function () {
             updateThinkingBudgetVisibility();
         });
 
@@ -3423,9 +3393,9 @@ function updateThinkingBudgetVisibility() {
     if (!modelSelect || !thinkingBudgetContainer) return;
 
     const selectedModel = modelSelect.value;
-    const isGemini25 = selectedModel.includes('2.5');
+    const supportsThinking = selectedModel.includes('2.5') || selectedModel.includes('3-pro');
 
-    if (isGemini25) {
+    if (supportsThinking) {
         thinkingBudgetContainer.style.display = 'block';
 
         // Reset to dynamic mode when switching models
@@ -3464,6 +3434,14 @@ function configureThinkingBudgetForModel(modelName) {
             canDisable: false,
             help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
         },
+        'gemini-3-pro-preview': {
+            min: 128,
+            max: 32768,
+            default: 128,  // Minimum possible since can't disable
+            defaultMode: 'custom',  // Use custom mode with minimum value
+            canDisable: false,
+            help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
+        },
         'gemini-2.5-flash': {
             min: 128,  // Custom range starts at 128
             max: 24576,
@@ -3472,7 +3450,7 @@ function configureThinkingBudgetForModel(modelName) {
             canDisable: true,
             help: 'Thinking disabled by default (0-24576 tokens available for custom)'
         },
-        'gemini-2.5-flash-lite-preview-06-17': {
+        'gemini-2.5-flash-lite': {
             min: 512,  // Custom range starts at 512
             max: 24576,
             default: 0,  // Disabled by default
@@ -3485,7 +3463,7 @@ function configureThinkingBudgetForModel(modelName) {
     const config = configs[modelName];
     if (!config) return;
 
-        // Show/hide disabled option based on model capability
+    // Show/hide disabled option based on model capability
     if (config.canDisable) {
         thinkingDisabledOption.style.display = 'block';
     } else {
@@ -3597,10 +3575,10 @@ function getThinkingBudgetValue() {
     if (!modelSelect) return null;
 
     const selectedModel = modelSelect.value;
-    const isGemini25 = selectedModel.includes('2.5');
+    const supportsThinking = selectedModel.includes('2.5') || selectedModel.includes('3-pro');
 
-    if (!isGemini25) {
-        return null; // Don't send thinking budget for non-2.5 models
+    if (!supportsThinking) {
+        return null; // Don't send thinking budget for non-thinking models
     }
 
     // Determine value based on selected mode
@@ -3614,4 +3592,256 @@ function getThinkingBudgetValue() {
 
     // Default to dynamic if nothing selected
     return -1;
+}
+
+// Sidebar View Navigation
+function showSidebarView(viewName) {
+    // Hide all views first (move to right)
+    document.querySelectorAll('.sidebar-view').forEach(view => {
+        view.classList.remove('active');
+        view.classList.remove('slide-left');
+    });
+
+    // Logic for transitions
+    const mainView = document.getElementById('view-main');
+    const targetView = document.getElementById(`view-${viewName}`);
+
+    if (viewName === 'main') {
+        mainView.classList.add('active');
+    } else {
+        // Move main view to left (parallax)
+        mainView.classList.add('slide-left');
+        // Bring target view in
+        if (targetView) targetView.classList.add('active');
+    }
+
+    // Special handling for settings
+    if (viewName === 'settings') {
+        checkSettingsStatus();
+    }
+}
+
+// Expose to window for HTML onclick attributes
+window.showSidebarView = showSidebarView;
+
+/**
+ * Check if API key is set and update UI
+ */
+async function checkSettingsStatus() {
+    try {
+        const response = await fetch('/api/settings/status');
+        const data = await response.json();
+
+        const inputContainer = document.getElementById('apiKeyInputContainer');
+        const configuredContainer = document.getElementById('apiKeyConfiguredContainer');
+        const maskedDisplay = document.getElementById('maskedKeyDisplay');
+
+        if (data.masked_key) {
+            // Key is set
+            if (inputContainer) inputContainer.style.display = 'none';
+            if (configuredContainer) configuredContainer.style.display = 'block';
+            if (maskedDisplay) maskedDisplay.textContent = data.masked_key;
+
+            // Store masked key for copy function
+            window.maskedApiKey = data.masked_key;
+        } else {
+            // No key set
+            if (inputContainer) inputContainer.style.display = 'block';
+            if (configuredContainer) configuredContainer.style.display = 'none';
+        }
+    } catch (e) {
+        console.error("Error checking settings:", e);
+    }
+}
+
+/**
+ * Save API Key
+ */
+async function saveSettings() {
+    const keyInput = document.getElementById('apiKeyInput');
+    const key = keyInput ? keyInput.value.trim() : '';
+
+    if (!key) {
+        showStatusInSettings('Please enter an API key', 'warning');
+        return;
+    }
+
+    const btn = document.getElementById('saveSettingsBtn');
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Saving...';
+
+    try {
+        const response = await fetch('/api/settings/api-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_key: key })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            showStatusInSettings('API Key saved successfully!', 'success');
+            // Clear input
+            keyInput.value = '';
+            // Refresh status to switch view
+            await checkSettingsStatus();
+            // Reload page after a short delay to apply changes
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        } else {
+            showStatusInSettings('Error: ' + data.message, 'danger');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        }
+    } catch (e) {
+        showStatusInSettings('Error: ' + e.message, 'danger');
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    }
+}
+
+/**
+ * Delete API Key
+ */
+async function deleteApiKey(e) {
+    if (e) e.preventDefault();
+
+    if (!confirm('Are you sure you want to delete the API key? You will need to enter it again to use the app.')) {
+        return;
+    }
+
+    const btn = document.getElementById('deleteApiKeyBtn');
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Deleting...';
+
+    try {
+        const response = await fetch('/api/settings/api-key', {
+            method: 'DELETE'
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            showStatusInSettings('API Key deleted.', 'success');
+            // Refresh status to switch view
+            await checkSettingsStatus();
+            // Reload page to clear state
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        } else {
+            const msg = data.message || data.detail || 'Unknown error';
+            showStatusInSettings('Error: ' + msg, 'danger');
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        }
+    } catch (e) {
+        showStatusInSettings('Error: ' + e.message, 'danger');
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    }
+}
+
+/**
+ * Copy API Key (Masked)
+ */
+function copyApiKey() {
+    const textToCopy = window.maskedApiKey || "API Key is set";
+    navigator.clipboard.writeText(textToCopy).then(() => {
+        const btn = document.getElementById('copyApiKeyBtn');
+        const originalHTML = btn.innerHTML;
+
+        btn.innerHTML = '<i class="fas fa-check me-2"></i>Copied!';
+        btn.classList.remove('btn-outline-secondary');
+        btn.classList.add('btn-success');
+
+        setTimeout(() => {
+            btn.innerHTML = originalHTML;
+            btn.classList.remove('btn-success');
+            btn.classList.add('btn-outline-secondary');
+        }, 2000);
+    }).catch(err => {
+        console.error('Failed to copy: ', err);
+        showStatusInSettings('Failed to copy to clipboard', 'danger');
+    });
+}
+
+async function handleTemplateGeneration() {
+    const ideaTypeInput = document.getElementById('ideaTypeInput');
+    const ideaType = ideaTypeInput.value.trim();
+    if (!ideaType) return;
+
+    const generateBtn = document.getElementById('generateTemplateBtn');
+    const originalText = generateBtn.innerHTML;
+    generateBtn.disabled = true;
+    generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
+
+    try {
+        const response = await fetch('/api/generate-template', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idea_type: ideaType })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            // Update hidden input
+            document.getElementById('ideaType').value = ideaType;
+
+            // Update new status card
+            const display = document.getElementById('ideaTypeDisplay');
+
+            if (display) {
+                display.textContent = ideaType;
+                display.classList.remove('text-muted', 'fst-italic');
+            }
+
+            // Show editor
+            currentTemplate = data.template;
+            document.getElementById('templateEditor').value = JSON.stringify(data.template, null, 2);
+
+            // Show modal
+            const modal = new bootstrap.Modal(document.getElementById('templateModal'));
+            modal.show();
+        } else {
+            alert('Error generating template: ' + data.message);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error generating template');
+    } finally {
+        generateBtn.disabled = false;
+        generateBtn.innerHTML = originalText;
+    }
+}
+
+function showStatusInSettings(msg, type) {
+    const el = document.getElementById('settingsStatus');
+    if (el) {
+        el.className = `alert alert-${type}`;
+        el.textContent = msg;
+        el.style.display = 'block';
+    }
+}
+
+function toggleApiKeyVisibility() {
+    const input = document.getElementById('apiKeyInput');
+    const btn = document.getElementById('toggleApiKeyVisibility');
+    const icon = btn ? btn.querySelector('i') : null;
+
+    if (input && icon) {
+        if (input.type === 'password') {
+            input.type = 'text';
+            icon.classList.remove('fa-eye');
+            icon.classList.add('fa-eye-slash');
+        } else {
+            input.type = 'password';
+            icon.classList.remove('fa-eye-slash');
+            icon.classList.add('fa-eye');
+        }
+    }
 }

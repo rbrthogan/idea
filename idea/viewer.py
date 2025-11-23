@@ -45,8 +45,40 @@ templates = Jinja2Templates(directory="idea/static/html")
 # Global engine instance
 engine = None
 
+# (Removed duplicate definitions)
+
+# Add this near other constants
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+# --- API Key Management ---
+def load_api_key():
+    """Load API key from .env file if it exists"""
+    env_path = Path(".env")
+    if env_path.exists():
+        try:
+            with open(env_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("GEMINI_API_KEY="):
+                        key = line.split("=", 1)[1].strip()
+                        if key:
+                            os.environ["GEMINI_API_KEY"] = key
+                            print("Loaded GEMINI_API_KEY from .env file")
+                            return True
+        except Exception as e:
+            print(f"Error loading .env file: {e}")
+    return False
+
+# Load key at startup
+load_api_key()
+
 # Flag indicating whether the API key is available
-API_KEY_MISSING = os.getenv("GEMINI_API_KEY") in (None, "")
+# We'll make this a function to always get the current state
+def is_api_key_missing():
+    return os.getenv("GEMINI_API_KEY") in (None, "")
+
+API_KEY_MISSING = is_api_key_missing()
 
 # Global queue for evolution updates
 evolution_queue = Queue()
@@ -60,14 +92,13 @@ evolution_status = {
 # Store the latest evolution data for rating
 latest_evolution_data = []
 
-# Add this near other constants
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
-
 # Add this class for the request body
 class SaveEvolutionRequest(BaseModel):
     data: dict
     filename: str
+
+class ApiKeyRequest(BaseModel):
+    api_key: str
 
 # --------------------------------------------------
 # Routes
@@ -76,12 +107,77 @@ class SaveEvolutionRequest(BaseModel):
 @app.get("/")
 def serve_viewer(request: Request):
     """Serves the viewer page"""
-    return templates.TemplateResponse("viewer.html", {"request": request, "api_key_missing": API_KEY_MISSING})
+    return templates.TemplateResponse("viewer.html", {"request": request, "api_key_missing": is_api_key_missing()})
 
 @app.get("/rate")
 def serve_rater(request: Request):
     """Serves the rater page"""
-    return templates.TemplateResponse("rater.html", {"request": request, "api_key_missing": API_KEY_MISSING})
+    return templates.TemplateResponse("rater.html", {"request": request, "api_key_missing": is_api_key_missing()})
+
+@app.post("/api/settings/api-key")
+async def set_api_key(request: ApiKeyRequest):
+    """Save API key to .env file"""
+    api_key = request.api_key.strip()
+    if not api_key:
+        return JSONResponse({"status": "error", "message": "API key cannot be empty"}, status_code=400)
+
+    # Save to .env
+    env_path = Path(".env")
+    # Read existing lines to preserve other env vars if any
+    lines = []
+    if env_path.exists():
+        try:
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"Error reading .env: {e}")
+
+    # Update or append
+    key_found = False
+    new_lines = []
+    for line in lines:
+        if line.strip().startswith("GEMINI_API_KEY="):
+            new_lines.append(f"GEMINI_API_KEY={api_key}\n")
+            key_found = True
+        else:
+            new_lines.append(line)
+
+    if not key_found:
+        if new_lines and not new_lines[-1].endswith('\n'):
+            new_lines[-1] += '\n'
+        new_lines.append(f"GEMINI_API_KEY={api_key}\n")
+
+    try:
+        with open(env_path, "w") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": f"Failed to write to .env: {str(e)}"}, status_code=500)
+
+    # Update current process env
+    os.environ["GEMINI_API_KEY"] = api_key
+
+    # Update global flag
+    global API_KEY_MISSING
+    API_KEY_MISSING = False
+
+    return JSONResponse({"status": "success", "message": "API key saved successfully"})
+
+@app.get("/api/settings/status")
+async def get_settings_status():
+    """Check if API key is set"""
+    is_missing = is_api_key_missing()
+    masked_key = None
+    if not is_missing:
+        key = os.environ.get("GEMINI_API_KEY", "")
+        if len(key) > 8:
+            masked_key = f"{key[:4]}...{key[-4:]}"
+        else:
+            masked_key = "***"
+
+    return JSONResponse({
+        "api_key_missing": is_missing,
+        "masked_key": masked_key
+    })
 
 
 
@@ -137,7 +233,7 @@ async def start_evolution(request: Request):
     """
     global engine, evolution_status, evolution_queue, latest_evolution_data
 
-    if API_KEY_MISSING:
+    if is_api_key_missing():
         return JSONResponse(
             {"status": "error", "message": "GEMINI_API_KEY not configured"},
             status_code=400,
@@ -186,11 +282,23 @@ async def start_evolution(request: Request):
     else:
         print("No thinking budget specified (non-2.5 model or not set)")
 
+    # Get max budget parameter
+    max_budget = data.get('maxBudget')
+    if max_budget is not None:
+        try:
+            max_budget = float(max_budget)
+            print(f"Parsed max budget: ${max_budget}")
+        except ValueError:
+            print(f"Error parsing max budget: {max_budget}")
+            max_budget = None
+    else:
+        print("No max budget specified")
+
     print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
           f"idea_type={idea_type}, model_type={model_type}, "
           f"creative_temp={creative_temp}, top_p={top_p}, "
           f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"thinking_budget={thinking_budget}")
+          f"thinking_budget={thinking_budget}, max_budget={max_budget}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -203,6 +311,7 @@ async def start_evolution(request: Request):
         tournament_size=tournament_size,
         tournament_comparisons=tournament_comparisons,
         thinking_budget=thinking_budget,
+        max_budget=max_budget,
     )
 
     # Generate contexts for each idea
@@ -812,15 +921,15 @@ async def auto_rate(request: Request):
             """Get the default thinking budget for a model, same as main app logic"""
             from idea.config import THINKING_BUDGET_CONFIG
 
-            # Only 2.5 models support thinking budget
-            if "2.5" not in model_name:
+            # Only 2.5 and 3.0 models support thinking budget
+            if "2.5" not in model_name and "3-pro" not in model_name:
                 return None
 
             # Get the config for this model and use its default value
             # This matches the main app logic:
             # - gemini-2.5-pro: default = 128 (minimum, can't disable)
             # - gemini-2.5-flash: default = 0 (disabled)
-            # - gemini-2.5-flash-lite-preview-06-17: default = 0 (disabled)
+            # - gemini-2.5-flash-lite: default = 0 (disabled)
             config = THINKING_BUDGET_CONFIG.get(model_name, {})
             return config.get('default', 0)  # Default to 0 (disabled) if not found
 
@@ -1479,6 +1588,32 @@ async def debug_idea_state(evolution_id: str, idea_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Run the server
+@app.delete("/api/settings/api-key")
+async def delete_api_key():
+    """Delete the API key from .env and environment variables"""
+    try:
+        # Remove from environment
+        if "GEMINI_API_KEY" in os.environ:
+            del os.environ["GEMINI_API_KEY"]
+
+        # Remove from .env file
+        env_path = Path(".env")
+        if env_path.exists():
+            # Read all lines
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+
+            # Filter out the key
+            new_lines = [line for line in lines if not line.strip().startswith("GEMINI_API_KEY=")]
+
+            # Write back
+            with open(env_path, "w") as f:
+                f.writelines(new_lines)
+
+        return JSONResponse({"status": "success", "message": "API Key deleted successfully"})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
 if __name__ == "__main__":
     uvicorn.run(
         "idea.viewer:app", host="127.0.0.1", port=8000, reload=True

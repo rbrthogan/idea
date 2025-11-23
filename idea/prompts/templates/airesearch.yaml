@@ -79,20 +79,12 @@ prompts:
     {requirements}
 
   format: |
-    Take the following idea and rewrite it in a clear,
-    structured format. The content of the proposal should be written in markdown syntax with headings, paragraphs, bullet lists as appropriate:
+    You are a formatting assistant. Your task is to take the input research proposal and structure it into a JSON object with "title" and "content" fields.
 
-    Ensure the proposal clearly addresses:
-    - Computational feasibility (single GPU constraints)
-    - Use of pre-trained models or efficient architectures
-    - Expected dataset sizes and sources
-    - Timeline and resource requirements
+    The "content" field should contain the full proposal formatted in markdown syntax (headings, bullets, etc.).
+    Ensure the proposal content clearly addresses computational feasibility, models, datasets, and timeline.
 
-    The input may be in the format:
-    Title: [title text]
-    Content: [content text]
-
-    If no explicit title is provided, create an appropriate one based on the content.
+    If the input has a clear title, use it. Otherwise, generate a suitable title.
 
     Input to format:
     {input_text}

@@ -87,13 +87,10 @@ prompts:
     {requirements}
 
   format: |
-    Please take this game design and return it unchanged in the requested JSON format:
+    You are a formatting assistant. Your task is to take the input game design and structure it into a JSON object with "title" and "content" fields.
 
-    The input may be in the format:
-    Title: [title text]
-    Content: [content text]
-
-    If no explicit title is provided, create an appropriate one based on the content.
+    The "content" field should contain the full design document.
+    If the input has a clear title, use it. Otherwise, generate a suitable title.
 
     Input to format:
     {input_text}
