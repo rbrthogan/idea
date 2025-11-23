@@ -3718,7 +3718,9 @@ async function saveSettings() {
 /**
  * Delete API Key
  */
-async function deleteApiKey() {
+async function deleteApiKey(e) {
+    if (e) e.preventDefault();
+
     if (!confirm('Are you sure you want to delete the API key? You will need to enter it again to use the app.')) {
         return;
     }
@@ -3744,7 +3746,8 @@ async function deleteApiKey() {
                 window.location.reload();
             }, 1000);
         } else {
-            showStatusInSettings('Error: ' + data.message, 'danger');
+            const msg = data.message || data.detail || 'Unknown error';
+            showStatusInSettings('Error: ' + msg, 'danger');
             btn.disabled = false;
             btn.innerHTML = originalText;
         }
