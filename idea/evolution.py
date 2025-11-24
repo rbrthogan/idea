@@ -410,10 +410,11 @@ class EvolutionEngine:
             self.population = []
             self.specific_prompts = []
 
-            # Calculate total steps: Gen 0 (Seed + Refine) + Gen 1..N (Tournaments + Breed+Refine)
+            # Calculate total steps: Gen 0 (Seed + Refine) + Gen 1..N (Tournaments + Breed+Refine + Elite)
             # We estimate tournament groups based on current pop_size
             est_tournament_groups = math.ceil(self.pop_size / self.tournament_size)
-            steps_per_gen = self.pop_size + est_tournament_groups
+            # Each breeding generation: tournament_groups + pop_size breeding + 1 for elite processing
+            steps_per_gen = self.pop_size + est_tournament_groups + 1
             total_steps = (2 * self.pop_size) + (self.generations * steps_per_gen)
 
             # --- Parallel Seeding ---

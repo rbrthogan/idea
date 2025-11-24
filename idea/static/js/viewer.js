@@ -16,6 +16,17 @@ let currentEvolutionData = null;
 let generations = [];
 let currentModalIdea = null;
 
+// Evolution timing tracking
+let evolutionStartTime = null;
+let lastActivityTime = null;
+let activityLog = [];
+const MAX_ACTIVITY_LOG_ITEMS = 5;
+let elapsedTimeInterval = null;
+
+// Track previous status message to detect changes for activity log
+let previousStatusMessage = '';
+let previousProgress = 0;
+
 /**
  * Load available templates and populate the idea type dropdown
  */
@@ -230,6 +241,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (!document.getElementById('progress-container')) {
                     createProgressBar();
                 }
+
+                // Log that contexts are ready
+                addActivityLogItem(`✅ ${contexts.length} seed contexts ready`, 'success');
 
                 // Start polling for updates
                 isEvolutionRunning = true;
@@ -1220,25 +1234,64 @@ async function pollProgress() {
             // Reset diversity plot for new evolution
             resetDiversityPlot();
             showDiversityPlotLoading();
+
+            // Initialize timing for new evolution
+            if (!evolutionStartTime) {
+                evolutionStartTime = Date.now();
+                lastActivityTime = Date.now();
+                activityLog = [];
+            }
         }
 
-        // Update progress bar
+        // Update progress bar and percentage display
         const progressBar = document.getElementById('evolution-progress');
-        const progressStatus = document.getElementById('progress-status');
+        const progressPercentage = document.getElementById('progress-percentage');
 
-        if (progressBar && progressStatus) {
-            const progress = data.progress || 0;
+        if (progressBar) {
+            // Cap progress at 100% to handle edge cases in calculation
+            const progress = Math.min(data.progress || 0, 100);
             progressBar.style.width = `${progress}%`;
             progressBar.setAttribute('aria-valuenow', progress);
-            progressBar.textContent = `${Math.round(progress)}%`;
+
+            // Update prominent percentage display
+            if (progressPercentage) {
+                progressPercentage.textContent = `${Math.round(progress)}%`;
+            }
+
+            // Cap the display at 100%
+            if (progress >= 100) {
+                progressBar.style.width = '100%';
+            }
+
+            // Parse and enhance status messages for activity log
+            let activityMessage = '';
+            let activityType = 'info';
 
             if (data.status_message) {
-                progressStatus.textContent = `${data.status_message} (${Math.round(progress)}%)`;
+                activityMessage = enhanceStatusMessage(data.status_message, data);
             } else if (data.current_generation === 0) {
-                progressStatus.textContent = `Generating Generation 0 (Initial Population)... (${Math.round(progress)}%)`;
+                activityMessage = 'Building initial population...';
             } else {
-                progressStatus.textContent = `Generating Generation ${data.current_generation}... (${Math.round(progress)}%)`;
+                activityMessage = `Evolving generation ${data.current_generation}...`;
             }
+
+            // Add to activity log if message changed (better duplicate detection)
+            if (activityMessage && activityMessage !== previousStatusMessage) {
+                addActivityLogItem(activityMessage, activityType);
+                previousStatusMessage = activityMessage;
+            }
+
+            // Update last activity time on any progress update
+            lastActivityTime = Date.now();
+            previousProgress = progress;
+        }
+
+        // Update status indicator
+        if (data.is_running) {
+            const genInfo = data.current_generation === 0
+                ? 'Initial Population'
+                : `Gen ${data.current_generation}/${data.total_generations}`;
+            updateEvolutionStatusIndicator(true, `Running: ${genInfo}`);
         }
 
         // Always update UI with current progress if there's history data
@@ -1258,9 +1311,32 @@ async function pollProgress() {
             localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
         }
 
-        // Handle diversity updates
-        if (data.diversity_history) {
+        // Handle diversity updates with activity logging
+        if (data.diversity_history && data.diversity_history.length > 0) {
+            const latestDiversity = data.diversity_history[data.diversity_history.length - 1];
+            // Only log if we have a new diversity calculation
+            if (latestDiversity && latestDiversity.diversity_score !== undefined) {
+                const diversityGenIndex = data.diversity_history.length - 1;
+                const diversityKey = `diversity_gen_${diversityGenIndex}`;
+                if (!window._loggedDiversityGens) window._loggedDiversityGens = new Set();
+                if (!window._loggedDiversityGens.has(diversityKey)) {
+                    window._loggedDiversityGens.add(diversityKey);
+                    const score = latestDiversity.diversity_score.toFixed(3);
+                    const genLabel = diversityGenIndex === 0 ? 'initial population' : `generation ${diversityGenIndex}`;
+                    addActivityLogItem(`📊 Diversity calculated for ${genLabel}: ${score}`, 'info');
+                }
+            }
             handleDiversityUpdate(data);
+        }
+
+        // Handle oracle updates with activity logging
+        if (data.oracle_update) {
+            addActivityLogItem('🔮 Oracle injected diverse idea into population', 'info');
+        }
+
+        // Handle elite selection updates
+        if (data.elite_selection_update) {
+            addActivityLogItem('⭐ Elite idea selected for next generation', 'info');
         }
 
         // Display token counts if available (Live updates)
@@ -1280,12 +1356,13 @@ async function pollProgress() {
         // Continue polling if evolution is still running
         if (data.is_running) {
             isEvolutionRunning = true;
-            document.getElementById('statusSpinner').style.display = 'inline-block';
             setTimeout(pollProgress, 1000); // Poll every second
         } else {
             // Evolution complete or stopped
             isEvolutionRunning = false;
-            document.getElementById('statusSpinner').style.display = 'none';
+
+            // Mark as complete with proper visual feedback
+            markEvolutionComplete(data.is_stopped);
 
             if (data.history && data.history.length > 0) {
                 // Save final state and enable save button
@@ -1317,15 +1394,6 @@ async function pollProgress() {
                 }
             }
 
-            // Update progress status
-            if (progressStatus) {
-                if (data.is_stopped) {
-                    progressStatus.textContent = data.stop_message || 'Evolution stopped';
-                } else {
-                    progressStatus.textContent = 'Evolution complete!';
-                }
-            }
-
             // Show completion/stop notification
             const startButton = document.getElementById('startButton');
             const stopButton = document.getElementById('stopButton');
@@ -1351,16 +1419,17 @@ async function pollProgress() {
                     startButton.textContent = 'Start Evolution';
                 }, 2000);
             }
+
+            // Reset tracking variables for next evolution
+            previousStatusMessage = '';
+            previousProgress = 0;
         }
 
         // Handle explicit errors from backend
         if (data.error) {
             console.error("Evolution error:", data.error);
             showErrorMessage(`Evolution Error: ${data.error}`);
-            if (progressStatus) {
-                progressStatus.textContent = `Error: ${data.error}`;
-                progressStatus.classList.add('text-danger');
-            }
+            addActivityLogItem(`❌ Error: ${data.error}`, 'error');
         }
     } catch (error) {
         console.error('Error polling progress:', error);
@@ -1604,22 +1673,35 @@ function resetUIState() {
         contextNav.style.display = 'none';
     }
 
-    // Reset progress bar if it exists
-    const progressBar = document.getElementById('evolution-progress');
-    const progressStatus = document.getElementById('progress-status');
-    if (progressBar && progressStatus) {
-        progressBar.style.width = '0%';
-        progressBar.setAttribute('aria-valuenow', 0);
-        progressBar.textContent = '0%';
-        progressStatus.textContent = 'Starting evolution...';
-    } else {
-        // Create progress bar if it doesn't exist
-        createProgressBar();
-    }
+    // Stop any existing elapsed time updater FIRST
+    stopElapsedTimeUpdater();
+
+    // Reset timing and activity tracking BEFORE creating new progress bar
+    evolutionStartTime = null;
+    lastActivityTime = null;
+    activityLog = [];
+    previousStatusMessage = '';
+    previousProgress = 0;
+
+    // Reset diversity tracking
+    window._loggedDiversityGens = new Set();
 
     // Reset evolution status
     isEvolutionRunning = false;
     currentEvolutionData = null;
+
+    // Reset progress bar if it exists, or create a new one
+    const existingProgressContainer = document.getElementById('progress-container');
+    if (existingProgressContainer) {
+        // Remove the old progress container
+        existingProgressContainer.remove();
+    }
+    // Create fresh progress bar with activity log (this starts the timer)
+    createProgressBar();
+
+    // Add initial activity for context generation
+    addActivityLogItem('🎯 Generating seed contexts...', 'info');
+    updateEvolutionStatusIndicator(true, 'Generating contexts...');
 
     // Clear localStorage data
     localStorage.removeItem('currentEvolutionData');
@@ -1637,22 +1719,252 @@ function resetUIState() {
     }
 }
 
-// Function to create the progress bar
+// Function to create the progress bar with enhanced visual feedback
 function createProgressBar() {
     const progressContainer = document.createElement('div');
     progressContainer.id = 'progress-container';
-    progressContainer.className = 'mb-4';
+    progressContainer.className = 'mb-4 evolution-progress-card';
     progressContainer.innerHTML = `
-        <div class="progress">
-            <div id="evolution-progress" class="progress-bar" role="progressbar"
-                 style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+        <div class="evolution-progress-header">
+            <div class="evolution-status-indicator">
+                <div class="evolution-spinner" id="evolution-spinner"></div>
+                <span id="evolution-status-text">Initializing...</span>
+            </div>
+            <div class="evolution-timing" id="evolution-timing">
+                <span class="timing-item" id="elapsed-time">
+                    <i class="fas fa-clock"></i> <span id="elapsed-time-value">0:00</span>
+                </span>
+            </div>
         </div>
-        <div id="progress-status" class="text-center mt-2">Starting evolution...</div>
+        <div class="progress-container-inner">
+            <div class="progress evolution-progress-bar">
+                <div id="evolution-progress" class="progress-bar" role="progressbar"
+                     style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                <div class="progress-bar-activity" id="progress-bar-activity"></div>
+            </div>
+            <div class="progress-percentage" id="progress-percentage">0%</div>
+        </div>
+        <div class="evolution-activity-log" id="evolution-activity-log">
+            <div class="activity-log-header">
+                <i class="fas fa-stream"></i> Recent Activity
+            </div>
+            <div class="activity-log-items" id="activity-log-items">
+                <div class="activity-item activity-item-placeholder">Waiting for first task...</div>
+            </div>
+        </div>
     `;
 
     // Insert progress bar before generations container
     const generationsContainer = document.getElementById('generations-container');
     generationsContainer.parentNode.insertBefore(progressContainer, generationsContainer);
+
+    // Initialize timing
+    evolutionStartTime = Date.now();
+    lastActivityTime = Date.now();
+    activityLog = [];
+
+    // Reset diversity tracking for new evolution
+    window._loggedDiversityGens = new Set();
+
+    // Start elapsed time updater immediately
+    startElapsedTimeUpdater();
+}
+
+// Function to start the elapsed time updater
+function startElapsedTimeUpdater() {
+    // Clear any existing interval
+    if (elapsedTimeInterval) {
+        clearInterval(elapsedTimeInterval);
+    }
+
+    // Update immediately on start
+    updateElapsedTimeDisplay();
+
+    elapsedTimeInterval = setInterval(() => {
+        updateElapsedTimeDisplay();
+    }, 1000);
+}
+
+// Function to update the elapsed time display
+function updateElapsedTimeDisplay() {
+    if (!evolutionStartTime) {
+        return;
+    }
+
+    const elapsed = Date.now() - evolutionStartTime;
+    const elapsedTimeEl = document.getElementById('elapsed-time-value');
+    if (elapsedTimeEl) {
+        elapsedTimeEl.textContent = formatDuration(elapsed);
+    }
+
+    // Check for inactivity (more than 5 seconds since last activity)
+    const timeSinceActivity = Date.now() - lastActivityTime;
+    const activityIndicator = document.getElementById('progress-bar-activity');
+    if (activityIndicator) {
+        if (timeSinceActivity > 5000) {
+            // Show pulsing animation to indicate waiting
+            activityIndicator.classList.add('waiting');
+        } else {
+            activityIndicator.classList.remove('waiting');
+        }
+    }
+}
+
+// Function to stop the elapsed time updater
+function stopElapsedTimeUpdater() {
+    if (elapsedTimeInterval) {
+        clearInterval(elapsedTimeInterval);
+        elapsedTimeInterval = null;
+    }
+}
+
+// Function to format duration in mm:ss or hh:mm:ss
+function formatDuration(ms) {
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (hours > 0) {
+        return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+// Function to enhance status messages for better readability
+function enhanceStatusMessage(rawMessage, data) {
+    if (!rawMessage) return '';
+
+    // Parse common patterns and make them more descriptive
+    // Order matters - more specific patterns first
+    const patterns = [
+        {
+            match: /Seeding idea (\d+)\/(\d+)/i,
+            transform: (m) => `🌱 Creating seed idea ${m[1]} of ${m[2]}`
+        },
+        {
+            // Breeding comes after tournament in gen 1+
+            match: /Breeding and refining idea (\d+)\/(\d+)/i,
+            transform: (m) => `🧬 Breeding offspring ${m[1]} of ${m[2]}`
+        },
+        {
+            // Refining in gen 0 (initial population polish)
+            match: /Refining idea (\d+)\/(\d+)/i,
+            transform: (m, data) => {
+                // Check if this is gen 0 (initial population) or later
+                if (data && data.current_generation === 0) {
+                    return `✨ Polishing seed ${m[1]} of ${m[2]}`;
+                }
+                return `✨ Refining idea ${m[1]} of ${m[2]}`;
+            }
+        },
+        {
+            match: /Running tournament group (\d+)\/(\d+)/i,
+            transform: (m) => `🏆 Tournament round ${m[1]} of ${m[2]}`
+        },
+        {
+            match: /Running tournament/i,
+            transform: () => '🏆 Running selection tournament...'
+        }
+    ];
+
+    for (const pattern of patterns) {
+        const match = rawMessage.match(pattern.match);
+        if (match) {
+            return pattern.transform(match, data);
+        }
+    }
+
+    // Return original message if no pattern matches
+    return rawMessage;
+}
+
+// Function to add an activity to the log
+function addActivityLogItem(message, type = 'info') {
+    lastActivityTime = Date.now();
+
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    // Add to activity log array
+    activityLog.unshift({ message, type, timestamp });
+
+    // Keep only the most recent items
+    if (activityLog.length > MAX_ACTIVITY_LOG_ITEMS) {
+        activityLog = activityLog.slice(0, MAX_ACTIVITY_LOG_ITEMS);
+    }
+
+    // Update the UI
+    const logContainer = document.getElementById('activity-log-items');
+    if (logContainer) {
+        logContainer.innerHTML = activityLog.map(item => `
+            <div class="activity-item activity-${item.type}">
+                <span class="activity-time">${item.timestamp}</span>
+                <span class="activity-message">${item.message}</span>
+            </div>
+        `).join('');
+    }
+}
+
+// Function to update the evolution status indicator
+function updateEvolutionStatusIndicator(isRunning, statusText = '') {
+    const spinner = document.getElementById('evolution-spinner');
+    const statusTextEl = document.getElementById('evolution-status-text');
+    const progressCard = document.getElementById('progress-container');
+
+    if (spinner) {
+        if (isRunning) {
+            spinner.classList.add('spinning');
+            spinner.classList.remove('complete', 'stopped');
+        } else {
+            spinner.classList.remove('spinning');
+        }
+    }
+
+    if (statusTextEl && statusText) {
+        statusTextEl.textContent = statusText;
+    }
+
+    if (progressCard) {
+        if (isRunning) {
+            progressCard.classList.add('running');
+            progressCard.classList.remove('complete', 'stopped');
+        }
+    }
+}
+
+// Function to mark evolution as complete
+function markEvolutionComplete(isStopped = false) {
+    const spinner = document.getElementById('evolution-spinner');
+    const statusTextEl = document.getElementById('evolution-status-text');
+    const progressCard = document.getElementById('progress-container');
+    const activityIndicator = document.getElementById('progress-bar-activity');
+
+    if (spinner) {
+        spinner.classList.remove('spinning');
+        spinner.classList.add(isStopped ? 'stopped' : 'complete');
+    }
+
+    if (statusTextEl) {
+        statusTextEl.textContent = isStopped ? 'Stopped' : 'Complete';
+    }
+
+    if (progressCard) {
+        progressCard.classList.remove('running');
+        progressCard.classList.add(isStopped ? 'stopped' : 'complete');
+    }
+
+    if (activityIndicator) {
+        activityIndicator.classList.remove('waiting');
+    }
+
+    stopElapsedTimeUpdater();
+
+    // Add final activity log entry
+    const elapsed = evolutionStartTime ? formatDuration(Date.now() - evolutionStartTime) : 'unknown';
+    addActivityLogItem(
+        isStopped ? `⏹️ Stopped after ${elapsed}` : `✅ Completed in ${elapsed}!`,
+        isStopped ? 'warning' : 'success'
+    );
 }
 
 
