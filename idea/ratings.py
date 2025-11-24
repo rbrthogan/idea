@@ -39,6 +39,7 @@ def parallel_evaluate_pairs(
     idea_type: str,
     concurrency: int = 8,
     randomize_presentation: bool = True,
+    progress_callback: Callable[[int, int], None] = None,
 ) -> List[Tuple[int, int, str]]:
     """Run LLM comparisons for pairs in parallel and return winners.
 
@@ -46,6 +47,8 @@ def parallel_evaluate_pairs(
     """
     futures = []
     results: List[Tuple[int, int, str]] = []
+    total_pairs = len(pairs)
+    completed_count = 0
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         for idx_a, idx_b in pairs:
@@ -63,6 +66,8 @@ def parallel_evaluate_pairs(
                         w = "B"
                     elif w == "B":
                         w = "A"
+                    elif w == "B":
+                        w = "A"
                 else:
                     w = compare_fn(a, b, idea_type)
                 return ia, ib, w
@@ -71,5 +76,11 @@ def parallel_evaluate_pairs(
 
         for f in as_completed(futures):
             results.append(f.result())
+            completed_count += 1
+            if progress_callback:
+                try:
+                    progress_callback(completed_count, total_pairs)
+                except Exception as e:
+                    print(f"Error in progress callback: {e}")
 
     return results

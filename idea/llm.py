@@ -5,7 +5,7 @@ from google import genai
 from google.genai import types
 import json
 from pydantic import BaseModel
-from typing import Type, Optional, Dict, List
+from typing import Type, Optional, Dict, List, Callable
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
 import numpy as np
@@ -525,7 +525,7 @@ class Critic(LLMWrapper):
 
         return elo_a, elo_b
 
-    def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int) -> dict:
+    def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int, progress_callback: Callable[[int, int], None] = None) -> dict:
         """Get tournament ranks with optional parallel pair evaluations.
 
         Falls back to original sequential scheduling for small tournaments to keep
@@ -577,6 +577,13 @@ class Critic(LLMWrapper):
                 elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
                 ranks[idea_idx_a] = elo_a
                 ranks[idea_idx_b] = elo_b
+
+                if progress_callback:
+                    try:
+                        progress_callback(k + 1, comparisons)
+                    except Exception as e:
+                        print(f"Error in progress callback: {e}")
+
             return ranks
 
         def select_pairs(snapshot_ranks: Dict[int, float], num_pairs: int) -> List[tuple[int, int]]:
@@ -600,39 +607,25 @@ class Critic(LLMWrapper):
                 pairs.append((idea_idx_a, idea_idx_b))
             return pairs
 
-        # Choose a batch size that balances ELO adaptation with throughput
-        batch_size = max(4, min(self._max_workers * 2, comparisons))
-        remaining = comparisons
-        while remaining > 0:
-            num_this_batch = min(batch_size, remaining)
-            pairs = select_pairs(ranks.copy(), num_this_batch)
-            # Deduplicate pairs to avoid redundant calls in the same batch
-            seen = set()
-            deduped_pairs: List[tuple[int, int]] = []
-            for a, b in pairs:
-                key = (a, b) if a <= b else (b, a)
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped_pairs.append((a, b))
+        # Generate pairs based on initial ranks
+        deduped_pairs = select_pairs(ranks, comparisons)
 
-            # Run pair evaluations in parallel using shared utility
-            results = parallel_evaluate_pairs(
-                pairs=deduped_pairs,
-                items=ideas,
-                compare_fn=self.compare_ideas,
-                idea_type=idea_type,
-                concurrency=self._max_workers,
-                randomize_presentation=True,
-            )
+        # Run parallel evaluation
+        results = parallel_evaluate_pairs(
+            pairs=deduped_pairs,
+            items=ideas,
+            compare_fn=self.compare_ideas,
+            idea_type=idea_type,
+            concurrency=self._max_workers,
+            randomize_presentation=True,
+            progress_callback=progress_callback,
+        )
 
-            for idx_a, idx_b, winner in results:
-                elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
-                ranks[idx_a] = elo_a
-                ranks[idx_b] = elo_b
-
-            # Decrement by actual completed comparisons
-            remaining -= len(results)
+        # Update ranks based on results
+        for idx_a, idx_b, winner in results:
+            elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
+            ranks[idx_a] = elo_a
+            ranks[idx_b] = elo_b
 
         return ranks
 

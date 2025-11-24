@@ -1280,10 +1280,12 @@ async function pollProgress() {
         // Continue polling if evolution is still running
         if (data.is_running) {
             isEvolutionRunning = true;
+            document.getElementById('statusSpinner').style.display = 'inline-block';
             setTimeout(pollProgress, 1000); // Poll every second
         } else {
             // Evolution complete or stopped
             isEvolutionRunning = false;
+            document.getElementById('statusSpinner').style.display = 'none';
 
             if (data.history && data.history.length > 0) {
                 // Save final state and enable save button
