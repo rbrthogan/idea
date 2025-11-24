@@ -273,6 +273,14 @@ async def start_evolution(request: Request):
         tournament_size = 5
         tournament_comparisons = 35
 
+    # Get mutation rate with default
+    try:
+        mutation_rate = float(data.get('mutationRate', 0.2))
+        print(f"Parsed mutation rate: {mutation_rate}")
+    except ValueError as e:
+        print(f"Error parsing mutation rate: {e}")
+        mutation_rate = 0.2
+
     # Get Oracle parameters with defaults
 
     # Get thinking budget parameter (only for Gemini 2.5 models)
@@ -299,7 +307,7 @@ async def start_evolution(request: Request):
           f"idea_type={idea_type}, model_type={model_type}, "
           f"creative_temp={creative_temp}, top_p={top_p}, "
           f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"thinking_budget={thinking_budget}, max_budget={max_budget}")
+          f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
 
     # Create and run evolution with specified parameters
     engine = EvolutionEngine(
@@ -311,6 +319,7 @@ async def start_evolution(request: Request):
         top_p=top_p,
         tournament_size=tournament_size,
         tournament_comparisons=tournament_comparisons,
+        mutation_rate=mutation_rate,
         thinking_budget=thinking_budget,
         max_budget=max_budget,
     )

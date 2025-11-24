@@ -253,6 +253,19 @@
                   oninput="document.getElementById('tournamentComparisonsValue').textContent = this.value">
                 <small class="text-muted">Number of comparisons to run in each tournament</small>
               </div>
+
+              <h6 class="mb-3 mt-4">Breeding Controls</h6>
+
+              <!-- Mutation Rate -->
+              <div class="mb-3">
+                <label for="mutationRate" class="form-label d-flex justify-content-between">
+                  <span>Mutation Rate</span>
+                  <span id="mutationRateValue">0.20</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1" step="0.05" id="mutationRate" value="0.2"
+                  oninput="document.getElementById('mutationRateValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Probability of injecting fresh concepts during breeding (0 = no mutation)</small>
+              </div>
             </div>
           </div>
 

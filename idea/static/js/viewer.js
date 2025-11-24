@@ -181,6 +181,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
         const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
 
+        // Get mutation rate
+        const mutationRate = parseFloat(document.getElementById('mutationRate').value);
+
         // Get thinking budget value (only for Gemini 2.5 models)
         const thinkingBudget = getThinkingBudgetValue();
 
@@ -197,6 +200,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             topP,
             tournamentSize,
             tournamentComparisons,
+            mutationRate,
             thinkingBudget,
             maxBudget
         };
