@@ -61,19 +61,38 @@
               </div>
             </div>
 
-            <!-- Evolution Configuration -->
+            <!-- History Section -->
             <div class="controls-section">
               <div class="d-flex justify-content-between align-items-center mb-2">
-                <h6 class="text-uppercase text-muted mb-0" style="font-size: 0.75rem; letter-spacing: 0.05em;">History
+                <h6 class="text-uppercase text-muted mb-0" style="font-size: 0.75rem; letter-spacing: 0.05em;">
+                  <i class="fas fa-history me-1"></i>History
                 </h6>
-                <button class="btn btn-sm btn-link p-0 text-decoration-none" id="newEvolutionBtn"
-                  style="display: none;">
-                  <i class="fas fa-plus me-1"></i>New
+                <button class="btn btn-sm btn-link p-0 text-decoration-none" onclick="showSidebarView('history')">
+                  <i class="fas fa-list me-1"></i>View All
                 </button>
               </div>
-              <select id="evolutionSelect" class="form-select form-select-sm mb-3">
-                <option value="">Select a previous evolution...</option>
-              </select>
+              <!-- Current/Selected evolution display -->
+              <div id="selectedEvolutionCard" class="selected-evolution-card mb-3" style="display: none;">
+                <div class="d-flex justify-content-between align-items-start">
+                  <div class="flex-grow-1">
+                    <div class="d-flex align-items-center mb-1">
+                      <span class="badge me-2" id="selectedEvolutionStatus">Complete</span>
+                      <small class="text-muted" id="selectedEvolutionDate"></small>
+                    </div>
+                    <div class="fw-medium text-truncate" id="selectedEvolutionName" style="max-width: 180px;"></div>
+                    <small class="text-muted" id="selectedEvolutionMeta"></small>
+                  </div>
+                  <button class="btn btn-sm btn-link text-danger p-0" onclick="clearSelectedEvolution()" title="Clear selection">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+                <!-- Action buttons based on status -->
+                <div class="mt-2 d-flex gap-2" id="selectedEvolutionActions">
+                  <!-- Will be populated dynamically -->
+                </div>
+              </div>
+              <input type="hidden" id="evolutionSelect" value="">
+              <input type="hidden" id="selectedCheckpointId" value="">
 
               <h6 class="text-uppercase text-muted mb-3 mt-4" style="font-size: 0.75rem; letter-spacing: 0.05em;">
                 Configuration</h6>
@@ -136,7 +155,14 @@
             </div>
 
             <!-- Action Buttons Footer -->
-            <div class="mt-auto p-3 border-top bg-light">
+            <div class="mt-auto p-3 border-top bg-light" id="actionButtonsFooter">
+              <!-- Evolution name input (shown before starting) -->
+              <div class="mb-2" id="evolutionNameSection">
+                <label class="form-label small text-muted mb-1">Evolution Name</label>
+                <input type="text" class="form-control form-control-sm" id="evolutionNameInput"
+                       placeholder="e.g., Sci-Fi Drabbles Round 2">
+                <small class="text-muted">Leave blank for auto-generated name</small>
+              </div>
               <button class="btn btn-primary w-100 mb-2" id="startButton" {% if api_key_missing %}disabled{% endif %}>
                 Start Evolution
               </button>
@@ -145,15 +171,6 @@
               </button>
               <button class="btn btn-warning w-100 mb-2" id="forceStopButton" style="display: none;">
                 <i class="fas fa-bolt me-1"></i>Force Stop
-              </button>
-              <button class="btn btn-success w-100 mb-2" id="resumeButton" style="display: none;">
-                <i class="fas fa-play me-1"></i>Resume Evolution
-              </button>
-              <button class="btn btn-info w-100 mb-2" id="continueButton" style="display: none;">
-                <i class="fas fa-forward me-1"></i>Continue (+3 gens)
-              </button>
-              <button class="btn btn-secondary w-100" id="downloadButton" disabled>
-                Save Results
               </button>
             </div>
           </div>
@@ -299,7 +316,38 @@
                 <!-- Templates will be injected here -->
               </div>
             </div>
-          </div> <!-- SETTINGS VIEW -->
+          </div>
+
+          <!-- History View -->
+          <div class="sidebar-view" id="view-history">
+            <div class="p-3 border-bottom d-flex align-items-center justify-content-between">
+              <div class="d-flex align-items-center">
+                <button class="btn btn-link text-dark p-0 me-2" onclick="showSidebarView('main')">
+                  <i class="fas fa-arrow-left"></i>
+                </button>
+                <h5 class="mb-0">History</h5>
+              </div>
+              <button class="btn btn-sm btn-outline-secondary" onclick="refreshHistoryList()" title="Refresh">
+                <i class="fas fa-sync-alt"></i>
+              </button>
+            </div>
+            <div class="p-3">
+              <!-- Filter tabs -->
+              <div class="btn-group btn-group-sm w-100 mb-3" role="group">
+                <button type="button" class="btn btn-outline-secondary active" onclick="filterHistory('all')" id="historyFilterAll">All</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="filterHistory('saved')" id="historyFilterSaved">Saved</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="filterHistory('checkpoint')" id="historyFilterCheckpoint">Checkpoints</button>
+              </div>
+              <!-- History list -->
+              <div id="historyList" class="history-list">
+                <div class="text-center text-muted py-4">
+                  <i class="fas fa-spinner fa-spin"></i> Loading...
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SETTINGS VIEW -->
           <div class="sidebar-view" id="view-settings">
             <div class="sidebar-header p-3 border-bottom d-flex align-items-center">
               <button class="btn btn-sm btn-link text-decoration-none p-0 me-2" onclick="showSidebarView('main')">

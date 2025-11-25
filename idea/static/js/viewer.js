@@ -12,6 +12,7 @@ let contexts = [];
 let specificPrompts = [];
 let breedingPrompts = [];  // Store breeding prompts for each generation
 let currentEvolutionId = null;
+let currentEvolutionName = null;
 let currentEvolutionData = null;
 let generations = [];
 let currentModalIdea = null;
@@ -143,7 +144,7 @@ window.filterTemplates = filterTemplates;
 document.addEventListener('DOMContentLoaded', async () => {
     // Load initial data
     await loadTemplateTypes();
-    await loadEvolutions();
+    await loadHistory();
 
     // Check if we have a current evolution running or saved
     const restored = await restoreCurrentEvolution();
@@ -196,6 +197,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         const maxBudgetInput = document.getElementById('maxBudget');
         const maxBudget = maxBudgetInput && maxBudgetInput.value ? parseFloat(maxBudgetInput.value) : null;
 
+        // Get evolution name (optional)
+        const evolutionNameInput = document.getElementById('evolutionNameInput');
+        const evolutionName = evolutionNameInput?.value?.trim() || null;
+
         const requestBody = {
             popSize,
             generations,
@@ -207,10 +212,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             tournamentComparisons,
             mutationRate,
             thinkingBudget,
-            maxBudget
+            maxBudget,
+            evolutionName
         };
 
         console.log("Request body JSON:", JSON.stringify(requestBody));
+
+        // Hide name input section when starting
+        const nameSection = document.getElementById('evolutionNameSection');
+        if (nameSection) nameSection.style.display = 'none';
 
         // Reset UI state
         resetUIState();
@@ -240,6 +250,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (response.ok) {
                 const data = await response.json();
 
+                // Store evolution identity
+                currentEvolutionId = data.evolution_id;
+                currentEvolutionName = data.evolution_name;
+
                 // Reset contexts and index
                 contexts = data.contexts || [];
                 specificPrompts = data.specific_prompts || [];
@@ -248,7 +262,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 // Create progress bar container if it doesn't exist
                 if (!document.getElementById('progress-container')) {
-                    createProgressBar();
+                    createProgressBar(currentEvolutionName);
                 }
 
                 // Log that contexts are ready
@@ -368,199 +382,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    // --- Resume Button ---
-    addListener('resumeButton', 'click', async function () {
-        const checkpointId = localStorage.getItem('lastCheckpointId');
-        if (!checkpointId) {
-            alert("No checkpoint available to resume from");
-            return;
-        }
-
-        console.log("Resuming evolution from checkpoint:", checkpointId);
-        const resumeButton = document.getElementById('resumeButton');
-        const continueButton = document.getElementById('continueButton');
-        const startButton = document.getElementById('startButton');
-        const stopButton = document.getElementById('stopButton');
-
-        if (resumeButton) {
-            resumeButton.disabled = true;
-            resumeButton.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Resuming...';
-        }
-
-        try {
-            const response = await fetch('/api/resume-evolution', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ checkpointId })
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                console.log("Resume started:", data);
-                addActivityLogItem(`🔄 Resuming from generation ${data.current_generation}`, 'info');
-
-                // Restore contexts
-                contexts = data.contexts || [];
-                specificPrompts = data.specific_prompts || [];
-                currentContextIndex = 0;
-                updateContextDisplay();
-
-                // Hide resume/continue buttons
-                if (resumeButton) {
-                    resumeButton.style.display = 'none';
-                }
-                if (continueButton) {
-                    continueButton.style.display = 'none';
-                }
-
-                // Update UI state
-                if (startButton) {
-                    startButton.disabled = true;
-                    startButton.textContent = 'Running...';
-                }
-                if (stopButton) {
-                    stopButton.disabled = false;
-                    stopButton.style.display = 'block';
-                    stopButton.textContent = 'Stop Evolution';
-                }
-
-                // Reset progress card if exists
-                const progressCard = document.getElementById('progress-container');
-                if (progressCard) {
-                    progressCard.classList.remove('stopped', 'complete');
-                    progressCard.classList.add('running');
-                }
-                const spinner = document.getElementById('evolution-spinner');
-                if (spinner) {
-                    spinner.classList.remove('stopped', 'complete');
-                    spinner.classList.add('spinning');
-                }
-                const statusTextEl = document.getElementById('evolution-status-text');
-                if (statusTextEl) {
-                    statusTextEl.textContent = 'Resuming...';
-                }
-
-                // Start polling
-                isEvolutionRunning = true;
-                pollProgress();
-            } else {
-                console.error("Failed to resume:", await response.text());
-                alert("Failed to resume evolution. Check console for details.");
-                if (resumeButton) {
-                    resumeButton.disabled = false;
-                    resumeButton.innerHTML = '<i class="fas fa-play me-1"></i>Resume Evolution';
-                }
-            }
-        } catch (error) {
-            console.error("Error resuming:", error);
-            alert("Error resuming evolution: " + error.message);
-            if (resumeButton) {
-                resumeButton.disabled = false;
-                resumeButton.innerHTML = '<i class="fas fa-play me-1"></i>Resume Evolution';
-            }
-        }
-    });
-
-    // --- Continue Button ---
-    addListener('continueButton', 'click', async function () {
-        const checkpointId = localStorage.getItem('lastCheckpointId');
-        if (!checkpointId) {
-            alert("No checkpoint available to continue from");
-            return;
-        }
-
-        const additionalGens = prompt("How many additional generations?", "3");
-        if (!additionalGens || isNaN(parseInt(additionalGens))) {
-            return;
-        }
-
-        console.log("Continuing evolution for", additionalGens, "more generations");
-        const continueButton = document.getElementById('continueButton');
-        const resumeButton = document.getElementById('resumeButton');
-        const startButton = document.getElementById('startButton');
-        const stopButton = document.getElementById('stopButton');
-
-        if (continueButton) {
-            continueButton.disabled = true;
-            continueButton.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Starting...';
-        }
-
-        try {
-            const response = await fetch('/api/continue-evolution', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    checkpointId,
-                    additionalGenerations: parseInt(additionalGens)
-                })
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                console.log("Continue started:", data);
-                addActivityLogItem(`📈 Continuing for ${additionalGens} more generations`, 'info');
-
-                // Restore contexts
-                contexts = data.contexts || [];
-                specificPrompts = data.specific_prompts || [];
-                currentContextIndex = 0;
-                updateContextDisplay();
-
-                // Hide resume/continue buttons
-                if (continueButton) {
-                    continueButton.style.display = 'none';
-                }
-                if (resumeButton) {
-                    resumeButton.style.display = 'none';
-                }
-
-                // Update UI state
-                if (startButton) {
-                    startButton.disabled = true;
-                    startButton.textContent = 'Running...';
-                }
-                if (stopButton) {
-                    stopButton.disabled = false;
-                    stopButton.style.display = 'block';
-                    stopButton.textContent = 'Stop Evolution';
-                }
-
-                // Reset progress card if exists
-                const progressCard = document.getElementById('progress-container');
-                if (progressCard) {
-                    progressCard.classList.remove('stopped', 'complete');
-                    progressCard.classList.add('running');
-                }
-                const spinner = document.getElementById('evolution-spinner');
-                if (spinner) {
-                    spinner.classList.remove('stopped', 'complete');
-                    spinner.classList.add('spinning');
-                }
-                const statusTextEl = document.getElementById('evolution-status-text');
-                if (statusTextEl) {
-                    statusTextEl.textContent = 'Continuing...';
-                }
-
-                // Start polling
-                isEvolutionRunning = true;
-                pollProgress();
-            } else {
-                console.error("Failed to continue:", await response.text());
-                alert("Failed to continue evolution. Check console for details.");
-                if (continueButton) {
-                    continueButton.disabled = false;
-                    continueButton.innerHTML = '<i class="fas fa-forward me-1"></i>Continue (+3 gens)';
-                }
-            }
-        } catch (error) {
-            console.error("Error continuing:", error);
-            alert("Error continuing evolution: " + error.message);
-            if (continueButton) {
-                continueButton.disabled = false;
-                continueButton.innerHTML = '<i class="fas fa-forward me-1"></i>Continue (+3 gens)';
-            }
-        }
-    });
+    // Resume/Continue buttons now handled via history panel
+    // See handleHistoryResume() and handleHistoryContinue() functions
 
     // --- Template Generation ---
     addListener('generateTemplateBtn', 'click', handleTemplateGeneration);
@@ -1388,45 +1211,507 @@ function generateUUID() {
 }
 
 async function loadEvolutions() {
-    const response = await fetch('/api/evolutions');
-    const evolutions = await response.json();
-
-    const select = document.getElementById('evolutionSelect');
-    select.innerHTML = '<option value="">Current Evolution</option>';
-
-    evolutions.forEach(evolution => {
-        const option = document.createElement('option');
-        option.value = evolution.id;
-        option.textContent = `Evolution from ${new Date(evolution.timestamp).toLocaleString()} - ${evolution.filename}`;
-        select.appendChild(option);
-    });
+    // Legacy function - now redirects to loadHistory
+    await loadHistory();
 }
 
-document.getElementById('evolutionSelect').addEventListener('change', async (e) => {
-    const evolutionId = e.target.value;
-    if (evolutionId) {
-        const response = await fetch(`/api/evolution/${evolutionId}`);
+// Global history state
+let historyItems = [];
+let selectedHistoryItem = null;
+let currentHistoryFilter = 'all';
+
+async function loadHistory() {
+    try {
+        const response = await fetch('/api/history');
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            historyItems = data.items || [];
+            renderHistoryList(historyItems);
+        } else {
+            console.error('Error loading history:', data.message);
+            historyItems = [];
+            renderHistoryList([]);
+        }
+    } catch (error) {
+        console.error('Error loading history:', error);
+        historyItems = [];
+        renderHistoryList([]);
+    }
+}
+
+async function refreshHistoryList() {
+    await loadHistory();
+}
+
+function filterHistory(filter) {
+    currentHistoryFilter = filter;
+
+    // Update button states
+    ['all', 'saved', 'checkpoint'].forEach(f => {
+        const btn = document.getElementById(`historyFilter${f.charAt(0).toUpperCase() + f.slice(1)}`);
+        if (btn) {
+            btn.classList.toggle('active', f === filter);
+        }
+    });
+
+    // Filter and render
+    let filtered = historyItems;
+    if (filter !== 'all') {
+        filtered = historyItems.filter(item => item.type === filter);
+    }
+    renderHistoryList(filtered, false);
+}
+
+function renderHistoryList(items, updateGlobal = true) {
+    const container = document.getElementById('historyList');
+    if (!container) return;
+
+    if (items.length === 0) {
+        container.innerHTML = `
+            <div class="history-empty">
+                <i class="fas fa-folder-open"></i>
+                <p>No evolutions found</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = items.map(item => {
+        const statusClass = `badge-status-${item.status}`;
+        const typeClass = `item-type-${item.type}`;
+        const date = item.timestamp ? new Date(item.timestamp).toLocaleDateString() : '';
+        const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
+        const isSelected = selectedHistoryItem?.id === item.id;
+
+        // Truncate display name (more room in expanded view)
+        let displayName = item.display_name || item.id;
+        if (displayName.length > 35) {
+            displayName = displayName.substring(0, 32) + '...';
+        }
+
+        // Build action buttons for expanded state
+        let actionsHtml = '';
+        if (isSelected) {
+            if (item.can_resume) {
+                actionsHtml += `<button class="btn btn-sm btn-success" onclick="event.stopPropagation(); handleHistoryResume('${item.id}')">
+                    <i class="fas fa-play me-1"></i>Resume
+                </button>`;
+            }
+            if (item.can_continue) {
+                actionsHtml += `
+                    <div class="continue-action-group d-flex gap-1" id="continueActionGroup-${item.id}">
+                        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); showContinueInputInline('${item.id}', '${item.type}')">
+                            <i class="fas fa-forward me-1"></i>Continue
+                        </button>
+                    </div>`;
+            }
+            if (item.can_rate) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); navigateToRatePage('${item.type === 'legacy_saved' ? item.id : ''}')">
+                    <i class="fas fa-star me-1"></i>Rate
+                </button>`;
+            }
+            if (item.can_rename) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); showRenameInputInline('${item.id}')" title="Rename">
+                    <i class="fas fa-edit"></i>
+                </button>`;
+            }
+            if (item.can_delete) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); confirmDeleteEvolution('${item.id}')" title="Delete">
+                    <i class="fas fa-trash"></i>
+                </button>`;
+            }
+        }
+
+        return `
+            <div class="history-item ${isSelected ? 'selected expanded' : ''}"
+                 onclick="selectHistoryItem('${item.id}')"
+                 data-item-id="${item.id}">
+                <div class="item-header">
+                    <span class="item-title" id="itemTitle-${item.id}" title="${item.display_name || item.id}">${displayName}</span>
+                    <span class="item-type-badge ${typeClass}">${item.type}</span>
+                </div>
+                <div class="item-meta">
+                    <span><i class="fas fa-calendar"></i> ${date} ${time}</span>
+                    <span><i class="fas fa-layer-group"></i> Gen ${item.generations}${item.total_generations ? '/' + item.total_generations : ''}</span>
+                </div>
+                <div class="item-footer">
+                    <span class="badge ${statusClass}">${formatStatus(item.status)}</span>
+                    ${isSelected ? `<span class="idea-type"><i class="fas fa-tag me-1"></i>${item.idea_type || 'Unknown'}</span>` : ''}
+                </div>
+                ${isSelected ? `<div class="item-actions">${actionsHtml}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+}
+
+function formatStatus(status) {
+    const statusMap = {
+        'complete': 'Complete',
+        'paused': 'Paused',
+        'in_progress': 'In Progress',
+        'force_stopped': 'Force Stopped',
+        'unknown': 'Unknown'
+    };
+    return statusMap[status] || status;
+}
+
+async function selectHistoryItem(itemId) {
+    const item = historyItems.find(i => i.id === itemId);
+    if (!item) return;
+
+    // Toggle selection - clicking same item deselects
+    if (selectedHistoryItem?.id === itemId) {
+        selectedHistoryItem = null;
+    } else {
+        selectedHistoryItem = item;
+    }
+
+    // Re-render list with new selection state (expands/collapses in place)
+    renderHistoryList(historyItems, false);
+
+    // Load the evolution data into the main content area if selected
+    if (selectedHistoryItem) {
+        await loadHistoryItemData(item);
+        document.getElementById('selectedCheckpointId').value = item.id;
+    }
+}
+
+function updateSelectedEvolutionCard(item) {
+    const card = document.getElementById('selectedEvolutionCard');
+    if (!card || !item) {
+        if (card) card.style.display = 'none';
+        return;
+    }
+
+    card.style.display = 'block';
+
+    // Update status badge
+    const statusBadge = document.getElementById('selectedEvolutionStatus');
+    statusBadge.className = `badge badge-status-${item.status}`;
+    statusBadge.textContent = formatStatus(item.status);
+
+    // Update date
+    const dateEl = document.getElementById('selectedEvolutionDate');
+    if (item.timestamp) {
+        dateEl.textContent = new Date(item.timestamp).toLocaleDateString();
+    } else {
+        dateEl.textContent = '';
+    }
+
+    // Update name
+    const nameEl = document.getElementById('selectedEvolutionName');
+    nameEl.textContent = item.display_name || item.id;
+    nameEl.title = item.display_name || item.id;
+
+    // Update meta
+    const metaEl = document.getElementById('selectedEvolutionMeta');
+    metaEl.textContent = `Gen ${item.generations}${item.total_generations ? '/' + item.total_generations : ''} • ${item.idea_type || 'Unknown type'}`;
+
+    // Update actions
+    const actionsEl = document.getElementById('selectedEvolutionActions');
+    let actionsHtml = '';
+
+    // Store checkpoint ID for actions
+    if (item.checkpoint_id) {
+        document.getElementById('selectedCheckpointId').value = item.checkpoint_id;
+    } else if (item.type === 'saved') {
+        // For saved evolutions, we might need to create a checkpoint first
+        document.getElementById('selectedCheckpointId').value = '';
+    }
+
+    if (item.can_resume) {
+        actionsHtml += `<button class="btn btn-sm btn-success flex-grow-1" onclick="handleHistoryResume('${item.checkpoint_id || item.id}')">
+            <i class="fas fa-play me-1"></i>Resume
+        </button>`;
+    }
+    if (item.can_continue) {
+        // Inline continue with generation input
+        actionsHtml += `
+            <div class="continue-action-group d-flex gap-1 flex-grow-1" id="continueActionGroup">
+                <button class="btn btn-sm btn-info flex-grow-1" id="continueBtn" onclick="showContinueInput('${item.checkpoint_id || item.id}', '${item.type}')">
+                    <i class="fas fa-forward me-1"></i>Continue
+                </button>
+            </div>`;
+    }
+    if (item.can_rate) {
+        actionsHtml += `<button class="btn btn-sm btn-outline-primary" onclick="navigateToRatePage('${item.type === 'saved' ? item.id : ''}')">
+            <i class="fas fa-star me-1"></i>Rate
+        </button>`;
+    }
+
+    // Add rename button for evolutions that support it
+    if (item.can_rename) {
+        actionsHtml += `<button class="btn btn-sm btn-outline-secondary" onclick="showRenameInput('${item.id}')" title="Rename">
+            <i class="fas fa-edit"></i>
+        </button>`;
+    }
+
+    // Add delete button
+    if (item.can_delete) {
+        actionsHtml += `<button class="btn btn-sm btn-outline-danger" onclick="confirmDeleteEvolution('${item.id}')" title="Delete">
+            <i class="fas fa-trash"></i>
+        </button>`;
+    }
+
+    actionsEl.innerHTML = actionsHtml || '<span class="text-muted small">No actions available</span>';
+
+    // Store the item ID in hidden field
+    document.getElementById('evolutionSelect').value = item.type === 'saved' ? item.id : '';
+}
+
+// Show inline continue input (for history list items)
+function showContinueInputInline(itemId, itemType) {
+    const group = document.getElementById(`continueActionGroup-${itemId}`);
+    if (!group) return;
+
+    group.innerHTML = `
+        <input type="number" class="form-control form-control-sm" id="continueGensInput-${itemId}"
+               value="3" min="1" max="20" style="width: 55px; text-align: center;"
+               onclick="event.stopPropagation()">
+        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); executeContinueInline('${itemId}', '${itemType}')">
+            <i class="fas fa-play"></i>
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); cancelContinueInputInline('${itemId}', '${itemType}')">
+            <i class="fas fa-times"></i>
+        </button>
+    `;
+
+    setTimeout(() => {
+        const input = document.getElementById(`continueGensInput-${itemId}`);
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }, 50);
+}
+
+function cancelContinueInputInline(itemId, itemType) {
+    const group = document.getElementById(`continueActionGroup-${itemId}`);
+    if (!group) return;
+
+    group.innerHTML = `
+        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); showContinueInputInline('${itemId}', '${itemType}')">
+            <i class="fas fa-forward me-1"></i>Continue
+        </button>
+    `;
+}
+
+async function executeContinueInline(itemId, itemType) {
+    const input = document.getElementById(`continueGensInput-${itemId}`);
+    const additionalGens = parseInt(input?.value || '3');
+
+    if (isNaN(additionalGens) || additionalGens < 1) {
+        alert("Please enter a valid number of generations (1 or more)");
+        return;
+    }
+
+    await handleHistoryContinue(itemId, itemType, additionalGens);
+}
+
+// Show inline rename input (for history list items)
+function showRenameInputInline(itemId) {
+    const titleEl = document.getElementById(`itemTitle-${itemId}`);
+    if (!titleEl) return;
+
+    const currentName = titleEl.textContent;
+    const parent = titleEl.parentNode;
+
+    titleEl.outerHTML = `
+        <div class="rename-inline-group d-flex gap-1 flex-grow-1" id="renameGroup-${itemId}">
+            <input type="text" class="form-control form-control-sm" id="renameInput-${itemId}"
+                   value="${selectedHistoryItem?.display_name || currentName}"
+                   onclick="event.stopPropagation()">
+            <button class="btn btn-sm btn-success" onclick="event.stopPropagation(); executeRenameInline('${itemId}')">
+                <i class="fas fa-check"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); cancelRenameInline('${itemId}', '${currentName}')">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `;
+
+    setTimeout(() => {
+        const input = document.getElementById(`renameInput-${itemId}`);
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }, 50);
+}
+
+function cancelRenameInline(itemId, originalName) {
+    const group = document.getElementById(`renameGroup-${itemId}`);
+    if (group) {
+        group.outerHTML = `<span class="item-title" id="itemTitle-${itemId}" title="${originalName}">${originalName}</span>`;
+    }
+}
+
+async function executeRenameInline(itemId) {
+    const input = document.getElementById(`renameInput-${itemId}`);
+    const newName = input?.value?.trim();
+
+    if (!newName) {
+        alert('Please enter a name');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/evolution/${itemId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName })
+        });
+
+        if (response.ok) {
+            // Update the item in historyItems
+            const item = historyItems.find(i => i.id === itemId);
+            if (item) {
+                item.display_name = newName;
+            }
+            if (selectedHistoryItem?.id === itemId) {
+                selectedHistoryItem.display_name = newName;
+            }
+            // Re-render
+            renderHistoryList(historyItems, false);
+        } else {
+            const data = await response.json();
+            alert(data.message || 'Failed to rename');
+        }
+    } catch (error) {
+        console.error('Error renaming:', error);
+        alert('Error renaming evolution');
+    }
+}
+
+// Legacy functions for main view selected card (keeping for compatibility)
+function showContinueInput(itemId, itemType) {
+    showContinueInputInline(itemId, itemType);
+}
+
+function cancelContinueInput(itemId, itemType) {
+    cancelContinueInputInline(itemId, itemType);
+}
+
+async function executeContinue(itemId, itemType) {
+    await executeContinueInline(itemId, itemType);
+}
+
+// Show rename input
+function showRenameInput(evolutionId) {
+    const nameEl = document.getElementById('selectedEvolutionName');
+    if (!nameEl) return;
+
+    const currentName = nameEl.textContent;
+    nameEl.outerHTML = `
+        <div class="rename-input-group d-flex gap-1" id="renameInputGroup">
+            <input type="text" class="form-control form-control-sm" id="renameInput" value="${currentName}" style="min-width: 120px;">
+            <button class="btn btn-sm btn-success" onclick="executeRename('${evolutionId}')">
+                <i class="fas fa-check"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="cancelRename('${currentName}')">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `;
+
+    // Focus and select input
+    setTimeout(() => {
+        const input = document.getElementById('renameInput');
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }, 50);
+}
+
+// Cancel rename
+function cancelRename(originalName) {
+    const group = document.getElementById('renameInputGroup');
+    if (group) {
+        group.outerHTML = `<div class="fw-medium text-truncate" id="selectedEvolutionName" style="max-width: 180px;">${originalName}</div>`;
+    }
+}
+
+// Execute rename
+async function executeRename(evolutionId) {
+    const input = document.getElementById('renameInput');
+    const newName = input?.value?.trim();
+
+    if (!newName) {
+        alert('Please enter a name');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/evolution/${evolutionId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName })
+        });
+
+        if (response.ok) {
+            // Update the display
+            cancelRename(newName);
+            // Refresh history list
+            await loadHistory();
+            // Update the selected item
+            if (selectedHistoryItem) {
+                selectedHistoryItem.display_name = newName;
+            }
+        } else {
+            const data = await response.json();
+            alert(data.message || 'Failed to rename');
+        }
+    } catch (error) {
+        console.error('Error renaming:', error);
+        alert('Error renaming evolution');
+    }
+}
+
+// Confirm and delete evolution
+async function confirmDeleteEvolution(evolutionId) {
+    if (!confirm('Are you sure you want to delete this evolution? This cannot be undone.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/evolution/${evolutionId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            // Clear selection and refresh
+            clearSelectedEvolution();
+            await loadHistory();
+        } else {
+            const data = await response.json();
+            alert(data.message || 'Failed to delete');
+        }
+    } catch (error) {
+        console.error('Error deleting:', error);
+        alert('Error deleting evolution');
+    }
+}
+
+async function loadHistoryItemData(item) {
+    try {
+        if (item.type === 'saved') {
+            // Load from saved evolution file
+            const response = await fetch(`/api/evolution/${item.id}`);
         if (response.ok) {
             const data = await response.json();
             if (data.data && data.data.history) {
-                // Clear existing content
                 document.getElementById('generations-container').innerHTML = '';
-
-                // Render the generations
                 renderGenerations(data.data.history);
 
-                // Restore diversity plot if we have diversity data
                 if (data.data.diversity_history && data.data.diversity_history.length > 0) {
-                    console.log("Restoring diversity plot from saved evolution:", data.data.diversity_history);
                     updateDiversityChart(data.data.diversity_history);
-                    // Ensure proper sizing after restoration
                     setTimeout(ensureDiversityChartSizing, 200);
                 } else {
-                    console.log("No diversity data found in saved evolution, resetting plot");
                     resetDiversityPlot();
                 }
 
-                // Update contexts if available
                 if (data.data.contexts) {
                     contexts = data.data.contexts;
                     specificPrompts = data.data.specific_prompts || [];
@@ -1436,36 +1721,368 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
                     document.querySelector('.context-navigation').style.display = 'block';
                 }
 
-                // Display token counts if available
                 if (data.data.token_counts) {
-                    console.log("Displaying token counts from saved evolution:", data.data.token_counts);
                     displayTokenCounts(data.data.token_counts);
                 }
 
-                // Enable download button
                 document.getElementById('downloadButton').disabled = false;
             }
+            }
+        } else if (item.type === 'checkpoint') {
+            // Load from checkpoint
+            const response = await fetch(`/api/checkpoints/${item.checkpoint_id}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.history) {
+                    document.getElementById('generations-container').innerHTML = '';
+                    renderGenerations(data.history);
+
+                    if (data.diversity_history && data.diversity_history.length > 0) {
+                        updateDiversityChart(data.diversity_history);
+                        setTimeout(ensureDiversityChartSizing, 200);
         } else {
-            console.error('Failed to load evolution:', await response.text());
+                        resetDiversityPlot();
+                    }
+
+                    if (data.contexts) {
+                        contexts = data.contexts;
+                        specificPrompts = data.specific_prompts || [];
+                        breedingPrompts = data.breeding_prompts || [];
+                        currentContextIndex = 0;
+                        updateContextDisplay();
+                        document.querySelector('.context-navigation').style.display = 'block';
+                    }
+
+                    document.getElementById('downloadButton').disabled = false;
+                }
+            }
         }
+    } catch (error) {
+        console.error('Error loading history item data:', error);
+    }
+}
+
+async function handleHistoryResume(checkpointId) {
+    if (!checkpointId) {
+        alert("No checkpoint available to resume from");
+        return;
+    }
+
+    console.log("Resuming evolution from checkpoint:", checkpointId);
+
+    // Update the action button
+    const actionsEl = document.getElementById('selectedEvolutionActions');
+    if (actionsEl) {
+        actionsEl.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Resuming...';
+    }
+
+    try {
+        const response = await fetch('/api/resume-evolution', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                checkpoint_id: checkpointId,
+                additional_generations: 0
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+
+            // Store checkpoint ID
+            localStorage.setItem('lastCheckpointId', data.checkpoint_id || checkpointId);
+
+            // Restore state
+            if (data.history) {
+                renderGenerations(data.history);
+            }
+            if (data.contexts) {
+                contexts = data.contexts;
+                specificPrompts = data.specific_prompts || [];
+                breedingPrompts = data.breeding_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
+            }
+
+            // Switch to evolution mode (hides template entry, shows evolution view)
+            if (typeof showEvolutionMode === 'function') {
+                showEvolutionMode();
     } else {
-        // Load current evolution from localStorage when "Current Evolution" is selected
-        console.log('Loading current evolution from localStorage...');
-        const restored = await restoreCurrentEvolution();
+                // Fallback: manually hide template entry
+                const templateEntry = document.getElementById('templateEntry');
+                if (templateEntry) templateEntry.style.display = 'none';
+            }
 
-        if (!restored) {
-            // Clear display if no current evolution available
-            document.getElementById('generations-container').innerHTML = '';
-            document.getElementById('contextDisplay').innerHTML =
-                '<p class="text-muted">Context will appear here when evolution starts...</p>';
-            document.querySelector('.context-navigation').style.display = 'none';
-            document.getElementById('downloadButton').disabled = true;
+            // Store evolution name from response
+            currentEvolutionName = data.evolution_name || currentEvolutionName;
+            currentEvolutionId = data.evolution_id || currentEvolutionId;
 
-            // Reset diversity plot when no current evolution is available
+            // Create progress bar if needed
+            if (!document.getElementById('progress-container')) {
+                createProgressBar(currentEvolutionName);
+            } else {
+                // Update the name in existing progress bar
+                const nameEl = document.getElementById('evolution-name');
+                if (nameEl && currentEvolutionName) nameEl.textContent = currentEvolutionName;
+            }
+
+            // Update UI state to running
+            isEvolutionRunning = true;
+            evolutionStartTime = Date.now();
+
+            // Set buttons to running state
+            const startButton = document.getElementById('startButton');
+            const stopButton = document.getElementById('stopButton');
+            if (startButton) {
+                startButton.disabled = true;
+                startButton.textContent = 'Running...';
+            }
+            if (stopButton) {
+                stopButton.disabled = false;
+                stopButton.style.display = 'block';
+            }
+
+            updateElapsedTimeDisplay();
+
+            // Start polling
+            if (pollingInterval) clearInterval(pollingInterval);
+            pollingInterval = setInterval(pollProgress, 1000);
+
+            // Clear selection and go back to main view
+            clearSelectedEvolution();
+            showSidebarView('main');
+
+            addActivityLogItem('🔄 Resuming evolution...', 'info');
+        } else {
+            console.error("Failed to resume:", await response.text());
+            alert("Failed to resume evolution. Check console for details.");
+            await refreshHistoryList();
+        }
+    } catch (error) {
+        console.error("Error resuming:", error);
+        alert("Error resuming evolution: " + error.message);
+        await refreshHistoryList();
+    }
+}
+
+async function handleHistoryContinue(itemId, itemType, additionalGens = 3) {
+    if (!itemId) {
+        alert("No evolution available to continue");
+        return;
+    }
+
+    console.log("Continuing evolution for", additionalGens, "more generations");
+
+    // Update the action button to show starting state
+    const group = document.getElementById('continueActionGroup');
+    if (group) {
+        group.innerHTML = '<span class="text-muted small"><i class="fas fa-spinner fa-spin me-1"></i>Starting...</span>';
+    }
+
+    try {
+        let response;
+
+        if (itemType === 'checkpoint') {
+            // Continue from checkpoint
+            response = await fetch('/api/continue-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    checkpoint_id: itemId,
+                    additional_generations: additionalGens
+                })
+            });
+        } else {
+            // For saved evolutions, use the special load-and-continue endpoint
+            response = await fetch('/api/continue-saved-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    evolution_id: itemId,
+                    additional_generations: additionalGens
+                })
+            });
+        }
+
+        if (response.ok) {
+            const data = await response.json();
+
+            // Store checkpoint ID
+            localStorage.setItem('lastCheckpointId', data.checkpoint_id || itemId);
+
+            // Restore state
+            if (data.history) {
+                renderGenerations(data.history);
+            }
+            if (data.contexts) {
+                contexts = data.contexts;
+                specificPrompts = data.specific_prompts || [];
+                breedingPrompts = data.breeding_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
+            }
+
+            // Switch to evolution mode (hides template entry, shows evolution view)
+            if (typeof showEvolutionMode === 'function') {
+                showEvolutionMode();
+            } else {
+                // Fallback: manually hide template entry
+                const templateEntry = document.getElementById('templateEntry');
+                if (templateEntry) templateEntry.style.display = 'none';
+            }
+
+            // Store evolution name from response
+            currentEvolutionName = data.evolution_name || currentEvolutionName;
+            currentEvolutionId = data.evolution_id || currentEvolutionId;
+
+            // Create progress bar if needed
+            if (!document.getElementById('progress-container')) {
+                createProgressBar(currentEvolutionName);
+            } else {
+                // Update the name in existing progress bar
+                const nameEl = document.getElementById('evolution-name');
+                if (nameEl && currentEvolutionName) nameEl.textContent = currentEvolutionName;
+            }
+
+            // Update UI state to running
+            isEvolutionRunning = true;
+            evolutionStartTime = Date.now();
+
+            // Set buttons to running state
+            const startButton = document.getElementById('startButton');
+            const stopButton = document.getElementById('stopButton');
+            if (startButton) {
+                startButton.disabled = true;
+                startButton.textContent = 'Running...';
+            }
+            if (stopButton) {
+                stopButton.disabled = false;
+                stopButton.style.display = 'block';
+            }
+
+            updateElapsedTimeDisplay();
+
+            // Start polling
+            if (pollingInterval) clearInterval(pollingInterval);
+            pollingInterval = setInterval(pollProgress, 1000);
+
+            // Clear selection and go back to main view
+            clearSelectedEvolution();
+            showSidebarView('main');
+
+            addActivityLogItem(`📈 Continuing for ${additionalGens} more generations...`, 'info');
+        } else {
+            console.error("Failed to continue:", await response.text());
+            alert("Failed to continue evolution. Check console for details.");
+            // Restore the continue button
+            cancelContinueInput(itemId, itemType);
+        }
+    } catch (error) {
+        console.error("Error continuing:", error);
+        alert("Error continuing evolution: " + error.message);
+        // Restore the continue button
+        cancelContinueInput(itemId, itemType);
+    }
+}
+
+function clearSelectedEvolution() {
+    selectedHistoryItem = null;
+
+    // Hide selected evolution card in main view
+    const mainCard = document.getElementById('selectedEvolutionCard');
+    if (mainCard) mainCard.style.display = 'none';
+
+    document.getElementById('evolutionSelect').value = '';
+    document.getElementById('selectedCheckpointId').value = '';
+
+    // Clear selection highlighting in history list
+    document.querySelectorAll('.history-item').forEach(el => {
+        el.classList.remove('selected');
+    });
+
+    // Hide history detail panel
+    const detailPanel = document.getElementById('historyDetailPanel');
+    if (detailPanel) detailPanel.style.display = 'none';
+
+    // Show the name input section again
+    const nameSection = document.getElementById('evolutionNameSection');
+    if (nameSection) nameSection.style.display = 'block';
+
+    // Clear the name input
+    const nameInput = document.getElementById('evolutionNameInput');
+    if (nameInput) nameInput.value = '';
+}
+
+// Clear selection in history view
+function clearHistorySelection() {
+    selectedHistoryItem = null;
+
+    // Re-render list without selection
+    renderHistoryList(historyItems, false);
+
+    // Clear main content
+    document.getElementById('generations-container').innerHTML = '';
             resetDiversityPlot();
         }
+
+
+// Delete evolution with confirmation
+async function confirmDeleteEvolution(evolutionId) {
+    const item = historyItems.find(i => i.id === evolutionId);
+    const name = item?.display_name || evolutionId;
+
+    if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) {
+        return;
     }
-});
+
+    try {
+        const response = await fetch(`/api/evolution/${evolutionId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            clearHistorySelection();
+            await loadHistory();
+        } else {
+            const data = await response.json();
+            alert(data.message || 'Failed to delete');
+        }
+    } catch (error) {
+        console.error('Error deleting:', error);
+        alert('Error deleting evolution');
+    }
+}
+
+function navigateToRatePage(evolutionId) {
+    // Switch to rate tab and load the evolution
+    const rateTab = document.querySelector('button[onclick*="rate"]') || document.getElementById('navRateBtn');
+    if (rateTab) {
+        rateTab.click();
+    }
+    // If evolution ID provided, select it in the rate page
+    if (evolutionId) {
+        // The rate page will handle loading
+    }
+}
+
+// Legacy evolutionSelect handler - now handled by history panel
+// Keeping for backward compatibility with any code that might set this value
+const evolutionSelectEl = document.getElementById('evolutionSelect');
+if (evolutionSelectEl) {
+    evolutionSelectEl.addEventListener('change', async (e) => {
+        const evolutionId = e.target.value;
+        if (evolutionId) {
+            // Find the item in history and select it
+            const item = historyItems.find(i => i.id === evolutionId);
+            if (item) {
+                await selectHistoryItem(item.id);
+            }
+        } else {
+            clearSelectedEvolution();
+            await restoreCurrentEvolution();
+        }
+    });
+}
 
 // Modify existing loadCurrentEvolution function
 async function loadCurrentEvolution() {
@@ -1481,6 +2098,16 @@ async function pollProgress() {
 
         const data = await response.json();
         console.log("Progress update:", data); // Add logging to see what's coming from the server
+
+        // Update evolution name if provided
+        if (data.evolution_name) {
+            currentEvolutionName = data.evolution_name;
+            const nameEl = document.getElementById('evolution-name');
+            if (nameEl) nameEl.textContent = currentEvolutionName;
+        }
+        if (data.evolution_id) {
+            currentEvolutionId = data.evolution_id;
+        }
 
         // Check if this is a new evolution (history is empty but is_running is true)
         if (data.is_running && (!data.history || data.history.length === 0)) {
@@ -1914,47 +2541,38 @@ function resetButtonStates() {
     if (forceStopButton) {
         forceStopButton.style.display = 'none';
     }
+
+    // Show name input section again
+    const nameSection = document.getElementById('evolutionNameSection');
+    if (nameSection) nameSection.style.display = 'block';
+
+    // Clear the name input for next evolution
+    const nameInput = document.getElementById('evolutionNameInput');
+    if (nameInput) nameInput.value = '';
 }
 
 // Function to show resume button when evolution is paused/stopped
+// Now just stores checkpoint ID - the history panel handles the UI
 function showResumeButton(checkpointId) {
-    const resumeButton = document.getElementById('resumeButton');
-    const startButton = document.getElementById('startButton');
-
     if (checkpointId) {
         localStorage.setItem('lastCheckpointId', checkpointId);
     }
-
-    if (resumeButton) {
-        resumeButton.style.display = 'block';
-    }
-    // Note: Don't show Continue for stopped evolutions - only for completed ones
+    // History panel handles resume/continue UI now
 }
 
 // Function to show continue button (for completed evolutions only)
+// Now just stores checkpoint ID - the history panel handles the UI
 function showContinueButton(checkpointId) {
-    const continueButton = document.getElementById('continueButton');
-
     if (checkpointId) {
         localStorage.setItem('lastCheckpointId', checkpointId);
     }
-
-    if (continueButton) {
-        continueButton.style.display = 'block';
-    }
+    // History panel handles resume/continue UI now
 }
 
 // Function to hide resume/continue buttons
+// Now a no-op - history panel handles the UI
 function hideResumeButtons() {
-    const resumeButton = document.getElementById('resumeButton');
-    const continueButton = document.getElementById('continueButton');
-
-    if (resumeButton) {
-        resumeButton.style.display = 'none';
-    }
-    if (continueButton) {
-        continueButton.style.display = 'none';
-    }
+    // History panel handles resume/continue UI now
 }
 
 // Function to show force stop button after a delay (when regular stop is taking too long)
@@ -1966,6 +2584,7 @@ function showForceStopButton() {
 }
 
 // Function to check for resumable checkpoints on page load
+// Now just logs info - the history panel handles UI for resume/continue
 async function checkForResumableCheckpoints() {
     try {
         const response = await fetch('/api/checkpoints');
@@ -1979,24 +2598,15 @@ async function checkForResumableCheckpoints() {
                 if (resumable) {
                     console.log("Found resumable checkpoint:", resumable);
                     localStorage.setItem('lastCheckpointId', resumable.id);
-                    showResumeButton(resumable.id);
-                    // Only add activity log if the UI is ready
+                    // Log to activity if UI is ready
                     if (typeof addActivityLogItem === 'function') {
                         try {
-                            addActivityLogItem(`💾 Resumable checkpoint found (Gen ${resumable.generation}/${resumable.total_generations})`, 'info');
+                            addActivityLogItem(`💾 Resumable checkpoint found - check History to resume`, 'info');
                         } catch (e) {
                             console.log("Resumable checkpoint:", resumable.id);
                         }
                     }
                     return resumable;
-                }
-
-                // Check for completed checkpoints that can be continued
-                const completed = data.checkpoints.find(cp => cp.status === 'complete');
-                if (completed) {
-                    console.log("Found completed checkpoint:", completed);
-                    localStorage.setItem('lastCheckpointId', completed.id);
-                    showContinueButton(completed.id);
                 }
             }
         }
@@ -2062,7 +2672,7 @@ function resetUIState() {
         existingProgressContainer.remove();
     }
     // Create fresh progress bar with activity log (this starts the timer)
-    createProgressBar();
+    createProgressBar(currentEvolutionName);
 
     // Add initial activity for context generation
     addActivityLogItem('🎯 Generating seed contexts...', 'info');
@@ -2085,12 +2695,18 @@ function resetUIState() {
 }
 
 // Function to create the progress bar with enhanced visual feedback
-function createProgressBar() {
+function createProgressBar(evolutionName = null) {
+    currentEvolutionName = evolutionName;
+
     const progressContainer = document.createElement('div');
     progressContainer.id = 'progress-container';
     progressContainer.className = 'mb-4 evolution-progress-card';
     progressContainer.innerHTML = `
         <div class="evolution-progress-header">
+            <div class="evolution-name-section">
+                <h4 class="evolution-name" id="evolution-name">${evolutionName || 'Evolution'}</h4>
+            </div>
+            <div class="evolution-status-section">
             <div class="evolution-status-indicator">
                 <div class="evolution-spinner" id="evolution-spinner"></div>
                 <span id="evolution-status-text">Initializing...</span>
@@ -2099,6 +2715,7 @@ function createProgressBar() {
                 <span class="timing-item" id="elapsed-time">
                     <i class="fas fa-clock"></i> <span id="elapsed-time-value">0:00</span>
                 </span>
+                </div>
             </div>
         </div>
         <div class="progress-container-inner">
@@ -2346,22 +2963,12 @@ function markEvolutionComplete(isStopped = false, isResumable = false, checkpoin
         addActivityLogItem(`✅ Completed in ${elapsed}!`, 'success');
     }
 
-    // Show resume/continue buttons if applicable
-    if (isResumable && checkpointId) {
-        // Paused/stopped evolution - show Resume button only
-        showResumeButton(checkpointId);
-        // Hide continue button for paused evolutions
-        const continueButton = document.getElementById('continueButton');
-        if (continueButton) {
-            continueButton.style.display = 'none';
-        }
-    } else if (!isStopped && checkpointId) {
-        // Evolution completed normally - show Continue button for extending
-        showContinueButton(checkpointId);
-        // Hide resume button for completed evolutions
-        const resumeButton = document.getElementById('resumeButton');
-        if (resumeButton) {
-            resumeButton.style.display = 'none';
+    // Store checkpoint info for history panel
+    if (checkpointId) {
+        localStorage.setItem('lastCheckpointId', checkpointId);
+        // Refresh history to show new checkpoint
+        if (typeof loadHistory === 'function') {
+            loadHistory();
         }
     }
 }
@@ -4319,14 +4926,30 @@ function showSidebarView(viewName) {
     // Logic for transitions
     const mainView = document.getElementById('view-main');
     const targetView = document.getElementById(`view-${viewName}`);
+    const sidebar = document.querySelector('.controls-panel');
 
     if (viewName === 'main') {
         mainView.classList.add('active');
+        // Collapse sidebar when returning to main
+        if (sidebar) sidebar.classList.remove('expanded');
+        // Show name input section
+        const nameSection = document.getElementById('evolutionNameSection');
+        if (nameSection) nameSection.style.display = 'block';
     } else {
         // Move main view to left (parallax)
         mainView.classList.add('slide-left');
         // Bring target view in
         if (targetView) targetView.classList.add('active');
+
+        // Expand sidebar for history view
+        if (viewName === 'history') {
+            if (sidebar) sidebar.classList.add('expanded');
+            // Load/refresh history when entering
+            loadHistory();
+        } else {
+            // Collapse for other views
+            if (sidebar) sidebar.classList.remove('expanded');
+        }
     }
 
     // Special handling for settings
@@ -4337,6 +4960,18 @@ function showSidebarView(viewName) {
 
 // Expose to window for HTML onclick attributes
 window.showSidebarView = showSidebarView;
+window.selectHistoryItem = selectHistoryItem;
+window.clearHistorySelection = clearHistorySelection;
+window.confirmDeleteEvolution = confirmDeleteEvolution;
+window.handleHistoryResume = handleHistoryResume;
+window.handleHistoryContinue = handleHistoryContinue;
+window.showContinueInputInline = showContinueInputInline;
+window.executeContinueInline = executeContinueInline;
+window.cancelContinueInputInline = cancelContinueInputInline;
+window.showRenameInputInline = showRenameInputInline;
+window.executeRenameInline = executeRenameInline;
+window.cancelRenameInline = cancelRenameInline;
+window.navigateToRatePage = navigateToRatePage;
 
 /**
  * Check if API key is set and update UI

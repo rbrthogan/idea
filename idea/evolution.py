@@ -13,7 +13,11 @@ from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates, get_prompts
 from idea.diversity import DiversityCalculator
 
-# Checkpoint directory
+# Evolution storage directories
+EVOLUTIONS_DIR = Path("data/evolutions")
+EVOLUTIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Legacy checkpoint directory (for backwards compatibility)
 CHECKPOINT_DIR = Path("data/checkpoints")
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -108,7 +112,13 @@ class EvolutionEngine:
         self.top_p = top_p
         self.mutation_rate = mutation_rate
 
-        # Checkpoint tracking
+        # Evolution identity and tracking
+        self.evolution_id = None  # Unique ID for this evolution (UUID)
+        self.evolution_name = None  # Human-readable name
+        self.created_at = None  # ISO timestamp when evolution started
+        self.updated_at = None  # ISO timestamp of last update
+
+        # Legacy checkpoint tracking (for backwards compatibility)
         self.checkpoint_id = None  # Set when evolution starts
         self.current_generation = 0  # Tracks which generation we're on
         self.checkpoint_callback = None  # Callback for saving checkpoints
@@ -267,36 +277,103 @@ class EvolutionEngine:
             'token_counts': self.get_total_token_count(),
         }
 
+    def set_name(self, name: str):
+        """Set the human-readable name for this evolution."""
+        self.evolution_name = name
+        self.updated_at = datetime.now().isoformat()
+
+    def generate_default_name(self) -> str:
+        """Generate a default name based on template and date."""
+        # Get template display name
+        try:
+            templates = list_available_templates()
+            template_info = templates.get(self.idea_type, {})
+            template_name = template_info.get('name', self.idea_type)
+        except Exception:
+            template_name = self.idea_type or 'Evolution'
+
+        # Format date nicely
+        date_str = datetime.now().strftime('%b %d, %Y')
+        return f"{template_name} - {date_str}"
+
+    def initialize_evolution(self, name: str = None):
+        """Initialize a new evolution with ID, name, and timestamps."""
+        self.evolution_id = str(uuid.uuid4())
+        self.evolution_name = name or self.generate_default_name()
+        self.created_at = datetime.now().isoformat()
+        self.updated_at = self.created_at
+        # Also set legacy checkpoint_id for compatibility
+        self.checkpoint_id = self.evolution_id[:18].replace('-', '')
+
     def save_checkpoint(self, status: str = 'in_progress') -> Optional[str]:
         """
-        Save the current state to a checkpoint file.
-        Returns the checkpoint file path on success, None on failure.
+        Save the current state to the unified evolutions directory.
+        Returns the file path on success, None on failure.
         """
         try:
-            if not self.checkpoint_id:
-                self.checkpoint_id = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+            # Initialize if this is a legacy evolution without an ID
+            if not self.evolution_id:
+                self.initialize_evolution()
+
+            self.updated_at = datetime.now().isoformat()
 
             state = self.get_checkpoint_state()
+            state['evolution_id'] = self.evolution_id
+            state['name'] = self.evolution_name
             state['status'] = status
+            state['created_at'] = self.created_at
+            state['updated_at'] = self.updated_at
 
-            checkpoint_path = CHECKPOINT_DIR / f"checkpoint_{self.checkpoint_id}.json"
+            # Save to unified evolutions directory
+            evolution_path = EVOLUTIONS_DIR / f"{self.evolution_id}.json"
 
-            with open(checkpoint_path, 'w') as f:
+            with open(evolution_path, 'w') as f:
                 json.dump(state, f, indent=2, default=str)
 
-            print(f"💾 Checkpoint saved: {checkpoint_path}")
-            return str(checkpoint_path)
+            print(f"💾 Evolution saved: {self.evolution_name} ({evolution_path})")
+            return str(evolution_path)
 
         except Exception as e:
-            print(f"❌ Failed to save checkpoint: {e}")
+            print(f"❌ Failed to save evolution: {e}")
             import traceback
             traceback.print_exc()
             return None
 
     @classmethod
+    def list_evolutions(cls) -> List[Dict[str, Any]]:
+        """
+        List all evolutions from the unified storage.
+        Returns a list of evolution metadata.
+        """
+        evolutions = []
+        for evolution_file in EVOLUTIONS_DIR.glob("*.json"):
+            try:
+                with open(evolution_file) as f:
+                    data = json.load(f)
+                    config = data.get('config', {})
+                    history = data.get('history', [])
+                    evolutions.append({
+                        'id': data.get('evolution_id', evolution_file.stem),
+                        'name': data.get('name', evolution_file.stem),
+                        'file': str(evolution_file),
+                        'status': data.get('status', 'unknown'),
+                        'created_at': data.get('created_at'),
+                        'updated_at': data.get('updated_at') or data.get('checkpoint_time'),
+                        'generation': data.get('current_generation', len(history)),
+                        'total_generations': config.get('generations', len(history)),
+                        'idea_type': config.get('idea_type', 'unknown'),
+                        'model_type': config.get('model_type', 'unknown'),
+                        'pop_size': config.get('pop_size', len(history[0]) if history else 0),
+                        'total_ideas': sum(len(gen) for gen in history),
+                    })
+            except Exception as e:
+                print(f"Warning: Could not read evolution {evolution_file}: {e}")
+        return sorted(evolutions, key=lambda x: x.get('updated_at') or x.get('created_at') or '', reverse=True)
+
+    @classmethod
     def list_checkpoints(cls) -> List[Dict[str, Any]]:
         """
-        List all available checkpoints.
+        List all available checkpoints (legacy format).
         Returns a list of checkpoint metadata.
         """
         checkpoints = []
@@ -320,88 +397,161 @@ class EvolutionEngine:
         return sorted(checkpoints, key=lambda x: x.get('time', ''), reverse=True)
 
     @classmethod
-    def load_checkpoint(cls, checkpoint_id: str) -> Optional['EvolutionEngine']:
+    def load_evolution(cls, evolution_id: str) -> Optional['EvolutionEngine']:
         """
-        Load an evolution engine from a checkpoint.
+        Load an evolution engine from the unified evolutions directory.
         Returns a configured EvolutionEngine instance, or None on failure.
         """
+        evolution_path = EVOLUTIONS_DIR / f"{evolution_id}.json"
+        if not evolution_path.exists():
+            print(f"❌ Evolution not found: {evolution_path}")
+            return None
+
+        return cls._load_from_file(evolution_path)
+
+    @classmethod
+    def rename_evolution(cls, evolution_id: str, new_name: str) -> bool:
+        """Rename an evolution."""
+        evolution_path = EVOLUTIONS_DIR / f"{evolution_id}.json"
+        if not evolution_path.exists():
+            return False
+
+        try:
+            with open(evolution_path) as f:
+                data = json.load(f)
+
+            data['name'] = new_name
+            data['updated_at'] = datetime.now().isoformat()
+
+            with open(evolution_path, 'w') as f:
+                json.dump(data, f, indent=2, default=str)
+
+            print(f"✅ Evolution renamed to: {new_name}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to rename evolution: {e}")
+            return False
+
+    @classmethod
+    def delete_evolution(cls, evolution_id: str) -> bool:
+        """Delete an evolution from unified storage."""
+        evolution_path = EVOLUTIONS_DIR / f"{evolution_id}.json"
+        try:
+            if evolution_path.exists():
+                evolution_path.unlink()
+                print(f"🗑️ Evolution deleted: {evolution_id}")
+                return True
+            return False
+        except Exception as e:
+            print(f"❌ Failed to delete evolution: {e}")
+            return False
+
+    @classmethod
+    def _load_from_file(cls, file_path: Path) -> Optional['EvolutionEngine']:
+        """Load evolution engine from a file path."""
+        try:
+            with open(file_path) as f:
+                state = json.load(f)
+
+            return cls._restore_from_state(state)
+        except Exception as e:
+            print(f"❌ Failed to load from {file_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    @classmethod
+    def _restore_from_state(cls, state: Dict[str, Any]) -> 'EvolutionEngine':
+        """Restore an EvolutionEngine from a state dictionary."""
+        config = state.get('config', {})
+
+        # Create a new engine with the saved configuration
+        engine = cls(
+            idea_type=config.get('idea_type'),
+            pop_size=config.get('pop_size', 5),
+            generations=config.get('generations', 3),
+            model_type=config.get('model_type', 'gemini-2.0-flash'),
+            creative_temp=config.get('creative_temp', DEFAULT_CREATIVE_TEMP),
+            top_p=config.get('top_p', DEFAULT_TOP_P),
+            tournament_size=config.get('tournament_size', 5),
+            tournament_comparisons=config.get('tournament_comparisons', 35),
+            thinking_budget=config.get('thinking_budget'),
+            max_budget=config.get('max_budget'),
+            mutation_rate=config.get('mutation_rate', 0.2),
+        )
+
+        # Restore evolution identity
+        engine.evolution_id = state.get('evolution_id')
+        engine.evolution_name = state.get('name')
+        engine.created_at = state.get('created_at')
+        engine.updated_at = state.get('updated_at')
+
+        # Restore legacy checkpoint ID for compatibility
+        engine.checkpoint_id = state.get('checkpoint_id') or (engine.evolution_id[:18].replace('-', '') if engine.evolution_id else None)
+        engine.current_generation = state.get('current_generation', 0)
+        engine.contexts = state.get('contexts', [])
+        engine.specific_prompts = state.get('specific_prompts', [])
+        engine.breeding_prompts = state.get('breeding_prompts', [])
+        engine.diversity_history = state.get('diversity_history', [])
+        engine.avg_idea_cost = state.get('avg_idea_cost', 0.0)
+        engine.avg_tournament_cost = state.get('avg_tournament_cost', 0.0)
+
+        # Restore population and history
+        def deserialize_idea(idea_data):
+            """Convert serialized idea back to proper format"""
+            if not isinstance(idea_data, dict):
+                return idea_data
+
+            result = dict(idea_data)
+            # Ensure ID is a UUID
+            if 'id' in result and isinstance(result['id'], str):
+                try:
+                    result['id'] = uuid.UUID(result['id'])
+                except ValueError:
+                    result['id'] = uuid.uuid4()
+
+            # Convert parent_ids back to UUIDs
+            if 'parent_ids' in result:
+                result['parent_ids'] = [
+                    uuid.UUID(pid) if isinstance(pid, str) else pid
+                    for pid in result['parent_ids']
+                ]
+
+            # Restore Idea object if present
+            if 'idea' in result and isinstance(result['idea'], dict):
+                result['idea'] = Idea(
+                    title=result['idea'].get('title'),
+                    content=result['idea'].get('content', '')
+                )
+
+            return result
+
+        engine.population = [deserialize_idea(idea) for idea in state.get('population', [])]
+        engine.history = [[deserialize_idea(idea) for idea in gen] for gen in state.get('history', [])]
+
+        print(f"✅ Evolution loaded: {engine.evolution_name or 'unnamed'} (gen {engine.current_generation}/{engine.generations})")
+        return engine
+
+    @classmethod
+    def load_checkpoint(cls, checkpoint_id: str) -> Optional['EvolutionEngine']:
+        """
+        Load an evolution engine from a checkpoint (legacy or new format).
+        Tries unified evolutions first, then legacy checkpoints.
+        Returns a configured EvolutionEngine instance, or None on failure.
+        """
+        # First try unified evolutions directory
+        evolution_path = EVOLUTIONS_DIR / f"{checkpoint_id}.json"
+        if evolution_path.exists():
+            return cls._load_from_file(evolution_path)
+
+        # Fall back to legacy checkpoint directory
         checkpoint_path = CHECKPOINT_DIR / f"checkpoint_{checkpoint_id}.json"
         if not checkpoint_path.exists():
             print(f"❌ Checkpoint not found: {checkpoint_path}")
             return None
 
-        try:
-            with open(checkpoint_path) as f:
-                state = json.load(f)
-
-            config = state.get('config', {})
-
-            # Create a new engine with the saved configuration
-            engine = cls(
-                idea_type=config.get('idea_type'),
-                pop_size=config.get('pop_size', 5),
-                generations=config.get('generations', 3),
-                model_type=config.get('model_type', 'gemini-2.0-flash'),
-                creative_temp=config.get('creative_temp', DEFAULT_CREATIVE_TEMP),
-                top_p=config.get('top_p', DEFAULT_TOP_P),
-                tournament_size=config.get('tournament_size', 5),
-                tournament_comparisons=config.get('tournament_comparisons', 35),
-                thinking_budget=config.get('thinking_budget'),
-                max_budget=config.get('max_budget'),
-                mutation_rate=config.get('mutation_rate', 0.2),
-            )
-
-            # Restore state
-            engine.checkpoint_id = state.get('checkpoint_id')
-            engine.current_generation = state.get('current_generation', 0)
-            engine.contexts = state.get('contexts', [])
-            engine.specific_prompts = state.get('specific_prompts', [])
-            engine.breeding_prompts = state.get('breeding_prompts', [])
-            engine.diversity_history = state.get('diversity_history', [])
-            engine.avg_idea_cost = state.get('avg_idea_cost', 0.0)
-            engine.avg_tournament_cost = state.get('avg_tournament_cost', 0.0)
-
-            # Restore population and history
-            def deserialize_idea(idea_data):
-                """Convert serialized idea back to proper format"""
-                if not isinstance(idea_data, dict):
-                    return idea_data
-
-                result = dict(idea_data)
-                # Ensure ID is a UUID
-                if 'id' in result and isinstance(result['id'], str):
-                    try:
-                        result['id'] = uuid.UUID(result['id'])
-                    except ValueError:
-                        result['id'] = uuid.uuid4()
-
-                # Convert parent_ids back to UUIDs
-                if 'parent_ids' in result:
-                    result['parent_ids'] = [
-                        uuid.UUID(pid) if isinstance(pid, str) else pid
-                        for pid in result['parent_ids']
-                    ]
-
-                # Restore Idea object if present
-                if 'idea' in result and isinstance(result['idea'], dict):
-                    result['idea'] = Idea(
-                        title=result['idea'].get('title'),
-                        content=result['idea'].get('content', '')
-                    )
-
-                return result
-
-            engine.population = [deserialize_idea(idea) for idea in state.get('population', [])]
-            engine.history = [[deserialize_idea(idea) for idea in gen] for gen in state.get('history', [])]
-
-            print(f"✅ Checkpoint loaded: generation {engine.current_generation}/{engine.generations}")
-            return engine
-
-        except Exception as e:
-            print(f"❌ Failed to load checkpoint: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+        # Use shared loading logic
+        return cls._load_from_file(checkpoint_path)
 
     @classmethod
     def delete_checkpoint(cls, checkpoint_id: str) -> bool:

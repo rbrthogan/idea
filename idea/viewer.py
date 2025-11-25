@@ -51,6 +51,10 @@ engine = None
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
+# Unified evolutions directory
+EVOLUTIONS_DIR = Path("data/evolutions")
+EVOLUTIONS_DIR.mkdir(exist_ok=True)
+
 # --- API Key Management ---
 def load_api_key():
     """Load API key from .env file if it exists"""
@@ -324,6 +328,11 @@ async def start_evolution(request: Request):
         max_budget=max_budget,
     )
 
+    # Initialize evolution with name (auto-generates if not provided)
+    evolution_name = data.get('evolutionName', '').strip() or None
+    engine.initialize_evolution(name=evolution_name)
+    print(f"Evolution initialized: '{engine.evolution_name}' (ID: {engine.evolution_id})")
+
     # Generate contexts for each idea
     contexts = engine.generate_contexts()
 
@@ -353,6 +362,8 @@ async def start_evolution(request: Request):
     return JSONResponse({
         "status": "success",
         "message": "Evolution started",
+        "evolution_id": engine.evolution_id,
+        "evolution_name": engine.evolution_name,
         "contexts": contexts,
         "specific_prompts": []  # Will be populated as evolution progresses
     })
@@ -395,7 +406,7 @@ async def force_stop_evolution():
     # Save checkpoint before forcing stop
     checkpoint_id = None
     try:
-        checkpoint_path = engine.save_checkpoint(status='force_stopped')
+        engine.save_checkpoint(status='force_stopped')
         checkpoint_id = engine.checkpoint_id
     except Exception as e:
         print(f"Warning: Failed to save checkpoint during force stop: {e}")
@@ -548,6 +559,8 @@ async def resume_evolution(request: Request):
         "status": "success",
         "message": f"Resuming from generation {engine.current_generation}/{engine.generations}",
         "checkpoint_id": checkpoint_id,
+        "evolution_id": engine.evolution_id,
+        "evolution_name": engine.evolution_name,
         "current_generation": engine.current_generation,
         "total_generations": engine.generations,
         "contexts": engine.contexts,
@@ -569,13 +582,14 @@ async def continue_evolution(request: Request):
         )
 
     data = await request.json()
-    checkpoint_id = data.get('checkpointId')
-    evolution_id = data.get('evolutionId')  # Alternative: continue from a saved evolution
-    additional_generations = int(data.get('additionalGenerations', 3))
+    # Support both camelCase and snake_case parameter names
+    checkpoint_id = data.get('checkpoint_id') or data.get('checkpointId')
+    evolution_id = data.get('evolution_id') or data.get('evolutionId')
+    additional_generations = int(data.get('additional_generations') or data.get('additionalGenerations', 3))
 
     if not checkpoint_id and not evolution_id:
         return JSONResponse(
-            {"status": "error", "message": "Either checkpointId or evolutionId is required"},
+            {"status": "error", "message": "Either checkpoint_id or evolution_id is required"},
             status_code=400,
         )
 
@@ -626,8 +640,86 @@ async def continue_evolution(request: Request):
         "status": "success",
         "message": f"Continuing for {additional_generations} more generations",
         "checkpoint_id": engine.checkpoint_id,
+        "evolution_id": engine.evolution_id,
+        "evolution_name": engine.evolution_name,
         "current_generation": engine.current_generation,
         "total_generations": new_total,
+        "contexts": engine.contexts,
+        "specific_prompts": engine.specific_prompts
+    })
+
+@app.post("/api/continue-saved-evolution")
+async def continue_saved_evolution(request: Request):
+    """
+    Continue a saved evolution (from data/*.json) for additional generations.
+    This creates a checkpoint from the saved file and then continues.
+    """
+    global engine, evolution_status, evolution_queue, latest_evolution_data
+
+    if is_api_key_missing():
+        return JSONResponse(
+            {"status": "error", "message": "GEMINI_API_KEY not configured"},
+            status_code=400,
+        )
+
+    data = await request.json()
+    evolution_id = data.get('evolution_id')
+    additional_generations = int(data.get('additional_generations', 3))
+
+    if not evolution_id:
+        return JSONResponse(
+            {"status": "error", "message": "evolution_id is required"},
+            status_code=400,
+        )
+
+    print(f"Continuing saved evolution '{evolution_id}' for {additional_generations} more generations")
+
+    # Load from evolution file and create engine
+    engine = await load_engine_from_evolution(evolution_id)
+
+    if engine is None:
+        return JSONResponse(
+            {"status": "error", "message": f"Failed to load evolution '{evolution_id}'"},
+            status_code=500,
+        )
+
+    # Clear the queue
+    while not evolution_queue.empty():
+        try:
+            evolution_queue.get_nowait()
+        except:
+            break
+
+    # Set up evolution status
+    new_total = engine.generations + additional_generations
+    evolution_status = {
+        "current_generation": engine.current_generation,
+        "total_generations": new_total,
+        "is_running": True,
+        "is_continuing": True,
+        "checkpoint_id": engine.checkpoint_id,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
+        "contexts": engine.contexts,
+        "specific_prompts": engine.specific_prompts,
+        "breeding_prompts": engine.breeding_prompts,
+        "progress": (engine.current_generation / new_total) * 100 if new_total > 0 else 0
+    }
+
+    # Put initial status in queue
+    await evolution_queue.put(evolution_status.copy())
+
+    # Start evolution in background task with additional generations
+    asyncio.create_task(run_continue_evolution_task(engine, additional_generations))
+
+    return JSONResponse({
+        "status": "success",
+        "message": f"Continuing saved evolution for {additional_generations} more generations",
+        "checkpoint_id": engine.checkpoint_id,
+        "evolution_id": engine.evolution_id,
+        "evolution_name": engine.evolution_name,
+        "current_generation": engine.current_generation,
+        "total_generations": new_total,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
         "contexts": engine.contexts,
         "specific_prompts": engine.specific_prompts
     })
@@ -789,6 +881,10 @@ async def run_evolution_task(engine):
     # Define the progress callback function
     async def progress_callback(update_data):
         global evolution_status, evolution_queue, latest_evolution_data
+
+        # Add evolution identity to every update
+        update_data['evolution_id'] = engine.evolution_id
+        update_data['evolution_name'] = engine.evolution_name
 
         # Convert Idea objects to dictionaries for JSON serialization
         if 'history' in update_data and isinstance(update_data['history'], list):
@@ -1099,10 +1195,200 @@ async def get_evolutions(request: Request):
         print(f"Error reading evolution files: {e}")
         return JSONResponse([])
 
+@app.get('/api/history')
+async def get_unified_history():
+    """
+    Get unified history of all evolutions.
+    Combines new unified storage + legacy checkpoints + legacy saved files.
+    """
+    history_items = []
+
+    try:
+        # 1. Load from unified evolutions directory (new format)
+        evolutions = EvolutionEngine.list_evolutions()
+        for ev in evolutions:
+            history_items.append({
+                'id': ev.get('id'),
+                'type': 'evolution',
+                'status': ev.get('status', 'unknown'),
+                'timestamp': ev.get('updated_at') or ev.get('created_at', ''),
+                'created_at': ev.get('created_at'),
+                'display_name': ev.get('name', 'Unnamed Evolution'),
+                'generations': ev.get('generation', 0),
+                'total_generations': ev.get('total_generations', 0),
+                'pop_size': ev.get('pop_size', 0),
+                'idea_type': ev.get('idea_type', 'Unknown'),
+                'model_type': ev.get('model_type', 'Unknown'),
+                'total_ideas': ev.get('total_ideas', 0),
+                'can_resume': ev.get('status') in ['paused', 'in_progress', 'force_stopped'],
+                'can_continue': ev.get('status') == 'complete',
+                'can_rate': ev.get('generation', 0) > 0,
+                'can_rename': True,
+                'can_delete': True,
+            })
+
+        # 2. Load legacy checkpoints (for backwards compatibility)
+        checkpoints = EvolutionEngine.list_checkpoints()
+        existing_ids = {item['id'] for item in history_items}
+        for cp in checkpoints:
+            checkpoint_id = cp.get('id', '')
+            # Skip if already in unified storage
+            if checkpoint_id in existing_ids:
+                continue
+
+            history_items.append({
+                'id': checkpoint_id,
+                'type': 'legacy_checkpoint',
+                'status': cp.get('status', 'unknown'),
+                'timestamp': cp.get('time', ''),
+                'display_name': f"Checkpoint {checkpoint_id[:16]}..." if len(checkpoint_id) > 16 else checkpoint_id,
+                'generations': cp.get('generation', 0),
+                'total_generations': cp.get('total_generations', 0),
+                'pop_size': cp.get('pop_size', 0),
+                'idea_type': cp.get('idea_type', 'Unknown'),
+                'model_type': cp.get('model_type', 'Unknown'),
+                'can_resume': cp.get('status') in ['paused', 'in_progress', 'force_stopped'],
+                'can_continue': cp.get('status') == 'complete',
+                'can_rate': cp.get('generation', 0) > 0,
+                'can_rename': False,  # Legacy format can't be renamed
+                'can_delete': True,
+            })
+
+        # 3. Load legacy saved evolutions from data/*.json (for backwards compatibility)
+        for file_path in DATA_DIR.glob('*.json'):
+            try:
+                evolution_id = file_path.stem
+                # Skip if already in unified storage or checkpoints
+                if evolution_id in existing_ids or any(item['id'] == evolution_id for item in history_items):
+                    continue
+
+                file_stat = file_path.stat()
+                with open(file_path) as f:
+                    data = json.load(f)
+
+                history = data.get('history', [])
+                config = data.get('config', {})
+                num_generations = len(history)
+                pop_size = len(history[0]) if history else 0
+
+                history_items.append({
+                    'id': evolution_id,
+                    'type': 'legacy_saved',
+                    'status': 'complete',
+                    'timestamp': datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
+                    'display_name': evolution_id.replace('_', ' ').replace('-', ' '),
+                    'generations': num_generations,
+                    'total_generations': num_generations,
+                    'pop_size': pop_size,
+                    'idea_type': config.get('idea_type') or data.get('idea_type', 'Unknown'),
+                    'model_type': config.get('model_type', 'Unknown'),
+                    'total_ideas': sum(len(gen) for gen in history),
+                    'can_continue': True,
+                    'can_rate': True,
+                    'can_rename': False,  # Legacy format
+                    'can_delete': True,
+                })
+            except Exception as e:
+                print(f"Error reading legacy file {file_path}: {e}")
+                continue
+
+        # Sort by timestamp descending (most recent first)
+        history_items.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+
+        return JSONResponse({
+            'status': 'success',
+            'items': history_items,
+            'total_count': len(history_items)
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"Error getting unified history: {e}")
+        traceback.print_exc()
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e),
+            'items': []
+        }, status_code=500)
+
+@app.post('/api/evolution/{evolution_id}/rename')
+async def rename_evolution(request: Request, evolution_id: str):
+    """Rename an evolution"""
+    try:
+        data = await request.json()
+        new_name = data.get('name', '').strip()
+
+        if not new_name:
+            return JSONResponse({
+                'status': 'error',
+                'message': 'Name cannot be empty'
+            }, status_code=400)
+
+        # Try unified evolutions first
+        if EvolutionEngine.rename_evolution(evolution_id, new_name):
+            return JSONResponse({
+                'status': 'success',
+                'message': f'Evolution renamed to "{new_name}"',
+                'name': new_name
+            })
+
+        return JSONResponse({
+            'status': 'error',
+            'message': 'Evolution not found or cannot be renamed'
+        }, status_code=404)
+
+    except Exception as e:
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status_code=500)
+
+@app.delete('/api/evolution/{evolution_id}')
+async def delete_evolution_endpoint(evolution_id: str):
+    """Delete an evolution"""
+    try:
+        # Try unified evolutions first
+        if EvolutionEngine.delete_evolution(evolution_id):
+            return JSONResponse({'status': 'success', 'message': 'Evolution deleted'})
+
+        # Try legacy checkpoint
+        if EvolutionEngine.delete_checkpoint(evolution_id):
+            return JSONResponse({'status': 'success', 'message': 'Checkpoint deleted'})
+
+        # Try legacy saved file
+        legacy_path = DATA_DIR / f"{evolution_id}.json"
+        if legacy_path.exists():
+            legacy_path.unlink()
+            return JSONResponse({'status': 'success', 'message': 'Evolution deleted'})
+
+        return JSONResponse({
+            'status': 'error',
+            'message': 'Evolution not found'
+        }, status_code=404)
+
+    except Exception as e:
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status_code=500)
+
 @app.get('/api/evolution/{evolution_id}')
 async def get_evolution(request: Request, evolution_id: str):
     """Get evolution data from file"""
     try:
+        # Try unified evolutions directory first
+        evolution_path = EVOLUTIONS_DIR / f"{evolution_id}.json"
+        if evolution_path.exists():
+            with open(evolution_path) as f:
+                data = json.load(f)
+                return JSONResponse({
+                    'id': evolution_id,
+                    'name': data.get('name', evolution_id),
+                    'timestamp': data.get('updated_at') or data.get('created_at'),
+                    'data': data
+                })
+
+        # Fall back to legacy data directory
         file_path = DATA_DIR / f"{evolution_id}.json"
         if file_path.exists():
             with open(file_path) as f:
