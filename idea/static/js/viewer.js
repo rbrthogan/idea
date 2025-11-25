@@ -146,7 +146,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadEvolutions();
 
     // Check if we have a current evolution running or saved
-    await restoreCurrentEvolution();
+    const restored = await restoreCurrentEvolution();
+
+    // If not restored from running evolution, check for resumable checkpoints
+    if (!restored) {
+        await checkForResumableCheckpoints();
+    }
 
     // Start polling for progress
     // pollProgress(); // Managed by restoreCurrentEvolution / startEvolution
@@ -273,6 +278,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             stopButton.textContent = 'Stopping...';
         }
 
+        // Show force stop button after 5 seconds if stop is taking too long
+        const forceStopTimeout = setTimeout(() => {
+            showForceStopButton();
+            addActivityLogItem('⏳ Stop is taking a while - Force Stop available', 'warning');
+        }, 5000);
+
         try {
             const response = await fetch('/api/stop-evolution', {
                 method: 'POST',
@@ -285,6 +296,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 // Polling will handle final reset
             } else {
                 console.error("Failed to stop evolution:", await response.text());
+                clearTimeout(forceStopTimeout);
                 if (stopButton) {
                     stopButton.disabled = false;
                     stopButton.textContent = 'Stop Evolution';
@@ -292,6 +304,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         } catch (error) {
             console.error("Error stopping evolution:", error);
+            clearTimeout(forceStopTimeout);
             if (stopButton) {
                 stopButton.disabled = false;
                 stopButton.textContent = 'Stop Evolution';
@@ -304,6 +317,248 @@ document.addEventListener('DOMContentLoaded', async () => {
             downloadResults(currentEvolutionData);
         } else {
             alert("No evolution data available to save");
+        }
+    });
+
+    // --- Force Stop Button ---
+    addListener('forceStopButton', 'click', async function () {
+        console.log("Force stopping evolution...");
+        const forceStopButton = document.getElementById('forceStopButton');
+        const stopButton = document.getElementById('stopButton');
+
+        if (forceStopButton) {
+            forceStopButton.disabled = true;
+            forceStopButton.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Forcing...';
+        }
+
+        try {
+            const response = await fetch('/api/force-stop-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log("Force stop successful:", data);
+                addActivityLogItem('⚡ Evolution force stopped - checkpoint saved', 'warning');
+
+                // Store checkpoint ID for resume
+                if (data.checkpoint_id) {
+                    localStorage.setItem('lastCheckpointId', data.checkpoint_id);
+                    showResumeButton(data.checkpoint_id);
+                }
+
+                // Reset UI
+                resetButtonStates();
+                isEvolutionRunning = false;
+            } else {
+                console.error("Failed to force stop:", await response.text());
+            }
+        } catch (error) {
+            console.error("Error force stopping:", error);
+        } finally {
+            if (forceStopButton) {
+                forceStopButton.disabled = false;
+                forceStopButton.innerHTML = '<i class="fas fa-bolt me-1"></i>Force Stop';
+                forceStopButton.style.display = 'none';
+            }
+            if (stopButton) {
+                stopButton.style.display = 'none';
+            }
+        }
+    });
+
+    // --- Resume Button ---
+    addListener('resumeButton', 'click', async function () {
+        const checkpointId = localStorage.getItem('lastCheckpointId');
+        if (!checkpointId) {
+            alert("No checkpoint available to resume from");
+            return;
+        }
+
+        console.log("Resuming evolution from checkpoint:", checkpointId);
+        const resumeButton = document.getElementById('resumeButton');
+        const continueButton = document.getElementById('continueButton');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+
+        if (resumeButton) {
+            resumeButton.disabled = true;
+            resumeButton.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Resuming...';
+        }
+
+        try {
+            const response = await fetch('/api/resume-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ checkpointId })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log("Resume started:", data);
+                addActivityLogItem(`🔄 Resuming from generation ${data.current_generation}`, 'info');
+
+                // Restore contexts
+                contexts = data.contexts || [];
+                specificPrompts = data.specific_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
+
+                // Hide resume/continue buttons
+                if (resumeButton) {
+                    resumeButton.style.display = 'none';
+                }
+                if (continueButton) {
+                    continueButton.style.display = 'none';
+                }
+
+                // Update UI state
+                if (startButton) {
+                    startButton.disabled = true;
+                    startButton.textContent = 'Running...';
+                }
+                if (stopButton) {
+                    stopButton.disabled = false;
+                    stopButton.style.display = 'block';
+                    stopButton.textContent = 'Stop Evolution';
+                }
+
+                // Reset progress card if exists
+                const progressCard = document.getElementById('progress-container');
+                if (progressCard) {
+                    progressCard.classList.remove('stopped', 'complete');
+                    progressCard.classList.add('running');
+                }
+                const spinner = document.getElementById('evolution-spinner');
+                if (spinner) {
+                    spinner.classList.remove('stopped', 'complete');
+                    spinner.classList.add('spinning');
+                }
+                const statusTextEl = document.getElementById('evolution-status-text');
+                if (statusTextEl) {
+                    statusTextEl.textContent = 'Resuming...';
+                }
+
+                // Start polling
+                isEvolutionRunning = true;
+                pollProgress();
+            } else {
+                console.error("Failed to resume:", await response.text());
+                alert("Failed to resume evolution. Check console for details.");
+                if (resumeButton) {
+                    resumeButton.disabled = false;
+                    resumeButton.innerHTML = '<i class="fas fa-play me-1"></i>Resume Evolution';
+                }
+            }
+        } catch (error) {
+            console.error("Error resuming:", error);
+            alert("Error resuming evolution: " + error.message);
+            if (resumeButton) {
+                resumeButton.disabled = false;
+                resumeButton.innerHTML = '<i class="fas fa-play me-1"></i>Resume Evolution';
+            }
+        }
+    });
+
+    // --- Continue Button ---
+    addListener('continueButton', 'click', async function () {
+        const checkpointId = localStorage.getItem('lastCheckpointId');
+        if (!checkpointId) {
+            alert("No checkpoint available to continue from");
+            return;
+        }
+
+        const additionalGens = prompt("How many additional generations?", "3");
+        if (!additionalGens || isNaN(parseInt(additionalGens))) {
+            return;
+        }
+
+        console.log("Continuing evolution for", additionalGens, "more generations");
+        const continueButton = document.getElementById('continueButton');
+        const resumeButton = document.getElementById('resumeButton');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+
+        if (continueButton) {
+            continueButton.disabled = true;
+            continueButton.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Starting...';
+        }
+
+        try {
+            const response = await fetch('/api/continue-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    checkpointId,
+                    additionalGenerations: parseInt(additionalGens)
+                })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log("Continue started:", data);
+                addActivityLogItem(`📈 Continuing for ${additionalGens} more generations`, 'info');
+
+                // Restore contexts
+                contexts = data.contexts || [];
+                specificPrompts = data.specific_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
+
+                // Hide resume/continue buttons
+                if (continueButton) {
+                    continueButton.style.display = 'none';
+                }
+                if (resumeButton) {
+                    resumeButton.style.display = 'none';
+                }
+
+                // Update UI state
+                if (startButton) {
+                    startButton.disabled = true;
+                    startButton.textContent = 'Running...';
+                }
+                if (stopButton) {
+                    stopButton.disabled = false;
+                    stopButton.style.display = 'block';
+                    stopButton.textContent = 'Stop Evolution';
+                }
+
+                // Reset progress card if exists
+                const progressCard = document.getElementById('progress-container');
+                if (progressCard) {
+                    progressCard.classList.remove('stopped', 'complete');
+                    progressCard.classList.add('running');
+                }
+                const spinner = document.getElementById('evolution-spinner');
+                if (spinner) {
+                    spinner.classList.remove('stopped', 'complete');
+                    spinner.classList.add('spinning');
+                }
+                const statusTextEl = document.getElementById('evolution-status-text');
+                if (statusTextEl) {
+                    statusTextEl.textContent = 'Continuing...';
+                }
+
+                // Start polling
+                isEvolutionRunning = true;
+                pollProgress();
+            } else {
+                console.error("Failed to continue:", await response.text());
+                alert("Failed to continue evolution. Check console for details.");
+                if (continueButton) {
+                    continueButton.disabled = false;
+                    continueButton.innerHTML = '<i class="fas fa-forward me-1"></i>Continue (+3 gens)';
+                }
+            }
+        } catch (error) {
+            console.error("Error continuing:", error);
+            alert("Error continuing evolution: " + error.message);
+            if (continueButton) {
+                continueButton.disabled = false;
+                continueButton.innerHTML = '<i class="fas fa-forward me-1"></i>Continue (+3 gens)';
+            }
         }
     });
 
@@ -1366,12 +1621,22 @@ async function pollProgress() {
             isEvolutionRunning = false;
 
             // Mark as complete with proper visual feedback
-            markEvolutionComplete(data.is_stopped);
+            // Pass resumable state and checkpoint ID for pause/resume functionality
+            markEvolutionComplete(
+                data.is_stopped,
+                data.is_resumable || false,
+                data.checkpoint_id || null
+            );
 
             if (data.history && data.history.length > 0) {
                 // Save final state and enable save button
                 currentEvolutionData = data;
                 renderGenerations(data.history);
+
+                // Store checkpoint ID if available for future resume/continue
+                if (data.checkpoint_id) {
+                    localStorage.setItem('lastCheckpointId', data.checkpoint_id);
+                }
 
                 // Store the final evolution data in localStorage including diversity data and token counts
                 const evolutionStateToStore = {
@@ -1380,7 +1645,8 @@ async function pollProgress() {
                     contexts: data.contexts || contexts,
                     specific_prompts: data.specific_prompts || specificPrompts,
                     breeding_prompts: data.breeding_prompts || breedingPrompts,
-                    token_counts: data.token_counts || null
+                    token_counts: data.token_counts || null,
+                    checkpoint_id: data.checkpoint_id || null
                 };
                 localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
 
@@ -1632,6 +1898,7 @@ function showSuccessMessage(message) {
 function resetButtonStates() {
     const startButton = document.getElementById('startButton');
     const stopButton = document.getElementById('stopButton');
+    const forceStopButton = document.getElementById('forceStopButton');
 
     if (startButton) {
         startButton.disabled = false;
@@ -1643,6 +1910,100 @@ function resetButtonStates() {
         stopButton.textContent = 'Stop Evolution';
         stopButton.style.display = 'none';
     }
+
+    if (forceStopButton) {
+        forceStopButton.style.display = 'none';
+    }
+}
+
+// Function to show resume button when evolution is paused/stopped
+function showResumeButton(checkpointId) {
+    const resumeButton = document.getElementById('resumeButton');
+    const startButton = document.getElementById('startButton');
+
+    if (checkpointId) {
+        localStorage.setItem('lastCheckpointId', checkpointId);
+    }
+
+    if (resumeButton) {
+        resumeButton.style.display = 'block';
+    }
+    // Note: Don't show Continue for stopped evolutions - only for completed ones
+}
+
+// Function to show continue button (for completed evolutions only)
+function showContinueButton(checkpointId) {
+    const continueButton = document.getElementById('continueButton');
+
+    if (checkpointId) {
+        localStorage.setItem('lastCheckpointId', checkpointId);
+    }
+
+    if (continueButton) {
+        continueButton.style.display = 'block';
+    }
+}
+
+// Function to hide resume/continue buttons
+function hideResumeButtons() {
+    const resumeButton = document.getElementById('resumeButton');
+    const continueButton = document.getElementById('continueButton');
+
+    if (resumeButton) {
+        resumeButton.style.display = 'none';
+    }
+    if (continueButton) {
+        continueButton.style.display = 'none';
+    }
+}
+
+// Function to show force stop button after a delay (when regular stop is taking too long)
+function showForceStopButton() {
+    const forceStopButton = document.getElementById('forceStopButton');
+    if (forceStopButton) {
+        forceStopButton.style.display = 'block';
+    }
+}
+
+// Function to check for resumable checkpoints on page load
+async function checkForResumableCheckpoints() {
+    try {
+        const response = await fetch('/api/checkpoints');
+        if (response.ok) {
+            const data = await response.json();
+            if (data.status === 'success' && data.checkpoints && data.checkpoints.length > 0) {
+                // Find the most recent paused or in_progress checkpoint
+                const resumable = data.checkpoints.find(cp =>
+                    cp.status === 'paused' || cp.status === 'in_progress' || cp.status === 'force_stopped'
+                );
+                if (resumable) {
+                    console.log("Found resumable checkpoint:", resumable);
+                    localStorage.setItem('lastCheckpointId', resumable.id);
+                    showResumeButton(resumable.id);
+                    // Only add activity log if the UI is ready
+                    if (typeof addActivityLogItem === 'function') {
+                        try {
+                            addActivityLogItem(`💾 Resumable checkpoint found (Gen ${resumable.generation}/${resumable.total_generations})`, 'info');
+                        } catch (e) {
+                            console.log("Resumable checkpoint:", resumable.id);
+                        }
+                    }
+                    return resumable;
+                }
+
+                // Check for completed checkpoints that can be continued
+                const completed = data.checkpoints.find(cp => cp.status === 'complete');
+                if (completed) {
+                    console.log("Found completed checkpoint:", completed);
+                    localStorage.setItem('lastCheckpointId', completed.id);
+                    showContinueButton(completed.id);
+                }
+            }
+        }
+    } catch (error) {
+        console.error("Error checking for checkpoints:", error);
+    }
+    return null;
 }
 
 // Function to reset the UI state
@@ -1937,11 +2298,12 @@ function updateEvolutionStatusIndicator(isRunning, statusText = '') {
 }
 
 // Function to mark evolution as complete
-function markEvolutionComplete(isStopped = false) {
+function markEvolutionComplete(isStopped = false, isResumable = false, checkpointId = null) {
     const spinner = document.getElementById('evolution-spinner');
     const statusTextEl = document.getElementById('evolution-status-text');
     const progressCard = document.getElementById('progress-container');
     const activityIndicator = document.getElementById('progress-bar-activity');
+    const forceStopButton = document.getElementById('forceStopButton');
 
     if (spinner) {
         spinner.classList.remove('spinning');
@@ -1949,7 +2311,13 @@ function markEvolutionComplete(isStopped = false) {
     }
 
     if (statusTextEl) {
-        statusTextEl.textContent = isStopped ? 'Stopped' : 'Complete';
+        if (isStopped && isResumable) {
+            statusTextEl.textContent = 'Paused';
+        } else if (isStopped) {
+            statusTextEl.textContent = 'Stopped';
+        } else {
+            statusTextEl.textContent = 'Complete';
+        }
     }
 
     if (progressCard) {
@@ -1961,14 +2329,41 @@ function markEvolutionComplete(isStopped = false) {
         activityIndicator.classList.remove('waiting');
     }
 
+    // Hide force stop button
+    if (forceStopButton) {
+        forceStopButton.style.display = 'none';
+    }
+
     stopElapsedTimeUpdater();
 
     // Add final activity log entry
     const elapsed = evolutionStartTime ? formatDuration(Date.now() - evolutionStartTime) : 'unknown';
-    addActivityLogItem(
-        isStopped ? `⏹️ Stopped after ${elapsed}` : `✅ Completed in ${elapsed}!`,
-        isStopped ? 'warning' : 'success'
-    );
+    if (isStopped && isResumable) {
+        addActivityLogItem(`⏸️ Paused after ${elapsed} - checkpoint saved`, 'info');
+    } else if (isStopped) {
+        addActivityLogItem(`⏹️ Stopped after ${elapsed}`, 'warning');
+    } else {
+        addActivityLogItem(`✅ Completed in ${elapsed}!`, 'success');
+    }
+
+    // Show resume/continue buttons if applicable
+    if (isResumable && checkpointId) {
+        // Paused/stopped evolution - show Resume button only
+        showResumeButton(checkpointId);
+        // Hide continue button for paused evolutions
+        const continueButton = document.getElementById('continueButton');
+        if (continueButton) {
+            continueButton.style.display = 'none';
+        }
+    } else if (!isStopped && checkpointId) {
+        // Evolution completed normally - show Continue button for extending
+        showContinueButton(checkpointId);
+        // Hide resume button for completed evolutions
+        const resumeButton = document.getElementById('resumeButton');
+        if (resumeButton) {
+            resumeButton.style.display = 'none';
+        }
+    }
 }
 
 

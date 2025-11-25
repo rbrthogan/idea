@@ -378,6 +378,410 @@ async def stop_evolution():
         "message": "Stop request sent - evolution will halt at the next safe point"
     })
 
+@app.post("/api/force-stop-evolution")
+async def force_stop_evolution():
+    """
+    Force stop the evolution immediately, saving a checkpoint for later resumption.
+    Use this when the graceful stop is taking too long.
+    """
+    global engine, evolution_status
+
+    if engine is None:
+        return JSONResponse(
+            {"status": "error", "message": "No evolution is currently running"},
+            status_code=400,
+        )
+
+    # Save checkpoint before forcing stop
+    checkpoint_id = None
+    try:
+        checkpoint_path = engine.save_checkpoint(status='force_stopped')
+        checkpoint_id = engine.checkpoint_id
+    except Exception as e:
+        print(f"Warning: Failed to save checkpoint during force stop: {e}")
+
+    # Mark as stopped
+    engine.stop_requested = True
+    engine.is_stopped = True
+
+    # Update status
+    evolution_status["is_running"] = False
+    evolution_status["is_stopped"] = True
+    evolution_status["is_resumable"] = True
+    evolution_status["checkpoint_id"] = checkpoint_id
+
+    return JSONResponse({
+        "status": "success",
+        "message": "Evolution force stopped. A checkpoint has been saved.",
+        "checkpoint_id": checkpoint_id,
+        "is_resumable": True
+    })
+
+@app.get("/api/checkpoints")
+async def list_checkpoints():
+    """
+    List all available evolution checkpoints.
+    """
+    try:
+        checkpoints = EvolutionEngine.list_checkpoints()
+        return JSONResponse({
+            "status": "success",
+            "checkpoints": checkpoints
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+@app.get("/api/checkpoints/{checkpoint_id}")
+async def get_checkpoint(checkpoint_id: str):
+    """
+    Get details of a specific checkpoint.
+    """
+    try:
+        from pathlib import Path
+        checkpoint_path = Path("data/checkpoints") / f"checkpoint_{checkpoint_id}.json"
+        if not checkpoint_path.exists():
+            return JSONResponse({
+                "status": "error",
+                "message": "Checkpoint not found"
+            }, status_code=404)
+
+        import json
+        with open(checkpoint_path) as f:
+            data = json.load(f)
+
+        return JSONResponse({
+            "status": "success",
+            "checkpoint": data
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+@app.delete("/api/checkpoints/{checkpoint_id}")
+async def delete_checkpoint(checkpoint_id: str):
+    """
+    Delete a specific checkpoint.
+    """
+    try:
+        success = EvolutionEngine.delete_checkpoint(checkpoint_id)
+        if success:
+            return JSONResponse({
+                "status": "success",
+                "message": "Checkpoint deleted"
+            })
+        else:
+            return JSONResponse({
+                "status": "error",
+                "message": "Checkpoint not found"
+            }, status_code=404)
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+@app.post("/api/resume-evolution")
+async def resume_evolution(request: Request):
+    """
+    Resume an evolution from a checkpoint.
+    """
+    global engine, evolution_status, evolution_queue, latest_evolution_data
+
+    if is_api_key_missing():
+        return JSONResponse(
+            {"status": "error", "message": "GEMINI_API_KEY not configured"},
+            status_code=400,
+        )
+
+    data = await request.json()
+    checkpoint_id = data.get('checkpointId')
+
+    if not checkpoint_id:
+        return JSONResponse(
+            {"status": "error", "message": "checkpointId is required"},
+            status_code=400,
+        )
+
+    print(f"Resuming evolution from checkpoint: {checkpoint_id}")
+
+    # Load the engine from checkpoint
+    engine = EvolutionEngine.load_checkpoint(checkpoint_id)
+    if engine is None:
+        return JSONResponse(
+            {"status": "error", "message": "Failed to load checkpoint"},
+            status_code=500,
+        )
+
+    # Clear the queue
+    while not evolution_queue.empty():
+        try:
+            evolution_queue.get_nowait()
+        except:
+            break
+
+    # Set up evolution status
+    evolution_status = {
+        "current_generation": engine.current_generation,
+        "total_generations": engine.generations,
+        "is_running": True,
+        "is_resuming": True,
+        "checkpoint_id": checkpoint_id,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
+        "contexts": engine.contexts,
+        "specific_prompts": engine.specific_prompts,
+        "breeding_prompts": engine.breeding_prompts,
+        "progress": (engine.current_generation / engine.generations) * 100 if engine.generations > 0 else 0
+    }
+
+    # Put initial status in queue
+    await evolution_queue.put(evolution_status.copy())
+
+    # Start evolution in background task
+    asyncio.create_task(run_resume_evolution_task(engine))
+
+    return JSONResponse({
+        "status": "success",
+        "message": f"Resuming from generation {engine.current_generation}/{engine.generations}",
+        "checkpoint_id": checkpoint_id,
+        "current_generation": engine.current_generation,
+        "total_generations": engine.generations,
+        "contexts": engine.contexts,
+        "specific_prompts": engine.specific_prompts
+    })
+
+@app.post("/api/continue-evolution")
+async def continue_evolution(request: Request):
+    """
+    Continue a completed evolution for additional generations.
+    This can work with either a checkpoint or a saved evolution file.
+    """
+    global engine, evolution_status, evolution_queue, latest_evolution_data
+
+    if is_api_key_missing():
+        return JSONResponse(
+            {"status": "error", "message": "GEMINI_API_KEY not configured"},
+            status_code=400,
+        )
+
+    data = await request.json()
+    checkpoint_id = data.get('checkpointId')
+    evolution_id = data.get('evolutionId')  # Alternative: continue from a saved evolution
+    additional_generations = int(data.get('additionalGenerations', 3))
+
+    if not checkpoint_id and not evolution_id:
+        return JSONResponse(
+            {"status": "error", "message": "Either checkpointId or evolutionId is required"},
+            status_code=400,
+        )
+
+    print(f"Continuing evolution for {additional_generations} more generations")
+
+    # Load the engine
+    if checkpoint_id:
+        engine = EvolutionEngine.load_checkpoint(checkpoint_id)
+    else:
+        # Load from evolution file and create a checkpoint
+        engine = await load_engine_from_evolution(evolution_id)
+
+    if engine is None:
+        return JSONResponse(
+            {"status": "error", "message": "Failed to load evolution state"},
+            status_code=500,
+        )
+
+    # Clear the queue
+    while not evolution_queue.empty():
+        try:
+            evolution_queue.get_nowait()
+        except:
+            break
+
+    # Set up evolution status
+    new_total = engine.generations + additional_generations
+    evolution_status = {
+        "current_generation": engine.current_generation,
+        "total_generations": new_total,
+        "is_running": True,
+        "is_continuing": True,
+        "checkpoint_id": engine.checkpoint_id,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
+        "contexts": engine.contexts,
+        "specific_prompts": engine.specific_prompts,
+        "breeding_prompts": engine.breeding_prompts,
+        "progress": (engine.current_generation / new_total) * 100 if new_total > 0 else 0
+    }
+
+    # Put initial status in queue
+    await evolution_queue.put(evolution_status.copy())
+
+    # Start evolution in background task with additional generations
+    asyncio.create_task(run_continue_evolution_task(engine, additional_generations))
+
+    return JSONResponse({
+        "status": "success",
+        "message": f"Continuing for {additional_generations} more generations",
+        "checkpoint_id": engine.checkpoint_id,
+        "current_generation": engine.current_generation,
+        "total_generations": new_total,
+        "contexts": engine.contexts,
+        "specific_prompts": engine.specific_prompts
+    })
+
+async def load_engine_from_evolution(evolution_id: str) -> Optional[EvolutionEngine]:
+    """
+    Create an EvolutionEngine from a saved evolution file.
+    This allows continuing evolutions that weren't saved as checkpoints.
+    """
+    try:
+        file_path = DATA_DIR / f"{evolution_id}.json"
+        if not file_path.exists():
+            print(f"Evolution file not found: {file_path}")
+            return None
+
+        import json
+        with open(file_path) as f:
+            data = json.load(f)
+
+        # Extract configuration from the saved data
+        config = data.get('config', {})
+        history = data.get('history', [])
+
+        if not history:
+            print("No history found in evolution file")
+            return None
+
+        # Create engine with default or saved config
+        engine = EvolutionEngine(
+            idea_type=config.get('idea_type', data.get('idea_type', get_default_template_id())),
+            pop_size=config.get('pop_size', len(history[-1]) if history else 5),
+            generations=len(history),  # Current number of generations
+            model_type=config.get('model_type', DEFAULT_MODEL),
+            creative_temp=config.get('creative_temp', DEFAULT_CREATIVE_TEMP),
+            top_p=config.get('top_p', DEFAULT_TOP_P),
+            tournament_size=config.get('tournament_size', 5),
+            tournament_comparisons=config.get('tournament_comparisons', 35),
+            thinking_budget=config.get('thinking_budget'),
+            max_budget=config.get('max_budget'),
+            mutation_rate=config.get('mutation_rate', 0.2),
+        )
+
+        # Restore state from the saved evolution
+        engine.contexts = data.get('contexts', [])
+        engine.specific_prompts = data.get('specific_prompts', [])
+        engine.breeding_prompts = data.get('breeding_prompts', [])
+        engine.diversity_history = data.get('diversity_history', [])
+        engine.current_generation = len(history)
+
+        # Restore history and population
+        def deserialize_idea(idea_data):
+            if not isinstance(idea_data, dict):
+                return idea_data
+            result = dict(idea_data)
+            if 'id' in result and isinstance(result['id'], str):
+                try:
+                    result['id'] = uuid.UUID(result['id'])
+                except ValueError:
+                    result['id'] = uuid.uuid4()
+            if 'parent_ids' in result:
+                result['parent_ids'] = [
+                    uuid.UUID(pid) if isinstance(pid, str) else pid
+                    for pid in result['parent_ids']
+                ]
+            # Restore Idea object if needed
+            if 'title' in result and 'content' in result and 'idea' not in result:
+                from idea.models import Idea
+                result['idea'] = Idea(title=result.get('title'), content=result.get('content', ''))
+            return result
+
+        engine.history = [[deserialize_idea(idea) for idea in gen] for gen in history]
+        engine.population = engine.history[-1] if engine.history else []
+
+        # Generate a new checkpoint ID for this continuation
+        from datetime import datetime
+        engine.checkpoint_id = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+
+        print(f"Loaded evolution from file: {evolution_id}, generations: {len(history)}")
+        return engine
+
+    except Exception as e:
+        print(f"Error loading evolution from file: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+async def run_resume_evolution_task(engine):
+    """Run resumed evolution in background with progress updates"""
+    global evolution_status, evolution_queue, latest_evolution_data
+
+    async def progress_callback(update_data):
+        global evolution_status, evolution_queue, latest_evolution_data
+
+        # Convert Idea objects to dictionaries for JSON serialization
+        if 'history' in update_data and isinstance(update_data['history'], list):
+            update_data['history'] = [
+                [idea_to_dict(idea) for idea in generation]
+                for generation in update_data['history']
+            ]
+            if update_data['history']:
+                latest_evolution_data = update_data['history']
+
+        # Add token counts if evolution is complete
+        if update_data.get('is_running') is False and 'error' not in update_data:
+            if hasattr(engine, 'get_total_token_count'):
+                update_data['token_counts'] = engine.get_total_token_count()
+
+        evolution_status.update(update_data)
+
+        # Clear queue and add update
+        while not evolution_queue.empty():
+            try:
+                evolution_queue.get_nowait()
+            except:
+                break
+        await evolution_queue.put(evolution_status.copy())
+
+    # Run the resumed evolution
+    await engine.resume_evolution_with_updates(progress_callback)
+
+async def run_continue_evolution_task(engine, additional_generations: int):
+    """Run continued evolution in background with progress updates"""
+    global evolution_status, evolution_queue, latest_evolution_data
+
+    async def progress_callback(update_data):
+        global evolution_status, evolution_queue, latest_evolution_data
+
+        # Convert Idea objects to dictionaries for JSON serialization
+        if 'history' in update_data and isinstance(update_data['history'], list):
+            update_data['history'] = [
+                [idea_to_dict(idea) for idea in generation]
+                for generation in update_data['history']
+            ]
+            if update_data['history']:
+                latest_evolution_data = update_data['history']
+
+        # Add token counts if evolution is complete
+        if update_data.get('is_running') is False and 'error' not in update_data:
+            if hasattr(engine, 'get_total_token_count'):
+                update_data['token_counts'] = engine.get_total_token_count()
+
+        evolution_status.update(update_data)
+
+        # Clear queue and add update
+        while not evolution_queue.empty():
+            try:
+                evolution_queue.get_nowait()
+            except:
+                break
+        await evolution_queue.put(evolution_status.copy())
+
+    # Run the evolution with additional generations
+    await engine.resume_evolution_with_updates(progress_callback, additional_generations=additional_generations)
+
 async def run_evolution_task(engine):
     """Run evolution in background with progress updates"""
     global evolution_status, evolution_queue, latest_evolution_data
