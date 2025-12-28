@@ -22,18 +22,17 @@
 
   <!-- Custom CSS -->
   <link rel="stylesheet" href="/static/css/viewer.css" />
+
+  <!-- Firebase SDK (for cloud deployment) -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
 </head>
 
 <body>
-  {% if api_key_missing %}
-  <div class="alert alert-warning text-center mb-0" role="alert" id="apiKeyAlert">
-    <span>GEMINI_API_KEY environment variable is not set. The app will not work without it.</span>
+  <div class="alert alert-warning text-center mb-0" role="alert" id="apiKeyAlert" style="display: none;">
+    <span>API Key not configured. The app requires a Google Gemini API Key to function.</span>
     <button class="btn btn-sm btn-outline-dark ms-3" id="setupApiKeyBtn">Setup API Key</button>
   </div>
-  <script>window.apiKeyMissing = true;</script>
-  {% else %}
-  <script>window.apiKeyMissing = false;</script>
-  {% endif %}
   <div class="container-fluid">
     <div class="layout-container">
       <!-- Fixed side panel for controls -->
@@ -82,7 +81,8 @@
                     <div class="fw-medium text-truncate" id="selectedEvolutionName" style="max-width: 180px;"></div>
                     <small class="text-muted" id="selectedEvolutionMeta"></small>
                   </div>
-                  <button class="btn btn-sm btn-link text-danger p-0" onclick="clearSelectedEvolution()" title="Clear selection">
+                  <button class="btn btn-sm btn-link text-danger p-0" onclick="clearSelectedEvolution()"
+                    title="Clear selection">
                     <i class="fas fa-times"></i>
                   </button>
                 </div>
@@ -160,7 +160,7 @@
               <div class="mb-2" id="evolutionNameSection">
                 <label class="form-label small text-muted mb-1">Evolution Name</label>
                 <input type="text" class="form-control form-control-sm" id="evolutionNameInput"
-                       placeholder="e.g., Sci-Fi Drabbles Round 2">
+                  placeholder="e.g., Sci-Fi Drabbles Round 2">
                 <small class="text-muted">Leave blank for auto-generated name</small>
               </div>
               <button class="btn btn-primary w-100 mb-2" id="startButton" {% if api_key_missing %}disabled{% endif %}>
@@ -290,7 +290,8 @@
                 </label>
                 <input type="range" class="form-range" min="0" max="1" step="0.05" id="mutationRate" value="0.2"
                   oninput="document.getElementById('mutationRateValue').textContent = parseFloat(this.value).toFixed(2)">
-                <small class="text-muted">Probability of injecting fresh concepts during breeding (0 = no mutation)</small>
+                <small class="text-muted">Probability of injecting fresh concepts during breeding (0 = no
+                  mutation)</small>
               </div>
             </div>
           </div>
@@ -334,9 +335,12 @@
             <div class="p-3">
               <!-- Filter tabs -->
               <div class="btn-group btn-group-sm w-100 mb-3" role="group">
-                <button type="button" class="btn btn-outline-secondary active" onclick="filterHistory('all')" id="historyFilterAll">All</button>
-                <button type="button" class="btn btn-outline-secondary" onclick="filterHistory('saved')" id="historyFilterSaved">Saved</button>
-                <button type="button" class="btn btn-outline-secondary" onclick="filterHistory('checkpoint')" id="historyFilterCheckpoint">Checkpoints</button>
+                <button type="button" class="btn btn-outline-secondary active" onclick="filterHistory('all')"
+                  id="historyFilterAll">All</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="filterHistory('saved')"
+                  id="historyFilterSaved">Saved</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="filterHistory('checkpoint')"
+                  id="historyFilterCheckpoint">Checkpoints</button>
               </div>
               <!-- History list -->
               <div id="historyList" class="history-list">
@@ -363,8 +367,12 @@
                 <!-- State A: No Key -->
                 <div id="apiKeyInputContainer">
                   <input type="password" class="form-control mb-2" id="apiKeyInput" placeholder="Enter API Key">
-                  <div class="form-text small mb-3">
-                    Stored locally in <code>.env</code>.
+                  <div class="form-text small mb-2">
+                    <i class="fas fa-lock me-1 text-success"></i>
+                    <strong>Securely encrypted</strong> at rest using AES-256 encryption.
+                  </div>
+                  <div class="form-text small mb-3 text-muted">
+                    Your API key is used to call Gemini models for idea generation.
                   </div>
                   <button class="btn btn-primary w-100" id="saveSettingsBtn">
                     <i class="fas fa-save me-2"></i>Save Key
@@ -400,9 +408,15 @@
 
       <!-- Main content area -->
       <div class="main-content" id="mainContent">
-        <div class="app-header main-header">
-          <img src="/static/img/logo.png" alt="App Logo" class="app-logo">
-          <h1>Open-Ended Idea Evolution</h1>
+        <div class="app-header main-header d-flex justify-content-between align-items-center">
+          <div class="d-flex align-items-center">
+            <img src="/static/img/logo.png" alt="App Logo" class="app-logo">
+            <h1>Open-Ended Idea Evolution</h1>
+          </div>
+          <!-- Auth container for sign-in button / user info -->
+          <div id="authContainer" class="d-flex align-items-center">
+            <!-- Will be populated by auth.js -->
+          </div>
         </div>
 
         <!-- Template Generation Entry Point -->
@@ -812,7 +826,10 @@
       document.getElementById('templateEntry').style.display = 'none';
 
       // Hide settings
-      document.getElementById('settingsSection').style.display = 'none';
+      const settingsSection = document.getElementById('settingsSection');
+      if (settingsSection) {
+        settingsSection.style.display = 'none';
+      }
 
       // Show new evolution button
       document.getElementById('newEvolutionBtn').style.display = 'inline-block';
@@ -1779,7 +1796,9 @@ Output: condensed list of basic elements, separated by semicolons"></textarea>
   </div>
 
   <!-- Include original viewer.js for evolution functionality -->
-  <script src="/static/js/viewer.js?v=2"></script>
+  <script src="/static/js/auth.js"></script>
+  <script src="/static/js/auth_logic.js?v=3"></script>
+  <script src="/static/js/viewer.js?v=3"></script>
 </body>
 
 </html>

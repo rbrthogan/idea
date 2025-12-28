@@ -27,14 +27,16 @@ class LLMWrapper(ABC):
                  prompt_template: str = "",
                  temperature: float = 1.0,
                  top_p: float = 0.95,
-                  agent_name: str = "",
-                  thinking_budget: Optional[int] = None):
+                 agent_name: str = "",
+                 thinking_budget: Optional[int] = None,
+                 api_key: Optional[str] = None):
         self.provider = provider
         self.model_name = model_name
         self.prompt_template = prompt_template
         self.temperature = temperature
         self.top_p = top_p
         self.thinking_budget = thinking_budget
+        self.api_key = api_key
         self.total_token_count = 0
         self.input_token_count = 0
         self.output_token_count = 0
@@ -47,13 +49,13 @@ class LLMWrapper(ABC):
 
     def _setup_provider(self):
         if self.provider == "google_generative_ai":
-            api_key = os.environ.get("GEMINI_API_KEY")
+            api_key = self.api_key or os.environ.get("GEMINI_API_KEY")
             if not api_key:
-                print("Warning: GEMINI_API_KEY not set")
+                print("Warning: GEMINI_API_KEY not set and no api_key provided")
 
             # Initialize client once
             with self._client_lock:
-                if self.client is None:
+                if self.client is None and api_key:
                     self.client = genai.Client(api_key=api_key)
         # Add other providers here
 
@@ -778,7 +780,8 @@ class Breeder(LLMWrapper):
             provider=self.provider,
             model_name=self.model_name,
             temperature=self.temperature,
-            top_p=self.top_p
+            top_p=self.top_p,
+            api_key=self.api_key
         )
 
         # Step 2: Sample 50% at random (handled in generate_context_from_parents)

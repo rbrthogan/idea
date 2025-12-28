@@ -50,6 +50,7 @@ class EvolutionEngine:
         thinking_budget: Optional[int] = None,
         max_budget: Optional[float] = None,
         mutation_rate: float = 0.2,
+        api_key: Optional[str] = None,
     ):
         self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
@@ -58,6 +59,8 @@ class EvolutionEngine:
         self.tournament_comparisons = tournament_comparisons
         self.thinking_budget = thinking_budget
         self.max_budget = max_budget
+        self.mutation_rate = mutation_rate
+        self.api_key = api_key
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
@@ -65,17 +68,17 @@ class EvolutionEngine:
         # Initialize LLM components with appropriate temperatures
         print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}, thinking_budget={thinking_budget}")
 
-        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
+        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
 
         # Always use 2.5 Flash for formatting as it has better instruction following for structured output
         # than 2.0 Flash or older models
-        self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-2.5-flash")
+        self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-2.5-flash", api_key=api_key)
 
         critic_model_name = "gemini-2.5-flash" if model_type == "gemini-2.5-pro" else model_type
-        self.critic = Critic(provider="google_generative_ai", model_name=critic_model_name, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
-        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, mutation_rate=mutation_rate)
+        self.critic = Critic(provider="google_generative_ai", model_name=critic_model_name, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
+        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, mutation_rate=mutation_rate, api_key=api_key)
 
-        self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget)
+        self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
 
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
@@ -397,7 +400,7 @@ class EvolutionEngine:
         return sorted(checkpoints, key=lambda x: x.get('time', ''), reverse=True)
 
     @classmethod
-    def load_evolution(cls, evolution_id: str) -> Optional['EvolutionEngine']:
+    def load_evolution(cls, evolution_id: str, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
         """
         Load an evolution engine from the unified evolutions directory.
         Returns a configured EvolutionEngine instance, or None on failure.
@@ -407,7 +410,7 @@ class EvolutionEngine:
             print(f"❌ Evolution not found: {evolution_path}")
             return None
 
-        return cls._load_from_file(evolution_path)
+        return cls._load_from_file(evolution_path, api_key=api_key)
 
     @classmethod
     def rename_evolution(cls, evolution_id: str, new_name: str) -> bool:
@@ -447,13 +450,13 @@ class EvolutionEngine:
             return False
 
     @classmethod
-    def _load_from_file(cls, file_path: Path) -> Optional['EvolutionEngine']:
+    def _load_from_file(cls, file_path: Path, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
         """Load evolution engine from a file path."""
         try:
             with open(file_path) as f:
                 state = json.load(f)
 
-            return cls._restore_from_state(state)
+            return cls._restore_from_state(state, api_key=api_key)
         except Exception as e:
             print(f"❌ Failed to load from {file_path}: {e}")
             import traceback
@@ -461,7 +464,7 @@ class EvolutionEngine:
             return None
 
     @classmethod
-    def _restore_from_state(cls, state: Dict[str, Any]) -> 'EvolutionEngine':
+    def _restore_from_state(cls, state: Dict[str, Any], api_key: Optional[str] = None) -> 'EvolutionEngine':
         """Restore an EvolutionEngine from a state dictionary."""
         config = state.get('config', {})
 
@@ -478,6 +481,7 @@ class EvolutionEngine:
             thinking_budget=config.get('thinking_budget'),
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
+            api_key=api_key,
         )
 
         # Restore evolution identity
@@ -533,7 +537,7 @@ class EvolutionEngine:
         return engine
 
     @classmethod
-    def load_checkpoint(cls, checkpoint_id: str) -> Optional['EvolutionEngine']:
+    def load_checkpoint(cls, checkpoint_id: str, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
         """
         Load an evolution engine from a checkpoint (legacy or new format).
         Tries unified evolutions first, then legacy checkpoints.
@@ -542,7 +546,7 @@ class EvolutionEngine:
         # First try unified evolutions directory
         evolution_path = EVOLUTIONS_DIR / f"{checkpoint_id}.json"
         if evolution_path.exists():
-            return cls._load_from_file(evolution_path)
+            return cls._load_from_file(evolution_path, api_key=api_key)
 
         # Fall back to legacy checkpoint directory
         checkpoint_path = CHECKPOINT_DIR / f"checkpoint_{checkpoint_id}.json"
@@ -551,7 +555,7 @@ class EvolutionEngine:
             return None
 
         # Use shared loading logic
-        return cls._load_from_file(checkpoint_path)
+        return cls._load_from_file(checkpoint_path, api_key=api_key)
 
     @classmethod
     def delete_checkpoint(cls, checkpoint_id: str) -> bool:

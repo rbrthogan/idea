@@ -21,6 +21,10 @@ from idea.llm import Critic
 from idea.config import LLM_MODELS, DEFAULT_MODEL, DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
 from idea.template_manager import router as template_router
 from idea.prompts.loader import list_available_templates
+from idea.admin import router as admin_router
+from idea.auth import require_auth, UserInfo
+from fastapi import Depends
+from idea import database as db
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -33,8 +37,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include template management routes
+# Include routers
 app.include_router(template_router)
+app.include_router(admin_router)
 
 # Mount static folder with custom config
 app.mount("/static", StaticFiles(directory="idea/static"), name="static")
@@ -45,8 +50,6 @@ templates = Jinja2Templates(directory="idea/static/html")
 # Global engine instance
 engine = None
 
-# (Removed duplicate definitions)
-
 # Add this near other constants
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -54,35 +57,6 @@ DATA_DIR.mkdir(exist_ok=True)
 # Unified evolutions directory
 EVOLUTIONS_DIR = Path("data/evolutions")
 EVOLUTIONS_DIR.mkdir(exist_ok=True)
-
-# --- API Key Management ---
-def load_api_key():
-    """Load API key from .env file if it exists"""
-    env_path = Path(".env")
-    if env_path.exists():
-        try:
-            with open(env_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("GEMINI_API_KEY="):
-                        key = line.split("=", 1)[1].strip()
-                        if key:
-                            os.environ["GEMINI_API_KEY"] = key
-                            print("Loaded GEMINI_API_KEY from .env file")
-                            return True
-        except Exception as e:
-            print(f"Error loading .env file: {e}")
-    return False
-
-# Load key at startup
-load_api_key()
-
-# Flag indicating whether the API key is available
-# We'll make this a function to always get the current state
-def is_api_key_missing():
-    return os.getenv("GEMINI_API_KEY") in (None, "")
-
-API_KEY_MISSING = is_api_key_missing()
 
 # Global queue for evolution updates
 evolution_queue = Queue()
@@ -111,80 +85,84 @@ class ApiKeyRequest(BaseModel):
 @app.get("/")
 def serve_viewer(request: Request):
     """Serves the viewer page"""
-    return templates.TemplateResponse("viewer.html", {"request": request, "api_key_missing": is_api_key_missing()})
+    return templates.TemplateResponse("viewer.html", {"request": request})
 
 @app.get("/rate")
 def serve_rater(request: Request):
     """Serves the rater page"""
-    return templates.TemplateResponse("rater.html", {"request": request, "api_key_missing": is_api_key_missing()})
+    return templates.TemplateResponse("rater.html", {"request": request})
+
+@app.get("/api/user/status")
+async def get_user_status(user: UserInfo = Depends(require_auth)):
+    """Get the status of the current user (e.g. has_api_key)"""
+    api_key = await db.get_user_api_key(user.uid)
+    return {
+        "has_api_key": api_key is not None
+    }
 
 @app.post("/api/settings/api-key")
-async def set_api_key(request: ApiKeyRequest):
-    """Save API key to .env file"""
+async def set_api_key(request: ApiKeyRequest, user: UserInfo = Depends(require_auth)):
+    """Save user's encoded API key"""
     api_key = request.api_key.strip()
     if not api_key:
         return JSONResponse({"status": "error", "message": "API key cannot be empty"}, status_code=400)
 
-    # Save to .env
-    env_path = Path(".env")
-    # Read existing lines to preserve other env vars if any
-    lines = []
-    if env_path.exists():
-        try:
-            with open(env_path, "r") as f:
-                lines = f.readlines()
-        except Exception as e:
-            print(f"Error reading .env: {e}")
-
-    # Update or append
-    key_found = False
-    new_lines = []
-    for line in lines:
-        if line.strip().startswith("GEMINI_API_KEY="):
-            new_lines.append(f"GEMINI_API_KEY={api_key}\n")
-            key_found = True
-        else:
-            new_lines.append(line)
-
-    if not key_found:
-        if new_lines and not new_lines[-1].endswith('\n'):
-            new_lines[-1] += '\n'
-        new_lines.append(f"GEMINI_API_KEY={api_key}\n")
-
     try:
-        with open(env_path, "w") as f:
-            f.writelines(new_lines)
+        await db.save_user_api_key(user.uid, api_key)
+        return JSONResponse({"status": "success", "message": "API Key saved successfully"})
     except Exception as e:
-        return JSONResponse({"status": "error", "message": f"Failed to write to .env: {str(e)}"}, status_code=500)
-
-    # Update current process env
-    os.environ["GEMINI_API_KEY"] = api_key
-
-    # Update global flag
-    global API_KEY_MISSING
-    API_KEY_MISSING = False
-
-    return JSONResponse({"status": "success", "message": "API key saved successfully"})
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.get("/api/settings/status")
-async def get_settings_status():
+async def get_settings_status(user: UserInfo = Depends(require_auth)):
     """Check if API key is set"""
-    is_missing = is_api_key_missing()
-    masked_key = None
-    if not is_missing:
-        key = os.environ.get("GEMINI_API_KEY", "")
-        if len(key) > 8:
-            masked_key = f"{key[:4]}...{key[-4:]}"
-        else:
-            masked_key = "***"
+    try:
+        api_key = await db.get_user_api_key(user.uid)
+        is_missing = api_key is None
+        masked_key = None
+        if not is_missing:
+            if len(api_key) > 8:
+                masked_key = f"{api_key[:4]}...{api_key[-4:]}"
+            else:
+                masked_key = "***"
 
-    return JSONResponse({
-        "api_key_missing": is_missing,
-        "masked_key": masked_key,
-        "api_key": key if not is_missing else None
-    })
+        return JSONResponse({
+            "api_key_missing": is_missing,
+            "masked_key": masked_key,
+            "api_key": api_key,
+            "is_admin": user.is_admin,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({
+            "status": "error",
+            "message": f"Internal Server Error: {str(e)}"
+        }, status_code=500)
 
 
+
+@app.get("/api/debug/auth")
+async def debug_auth(user: UserInfo = Depends(require_auth)):
+    """Debug endpoint to verify auth and user info."""
+    return {"status": "ok", "user": user.to_dict()}
+
+@app.get("/api/debug/db")
+
+async def debug_db(user: UserInfo = Depends(require_auth)):
+    """Debug endpoint to verify database connection."""
+    try:
+        # Test basic DB read
+        key = await db.get_user_api_key(user.uid)
+        return {"status": "ok", "key_present": key is not None}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }, status_code=500)
 
 @app.get("/api/template-types")
 async def get_template_types():
@@ -232,144 +210,156 @@ def get_default_template_id():
         return 'airesearch'
 
 @app.post("/api/start-evolution")
-async def start_evolution(request: Request):
+async def start_evolution(request: Request, user: UserInfo = Depends(require_auth)):
     """
     Runs the complete evolution and returns the final results
     """
     global engine, evolution_status, evolution_queue, latest_evolution_data
 
-    if is_api_key_missing():
-        return JSONResponse(
-            {"status": "error", "message": "GEMINI_API_KEY not configured"},
-            status_code=400,
+    try:
+        # Check for API key in DB
+        api_key = await db.get_user_api_key(user.uid)
+        if not api_key:
+            return JSONResponse(
+                {"status": "error", "message": "API Key not configured. Please set it in Settings."},
+                status_code=400,
+            )
+
+        data = await request.json()
+        print(f"Received request data: {data}")
+
+        # Clear the latest evolution data when starting a new evolution
+        latest_evolution_data = []
+
+        pop_size = int(data.get('popSize', 3))
+        generations = int(data.get('generations', 2))
+        idea_type = data.get('ideaType', get_default_template_id())
+        model_type = data.get('modelType', 'gemini-2.0-flash-lite')
+
+        # Get creative and tournament parameters with defaults
+        try:
+            creative_temp = float(data.get('creativeTemp', DEFAULT_CREATIVE_TEMP))
+            top_p = float(data.get('topP', DEFAULT_TOP_P))
+            print(f"Parsed creative values: temp={creative_temp}, top_p={top_p}")
+        except ValueError as e:
+            print(f"Error parsing creative values: {e}")
+            # Use defaults if parsing fails
+            creative_temp = DEFAULT_CREATIVE_TEMP
+            top_p = DEFAULT_TOP_P
+
+        # Get tournament parameters with defaults
+        try:
+            tournament_size = int(data.get('tournamentSize', 5))
+            tournament_comparisons = int(data.get('tournamentComparisons', 35))
+            print(f"Parsed tournament values: size={tournament_size}, comparisons={tournament_comparisons}")
+        except ValueError as e:
+            print(f"Error parsing tournament values: {e}")
+            # Use defaults if parsing fails
+            tournament_size = 5
+            tournament_comparisons = 35
+
+        # Get mutation rate with default
+        try:
+            mutation_rate = float(data.get('mutationRate', 0.2))
+            print(f"Parsed mutation rate: {mutation_rate}")
+        except ValueError as e:
+            print(f"Error parsing mutation rate: {e}")
+            mutation_rate = 0.2
+
+        # Get Oracle parameters with defaults
+
+        # Get thinking budget parameter (only for Gemini 2.5 models)
+        thinking_budget = data.get('thinkingBudget')
+        if thinking_budget is not None:
+            thinking_budget = int(thinking_budget)
+            print(f"Parsed thinking budget: {thinking_budget}")
+        else:
+            print("No thinking budget specified (non-2.5 model or not set)")
+
+        # Get max budget parameter
+        max_budget = data.get('maxBudget')
+        if max_budget is not None:
+            try:
+                max_budget = float(max_budget)
+                print(f"Parsed max budget: ${max_budget}")
+            except ValueError:
+                print(f"Error parsing max budget: {max_budget}")
+                max_budget = None
+        else:
+            print("No max budget specified")
+
+        print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
+              f"idea_type={idea_type}, model_type={model_type}, "
+              f"creative_temp={creative_temp}, top_p={top_p}, "
+              f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
+              f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
+
+        # Create and run evolution with specified parameters
+        engine = EvolutionEngine(
+            pop_size=pop_size,
+            generations=generations,
+            idea_type=idea_type,
+            model_type=model_type,
+            creative_temp=creative_temp,
+            top_p=top_p,
+            tournament_size=tournament_size,
+            tournament_comparisons=tournament_comparisons,
+            mutation_rate=mutation_rate,
+            thinking_budget=thinking_budget,
+            max_budget=max_budget,
+            api_key=api_key,
         )
 
-    data = await request.json()
-    print(f"Received request data: {data}")
+        # Initialize evolution with name (auto-generates if not provided)
+        evolution_name = (data.get('evolutionName') or '').strip() or None
+        engine.initialize_evolution(name=evolution_name)
+        print(f"Evolution initialized: '{engine.evolution_name}' (ID: {engine.evolution_id})")
 
-    # Clear the latest evolution data when starting a new evolution
-    latest_evolution_data = []
+        # Generate contexts for each idea
+        contexts = engine.generate_contexts()
 
-    pop_size = int(data.get('popSize', 3))
-    generations = int(data.get('generations', 2))
-    idea_type = data.get('ideaType', get_default_template_id())
-    model_type = data.get('modelType', 'gemini-2.0-flash-lite')
+        # Clear the queue
+        while not evolution_queue.empty():
+            try:
+                evolution_queue.get_nowait()
+            except:
+                break
 
-    # Get creative and tournament parameters with defaults
-    try:
-        creative_temp = float(data.get('creativeTemp', DEFAULT_CREATIVE_TEMP))
-        top_p = float(data.get('topP', DEFAULT_TOP_P))
-        print(f"Parsed creative values: temp={creative_temp}, top_p={top_p}")
-    except ValueError as e:
-        print(f"Error parsing creative values: {e}")
-        # Use defaults if parsing fails
-        creative_temp = DEFAULT_CREATIVE_TEMP
-        top_p = DEFAULT_TOP_P
+        # Set up evolution status
+        evolution_status = {
+            "current_generation": 0,
+            "total_generations": generations,
+            "is_running": True,
+            "history": [],
+            "contexts": contexts,
+            "progress": 0
+        }
 
-    # Get tournament parameters with defaults
-    try:
-        tournament_size = int(data.get('tournamentSize', 5))
-        tournament_comparisons = int(data.get('tournamentComparisons', 35))
-        print(f"Parsed tournament values: size={tournament_size}, comparisons={tournament_comparisons}")
-    except ValueError as e:
-        print(f"Error parsing tournament values: {e}")
-        # Use defaults if parsing fails
-        tournament_size = 5
-        tournament_comparisons = 35
+        # Put initial status in queue
+        await evolution_queue.put(evolution_status.copy())
 
-    # Get mutation rate with default
-    try:
-        mutation_rate = float(data.get('mutationRate', 0.2))
-        print(f"Parsed mutation rate: {mutation_rate}")
-    except ValueError as e:
-        print(f"Error parsing mutation rate: {e}")
-        mutation_rate = 0.2
+        # Start evolution in background task
+        asyncio.create_task(run_evolution_task(engine))
 
-    # Get Oracle parameters with defaults
-
-    # Get thinking budget parameter (only for Gemini 2.5 models)
-    thinking_budget = data.get('thinkingBudget')
-    if thinking_budget is not None:
-        thinking_budget = int(thinking_budget)
-        print(f"Parsed thinking budget: {thinking_budget}")
-    else:
-        print("No thinking budget specified (non-2.5 model or not set)")
-
-    # Get max budget parameter
-    max_budget = data.get('maxBudget')
-    if max_budget is not None:
-        try:
-            max_budget = float(max_budget)
-            print(f"Parsed max budget: ${max_budget}")
-        except ValueError:
-            print(f"Error parsing max budget: {max_budget}")
-            max_budget = None
-    else:
-        print("No max budget specified")
-
-    print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
-          f"idea_type={idea_type}, model_type={model_type}, "
-          f"creative_temp={creative_temp}, top_p={top_p}, "
-          f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
-
-    # Create and run evolution with specified parameters
-    engine = EvolutionEngine(
-        pop_size=pop_size,
-        generations=generations,
-        idea_type=idea_type,
-        model_type=model_type,
-        creative_temp=creative_temp,
-        top_p=top_p,
-        tournament_size=tournament_size,
-        tournament_comparisons=tournament_comparisons,
-        mutation_rate=mutation_rate,
-        thinking_budget=thinking_budget,
-        max_budget=max_budget,
-    )
-
-    # Initialize evolution with name (auto-generates if not provided)
-    evolution_name = data.get('evolutionName', '').strip() or None
-    engine.initialize_evolution(name=evolution_name)
-    print(f"Evolution initialized: '{engine.evolution_name}' (ID: {engine.evolution_id})")
-
-    # Generate contexts for each idea
-    contexts = engine.generate_contexts()
-
-    # Clear the queue
-    while not evolution_queue.empty():
-        try:
-            evolution_queue.get_nowait()
-        except:
-            break
-
-    # Set up evolution status
-    evolution_status = {
-        "current_generation": 0,
-        "total_generations": generations,
-        "is_running": True,
-        "history": [],
-        "contexts": contexts,
-        "progress": 0
-    }
-
-    # Put initial status in queue
-    await evolution_queue.put(evolution_status.copy())
-
-    # Start evolution in background task
-    asyncio.create_task(run_evolution_task(engine))
-
-    return JSONResponse({
-        "status": "success",
-        "message": "Evolution started",
-        "evolution_id": engine.evolution_id,
-        "evolution_name": engine.evolution_name,
-        "contexts": contexts,
-        "specific_prompts": []  # Will be populated as evolution progresses
-    })
+        return JSONResponse({
+            "status": "success",
+            "message": "Evolution started",
+            "evolution_id": engine.evolution_id,
+            "evolution_name": engine.evolution_name,
+            "contexts": contexts,
+            "specific_prompts": []  # Will be populated as evolution progresses
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }, status_code=500)
 
 @app.post("/api/stop-evolution")
-async def stop_evolution():
+async def stop_evolution(user: UserInfo = Depends(require_auth)):
     """
     Request the evolution to stop gracefully
     """
@@ -390,7 +380,7 @@ async def stop_evolution():
     })
 
 @app.post("/api/force-stop-evolution")
-async def force_stop_evolution():
+async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
     """
     Force stop the evolution immediately, saving a checkpoint for later resumption.
     Use this when the graceful stop is taking too long.
@@ -497,15 +487,17 @@ async def delete_checkpoint(checkpoint_id: str):
         }, status_code=500)
 
 @app.post("/api/resume-evolution")
-async def resume_evolution(request: Request):
+async def resume_evolution(request: Request, user: UserInfo = Depends(require_auth)):
     """
     Resume an evolution from a checkpoint.
     """
     global engine, evolution_status, evolution_queue, latest_evolution_data
 
-    if is_api_key_missing():
+    # Check for API key in DB
+    api_key = await db.get_user_api_key(user.uid)
+    if not api_key:
         return JSONResponse(
-            {"status": "error", "message": "GEMINI_API_KEY not configured"},
+            {"status": "error", "message": "API Key not configured."},
             status_code=400,
         )
 
@@ -521,7 +513,7 @@ async def resume_evolution(request: Request):
     print(f"Resuming evolution from checkpoint: {checkpoint_id}")
 
     # Load the engine from checkpoint
-    engine = EvolutionEngine.load_checkpoint(checkpoint_id)
+    engine = EvolutionEngine.load_checkpoint(checkpoint_id, api_key=api_key)
     if engine is None:
         return JSONResponse(
             {"status": "error", "message": "Failed to load checkpoint"},
@@ -568,16 +560,18 @@ async def resume_evolution(request: Request):
     })
 
 @app.post("/api/continue-evolution")
-async def continue_evolution(request: Request):
+async def continue_evolution(request: Request, user: UserInfo = Depends(require_auth)):
     """
     Continue a completed evolution for additional generations.
     This can work with either a checkpoint or a saved evolution file.
     """
     global engine, evolution_status, evolution_queue, latest_evolution_data
 
-    if is_api_key_missing():
+    # Check for API key in DB
+    api_key = await db.get_user_api_key(user.uid)
+    if not api_key:
         return JSONResponse(
-            {"status": "error", "message": "GEMINI_API_KEY not configured"},
+            {"status": "error", "message": "API Key not configured."},
             status_code=400,
         )
 
@@ -597,10 +591,10 @@ async def continue_evolution(request: Request):
 
     # Load the engine
     if checkpoint_id:
-        engine = EvolutionEngine.load_checkpoint(checkpoint_id)
+        engine = EvolutionEngine.load_checkpoint(checkpoint_id, api_key=api_key)
     else:
         # Load from evolution file and create a checkpoint
-        engine = await load_engine_from_evolution(evolution_id)
+        engine = await load_engine_from_evolution(evolution_id, api_key=api_key)
 
     if engine is None:
         return JSONResponse(
@@ -649,16 +643,18 @@ async def continue_evolution(request: Request):
     })
 
 @app.post("/api/continue-saved-evolution")
-async def continue_saved_evolution(request: Request):
+async def continue_saved_evolution(request: Request, user: UserInfo = Depends(require_auth)):
     """
     Continue a saved evolution (from data/*.json) for additional generations.
     This creates a checkpoint from the saved file and then continues.
     """
     global engine, evolution_status, evolution_queue, latest_evolution_data
 
-    if is_api_key_missing():
+    # Check for API key in DB
+    api_key = await db.get_user_api_key(user.uid)
+    if not api_key:
         return JSONResponse(
-            {"status": "error", "message": "GEMINI_API_KEY not configured"},
+            {"status": "error", "message": "API Key not configured."},
             status_code=400,
         )
 
@@ -675,7 +671,7 @@ async def continue_saved_evolution(request: Request):
     print(f"Continuing saved evolution '{evolution_id}' for {additional_generations} more generations")
 
     # Load from evolution file and create engine
-    engine = await load_engine_from_evolution(evolution_id)
+    engine = await load_engine_from_evolution(evolution_id, api_key=api_key)
 
     if engine is None:
         return JSONResponse(
@@ -724,12 +720,19 @@ async def continue_saved_evolution(request: Request):
         "specific_prompts": engine.specific_prompts
     })
 
-async def load_engine_from_evolution(evolution_id: str) -> Optional[EvolutionEngine]:
+async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] = None) -> Optional[EvolutionEngine]:
     """
     Create an EvolutionEngine from a saved evolution file.
     This allows continuing evolutions that weren't saved as checkpoints.
     """
     try:
+        # Try unified evolutions first
+        # EvolutionEngine can handle loading from file path now
+        engine = EvolutionEngine.load_evolution(evolution_id, api_key=api_key)
+        if engine:
+            return engine
+
+        # Fallback for manual loading if needed (legacy files)
         file_path = DATA_DIR / f"{evolution_id}.json"
         if not file_path.exists():
             print(f"Evolution file not found: {file_path}")
@@ -760,6 +763,7 @@ async def load_engine_from_evolution(evolution_id: str) -> Optional[EvolutionEng
             thinking_budget=config.get('thinking_budget'),
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
+            api_key=api_key,
         )
 
         # Restore state from the saved evolution
@@ -2296,27 +2300,10 @@ async def debug_idea_state(evolution_id: str, idea_id: str):
 
 # Run the server
 @app.delete("/api/settings/api-key")
-async def delete_api_key():
-    """Delete the API key from .env and environment variables"""
+async def delete_api_key(user: UserInfo = Depends(require_auth)):
+    """Delete the API key for the user"""
     try:
-        # Remove from environment
-        if "GEMINI_API_KEY" in os.environ:
-            del os.environ["GEMINI_API_KEY"]
-
-        # Remove from .env file
-        env_path = Path(".env")
-        if env_path.exists():
-            # Read all lines
-            with open(env_path, "r") as f:
-                lines = f.readlines()
-
-            # Filter out the key
-            new_lines = [line for line in lines if not line.strip().startswith("GEMINI_API_KEY=")]
-
-            # Write back
-            with open(env_path, "w") as f:
-                f.writelines(new_lines)
-
+        await db.delete_user_api_key(user.uid)
         return JSONResponse({"status": "success", "message": "API Key deleted successfully"})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)

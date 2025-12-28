@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin Dashboard - Idea Evolution</title>
+
+    <link rel="icon" href="/static/img/favicon.ico" type="image/x-icon">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <link rel="stylesheet" href="/static/css/viewer.css" />
+
+    <style>
+        .stat-card {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .stat-card .stat-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+        }
+
+        .stat-card .stat-label {
+            opacity: 0.9;
+            font-size: 0.875rem;
+        }
+
+        .user-table {
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        }
+
+        .user-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+        }
+
+        .badge-active {
+            background: #28a745;
+        }
+
+        .badge-inactive {
+            background: #6c757d;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container-fluid py-4">
+        <div class="row mb-4">
+            <div class="col">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h1><i class="fas fa-shield-alt me-2"></i>Admin Dashboard</h1>
+                        <p class="text-muted mb-0">Monitor platform activity and user statistics</p>
+                    </div>
+                    <a href="/" class="btn btn-outline-secondary">
+                        <i class="fas fa-arrow-left me-2"></i>Back to App
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="row mb-4" id="statsContainer">
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="stat-value" id="totalUsers">--</div>
+                    <div class="stat-label">Total Users</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%);">
+                    <div class="stat-value" id="activeUsers">--</div>
+                    <div class="stat-label">Users with API Key</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card" style="background: linear-gradient(135deg, #6f42c1 0%, #e83e8c 100%);">
+                    <div class="stat-value" id="totalEvolutions">--</div>
+                    <div class="stat-label">Total Evolutions</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card" style="background: linear-gradient(135deg, #fd7e14 0%, #ffc107 100%);">
+                    <div class="stat-value" id="totalCheckpoints">--</div>
+                    <div class="stat-label">Total Checkpoints</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Users Table -->
+        <div class="row">
+            <div class="col">
+                <div class="user-table">
+                    <div class="p-3 border-bottom d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-users me-2"></i>Users</h5>
+                        <button class="btn btn-sm btn-outline-primary" onclick="loadStats()">
+                            <i class="fas fa-sync-alt me-1"></i>Refresh
+                        </button>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>User ID</th>
+                                    <th>Evolutions</th>
+                                    <th>Checkpoints</th>
+                                    <th>API Key</th>
+                                    <th>Last Activity</th>
+                                </tr>
+                            </thead>
+                            <tbody id="usersTableBody">
+                                <tr>
+                                    <td colspan="5" class="text-center py-4">
+                                        <i class="fas fa-spinner fa-spin me-2"></i>Loading...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
+    <script src="/static/js/auth.js"></script>
+    <script src="/static/js/auth_logic.js"></script>
+
+    <script>
+        // auth_logic.js will automatically inject the token into fetch requests
+
+        async function loadStats() {
+            try {
+                // Wait for auth to be ready
+                if (!window.currentUser) {
+                    console.log("Waiting for auth...");
+                    setTimeout(loadStats, 500);
+                    return;
+                }
+
+                const response = await fetch('/admin/api/stats'); // fetch is monkey-patched
+
+                if (response.status === 403) {
+                    document.body.innerHTML = '<div class="container py-5"><div class="alert alert-danger"><h4>Access Denied</h4><p>You do not have admin privileges.</p><a href="/" class="btn btn-primary">Return Home</a></div></div>';
+                    return;
+                }
+
+                const data = await response.json();
+                if (data.status === 'success') {
+                    document.getElementById('totalUsers').textContent = data.stats.total_users;
+                    document.getElementById('activeUsers').textContent = data.stats.users_with_api_key;
+                    document.getElementById('totalEvolutions').textContent = data.stats.total_evolutions;
+                    document.getElementById('totalCheckpoints').textContent = data.stats.total_checkpoints;
+                }
+            } catch (e) {
+                console.error('Failed to load stats:', e);
+            }
+        }
+
+        async function loadUsers() {
+            try {
+                if (!window.currentUser) {
+                    setTimeout(loadUsers, 500);
+                    return;
+                }
+
+                const response = await fetch('/admin/api/users');
+
+                if (!response.ok) return;
+
+                const data = await response.json();
+                const tbody = document.getElementById('usersTableBody');
+
+                if (data.users.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-muted">No users yet</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.users.map(user => `
+          <tr>
+            <td><code class="small">${user.user_id.substring(0, 12)}...</code></td>
+            <td><span class="badge bg-primary">${user.evolution_count}</span></td>
+            <td><span class="badge bg-secondary">${user.checkpoint_count}</span></td>
+            <td>
+              ${user.has_api_key
+                        ? '<span class="badge badge-active"><i class="fas fa-check"></i> Set</span>'
+                        : '<span class="badge badge-inactive">Not set</span>'}
+            </td>
+            <td class="text-muted small">${user.last_activity ? new Date(user.last_activity).toLocaleDateString() : '--'}</td>
+          </tr>
+        `).join('');
+            } catch (e) {
+                console.error('Failed to load users:', e);
+            }
+        }
+
+        // Initialize when auth is ready (handled by auth_logic.js observer or timeout fallback)
+        // We'll use a polling check for simplicity since auth_logic.js doesn't emit a custom event yet
+        document.addEventListener('DOMContentLoaded', () => {
+             // Let auth_logic run first
+             setTimeout(() => {
+                 loadStats();
+                 loadUsers();
+             }, 1000);
+        });
+    </script>
+</body>
+
+</html>
