@@ -74,7 +74,7 @@ terraform apply -target=google_artifact_registry_repository.repo \
 
 # 2. Configure Firebase in Frontend
 echo -e "${BLUE}Configuring Frontend...${NC}"
-FIREBASE_CONFIG=$(terraform output -json firebase_config_json)
+FIREBASE_CONFIG=$(terraform output -raw firebase_config_json)
 
 # Go back to root
 cd ..

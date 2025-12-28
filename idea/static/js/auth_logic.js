@@ -41,7 +41,7 @@ if (!loginOverlay) {
     loginOverlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
         background: rgba(255, 255, 255, 0.98); z-index: 10000;
-        display: none; flex-direction: column; justify-content: center; align-items: center;
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
         backdrop-filter: blur(10px);
     `;
     loginOverlay.innerHTML = `
