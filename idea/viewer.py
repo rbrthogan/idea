@@ -25,6 +25,7 @@ from idea.admin import router as admin_router
 from idea.auth import require_auth, UserInfo
 from fastapi import Depends
 from idea import database as db
+from idea.user_state import user_states, UserEvolutionState
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -47,9 +48,6 @@ app.mount("/static", StaticFiles(directory="idea/static"), name="static")
 # Templates
 templates = Jinja2Templates(directory="idea/static/html")
 
-# Global engine instance
-engine = None
-
 # Add this near other constants
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -58,17 +56,6 @@ DATA_DIR.mkdir(exist_ok=True)
 EVOLUTIONS_DIR = Path("data/evolutions")
 EVOLUTIONS_DIR.mkdir(exist_ok=True)
 
-# Global queue for evolution updates
-evolution_queue = Queue()
-evolution_status = {
-    "current_generation": 0,
-    "total_generations": 0,
-    "is_running": False,
-    "history": []
-}
-
-# Store the latest evolution data for rating
-latest_evolution_data = []
 
 # Add this class for the request body
 class SaveEvolutionRequest(BaseModel):
@@ -214,9 +201,17 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
     """
     Runs the complete evolution and returns the final results
     """
-    global engine, evolution_status, evolution_queue, latest_evolution_data
-
     try:
+        # Get user-specific state
+        state = await user_states.get(user.uid)
+
+        # Check if this user already has an evolution running
+        if state.status.get("is_running"):
+            return JSONResponse(
+                {"status": "error", "message": "You already have an evolution running. Please wait for it to complete or stop it first."},
+                status_code=409,
+            )
+
         # Check for API key in DB
         api_key = await db.get_user_api_key(user.uid)
         if not api_key:
@@ -229,7 +224,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
         print(f"Received request data: {data}")
 
         # Clear the latest evolution data when starting a new evolution
-        latest_evolution_data = []
+        state.latest_data = []
 
         pop_size = int(data.get('popSize', 3))
         generations = int(data.get('generations', 2))
@@ -295,7 +290,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
               f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
 
         # Create and run evolution with specified parameters
-        engine = EvolutionEngine(
+        state.engine = EvolutionEngine(
             pop_size=pop_size,
             generations=generations,
             idea_type=idea_type,
@@ -312,21 +307,17 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
 
         # Initialize evolution with name (auto-generates if not provided)
         evolution_name = (data.get('evolutionName') or '').strip() or None
-        engine.initialize_evolution(name=evolution_name)
-        print(f"Evolution initialized: '{engine.evolution_name}' (ID: {engine.evolution_id})")
+        state.engine.initialize_evolution(name=evolution_name)
+        print(f"Evolution initialized: '{state.engine.evolution_name}' (ID: {state.engine.evolution_id})")
 
         # Generate contexts for each idea
-        contexts = engine.generate_contexts()
+        contexts = state.engine.generate_contexts()
 
         # Clear the queue
-        while not evolution_queue.empty():
-            try:
-                evolution_queue.get_nowait()
-            except:
-                break
+        state.reset_queue()
 
         # Set up evolution status
-        evolution_status = {
+        state.status = {
             "current_generation": 0,
             "total_generations": generations,
             "is_running": True,
@@ -336,16 +327,16 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
         }
 
         # Put initial status in queue
-        await evolution_queue.put(evolution_status.copy())
+        await state.queue.put(state.status.copy())
 
         # Start evolution in background task
-        asyncio.create_task(run_evolution_task(engine))
+        asyncio.create_task(run_evolution_task(state))
 
         return JSONResponse({
             "status": "success",
             "message": "Evolution started",
-            "evolution_id": engine.evolution_id,
-            "evolution_name": engine.evolution_name,
+            "evolution_id": state.engine.evolution_id,
+            "evolution_name": state.engine.evolution_name,
             "contexts": contexts,
             "specific_prompts": []  # Will be populated as evolution progresses
         })
@@ -363,16 +354,16 @@ async def stop_evolution(user: UserInfo = Depends(require_auth)):
     """
     Request the evolution to stop gracefully
     """
-    global engine
+    state = await user_states.get(user.uid)
 
-    if engine is None:
+    if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": "No evolution is currently running"},
             status_code=400,
         )
 
     # Request stop
-    engine.stop_evolution()
+    state.engine.stop_evolution()
 
     return JSONResponse({
         "status": "success",
@@ -385,9 +376,9 @@ async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
     Force stop the evolution immediately, saving a checkpoint for later resumption.
     Use this when the graceful stop is taking too long.
     """
-    global engine, evolution_status
+    state = await user_states.get(user.uid)
 
-    if engine is None:
+    if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": "No evolution is currently running"},
             status_code=400,
@@ -396,20 +387,20 @@ async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
     # Save checkpoint before forcing stop
     checkpoint_id = None
     try:
-        engine.save_checkpoint(status='force_stopped')
-        checkpoint_id = engine.checkpoint_id
+        state.engine.save_checkpoint(status='force_stopped')
+        checkpoint_id = state.engine.checkpoint_id
     except Exception as e:
         print(f"Warning: Failed to save checkpoint during force stop: {e}")
 
     # Mark as stopped
-    engine.stop_requested = True
-    engine.is_stopped = True
+    state.engine.stop_requested = True
+    state.engine.is_stopped = True
 
     # Update status
-    evolution_status["is_running"] = False
-    evolution_status["is_stopped"] = True
-    evolution_status["is_resumable"] = True
-    evolution_status["checkpoint_id"] = checkpoint_id
+    state.status["is_running"] = False
+    state.status["is_stopped"] = True
+    state.status["is_resumable"] = True
+    state.status["checkpoint_id"] = checkpoint_id
 
     return JSONResponse({
         "status": "success",
@@ -491,7 +482,15 @@ async def resume_evolution(request: Request, user: UserInfo = Depends(require_au
     """
     Resume an evolution from a checkpoint.
     """
-    global engine, evolution_status, evolution_queue, latest_evolution_data
+    # Get user-specific state
+    state = await user_states.get(user.uid)
+
+    # Check if already running
+    if state.status.get("is_running"):
+        return JSONResponse(
+            {"status": "error", "message": "You already have an evolution running."},
+            status_code=409,
+        )
 
     # Check for API key in DB
     api_key = await db.get_user_api_key(user.uid)
@@ -513,50 +512,46 @@ async def resume_evolution(request: Request, user: UserInfo = Depends(require_au
     print(f"Resuming evolution from checkpoint: {checkpoint_id}")
 
     # Load the engine from checkpoint
-    engine = EvolutionEngine.load_checkpoint(checkpoint_id, api_key=api_key)
-    if engine is None:
+    state.engine = EvolutionEngine.load_checkpoint(checkpoint_id, api_key=api_key)
+    if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": "Failed to load checkpoint"},
             status_code=500,
         )
 
     # Clear the queue
-    while not evolution_queue.empty():
-        try:
-            evolution_queue.get_nowait()
-        except:
-            break
+    state.reset_queue()
 
     # Set up evolution status
-    evolution_status = {
-        "current_generation": engine.current_generation,
-        "total_generations": engine.generations,
+    state.status = {
+        "current_generation": state.engine.current_generation,
+        "total_generations": state.engine.generations,
         "is_running": True,
         "is_resuming": True,
         "checkpoint_id": checkpoint_id,
-        "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
-        "contexts": engine.contexts,
-        "specific_prompts": engine.specific_prompts,
-        "breeding_prompts": engine.breeding_prompts,
-        "progress": (engine.current_generation / engine.generations) * 100 if engine.generations > 0 else 0
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts,
+        "breeding_prompts": state.engine.breeding_prompts,
+        "progress": (state.engine.current_generation / state.engine.generations) * 100 if state.engine.generations > 0 else 0
     }
 
     # Put initial status in queue
-    await evolution_queue.put(evolution_status.copy())
+    await state.queue.put(state.status.copy())
 
     # Start evolution in background task
-    asyncio.create_task(run_resume_evolution_task(engine))
+    asyncio.create_task(run_resume_evolution_task(state))
 
     return JSONResponse({
         "status": "success",
-        "message": f"Resuming from generation {engine.current_generation}/{engine.generations}",
+        "message": f"Resuming from generation {state.engine.current_generation}/{state.engine.generations}",
         "checkpoint_id": checkpoint_id,
-        "evolution_id": engine.evolution_id,
-        "evolution_name": engine.evolution_name,
-        "current_generation": engine.current_generation,
-        "total_generations": engine.generations,
-        "contexts": engine.contexts,
-        "specific_prompts": engine.specific_prompts
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "current_generation": state.engine.current_generation,
+        "total_generations": state.engine.generations,
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts
     })
 
 @app.post("/api/continue-evolution")
@@ -565,7 +560,15 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
     Continue a completed evolution for additional generations.
     This can work with either a checkpoint or a saved evolution file.
     """
-    global engine, evolution_status, evolution_queue, latest_evolution_data
+    # Get user-specific state
+    state = await user_states.get(user.uid)
+
+    # Check if already running
+    if state.status.get("is_running"):
+        return JSONResponse(
+            {"status": "error", "message": "You already have an evolution running."},
+            status_code=409,
+        )
 
     # Check for API key in DB
     api_key = await db.get_user_api_key(user.uid)
@@ -591,55 +594,51 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
 
     # Load the engine
     if checkpoint_id:
-        engine = EvolutionEngine.load_checkpoint(checkpoint_id, api_key=api_key)
+        state.engine = EvolutionEngine.load_checkpoint(checkpoint_id, api_key=api_key)
     else:
         # Load from evolution file and create a checkpoint
-        engine = await load_engine_from_evolution(evolution_id, api_key=api_key)
+        state.engine = await load_engine_from_evolution(evolution_id, api_key=api_key)
 
-    if engine is None:
+    if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": "Failed to load evolution state"},
             status_code=500,
         )
 
     # Clear the queue
-    while not evolution_queue.empty():
-        try:
-            evolution_queue.get_nowait()
-        except:
-            break
+    state.reset_queue()
 
     # Set up evolution status
-    new_total = engine.generations + additional_generations
-    evolution_status = {
-        "current_generation": engine.current_generation,
+    new_total = state.engine.generations + additional_generations
+    state.status = {
+        "current_generation": state.engine.current_generation,
         "total_generations": new_total,
         "is_running": True,
         "is_continuing": True,
-        "checkpoint_id": engine.checkpoint_id,
-        "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
-        "contexts": engine.contexts,
-        "specific_prompts": engine.specific_prompts,
-        "breeding_prompts": engine.breeding_prompts,
-        "progress": (engine.current_generation / new_total) * 100 if new_total > 0 else 0
+        "checkpoint_id": state.engine.checkpoint_id,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts,
+        "breeding_prompts": state.engine.breeding_prompts,
+        "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0
     }
 
     # Put initial status in queue
-    await evolution_queue.put(evolution_status.copy())
+    await state.queue.put(state.status.copy())
 
     # Start evolution in background task with additional generations
-    asyncio.create_task(run_continue_evolution_task(engine, additional_generations))
+    asyncio.create_task(run_continue_evolution_task(state, additional_generations))
 
     return JSONResponse({
         "status": "success",
         "message": f"Continuing for {additional_generations} more generations",
-        "checkpoint_id": engine.checkpoint_id,
-        "evolution_id": engine.evolution_id,
-        "evolution_name": engine.evolution_name,
-        "current_generation": engine.current_generation,
+        "checkpoint_id": state.engine.checkpoint_id,
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "current_generation": state.engine.current_generation,
         "total_generations": new_total,
-        "contexts": engine.contexts,
-        "specific_prompts": engine.specific_prompts
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts
     })
 
 @app.post("/api/continue-saved-evolution")
@@ -648,7 +647,15 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
     Continue a saved evolution (from data/*.json) for additional generations.
     This creates a checkpoint from the saved file and then continues.
     """
-    global engine, evolution_status, evolution_queue, latest_evolution_data
+    # Get user-specific state
+    state = await user_states.get(user.uid)
+
+    # Check if already running
+    if state.status.get("is_running"):
+        return JSONResponse(
+            {"status": "error", "message": "You already have an evolution running."},
+            status_code=409,
+        )
 
     # Check for API key in DB
     api_key = await db.get_user_api_key(user.uid)
@@ -671,53 +678,49 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
     print(f"Continuing saved evolution '{evolution_id}' for {additional_generations} more generations")
 
     # Load from evolution file and create engine
-    engine = await load_engine_from_evolution(evolution_id, api_key=api_key)
+    state.engine = await load_engine_from_evolution(evolution_id, api_key=api_key)
 
-    if engine is None:
+    if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": f"Failed to load evolution '{evolution_id}'"},
             status_code=500,
         )
 
     # Clear the queue
-    while not evolution_queue.empty():
-        try:
-            evolution_queue.get_nowait()
-        except:
-            break
+    state.reset_queue()
 
     # Set up evolution status
-    new_total = engine.generations + additional_generations
-    evolution_status = {
-        "current_generation": engine.current_generation,
+    new_total = state.engine.generations + additional_generations
+    state.status = {
+        "current_generation": state.engine.current_generation,
         "total_generations": new_total,
         "is_running": True,
         "is_continuing": True,
-        "checkpoint_id": engine.checkpoint_id,
-        "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
-        "contexts": engine.contexts,
-        "specific_prompts": engine.specific_prompts,
-        "breeding_prompts": engine.breeding_prompts,
-        "progress": (engine.current_generation / new_total) * 100 if new_total > 0 else 0
+        "checkpoint_id": state.engine.checkpoint_id,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts,
+        "breeding_prompts": state.engine.breeding_prompts,
+        "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0
     }
 
     # Put initial status in queue
-    await evolution_queue.put(evolution_status.copy())
+    await state.queue.put(state.status.copy())
 
     # Start evolution in background task with additional generations
-    asyncio.create_task(run_continue_evolution_task(engine, additional_generations))
+    asyncio.create_task(run_continue_evolution_task(state, additional_generations))
 
     return JSONResponse({
         "status": "success",
         "message": f"Continuing saved evolution for {additional_generations} more generations",
-        "checkpoint_id": engine.checkpoint_id,
-        "evolution_id": engine.evolution_id,
-        "evolution_name": engine.evolution_name,
-        "current_generation": engine.current_generation,
+        "checkpoint_id": state.engine.checkpoint_id,
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "current_generation": state.engine.current_generation,
         "total_generations": new_total,
-        "history": [[idea_to_dict(idea) for idea in gen] for gen in engine.history],
-        "contexts": engine.contexts,
-        "specific_prompts": engine.specific_prompts
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts
     })
 
 async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] = None) -> Optional[EvolutionEngine]:
@@ -810,13 +813,11 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
         traceback.print_exc()
         return None
 
-async def run_resume_evolution_task(engine):
+async def run_resume_evolution_task(state: UserEvolutionState):
     """Run resumed evolution in background with progress updates"""
-    global evolution_status, evolution_queue, latest_evolution_data
+    engine = state.engine
 
     async def progress_callback(update_data):
-        global evolution_status, evolution_queue, latest_evolution_data
-
         # Convert Idea objects to dictionaries for JSON serialization
         if 'history' in update_data and isinstance(update_data['history'], list):
             update_data['history'] = [
@@ -824,33 +825,27 @@ async def run_resume_evolution_task(engine):
                 for generation in update_data['history']
             ]
             if update_data['history']:
-                latest_evolution_data = update_data['history']
+                state.latest_data = update_data['history']
 
         # Add token counts if evolution is complete
         if update_data.get('is_running') is False and 'error' not in update_data:
             if hasattr(engine, 'get_total_token_count'):
                 update_data['token_counts'] = engine.get_total_token_count()
 
-        evolution_status.update(update_data)
+        state.status.update(update_data)
 
         # Clear queue and add update
-        while not evolution_queue.empty():
-            try:
-                evolution_queue.get_nowait()
-            except:
-                break
-        await evolution_queue.put(evolution_status.copy())
+        state.reset_queue()
+        await state.queue.put(state.status.copy())
 
     # Run the resumed evolution
     await engine.resume_evolution_with_updates(progress_callback)
 
-async def run_continue_evolution_task(engine, additional_generations: int):
+async def run_continue_evolution_task(state: UserEvolutionState, additional_generations: int):
     """Run continued evolution in background with progress updates"""
-    global evolution_status, evolution_queue, latest_evolution_data
+    engine = state.engine
 
     async def progress_callback(update_data):
-        global evolution_status, evolution_queue, latest_evolution_data
-
         # Convert Idea objects to dictionaries for JSON serialization
         if 'history' in update_data and isinstance(update_data['history'], list):
             update_data['history'] = [
@@ -858,34 +853,28 @@ async def run_continue_evolution_task(engine, additional_generations: int):
                 for generation in update_data['history']
             ]
             if update_data['history']:
-                latest_evolution_data = update_data['history']
+                state.latest_data = update_data['history']
 
         # Add token counts if evolution is complete
         if update_data.get('is_running') is False and 'error' not in update_data:
             if hasattr(engine, 'get_total_token_count'):
                 update_data['token_counts'] = engine.get_total_token_count()
 
-        evolution_status.update(update_data)
+        state.status.update(update_data)
 
         # Clear queue and add update
-        while not evolution_queue.empty():
-            try:
-                evolution_queue.get_nowait()
-            except:
-                break
-        await evolution_queue.put(evolution_status.copy())
+        state.reset_queue()
+        await state.queue.put(state.status.copy())
 
     # Run the evolution with additional generations
     await engine.resume_evolution_with_updates(progress_callback, additional_generations=additional_generations)
 
-async def run_evolution_task(engine):
+async def run_evolution_task(state: UserEvolutionState):
     """Run evolution in background with progress updates"""
-    global evolution_status, evolution_queue, latest_evolution_data
+    engine = state.engine
 
     # Define the progress callback function
     async def progress_callback(update_data):
-        global evolution_status, evolution_queue, latest_evolution_data
-
         # Add evolution identity to every update
         update_data['evolution_id'] = engine.evolution_id
         update_data['evolution_name'] = engine.evolution_name
@@ -899,7 +888,7 @@ async def run_evolution_task(engine):
 
             # Store the latest evolution data for rating
             if update_data['history']:
-                latest_evolution_data = update_data['history']
+                state.latest_data = update_data['history']
 
         # If evolution is complete, add token counts
         if update_data.get('is_running') is False and 'error' not in update_data:
@@ -909,19 +898,15 @@ async def run_evolution_task(engine):
                 print(f"Evolution complete. Total tokens: {update_data['token_counts']['total']}")
 
         # Update the evolution status by merging the new data
-        evolution_status.update(update_data)
+        state.status.update(update_data)
 
         # Clear the queue before adding new update to avoid backlog
-        while not evolution_queue.empty():
-            try:
-                evolution_queue.get_nowait()
-            except:
-                break
+        state.reset_queue()
 
         # Add the update to the queue
-        # We put the full evolution_status (copy) into the queue to ensure
+        # We put the full status (copy) into the queue to ensure
         # the frontend gets the complete state, not just the partial update.
-        await evolution_queue.put(evolution_status.copy())
+        await state.queue.put(state.status.copy())
 
         # Log progress
         gen = update_data.get('current_generation', 0)
@@ -1070,25 +1055,25 @@ def idea_to_dict(idea) -> dict:
     return idea if isinstance(idea, dict) else {}
 
 @app.get("/api/generations")
-def api_get_generations():
+async def api_get_generations(user: UserInfo = Depends(require_auth)):
     """
     Returns a JSON array of arrays: each generation is an array of ideas.
     Each idea is {title, content}.
     """
-    global latest_evolution_data
+    state = await user_states.get(user.uid)
 
     # If engine is None, use the latest evolution data
-    if engine is None:
-        if latest_evolution_data:
-            print(f"Returning latest evolution data with {len(latest_evolution_data)} generations")
-            return JSONResponse(latest_evolution_data)
+    if state.engine is None:
+        if state.latest_data:
+            print(f"Returning latest evolution data with {len(state.latest_data)} generations")
+            return JSONResponse(state.latest_data)
         else:
             print("No evolution data available")
             return JSONResponse([])  # Return empty array if no data is available
 
     # If engine is available, use its history
     result = []
-    for generation in engine.history:
+    for generation in state.engine.history:
         gen_list = []
         for prop in generation:
             # Use idea_to_dict to properly serialize the idea with all metadata
@@ -1096,16 +1081,19 @@ def api_get_generations():
         result.append(gen_list)
 
     # Store the result as the latest evolution data
-    latest_evolution_data = result
+    state.latest_data = result
 
     return JSONResponse(result)
 
 @app.get("/api/generations/{gen_id}")
-def api_get_generation(gen_id: int):
+async def api_get_generation(gen_id: int, user: UserInfo = Depends(require_auth)):
     """
     Returns ideas for a specific generation.
     """
-    ideas = engine.get_ideas_by_generation(gen_id)
+    state = await user_states.get(user.uid)
+    if state.engine is None:
+        return JSONResponse({"error": "No evolution running."}, status_code=404)
+    ideas = state.engine.get_ideas_by_generation(gen_id)
     if not ideas:
         return JSONResponse({"error": "Invalid generation index."}, status_code=404)
     # Use idea_to_dict to properly serialize ideas with all metadata
@@ -1123,19 +1111,19 @@ def test_static():
     return {"files": files, "js_exists": os.path.exists("idea/static/js/viewer.js")}
 
 @app.get("/api/progress")
-async def get_progress():
+async def get_progress(user: UserInfo = Depends(require_auth)):
     """Returns the current progress of the evolution"""
-    global evolution_status
+    state = await user_states.get(user.uid)
 
     # If there's a new update in the queue, get it
     try:
         # Get the latest update from the queue without waiting
-        if not evolution_queue.empty():
-            evolution_status = await evolution_queue.get()
+        if not state.queue.empty():
+            state.status = await state.queue.get()
     except Exception as e:
         print(f"Error getting queue updates: {e}")
 
-    return JSONResponse(convert_uuids_to_strings(evolution_status))
+    return JSONResponse(convert_uuids_to_strings(state.status))
 
 @app.post("/api/save-evolution")
 async def save_evolution(request: Request):

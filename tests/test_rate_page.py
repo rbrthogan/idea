@@ -31,17 +31,29 @@ class TestRatePageAPI:
         assert "evolutionSelect" in response.text
 
     def test_api_generations_empty_when_no_data(self):
-        """Test that /api/generations returns empty array when no data is available"""
-        with patch('idea.viewer.engine', None), \
-             patch('idea.viewer.latest_evolution_data', None):
-            response = self.client.get("/api/generations")
-            assert response.status_code == 200
-            data = response.json()
-            assert data == []
+        """Test that /api/generations returns empty array when no data is available
 
-    def test_api_generations_with_mock_data(self):
-        """Test that /api/generations returns proper data structure"""
-        mock_evolution_data = [
+        Note: This endpoint now requires authentication. With no auth token,
+        it should return 401/403. We test this behavior here.
+        """
+        # Without authentication, the endpoint should reject the request
+        response = self.client.get("/api/generations")
+        assert response.status_code in [401, 403]
+
+    def test_api_generations_with_mock_auth(self):
+        """Test that /api/generations returns proper data structure with auth
+
+        Since the endpoint now requires authentication and uses user-scoped state,
+        we need to mock both the auth dependency and the user state.
+        """
+        from idea.auth import UserInfo
+        from idea.user_state import UserEvolutionState, user_states
+        from asyncio import Queue
+
+        mock_user = UserInfo(uid="test_user_123", email="test@example.com", is_admin=False)
+        mock_state = UserEvolutionState()
+        mock_state.engine = None  # No engine yet
+        mock_state.latest_data = [
             [
                 {"title": "Idea 1", "content": "Content 1"},
                 {"title": "Idea 2", "content": "Content 2"}
@@ -52,7 +64,20 @@ class TestRatePageAPI:
             ]
         ]
 
-        with patch('idea.viewer.latest_evolution_data', mock_evolution_data):
+        async def mock_require_auth():
+            return mock_user
+
+        async def mock_get_state(user_id):
+            return mock_state
+
+        from idea.viewer import app, require_auth
+        from idea.user_state import user_states as real_user_states
+
+        # Override the auth dependency
+        app.dependency_overrides[require_auth] = mock_require_auth
+
+        # Patch user_states.get
+        with patch.object(real_user_states, 'get', mock_get_state):
             response = self.client.get("/api/generations")
             assert response.status_code == 200
             data = response.json()
@@ -61,6 +86,9 @@ class TestRatePageAPI:
             assert len(data[1]) == 2
             assert data[0][0]["title"] == "Idea 1"
             assert data[0][0]["content"] == "Content 1"
+
+        # Clean up dependency override
+        app.dependency_overrides.clear()
 
     def test_api_evolutions_returns_list(self):
         """Test that /api/evolutions returns a list structure"""

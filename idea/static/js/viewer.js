@@ -274,7 +274,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 updateContextDisplay();
             } else {
-                console.error("Failed to run evolution:", await response.text());
+                // Handle error responses
+                const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+                console.error("Failed to run evolution:", errorData);
+
+                if (response.status === 409) {
+                    // Evolution already running - show helpful message
+                    showAlreadyRunningMessage();
+                } else {
+                    // Other errors
+                    alert(`Error: ${errorData.message || 'Failed to start evolution'}`);
+                }
                 resetButtonStates();
             }
         } catch (error) {
@@ -1281,7 +1291,7 @@ function renderHistoryList(items, updateGlobal = true) {
         const statusClass = `badge-status-${item.status}`;
         const typeClass = `item-type-${item.type}`;
         const date = item.timestamp ? new Date(item.timestamp).toLocaleDateString() : '';
-        const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
+        const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
         const isSelected = selectedHistoryItem?.id === item.id;
 
         // Truncate display name (more room in expanded view)
@@ -1699,34 +1709,34 @@ async function loadHistoryItemData(item) {
         if (item.type === 'saved') {
             // Load from saved evolution file
             const response = await fetch(`/api/evolution/${item.id}`);
-        if (response.ok) {
-            const data = await response.json();
-            if (data.data && data.data.history) {
-                document.getElementById('generations-container').innerHTML = '';
-                renderGenerations(data.data.history);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.data && data.data.history) {
+                    document.getElementById('generations-container').innerHTML = '';
+                    renderGenerations(data.data.history);
 
-                if (data.data.diversity_history && data.data.diversity_history.length > 0) {
-                    updateDiversityChart(data.data.diversity_history);
-                    setTimeout(ensureDiversityChartSizing, 200);
-                } else {
-                    resetDiversityPlot();
+                    if (data.data.diversity_history && data.data.diversity_history.length > 0) {
+                        updateDiversityChart(data.data.diversity_history);
+                        setTimeout(ensureDiversityChartSizing, 200);
+                    } else {
+                        resetDiversityPlot();
+                    }
+
+                    if (data.data.contexts) {
+                        contexts = data.data.contexts;
+                        specificPrompts = data.data.specific_prompts || [];
+                        breedingPrompts = data.data.breeding_prompts || [];
+                        currentContextIndex = 0;
+                        updateContextDisplay();
+                        document.querySelector('.context-navigation').style.display = 'block';
+                    }
+
+                    if (data.data.token_counts) {
+                        displayTokenCounts(data.data.token_counts);
+                    }
+
+                    document.getElementById('downloadButton').disabled = false;
                 }
-
-                if (data.data.contexts) {
-                    contexts = data.data.contexts;
-                    specificPrompts = data.data.specific_prompts || [];
-                    breedingPrompts = data.data.breeding_prompts || [];
-                    currentContextIndex = 0;
-                    updateContextDisplay();
-                    document.querySelector('.context-navigation').style.display = 'block';
-                }
-
-                if (data.data.token_counts) {
-                    displayTokenCounts(data.data.token_counts);
-                }
-
-                document.getElementById('downloadButton').disabled = false;
-            }
             }
         } else if (item.type === 'checkpoint') {
             // Load from checkpoint
@@ -1740,7 +1750,7 @@ async function loadHistoryItemData(item) {
                     if (data.diversity_history && data.diversity_history.length > 0) {
                         updateDiversityChart(data.diversity_history);
                         setTimeout(ensureDiversityChartSizing, 200);
-        } else {
+                    } else {
                         resetDiversityPlot();
                     }
 
@@ -1807,7 +1817,7 @@ async function handleHistoryResume(checkpointId) {
             // Switch to evolution mode (hides template entry, shows evolution view)
             if (typeof showEvolutionMode === 'function') {
                 showEvolutionMode();
-    } else {
+            } else {
                 // Fallback: manually hide template entry
                 const templateEntry = document.getElementById('templateEntry');
                 if (templateEntry) templateEntry.style.display = 'none';
@@ -2022,8 +2032,8 @@ function clearHistorySelection() {
 
     // Clear main content
     document.getElementById('generations-container').innerHTML = '';
-            resetDiversityPlot();
-        }
+    resetDiversityPlot();
+}
 
 
 // Delete evolution with confirmation
@@ -2550,6 +2560,256 @@ function resetButtonStates() {
     const nameInput = document.getElementById('evolutionNameInput');
     if (nameInput) nameInput.value = '';
 }
+
+/**
+ * Show a user-friendly message when an evolution is already running
+ * Offers a button to view the current evolution progress
+ */
+function showAlreadyRunningMessage() {
+    // Check if modal already exists
+    let modal = document.getElementById('alreadyRunningModal');
+    if (!modal) {
+        // Create the modal
+        modal = document.createElement('div');
+        modal.id = 'alreadyRunningModal';
+        modal.className = 'modal fade';
+        modal.tabIndex = -1;
+        modal.innerHTML = `
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header bg-warning text-dark">
+                        <h5 class="modal-title">
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            Evolution Already Running
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>You already have an evolution in progress. You can only run one evolution at a time.</p>
+                        <p class="mb-0 text-muted">Click below to view your current evolution, or wait for it to complete before starting a new one.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-primary" id="viewCurrentEvolutionBtn">
+                            <i class="fas fa-eye me-1"></i>View Current Evolution
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        // Add event listener for the view button
+        document.getElementById('viewCurrentEvolutionBtn').addEventListener('click', async function () {
+            // Close the modal
+            const bsModal = bootstrap.Modal.getInstance(modal);
+            if (bsModal) bsModal.hide();
+
+            // Start polling to sync with the running evolution
+            isEvolutionRunning = true;
+            pollProgress();
+
+            // Show the stop button
+            const stopButton = document.getElementById('stopButton');
+            if (stopButton) {
+                stopButton.disabled = false;
+                stopButton.style.display = 'block';
+            }
+
+            // Update start button to show running state
+            const startButton = document.getElementById('startButton');
+            if (startButton) {
+                startButton.disabled = true;
+                startButton.textContent = 'Running...';
+            }
+
+            // Add activity log message
+            addActivityLogItem('🔄 Reconnected to running evolution', 'info');
+        });
+    }
+
+    // Show the modal
+    const bsModal = new bootstrap.Modal(modal);
+    bsModal.show();
+}
+
+/**
+ * Check if there's a running evolution and show a persistent banner
+ * Called after auth is complete to detect reconnection opportunities
+ */
+async function checkRunningEvolution() {
+    try {
+        const response = await fetch('/api/progress');
+        if (!response.ok) {
+            console.log("Could not check evolution status:", response.status);
+            hideRunningEvolutionBanner();
+            return;
+        }
+
+        const progressData = await response.json();
+        console.log("Evolution status check:", progressData);
+
+        if (progressData.is_running) {
+            // There's an evolution running - show the banner
+            showRunningEvolutionBanner(progressData);
+        } else {
+            // No evolution running - hide the banner if present
+            hideRunningEvolutionBanner();
+        }
+    } catch (error) {
+        console.error("Error checking running evolution:", error);
+        hideRunningEvolutionBanner();
+    }
+}
+
+/**
+ * Show the persistent "evolution running" banner at the top of the page
+ */
+function showRunningEvolutionBanner(progressData) {
+    let banner = document.getElementById('runningEvolutionBanner');
+
+    if (!banner) {
+        // Create the banner
+        banner = document.createElement('div');
+        banner.id = 'runningEvolutionBanner';
+        banner.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px 20px;
+            z-index: 9998;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            font-size: 14px;
+        `;
+
+        banner.innerHTML = `
+            <div class="d-flex align-items-center gap-2">
+                <div class="spinner-border spinner-border-sm text-light" role="status">
+                    <span class="visually-hidden">Running...</span>
+                </div>
+                <span id="bannerStatusText">Evolution running...</span>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <span id="bannerProgressText" class="badge bg-light text-dark">0%</span>
+                <button id="reconnectEvolutionBtn" class="btn btn-sm btn-light">
+                    <i class="fas fa-eye me-1"></i>View Evolution
+                </button>
+            </div>
+        `;
+
+        // Insert at the very beginning of body
+        document.body.insertBefore(banner, document.body.firstChild);
+
+        // Add top padding to body to prevent content overlap
+        document.body.style.paddingTop = (banner.offsetHeight) + 'px';
+
+        // Add click handler for reconnect button
+        document.getElementById('reconnectEvolutionBtn').addEventListener('click', reconnectToRunningEvolution);
+    }
+
+    // Update status text and progress
+    const statusText = document.getElementById('bannerStatusText');
+    const progressText = document.getElementById('bannerProgressText');
+
+    if (progressData.evolution_name) {
+        statusText.textContent = `"${progressData.evolution_name}" running...`;
+    } else {
+        statusText.textContent = `Evolution running...`;
+    }
+
+    if (progressData.progress !== undefined) {
+        progressText.textContent = `${Math.round(progressData.progress)}%`;
+    }
+
+    banner.style.display = 'flex';
+}
+
+/**
+ * Hide the running evolution banner
+ */
+function hideRunningEvolutionBanner() {
+    const banner = document.getElementById('runningEvolutionBanner');
+    if (banner) {
+        banner.style.display = 'none';
+        document.body.style.paddingTop = '0';
+    }
+}
+
+/**
+ * Reconnect to the running evolution
+ */
+async function reconnectToRunningEvolution() {
+    console.log("Reconnecting to running evolution...");
+
+    // Get current progress data to get evolution name
+    try {
+        const response = await fetch('/api/progress');
+        if (response.ok) {
+            const progressData = await response.json();
+
+            // Store evolution identity
+            if (progressData.evolution_id) {
+                currentEvolutionId = progressData.evolution_id;
+            }
+            if (progressData.evolution_name) {
+                currentEvolutionName = progressData.evolution_name;
+            }
+        }
+    } catch (e) {
+        console.log("Could not get progress data for reconnect:", e);
+    }
+
+    // Hide the template entry section (the "What kind of ideas do you want to generate?" prompt)
+    const templateEntry = document.getElementById('templateEntry');
+    if (templateEntry) {
+        templateEntry.style.display = 'none';
+    }
+
+    // Hide name input section
+    const nameSection = document.getElementById('evolutionNameSection');
+    if (nameSection) {
+        nameSection.style.display = 'none';
+    }
+
+    // Create progress bar if it doesn't exist
+    if (!document.getElementById('progress-container')) {
+        createProgressBar(currentEvolutionName);
+    }
+
+    // Start polling to sync with the running evolution
+    isEvolutionRunning = true;
+    pollProgress();
+
+    // Show the stop button
+    const stopButton = document.getElementById('stopButton');
+    if (stopButton) {
+        stopButton.disabled = false;
+        stopButton.style.display = 'block';
+    }
+
+    // Update start button to show running state
+    const startButton = document.getElementById('startButton');
+    if (startButton) {
+        startButton.disabled = true;
+        startButton.textContent = 'Running...';
+    }
+
+    // Add activity log message
+    addActivityLogItem('🔄 Reconnected to running evolution', 'info');
+
+    // Hide the banner since we're now watching
+    hideRunningEvolutionBanner();
+}
+
+// Expose checkRunningEvolution globally so auth_logic.js can call it
+window.checkRunningEvolution = checkRunningEvolution;
 
 // Function to show resume button when evolution is paused/stopped
 // Now just stores checkpoint ID - the history panel handles the UI

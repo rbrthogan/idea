@@ -107,6 +107,11 @@ if (firebase.auth) {
             // Check API Key Status
             checkApiKeyStatus();
 
+            // Check if there's a running evolution and show banner
+            if (typeof checkRunningEvolution === 'function') {
+                checkRunningEvolution();
+            }
+
             // Render Header UI
             renderUserUI(user);
         } else {
