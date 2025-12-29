@@ -2,7 +2,7 @@
 Template Manager API endpoints for CRUD operations on YAML prompt templates
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -13,6 +13,8 @@ from datetime import datetime
 from idea.prompts.loader import list_available_templates, validate_template
 from idea.prompts.validation import TemplateValidator
 from idea.llm import LLMWrapper
+from idea.auth import require_auth, UserInfo
+from idea import database as db
 
 # Create router for template management
 router = APIRouter(prefix="/api/templates", tags=["templates"])
@@ -123,13 +125,33 @@ def get_template_starter() -> Dict[str, Any]:
 
 
 @router.get("/")
-async def list_templates():
-    """List all available templates"""
+async def list_templates(user: UserInfo = Depends(require_auth)):
+    """List all available templates (system + user templates)"""
     try:
-        templates = list_available_templates()
+        # Get system templates from bundled YAML files
+        system_templates = list_available_templates()
+
+        # Mark system templates
+        for template_id, template_info in system_templates.items():
+            if 'error' not in template_info:
+                template_info['is_system'] = True
+
+        # Get user's custom templates from Firestore
+        user_templates = await db.list_user_templates(user.uid)
+
+        # Add user templates to the result (with is_system=False)
+        for ut in user_templates:
+            template_id = ut.get('id')
+            # Don't override system templates
+            if template_id not in system_templates:
+                system_templates[template_id] = {
+                    **ut,
+                    'is_system': False
+                }
+
         return JSONResponse({
             "status": "success",
-            "templates": templates
+            "templates": system_templates
         })
     except Exception as e:
         return JSONResponse({
@@ -155,28 +177,41 @@ async def get_starter_template():
 
 
 @router.get("/{template_id}")
-async def get_template(template_id: str):
-    """Get a specific template by ID"""
+async def get_template(template_id: str, user: UserInfo = Depends(require_auth)):
+    """Get a specific template by ID (checks system templates then user templates)"""
     try:
+        # First check system templates (bundled YAML files)
         template_path = TEMPLATES_DIR / f"{template_id}.yaml"
 
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
+        if template_path.exists():
+            with open(template_path, 'r', encoding='utf-8') as f:
+                template_data = yaml.safe_load(f)
+            template_data['is_system'] = True
 
-        with open(template_path, 'r', encoding='utf-8') as f:
-            template_data = yaml.safe_load(f)
+            # Get validation info
+            is_valid, warnings = validate_template(template_id)
 
-        # Get validation info
-        is_valid, warnings = validate_template(template_id)
+            return JSONResponse({
+                "status": "success",
+                "template": template_data,
+                "validation": {
+                    "is_valid": is_valid,
+                    "warnings": warnings
+                }
+            })
 
-        return JSONResponse({
-            "status": "success",
-            "template": template_data,
-            "validation": {
-                "is_valid": is_valid,
-                "warnings": warnings
-            }
-        })
+        # Check user's templates in Firestore
+        user_template = await db.get_user_template(user.uid, template_id)
+        if user_template:
+            user_template['is_system'] = False
+            return JSONResponse({
+                "status": "success",
+                "template": user_template,
+                "validation": {"is_valid": True, "warnings": []}
+            })
+
+        raise HTTPException(status_code=404, detail="Template not found")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -187,17 +222,16 @@ async def get_template(template_id: str):
 
 
 @router.post("/")
-async def create_template(request: TemplateCreateRequest):
-    """Create a new template"""
+async def create_template(request: TemplateCreateRequest, user: UserInfo = Depends(require_auth)):
+    """Create a new template (saved to Firestore for the user)"""
     try:
         # Generate template ID from name
         template_id = request.name.lower().replace(" ", "_").replace("-", "_")
         template_id = "".join(c for c in template_id if c.isalnum() or c == "_")
 
-        template_path = TEMPLATES_DIR / f"{template_id}.yaml"
-
-        # Check if template already exists
-        if template_path.exists():
+        # Check if user already has a template with this ID
+        existing = await db.get_user_template(user.uid, template_id)
+        if existing:
             return JSONResponse({
                 "status": "error",
                 "message": f"Template '{template_id}' already exists"
@@ -239,9 +273,8 @@ async def create_template(request: TemplateCreateRequest):
                 "message": f"Template validation failed: {e}"
             }, status_code=400)
 
-        # Save template
-        with open(template_path, 'w', encoding='utf-8') as f:
-            yaml.dump(template_data, f, default_flow_style=False, sort_keys=False, indent=2)
+        # Save template to Firestore
+        await db.save_user_template(user.uid, template_id, template_data)
 
         return JSONResponse({
             "status": "success",
@@ -352,24 +385,24 @@ def get_core_templates() -> set:
 
 
 @router.delete("/{template_id}")
-async def delete_template(template_id: str):
-    """Delete a template"""
+async def delete_template(template_id: str, user: UserInfo = Depends(require_auth)):
+    """Delete a user template (system templates cannot be deleted)"""
     try:
+        # Don't allow deletion of core/system templates
+        core_templates = get_core_templates()
         template_path = TEMPLATES_DIR / f"{template_id}.yaml"
 
-        if not template_path.exists():
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        # Don't allow deletion of core templates
-        core_templates = get_core_templates()
-        if template_id in core_templates:
+        if template_id in core_templates or template_path.exists():
             return JSONResponse({
                 "status": "error",
-                "message": f"Cannot delete core template '{template_id}'"
+                "message": f"Cannot delete system template '{template_id}'"
             }, status_code=400)
 
-        # Delete the template file
-        template_path.unlink()
+        # Delete the user's template from Firestore
+        deleted = await db.delete_user_template(user.uid, template_id)
+
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Template not found")
 
         return JSONResponse({
             "status": "success",
@@ -406,9 +439,17 @@ async def validate_template_endpoint(template_id: str):
 
 
 @router.post("/generate")
-async def generate_template(request: TemplateGenerateRequest):
-    """Generate a draft template using Gemini 2.5 Pro based on user's idea type suggestion"""
+async def generate_template(request: TemplateGenerateRequest, user: UserInfo = Depends(require_auth)):
+    """Generate a draft template using Gemini 3 Pro based on user's idea type suggestion"""
     try:
+        # Get user's API key
+        api_key = await db.get_user_api_key(user.uid)
+        if not api_key:
+            return JSONResponse({
+                "status": "error",
+                "message": "API Key not configured. Please set it in Settings."
+            }, status_code=400)
+
         # Get the existing 3 core templates as examples
         example_templates = {}
         for template_id in ['airesearch', 'drabble', 'game_design']:
@@ -429,9 +470,10 @@ async def generate_template(request: TemplateGenerateRequest):
         # Use Gemini 2.5 Pro to generate the template
         llm = LLMWrapper(
             provider="google_generative_ai",
-            model_name="gemini-2.5-pro",
+            model_name="gemini-3-pro-preview",
             temperature=0.7,  # Balanced creativity and consistency
-            top_p=0.9
+            top_p=0.9,
+            api_key=api_key
         )
 
         response = llm.generate_text(prompt)

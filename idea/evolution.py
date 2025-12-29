@@ -12,14 +12,12 @@ from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates, get_prompts
 from idea.diversity import DiversityCalculator
+from idea import database as db
 
-# Evolution storage directories
+# Legacy filesystem storage directories (kept for backwards compatibility with local dev)
+# These are not used on Cloud Run - all data goes to Firestore
 EVOLUTIONS_DIR = Path("data/evolutions")
-EVOLUTIONS_DIR.mkdir(parents=True, exist_ok=True)
-
-# Legacy checkpoint directory (for backwards compatibility)
 CHECKPOINT_DIR = Path("data/checkpoints")
-CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_default_template_id():
@@ -51,7 +49,9 @@ class EvolutionEngine:
         max_budget: Optional[float] = None,
         mutation_rate: float = 0.2,
         api_key: Optional[str] = None,
+        user_id: Optional[str] = None,  # Required for Firestore storage
     ):
+        self.user_id = user_id  # User ID for scoped storage
         self.idea_type = idea_type or get_default_template_id()
         self.pop_size = pop_size
         self.generations = generations
@@ -308,12 +308,16 @@ class EvolutionEngine:
         # Also set legacy checkpoint_id for compatibility
         self.checkpoint_id = self.evolution_id[:18].replace('-', '')
 
-    def save_checkpoint(self, status: str = 'in_progress') -> Optional[str]:
+    async def save_checkpoint(self, status: str = 'in_progress') -> Optional[str]:
         """
-        Save the current state to the unified evolutions directory.
-        Returns the file path on success, None on failure.
+        Save the current state to Firestore.
+        Returns the evolution_id on success, None on failure.
         """
         try:
+            if not self.user_id:
+                print("❌ Cannot save evolution: user_id not set")
+                return None
+
             # Initialize if this is a legacy evolution without an ID
             if not self.evolution_id:
                 self.initialize_evolution()
@@ -327,14 +331,11 @@ class EvolutionEngine:
             state['created_at'] = self.created_at
             state['updated_at'] = self.updated_at
 
-            # Save to unified evolutions directory
-            evolution_path = EVOLUTIONS_DIR / f"{self.evolution_id}.json"
+            # Save to Firestore
+            await db.save_evolution(self.user_id, self.evolution_id, state)
 
-            with open(evolution_path, 'w') as f:
-                json.dump(state, f, indent=2, default=str)
-
-            print(f"💾 Evolution saved: {self.evolution_name} ({evolution_path})")
-            return str(evolution_path)
+            print(f"💾 Evolution saved to Firestore: {self.evolution_name} ({self.evolution_id})")
+            return self.evolution_id
 
         except Exception as e:
             print(f"❌ Failed to save evolution: {e}")
@@ -343,108 +344,102 @@ class EvolutionEngine:
             return None
 
     @classmethod
-    def list_evolutions(cls) -> List[Dict[str, Any]]:
+    async def list_evolutions_for_user(cls, user_id: str) -> List[Dict[str, Any]]:
         """
-        List all evolutions from the unified storage.
+        List all evolutions for a user from Firestore.
         Returns a list of evolution metadata.
         """
-        evolutions = []
-        for evolution_file in EVOLUTIONS_DIR.glob("*.json"):
-            try:
-                with open(evolution_file) as f:
-                    data = json.load(f)
-                    config = data.get('config', {})
-                    history = data.get('history', [])
-                    evolutions.append({
-                        'id': data.get('evolution_id', evolution_file.stem),
-                        'name': data.get('name', evolution_file.stem),
-                        'file': str(evolution_file),
-                        'status': data.get('status', 'unknown'),
-                        'created_at': data.get('created_at'),
-                        'updated_at': data.get('updated_at') or data.get('checkpoint_time'),
-                        'generation': data.get('current_generation', len(history)),
-                        'total_generations': config.get('generations', len(history)),
-                        'idea_type': config.get('idea_type', 'unknown'),
-                        'model_type': config.get('model_type', 'unknown'),
-                        'pop_size': config.get('pop_size', len(history[0]) if history else 0),
-                        'total_ideas': sum(len(gen) for gen in history),
-                    })
-            except Exception as e:
-                print(f"Warning: Could not read evolution {evolution_file}: {e}")
-        return sorted(evolutions, key=lambda x: x.get('updated_at') or x.get('created_at') or '', reverse=True)
+        try:
+            evolutions = await db.list_evolutions(user_id)
+            # Transform the data to match expected format
+            result = []
+            for data in evolutions:
+                config = data.get('config', {})
+                history = data.get('history', [])
+                result.append({
+                    'id': data.get('evolution_id') or data.get('id'),
+                    'name': data.get('name', 'Unnamed'),
+                    'status': data.get('status', 'unknown'),
+                    'created_at': data.get('created_at'),
+                    'updated_at': data.get('updated_at'),
+                    'generation': data.get('current_generation', len(history)),
+                    'total_generations': config.get('generations', len(history)),
+                    'idea_type': config.get('idea_type', 'unknown'),
+                    'model_type': config.get('model_type', 'unknown'),
+                    'pop_size': config.get('pop_size', len(history[0]) if history else 0),
+                    'total_ideas': sum(len(gen) for gen in history),
+                })
+            return result
+        except Exception as e:
+            print(f"Error listing evolutions: {e}")
+            return []
 
     @classmethod
-    def list_checkpoints(cls) -> List[Dict[str, Any]]:
+    async def list_checkpoints_for_user(cls, user_id: str) -> List[Dict[str, Any]]:
         """
-        List all available checkpoints (legacy format).
+        List all checkpoints for a user from Firestore.
         Returns a list of checkpoint metadata.
         """
-        checkpoints = []
-        for checkpoint_file in CHECKPOINT_DIR.glob("checkpoint_*.json"):
-            try:
-                with open(checkpoint_file) as f:
-                    data = json.load(f)
-                    checkpoints.append({
-                        'id': data.get('checkpoint_id'),
-                        'file': str(checkpoint_file),
-                        'time': data.get('checkpoint_time'),
-                        'status': data.get('status', 'unknown'),
-                        'generation': data.get('current_generation', 0),
-                        'total_generations': data.get('config', {}).get('generations', 0),
-                        'idea_type': data.get('config', {}).get('idea_type', 'unknown'),
-                        'model_type': data.get('config', {}).get('model_type', 'unknown'),
-                        'pop_size': data.get('config', {}).get('pop_size', 0),
-                    })
-            except Exception as e:
-                print(f"Warning: Could not read checkpoint {checkpoint_file}: {e}")
-        return sorted(checkpoints, key=lambda x: x.get('time', ''), reverse=True)
+        try:
+            checkpoints = await db.list_checkpoints(user_id)
+            result = []
+            for data in checkpoints:
+                config = data.get('config', {})
+                result.append({
+                    'id': data.get('checkpoint_id') or data.get('id'),
+                    'time': data.get('checkpoint_time') or data.get('updated_at'),
+                    'status': data.get('status', 'unknown'),
+                    'generation': data.get('current_generation', 0),
+                    'total_generations': config.get('generations', 0),
+                    'idea_type': config.get('idea_type', 'unknown'),
+                    'model_type': config.get('model_type', 'unknown'),
+                    'pop_size': config.get('pop_size', 0),
+                })
+            return result
+        except Exception as e:
+            print(f"Error listing checkpoints: {e}")
+            return []
 
     @classmethod
-    def load_evolution(cls, evolution_id: str, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
+    async def load_evolution_for_user(cls, user_id: str, evolution_id: str, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
         """
-        Load an evolution engine from the unified evolutions directory.
+        Load an evolution engine from Firestore.
         Returns a configured EvolutionEngine instance, or None on failure.
         """
-        evolution_path = EVOLUTIONS_DIR / f"{evolution_id}.json"
-        if not evolution_path.exists():
-            print(f"❌ Evolution not found: {evolution_path}")
+        try:
+            state = await db.get_evolution(user_id, evolution_id)
+            if not state:
+                print(f"❌ Evolution not found: {evolution_id}")
+                return None
+
+            engine = cls._restore_from_state(state, api_key=api_key, user_id=user_id)
+            return engine
+        except Exception as e:
+            print(f"❌ Failed to load evolution: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
-        return cls._load_from_file(evolution_path, api_key=api_key)
-
     @classmethod
-    def rename_evolution(cls, evolution_id: str, new_name: str) -> bool:
-        """Rename an evolution."""
-        evolution_path = EVOLUTIONS_DIR / f"{evolution_id}.json"
-        if not evolution_path.exists():
-            return False
-
+    async def rename_evolution_for_user(cls, user_id: str, evolution_id: str, new_name: str) -> bool:
+        """Rename an evolution in Firestore."""
         try:
-            with open(evolution_path) as f:
-                data = json.load(f)
-
-            data['name'] = new_name
-            data['updated_at'] = datetime.now().isoformat()
-
-            with open(evolution_path, 'w') as f:
-                json.dump(data, f, indent=2, default=str)
-
-            print(f"✅ Evolution renamed to: {new_name}")
-            return True
+            result = await db.rename_evolution(user_id, evolution_id, new_name)
+            if result:
+                print(f"✅ Evolution renamed to: {new_name}")
+            return result
         except Exception as e:
             print(f"❌ Failed to rename evolution: {e}")
             return False
 
     @classmethod
-    def delete_evolution(cls, evolution_id: str) -> bool:
-        """Delete an evolution from unified storage."""
-        evolution_path = EVOLUTIONS_DIR / f"{evolution_id}.json"
+    async def delete_evolution_for_user(cls, user_id: str, evolution_id: str) -> bool:
+        """Delete an evolution from Firestore."""
         try:
-            if evolution_path.exists():
-                evolution_path.unlink()
+            result = await db.delete_evolution(user_id, evolution_id)
+            if result:
                 print(f"🗑️ Evolution deleted: {evolution_id}")
-                return True
-            return False
+            return result
         except Exception as e:
             print(f"❌ Failed to delete evolution: {e}")
             return False
@@ -464,7 +459,7 @@ class EvolutionEngine:
             return None
 
     @classmethod
-    def _restore_from_state(cls, state: Dict[str, Any], api_key: Optional[str] = None) -> 'EvolutionEngine':
+    def _restore_from_state(cls, state: Dict[str, Any], api_key: Optional[str] = None, user_id: Optional[str] = None) -> 'EvolutionEngine':
         """Restore an EvolutionEngine from a state dictionary."""
         config = state.get('config', {})
 
@@ -482,6 +477,7 @@ class EvolutionEngine:
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
             api_key=api_key,
+            user_id=user_id or state.get('user_id'),
         )
 
         # Restore evolution identity
@@ -636,7 +632,7 @@ class EvolutionEngine:
 
         # Save checkpoint for completed generation 0
         self.current_generation = 1
-        self.save_checkpoint(status='in_progress')
+        await self.save_checkpoint(status='in_progress')
 
         # Send update
         token_counts = self.get_total_token_count()
@@ -722,7 +718,7 @@ class EvolutionEngine:
                     self.is_stopped = True
                     self.current_generation = gen
                     print(f"Stop requested - evolution halted at generation {gen}")
-                    checkpoint_path = self.save_checkpoint(status='paused')
+                    checkpoint_path = await self.save_checkpoint(status='paused')
                     token_counts = self.get_total_token_count()
                     await progress_callback({
                         "current_generation": gen,
@@ -914,7 +910,7 @@ class EvolutionEngine:
                 # Update generation tracking and save checkpoint
                 self.current_generation = gen + 1
                 checkpoint_status = 'in_progress' if gen < self.generations - 1 else 'complete'
-                self.save_checkpoint(status=checkpoint_status)
+                await self.save_checkpoint(status=checkpoint_status)
 
                 # Send progress update
                 token_counts = self.get_total_token_count()
@@ -935,7 +931,7 @@ class EvolutionEngine:
 
             # Evolution complete
             print("Evolution complete!")
-            self.save_checkpoint(status='complete')
+            await self.save_checkpoint(status='complete')
             token_counts = self.get_total_token_count()
             await progress_callback({
                 "current_generation": self.generations,
@@ -954,7 +950,7 @@ class EvolutionEngine:
             import traceback
             print(f"Error in resume evolution: {e}")
             print(traceback.format_exc())
-            self.save_checkpoint(status='error')
+            await self.save_checkpoint(status='error')
             await progress_callback({
                 "is_running": False,
                 "error": str(e),
@@ -1345,7 +1341,7 @@ class EvolutionEngine:
                     print(f"Stop requested - evolution halted after generation {gen}")
 
                     # Save checkpoint so evolution can be resumed
-                    checkpoint_path = self.save_checkpoint(status='paused')
+                    checkpoint_path = await self.save_checkpoint(status='paused')
 
                     # Calculate token counts for the final update
                     token_counts = self.get_total_token_count()
@@ -1858,7 +1854,7 @@ class EvolutionEngine:
 
                 # Auto-save checkpoint after each generation completes
                 checkpoint_status = 'in_progress' if gen < self.generations - 1 else 'complete'
-                checkpoint_path = self.save_checkpoint(status=checkpoint_status)
+                checkpoint_path = await self.save_checkpoint(status=checkpoint_status)
                 if checkpoint_path:
                     # Notify frontend about checkpoint
                     await progress_callback({

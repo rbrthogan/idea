@@ -396,7 +396,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // See handleHistoryResume() and handleHistoryContinue() functions
 
     // --- Template Generation ---
-    addListener('generateTemplateBtn', 'click', handleTemplateGeneration);
+    // Note: generateTemplateBtn listener is set up in viewer.html
     addListener('saveTemplateBtn', 'click', saveAndUseTemplate);
     addListener('reviewEditBtn', 'click', reviewAndEditTemplate);
 
@@ -744,7 +744,7 @@ function createCardPreview(text, maxLength = 150) {
         .replace(/`{3}[\s\S]*?`{3}/g, '[Code Block]') // Replace code blocks
         .replace(/`([^`]+)`/g, '$1') // Remove inline code
         .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1') // Replace links with just text
-        .replace(/^>+\s*/gm, '') // Remove blockquote markers
+        .replace(/^>\+\s*/gm, '') // Remove blockquote markers
         .replace(/^\s*[\*\-]\s+/gm, '• ') // Convert list markers to bullets
         .replace(/^\s*\d+\.\s+/gm, '• '); // Convert numbered lists to bullets
 
@@ -757,6 +757,37 @@ function createCardPreview(text, maxLength = 150) {
     }
 
     return preview;
+}
+
+// Helper to extract title and content from possibly nested idea structures
+// Handles: idea.title/content, idea.idea.title/content, or JSON-encoded content
+function getIdeaData(idea) {
+    let title = idea.title;
+    let content = idea.content;
+
+    // Check if data is nested under an 'idea' property
+    if (idea.idea && typeof idea.idea === 'object') {
+        title = idea.idea.title || title;
+        content = idea.idea.content || content;
+    }
+
+    // Handle case where content might be JSON-encoded
+    if (typeof content === 'string' && content.startsWith('{') && content.includes('"title"')) {
+        try {
+            const parsed = JSON.parse(content);
+            title = parsed.title || title;
+            content = parsed.content || content;
+        } catch (e) {
+            // Not valid JSON, use as-is
+        }
+    }
+
+    return {
+        title: title || 'Untitled',
+        content: content || '',
+        // Preserve other properties
+        ...idea
+    };
 }
 
 // Update the renderGenerations function to use the improved preview
@@ -861,13 +892,16 @@ function renderGenerations(gens) {
             card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
 
+            // Extract idea data (handles nested structures from Firestore)
+            const ideaData = getIdeaData(idea);
+
             // Mark elite ideas with data attribute for styling
-            if (idea.elite_selected) {
+            if (ideaData.elite_selected) {
                 card.setAttribute('data-elite', 'true');
             }
 
             // Create a plain text preview for the card
-            const plainPreview = createCardPreview(idea.content, 150);
+            const plainPreview = createCardPreview(ideaData.content, 150);
 
             // Add "Prompt" button for initial generation cards
             const viewPromptButton = index === 0 ?
@@ -920,7 +954,7 @@ function renderGenerations(gens) {
 
             card.innerHTML = `
                 <div class="card-body">
-                    <h5 class="card-title">${idea.title || 'Untitled'}</h5>
+                    <h5 class="card-title">${ideaData.title || 'Untitled'}</h5>
                     <div class="card-text">
                         <p>${plainPreview}</p>
                     </div>
@@ -938,7 +972,7 @@ function renderGenerations(gens) {
             // Add click handler for view button
             const viewButton = card.querySelector('.view-idea');
             viewButton.addEventListener('click', () => {
-                showIdeaModal(idea);
+                showIdeaModal(ideaData);
             });
 
             // Add click handler for initial prompt button if it exists (generation 0)
@@ -1706,12 +1740,28 @@ async function confirmDeleteEvolution(evolutionId) {
 
 async function loadHistoryItemData(item) {
     try {
-        if (item.type === 'saved') {
-            // Load from saved evolution file
+        if (item.type === 'saved' || item.type === 'evolution') {
+            // Load from saved evolution file or Firestore
             const response = await fetch(`/api/evolution/${item.id}`);
             if (response.ok) {
                 const data = await response.json();
                 if (data.data && data.data.history) {
+                    // Hide the template entry section
+                    const templateEntry = document.getElementById('templateEntry');
+                    if (templateEntry) templateEntry.style.display = 'none';
+
+                    // Hide name input section
+                    const nameSection = document.getElementById('evolutionNameSection');
+                    if (nameSection) nameSection.style.display = 'none';
+
+                    // Hide sidebar to give more canvas space
+                    const sidebar = document.querySelector('.left-sidebar');
+                    if (sidebar) sidebar.classList.remove('show');
+
+                    // Ensure generations container is visible
+                    const genContainer = document.getElementById('generations-container');
+                    if (genContainer) genContainer.style.display = 'block';
+
                     document.getElementById('generations-container').innerHTML = '';
                     renderGenerations(data.data.history);
 
@@ -5386,55 +5436,7 @@ function copyApiKey() {
     });
 }
 
-async function handleTemplateGeneration() {
-    const ideaTypeInput = document.getElementById('ideaTypeInput');
-    const ideaType = ideaTypeInput.value.trim();
-    if (!ideaType) return;
-
-    const generateBtn = document.getElementById('generateTemplateBtn');
-    const originalText = generateBtn.innerHTML;
-    generateBtn.disabled = true;
-    generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
-
-    try {
-        const response = await fetch('/api/generate-template', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ idea_type: ideaType })
-        });
-
-        const data = await response.json();
-
-        if (data.status === 'success') {
-            // Update hidden input
-            document.getElementById('ideaType').value = ideaType;
-
-            // Update new status card
-            const display = document.getElementById('ideaTypeDisplay');
-
-            if (display) {
-                display.textContent = ideaType;
-                display.classList.remove('text-muted', 'fst-italic');
-            }
-
-            // Show editor
-            currentTemplate = data.template;
-            document.getElementById('templateEditor').value = JSON.stringify(data.template, null, 2);
-
-            // Show modal
-            const modal = new bootstrap.Modal(document.getElementById('templateModal'));
-            modal.show();
-        } else {
-            alert('Error generating template: ' + data.message);
-        }
-    } catch (error) {
-        console.error('Error:', error);
-        alert('Error generating template');
-    } finally {
-        generateBtn.disabled = false;
-        generateBtn.innerHTML = originalText;
-    }
-}
+// Note: handleTemplateGeneration is defined in viewer.html with proper DOM elements
 
 function showStatusInSettings(msg, type) {
     const el = document.getElementById('settingsStatus');

@@ -303,6 +303,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             thinking_budget=thinking_budget,
             max_budget=max_budget,
             api_key=api_key,
+            user_id=user.uid,  # Store user_id for Firestore scoping
         )
 
         # Initialize evolution with name (auto-generates if not provided)
@@ -387,7 +388,7 @@ async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
     # Save checkpoint before forcing stop
     checkpoint_id = None
     try:
-        state.engine.save_checkpoint(status='force_stopped')
+        await state.engine.save_checkpoint(status='force_stopped')
         checkpoint_id = state.engine.checkpoint_id
     except Exception as e:
         print(f"Warning: Failed to save checkpoint during force stop: {e}")
@@ -410,12 +411,12 @@ async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
     })
 
 @app.get("/api/checkpoints")
-async def list_checkpoints():
+async def list_checkpoints_endpoint(user: UserInfo = Depends(require_auth)):
     """
-    List all available evolution checkpoints.
+    List all available evolution checkpoints for the current user.
     """
     try:
-        checkpoints = EvolutionEngine.list_checkpoints()
+        checkpoints = await EvolutionEngine.list_checkpoints_for_user(user.uid)
         return JSONResponse({
             "status": "success",
             "checkpoints": checkpoints
@@ -511,11 +512,11 @@ async def resume_evolution(request: Request, user: UserInfo = Depends(require_au
 
     print(f"Resuming evolution from checkpoint: {checkpoint_id}")
 
-    # Load the engine from checkpoint
-    state.engine = EvolutionEngine.load_checkpoint(checkpoint_id, api_key=api_key)
+    # Load the engine from Firestore
+    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, checkpoint_id, api_key=api_key)
     if state.engine is None:
         return JSONResponse(
-            {"status": "error", "message": "Failed to load checkpoint"},
+            {"status": "error", "message": "Failed to load evolution or checkpoint"},
             status_code=500,
         )
 
@@ -592,12 +593,9 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
 
     print(f"Continuing evolution for {additional_generations} more generations")
 
-    # Load the engine
-    if checkpoint_id:
-        state.engine = EvolutionEngine.load_checkpoint(checkpoint_id, api_key=api_key)
-    else:
-        # Load from evolution file and create a checkpoint
-        state.engine = await load_engine_from_evolution(evolution_id, api_key=api_key)
+    # Load the engine from Firestore (works for both checkpoints and evolutions)
+    evolution_or_checkpoint_id = checkpoint_id or evolution_id
+    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_or_checkpoint_id, api_key=api_key)
 
     if state.engine is None:
         return JSONResponse(
@@ -677,8 +675,8 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
 
     print(f"Continuing saved evolution '{evolution_id}' for {additional_generations} more generations")
 
-    # Load from evolution file and create engine
-    state.engine = await load_engine_from_evolution(evolution_id, api_key=api_key)
+    # Load evolution from Firestore
+    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_id, api_key=api_key)
 
     if state.engine is None:
         return JSONResponse(
@@ -1167,37 +1165,33 @@ async def save_evolution(request: Request):
         }, status_code=500)
 
 @app.get('/api/evolutions')
-async def get_evolutions(request: Request):
-    """Get list of evolutions from file system"""
-    evolutions_list = []
-
+async def get_evolutions(user: UserInfo = Depends(require_auth)):
+    """Get list of evolutions for the current user from Firestore"""
     try:
-        for file_path in DATA_DIR.glob('*.json'):
-            file_stat = file_path.stat()
+        evolutions = await db.list_evolutions(user.uid)
+        evolutions_list = []
+        for ev in evolutions:
             evolutions_list.append({
-                'id': file_path.stem,  # Use filename without extension as ID
-                'timestamp': datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
-                'filename': file_path.name
+                'id': ev.get('id'),
+                'timestamp': ev.get('updated_at') or ev.get('created_at', ''),
+                'filename': ev.get('name', 'Unnamed Evolution')
             })
-
-        # Sort by timestamp descending
-        evolutions_list.sort(key=lambda x: x['timestamp'], reverse=True)
         return JSONResponse(evolutions_list)
     except Exception as e:
-        print(f"Error reading evolution files: {e}")
+        print(f"Error listing evolutions: {e}")
         return JSONResponse([])
 
 @app.get('/api/history')
-async def get_unified_history():
+async def get_unified_history(user: UserInfo = Depends(require_auth)):
     """
-    Get unified history of all evolutions.
-    Combines new unified storage + legacy checkpoints + legacy saved files.
+    Get unified history of all evolutions for the current user.
+    Loads from Firestore.
     """
     history_items = []
 
     try:
-        # 1. Load from unified evolutions directory (new format)
-        evolutions = EvolutionEngine.list_evolutions()
+        # 1. Load evolutions from Firestore (user-scoped)
+        evolutions = await EvolutionEngine.list_evolutions_for_user(user.uid)
         for ev in evolutions:
             history_items.append({
                 'id': ev.get('id'),
@@ -1219,8 +1213,8 @@ async def get_unified_history():
                 'can_delete': True,
             })
 
-        # 2. Load legacy checkpoints (for backwards compatibility)
-        checkpoints = EvolutionEngine.list_checkpoints()
+        # 2. Load legacy checkpoints from Firestore (for backwards compatibility)
+        checkpoints = await EvolutionEngine.list_checkpoints_for_user(user.uid)
         existing_ids = {item['id'] for item in history_items}
         for cp in checkpoints:
             checkpoint_id = cp.get('id', '')
@@ -1304,7 +1298,7 @@ async def get_unified_history():
         }, status_code=500)
 
 @app.post('/api/evolution/{evolution_id}/rename')
-async def rename_evolution(request: Request, evolution_id: str):
+async def rename_evolution_endpoint(request: Request, evolution_id: str, user: UserInfo = Depends(require_auth)):
     """Rename an evolution"""
     try:
         data = await request.json()
@@ -1316,8 +1310,8 @@ async def rename_evolution(request: Request, evolution_id: str):
                 'message': 'Name cannot be empty'
             }, status_code=400)
 
-        # Try unified evolutions first
-        if EvolutionEngine.rename_evolution(evolution_id, new_name):
+        # Rename in Firestore
+        if await EvolutionEngine.rename_evolution_for_user(user.uid, evolution_id, new_name):
             return JSONResponse({
                 'status': 'success',
                 'message': f'Evolution renamed to "{new_name}"',
@@ -1336,21 +1330,11 @@ async def rename_evolution(request: Request, evolution_id: str):
         }, status_code=500)
 
 @app.delete('/api/evolution/{evolution_id}')
-async def delete_evolution_endpoint(evolution_id: str):
+async def delete_evolution_endpoint(evolution_id: str, user: UserInfo = Depends(require_auth)):
     """Delete an evolution"""
     try:
-        # Try unified evolutions first
-        if EvolutionEngine.delete_evolution(evolution_id):
-            return JSONResponse({'status': 'success', 'message': 'Evolution deleted'})
-
-        # Try legacy checkpoint
-        if EvolutionEngine.delete_checkpoint(evolution_id):
-            return JSONResponse({'status': 'success', 'message': 'Checkpoint deleted'})
-
-        # Try legacy saved file
-        legacy_path = DATA_DIR / f"{evolution_id}.json"
-        if legacy_path.exists():
-            legacy_path.unlink()
+        # Delete from Firestore
+        if await EvolutionEngine.delete_evolution_for_user(user.uid, evolution_id):
             return JSONResponse({'status': 'success', 'message': 'Evolution deleted'})
 
         return JSONResponse({
@@ -1365,33 +1349,22 @@ async def delete_evolution_endpoint(evolution_id: str):
         }, status_code=500)
 
 @app.get('/api/evolution/{evolution_id}')
-async def get_evolution(request: Request, evolution_id: str):
-    """Get evolution data from file"""
+async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth)):
+    """Get evolution data from Firestore"""
     try:
-        # Try unified evolutions directory first
-        evolution_path = EVOLUTIONS_DIR / f"{evolution_id}.json"
-        if evolution_path.exists():
-            with open(evolution_path) as f:
-                data = json.load(f)
-                return JSONResponse({
-                    'id': evolution_id,
-                    'name': data.get('name', evolution_id),
-                    'timestamp': data.get('updated_at') or data.get('created_at'),
-                    'data': data
-                })
-
-        # Fall back to legacy data directory
-        file_path = DATA_DIR / f"{evolution_id}.json"
-        if file_path.exists():
-            with open(file_path) as f:
-                data = json.load(f)
-                return JSONResponse({
-                    'id': evolution_id,
-                    'timestamp': datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(),
-                    'data': data
-                })
+        # Load from Firestore
+        data = await db.get_evolution(user.uid, evolution_id)
+        if data:
+            return JSONResponse({
+                'id': evolution_id,
+                'name': data.get('name', evolution_id),
+                'timestamp': data.get('updated_at') or data.get('created_at'),
+                'data': data
+            })
 
         raise HTTPException(status_code=404, detail="Evolution not found")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

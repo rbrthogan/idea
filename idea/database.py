@@ -75,6 +75,19 @@ async def save_user_api_key(user_id: str, api_key: str) -> None:
     db = get_db()
     encrypted = encrypt_api_key(api_key)
 
+    # Ensure parent user document exists (required for admin listing)
+    user_ref = db.collection("users").document(user_id)
+    user_doc = user_ref.get()
+    if not user_doc.exists:
+        user_ref.set({
+            "created_at": datetime.utcnow().isoformat(),
+            "last_activity": datetime.utcnow().isoformat()
+        })
+    else:
+        user_ref.update({
+            "last_activity": datetime.utcnow().isoformat()
+        })
+
     db.collection("users").document(user_id).collection("settings").document("main").set({
         "api_key_encrypted": encrypted,
         "api_key_set": True,
@@ -106,13 +119,39 @@ async def delete_user_api_key(user_id: str) -> None:
 
 # --- Evolutions ---
 
-async def save_evolution(user_id: str, evolution_id: str, data: Dict[str, Any]) -> None:
-    """Save an evolution for a user."""
-    db = get_db()
-    data["updated_at"] = datetime.utcnow().isoformat()
-    data["user_id"] = user_id
+# Fields that may contain nested arrays and need JSON serialization
+# Firestore doesn't support arrays within arrays, so we serialize these to JSON strings
+EVOLUTION_NESTED_FIELDS = [
+    'history',           # [[ideas], [ideas], ...]
+    'population',        # [ideas]
+    'diversity_history', # [[diversity scores], ...]
+    'contexts',          # may contain nested structures
+    'specific_prompts',  # may contain nested structures
+    'breeding_prompts',  # may contain nested structures
+    'token_counts',      # dict with nested data
+    'config',            # dict with config values
+]
 
-    db.collection("users").document(user_id).collection("evolutions").document(evolution_id).set(data)
+
+async def save_evolution(user_id: str, evolution_id: str, data: Dict[str, Any]) -> None:
+    """Save an evolution for a user.
+
+    Note: Firestore doesn't support nested arrays, so we serialize fields like
+    'history' (which is [[ideas], [ideas]]) to JSON strings.
+    """
+    db = get_db()
+
+    # Make a copy to avoid modifying the original
+    save_data = dict(data)
+    save_data["updated_at"] = datetime.utcnow().isoformat()
+    save_data["user_id"] = user_id
+
+    # Serialize nested array fields to JSON strings
+    for field in EVOLUTION_NESTED_FIELDS:
+        if field in save_data and save_data[field] is not None:
+            save_data[field] = json.dumps(save_data[field], default=str)
+
+    db.collection("users").document(user_id).collection("evolutions").document(evolution_id).set(save_data)
 
 
 async def get_evolution(user_id: str, evolution_id: str) -> Optional[Dict[str, Any]]:
@@ -121,7 +160,15 @@ async def get_evolution(user_id: str, evolution_id: str) -> Optional[Dict[str, A
     doc = db.collection("users").document(user_id).collection("evolutions").document(evolution_id).get()
 
     if doc.exists:
-        return doc.to_dict()
+        data = doc.to_dict()
+        # Deserialize JSON string fields back to nested arrays
+        for field in EVOLUTION_NESTED_FIELDS:
+            if field in data and isinstance(data[field], str):
+                try:
+                    data[field] = json.loads(data[field])
+                except json.JSONDecodeError:
+                    pass  # Keep as string if not valid JSON
+        return data
     return None
 
 
@@ -137,6 +184,13 @@ async def list_evolutions(user_id: str, limit: int = 50) -> List[Dict[str, Any]]
     for doc in docs:
         data = doc.to_dict()
         data["id"] = doc.id
+        # Deserialize JSON string fields back to native types
+        for field in EVOLUTION_NESTED_FIELDS:
+            if field in data and isinstance(data[field], str):
+                try:
+                    data[field] = json.loads(data[field])
+                except json.JSONDecodeError:
+                    pass  # Keep as string if not valid JSON
         evolutions.append(data)
     return evolutions
 
@@ -148,6 +202,20 @@ async def delete_evolution(user_id: str, evolution_id: str) -> bool:
     doc = doc_ref.get()
     if doc.exists:
         doc_ref.delete()
+        return True
+    return False
+
+
+async def rename_evolution(user_id: str, evolution_id: str, new_name: str) -> bool:
+    """Rename an evolution."""
+    db = get_db()
+    doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
+    doc = doc_ref.get()
+    if doc.exists:
+        doc_ref.update({
+            "name": new_name,
+            "updated_at": datetime.utcnow().isoformat()
+        })
         return True
     return False
 

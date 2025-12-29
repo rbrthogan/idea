@@ -334,15 +334,6 @@
               </button>
             </div>
             <div class="p-3">
-              <!-- Filter tabs -->
-              <div class="btn-group btn-group-sm w-100 mb-3" role="group">
-                <button type="button" class="btn btn-outline-secondary active" onclick="filterHistory('all')"
-                  id="historyFilterAll">All</button>
-                <button type="button" class="btn btn-outline-secondary" onclick="filterHistory('saved')"
-                  id="historyFilterSaved">Saved</button>
-                <button type="button" class="btn btn-outline-secondary" onclick="filterHistory('checkpoint')"
-                  id="historyFilterCheckpoint">Checkpoints</button>
-              </div>
               <!-- History list -->
               <div id="historyList" class="history-list">
                 <div class="text-center text-muted py-4">
@@ -1111,7 +1102,7 @@
         // Show loading state
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
-        showStatus('Generating template with Gemini 2.5 Pro...', 'info');
+        showStatus('Generating template with Gemini 3.0 Pro...', 'info');
         hideTemplatePreview();
 
         // Generate template

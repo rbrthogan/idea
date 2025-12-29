@@ -18,4 +18,8 @@
 
 
 ## Bugs
--
+- When you attached to a running evolution the progress bar is there but the timer state resets to 0 so you don't know how long it has been running.
+- Diversity chart is not updating
+
+## UX Improvements
+- Rater page should reuse the same history sidebar as the main viewer page instead of having a separate dropdown
