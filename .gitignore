@@ -21,3 +21,6 @@ terraform.tfvars
 
 # Generated files (contains deployment-specific config)
 idea/static/js/auth.js
+
+# Firebase
+.firebase/

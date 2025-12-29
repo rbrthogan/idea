@@ -46,7 +46,7 @@ async def get_stats(user: UserInfo = Depends(require_admin)):
         users = await db.get_all_users_summary()
 
         total_evolutions = sum(u.get("evolution_count", 0) for u in users)
-        total_checkpoints = sum(u.get("checkpoint_count", 0) for u in users)
+        total_templates = sum(u.get("template_count", 0) for u in users)
         users_with_api_key = sum(1 for u in users if u.get("has_api_key"))
 
         return JSONResponse({
@@ -55,7 +55,7 @@ async def get_stats(user: UserInfo = Depends(require_admin)):
                 "total_users": len(users),
                 "users_with_api_key": users_with_api_key,
                 "total_evolutions": total_evolutions,
-                "total_checkpoints": total_checkpoints
+                "total_templates": total_templates
             }
         })
     except Exception as e:

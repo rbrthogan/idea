@@ -354,11 +354,15 @@ async def get_all_users_summary() -> List[Dict[str, Any]]:
 
         # Count evolutions
         evolutions = list(db.collection("users").document(user_id).collection("evolutions").limit(100).stream())
-        evolution_count = len(evolutions)
-
         # Count checkpoints
         checkpoints = list(db.collection("users").document(user_id).collection("checkpoints").limit(100).stream())
-        checkpoint_count = len(checkpoints)
+
+        # Combined count for admin display
+        total_evolution_count = len(evolutions) + len(checkpoints)
+
+        # Count templates
+        templates = list(db.collection("users").document(user_id).collection("templates").limit(100).stream())
+        template_count = len(templates)
 
         # Get settings for last activity
         settings = db.collection("users").document(user_id).collection("settings").document("main").get()
@@ -368,8 +372,8 @@ async def get_all_users_summary() -> List[Dict[str, Any]]:
 
         users.append({
             "user_id": user_id,
-            "evolution_count": evolution_count,
-            "checkpoint_count": checkpoint_count,
+            "evolution_count": total_evolution_count,
+            "template_count": template_count,
             "last_activity": last_activity,
             "has_api_key": settings.exists and settings.to_dict().get("api_key_set", False)
         })

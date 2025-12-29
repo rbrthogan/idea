@@ -93,9 +93,9 @@
                 </div>
             </div>
             <div class="col-md-3">
-                <div class="stat-card" style="background: linear-gradient(135deg, #fd7e14 0%, #ffc107 100%);">
-                    <div class="stat-value" id="totalCheckpoints">--</div>
-                    <div class="stat-label">Total Checkpoints</div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #0dcaf0 0%, #0d6efd 100%);">
+                    <div class="stat-value" id="totalTemplates">--</div>
+                    <div class="stat-label">Total Templates</div>
                 </div>
             </div>
         </div>
@@ -116,7 +116,7 @@
                                 <tr>
                                     <th>User ID</th>
                                     <th>Evolutions</th>
-                                    <th>Checkpoints</th>
+                                    <th>Templates</th>
                                     <th>API Key</th>
                                     <th>Last Activity</th>
                                 </tr>
@@ -165,7 +165,7 @@
                     document.getElementById('totalUsers').textContent = data.stats.total_users;
                     document.getElementById('activeUsers').textContent = data.stats.users_with_api_key;
                     document.getElementById('totalEvolutions').textContent = data.stats.total_evolutions;
-                    document.getElementById('totalCheckpoints').textContent = data.stats.total_checkpoints;
+                    document.getElementById('totalTemplates').textContent = data.stats.total_templates;
                 }
             } catch (e) {
                 console.error('Failed to load stats:', e);
@@ -195,7 +195,7 @@
           <tr>
             <td><code class="small">${user.user_id.substring(0, 12)}...</code></td>
             <td><span class="badge bg-primary">${user.evolution_count}</span></td>
-            <td><span class="badge bg-secondary">${user.checkpoint_count}</span></td>
+            <td><span class="badge bg-info text-dark">${user.template_count}</span></td>
             <td>
               ${user.has_api_key
                         ? '<span class="badge badge-active"><i class="fas fa-check"></i> Set</span>'
@@ -212,11 +212,11 @@
         // Initialize when auth is ready (handled by auth_logic.js observer or timeout fallback)
         // We'll use a polling check for simplicity since auth_logic.js doesn't emit a custom event yet
         document.addEventListener('DOMContentLoaded', () => {
-             // Let auth_logic run first
-             setTimeout(() => {
-                 loadStats();
-                 loadUsers();
-             }, 1000);
+            // Let auth_logic run first
+            setTimeout(() => {
+                loadStats();
+                loadUsers();
+            }, 1000);
         });
     </script>
 </body>
