@@ -1785,7 +1785,10 @@ async function loadHistoryItemData(item) {
                         displayTokenCounts(data.data.token_counts);
                     }
 
-                    document.getElementById('downloadButton').disabled = false;
+                    const downloadBtn = document.getElementById('downloadButton');
+                    if (downloadBtn) {
+                        downloadBtn.disabled = false;
+                    }
                 }
             }
         } else if (item.type === 'checkpoint') {
@@ -2167,6 +2170,19 @@ async function pollProgress() {
         }
         if (data.evolution_id) {
             currentEvolutionId = data.evolution_id;
+        }
+
+        // Sync start time from server if available
+        if (data.start_time) {
+            const serverStartTime = new Date(data.start_time).getTime();
+            // detailed check to avoid unnecessary updates but ensure sync
+            if (!evolutionStartTime || Math.abs(evolutionStartTime - serverStartTime) > 2000) {
+                console.log("Syncing evolution start time from server:", data.start_time);
+                evolutionStartTime = serverStartTime;
+                if (!elapsedTimeInterval) {
+                    startElapsedTimeUpdater();
+                }
+            }
         }
 
         // Check if this is a new evolution (history is empty but is_running is true)
@@ -4516,18 +4532,23 @@ function processDiversityData(diversityHistory) {
     const perGenerationScores = [];
     const interGenerationScores = [];
 
+    console.log("Processing diversity history:", diversityHistory);
+
     diversityHistory.forEach((diversityData, index) => {
         // Check if we have valid diversity data
         if (!diversityData) {
+            console.log(`Skipping index ${index}: Invalid data`);
             return;
         }
 
         // Handle case where diversity calculation is disabled or failed
         if (diversityData.enabled === false) {
+            console.log(`Skipping index ${index}: Diversity calculation disabled`);
             return;
         }
 
         if (diversityData.error) {
+            console.log(`Skipping index ${index}: Error in diversity data:`, diversityData.error);
             return;
         }
 
@@ -4638,8 +4659,14 @@ function updateDiversityChart(diversityHistory) {
             // Ensure proper sizing of canvas and container
             const canvas = document.getElementById('diversity-chart');
             const plotContainer = document.querySelector('.diversity-plot-container');
+            const plotSection = document.getElementById('diversity-plot-section');
 
             if (canvas && plotContainer) {
+                // Ensure parent section is visible
+                if (plotSection) {
+                    plotSection.style.display = 'block';
+                }
+
                 // Force proper sizing
                 plotContainer.style.display = 'block';
                 plotContainer.style.height = '450px';

@@ -324,7 +324,8 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             "is_running": True,
             "history": [],
             "contexts": contexts,
-            "progress": 0
+            "progress": 0,
+            "start_time": datetime.now().isoformat()  # Track when evolution started
         }
 
         # Put initial status in queue
@@ -534,7 +535,8 @@ async def resume_evolution(request: Request, user: UserInfo = Depends(require_au
         "contexts": state.engine.contexts,
         "specific_prompts": state.engine.specific_prompts,
         "breeding_prompts": state.engine.breeding_prompts,
-        "progress": (state.engine.current_generation / state.engine.generations) * 100 if state.engine.generations > 0 else 0
+        "progress": (state.engine.current_generation / state.engine.generations) * 100 if state.engine.generations > 0 else 0,
+        "start_time": datetime.now().isoformat()  # Track when evolution resumed
     }
 
     # Put initial status in queue
@@ -618,7 +620,8 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
         "contexts": state.engine.contexts,
         "specific_prompts": state.engine.specific_prompts,
         "breeding_prompts": state.engine.breeding_prompts,
-        "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0
+        "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0,
+        "start_time": datetime.now().isoformat()  # Track when evolution continued
     }
 
     # Put initial status in queue
@@ -699,7 +702,8 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
         "contexts": state.engine.contexts,
         "specific_prompts": state.engine.specific_prompts,
         "breeding_prompts": state.engine.breeding_prompts,
-        "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0
+        "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0,
+        "start_time": datetime.now().isoformat()  # Track when evolution continued
     }
 
     # Put initial status in queue

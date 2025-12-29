@@ -86,7 +86,7 @@ class EvolutionEngine:
         self.breeding_prompts = []  # List of lists: breeding prompts for each generation (empty for gen 0)
 
         # Initialize diversity calculator
-        self.diversity_calculator = DiversityCalculator()
+        self.diversity_calculator = DiversityCalculator(api_key=api_key)
         self.diversity_history = []  # List of diversity metrics for each generation
 
         # Add stop flag for graceful interruption

@@ -17,16 +17,18 @@ class DiversityCalculator:
     to track how the evolutionary algorithm's population changes over time.
     """
 
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None):
         """Initialize the diversity calculator with Gemini client."""
-        self.api_key = os.environ.get("GEMINI_API_KEY")
+        # Use provided key or fallback to environment variable
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+
         if not self.api_key:
             logger.warning("GEMINI_API_KEY not found. Diversity calculation will be disabled.")
             self.client = None
         else:
             try:
                 self.client = genai.Client(api_key=self.api_key)
-                logger.info("DiversityCalculator initialized successfully")
+                logger.debug("DiversityCalculator initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize Gemini client: {e}")
                 self.client = None
