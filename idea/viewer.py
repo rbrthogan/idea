@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple, Optional
 
 from idea.evolution import EvolutionEngine
 from idea.llm import Critic
-from idea.config import LLM_MODELS, DEFAULT_MODEL, DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
+from idea.config import LLM_MODELS, DEFAULT_MODEL, DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P, SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, ADMIN_EMAIL
 from idea.template_manager import router as template_router
 from idea.prompts.loader import list_available_templates
 from idea.admin import router as admin_router
@@ -26,6 +26,9 @@ from idea.auth import require_auth, UserInfo
 from fastapi import Depends
 from idea import database as db
 from idea.user_state import user_states, UserEvolutionState
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -64,6 +67,11 @@ class SaveEvolutionRequest(BaseModel):
 
 class ApiKeyRequest(BaseModel):
     api_key: str
+
+class ContactRequest(BaseModel):
+    name: str
+    email: str
+    message: str
 
 # --------------------------------------------------
 # Routes
@@ -127,6 +135,45 @@ async def get_settings_status(user: UserInfo = Depends(require_auth)):
             "message": f"Internal Server Error: {str(e)}"
         }, status_code=500)
 
+
+
+
+@app.post("/api/contact")
+async def send_contact_email(request: ContactRequest):
+    """
+    Send a contact email to the admin.
+    """
+    try:
+        if not SMTP_USERNAME or not SMTP_PASSWORD or not ADMIN_EMAIL:
+            print("SMTP not configured. Message received but not sent.")
+            print(f"From: {request.name} <{request.email}>")
+            print(f"Message: {request.message}")
+            # Return success even if email not sent, as we logged it (simulated behavior for dev)
+            return JSONResponse({
+                "status": "success",
+                "message": "Message received! (SMTP not configured, checked logs)"
+            })
+
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USERNAME
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = f"Idea App Contact: {request.name}"
+        msg['Reply-To'] = request.email
+
+        body = f"Name: {request.name}\nEmail: {request.email}\n\nMessage:\n{request.message}"
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(SMTP_USERNAME, ADMIN_EMAIL, text)
+        server.quit()
+
+        return JSONResponse({"status": "success", "message": "Email sent successfully"})
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.get("/api/debug/auth")

@@ -55,3 +55,11 @@ model_prices_per_million_tokens = {
     "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
     "gemini-3-pro-preview": {"input": 2.00, "output": 12.00}
 }
+
+# SMTP Configuration
+import os
+SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")

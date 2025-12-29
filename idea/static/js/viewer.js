@@ -461,6 +461,68 @@ document.addEventListener('DOMContentLoaded', async () => {
             updateContextDisplay();
         }
     });
+
+    // --- Contact Form ---
+    addListener('sendContactBtn', 'click', async () => {
+        const name = document.getElementById('contactName').value.trim();
+        const email = document.getElementById('contactEmail').value.trim();
+        const message = document.getElementById('contactMessage').value.trim();
+        const btn = document.getElementById('sendContactBtn');
+
+        if (!name || !email || !message) {
+            alert('Please fill in all fields');
+            return;
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Sending...';
+
+        try {
+            const response = await fetch('/api/contact', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, email, message })
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                // Close modal
+                const modalEl = document.getElementById('contactModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                modal.hide();
+
+                // Clear form
+                document.getElementById('contactForm').reset();
+
+                // Show success (you might want a nicer toast notification here)
+                alert('Message sent successfully!');
+            } else {
+                alert(`Error: ${data.message || 'Failed to send message'}`);
+            }
+        } catch (error) {
+            console.error('Error sending contact message:', error);
+            alert('An error occurred while sending the message');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Send Message';
+        }
+    });
+
+    // --- Welcome Modal Logic ---
+    const hasSeenWelcome = localStorage.getItem('hasSeenWelcomeModal');
+    if (!hasSeenWelcome) {
+        // Show modal after a short delay
+        setTimeout(() => {
+            const welcomeModal = new bootstrap.Modal(document.getElementById('welcomeModal'));
+            welcomeModal.show();
+
+            // Set flag when modal is closed
+            document.getElementById('welcomeModal').addEventListener('hidden.bs.modal', function () {
+                localStorage.setItem('hasSeenWelcomeModal', 'true');
+            });
+        }, 1000);
+    }
 });
 
 // Function to restore current evolution from localStorage

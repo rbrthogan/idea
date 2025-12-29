@@ -20,7 +20,13 @@ Deploy Idea Evolution to Google Cloud Run with one command.
     -   Go to **Authentication > Settings > Authorized domains**.
     -   Click **Add domain** and paste your Cloud Run domain (without `https://`).
     -   This is **required** for Google Sign-In to work on the deployed app.
-
+### 5. Email Setup (For Contact Form)
+The "Contact Us" feature requires an SMTP server to send emails to the admin.
+-   **Gmail Recommendation**:
+    -   Go to [Google Account Security](https://myaccount.google.com/security).
+    -   Enable **2-Step Verification**.
+    -   Search for **App Passwords** and create one.
+    -   Save the 16-character code. You will need this (and your email address) when running `deploy.sh`.
 ## Quick Start
 
 1. Login to Google Cloud:

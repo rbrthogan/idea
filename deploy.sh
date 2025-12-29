@@ -48,6 +48,23 @@ else
     PROJECT_ID=$(grep project_id terraform.tfvars | cut -d'"' -f2)
 fi
 
+# Check for SMTP config
+if ! grep -q "smtp_username" terraform.tfvars; then
+    echo -e "${BLUE}SMTP Configuration missing. Let's set it up.${NC}"
+    read -p "Enter SMTP Username (email): " SMTP_USERNAME
+    read -s -p "Enter SMTP Password (app password): " SMTP_PASSWORD
+    echo ""
+    read -p "Enter SMTP Server (default: smtp.gmail.com): " SMTP_SERVER
+    SMTP_SERVER=${SMTP_SERVER:-smtp.gmail.com}
+    read -p "Enter SMTP Port (default: 587): " SMTP_PORT
+    SMTP_PORT=${SMTP_PORT:-587}
+
+    echo "smtp_username = \"$SMTP_USERNAME\"" >> terraform.tfvars
+    echo "smtp_password = \"$SMTP_PASSWORD\"" >> terraform.tfvars
+    echo "smtp_server = \"$SMTP_SERVER\"" >> terraform.tfvars
+    echo "smtp_port = \"$SMTP_PORT\"" >> terraform.tfvars
+fi
+
 REGION="us-central1" # defaulting for simplicity, could parse from info
 
 # 0. Manual Prerequisite Check removed (see DEPLOY.md)
@@ -68,6 +85,7 @@ echo -e "${BLUE}Provisioning Remaining Resources...${NC}"
 terraform apply -target=google_artifact_registry_repository.repo \
                 -target=google_firestore_database.database \
                 -target=google_secret_manager_secret_version.encryption_key_version \
+                -target=google_secret_manager_secret_version.smtp_password_version \
                 -target=google_firebase_web_app.default \
                 -target=data.google_firebase_web_app_config.default \
                 -auto-approve

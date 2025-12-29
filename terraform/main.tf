@@ -98,6 +98,26 @@ resource "google_secret_manager_secret_iam_member" "secret_access" {
   member    = "serviceAccount:${google_service_account.idea_sa.email}"
 }
 
+# SMTP Password Secret
+resource "google_secret_manager_secret" "smtp_password" {
+  secret_id = "idea-smtp-password"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "smtp_password_version" {
+  secret      = google_secret_manager_secret.smtp_password.id
+  secret_data = var.smtp_password
+}
+
+resource "google_secret_manager_secret_iam_member" "smtp_password_access" {
+  secret_id = google_secret_manager_secret.smtp_password.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.idea_sa.email}"
+}
+
 # Grant Cloud Run SA access to Firestore
 resource "google_project_iam_member" "firestore_access" {
   project = var.project_id
@@ -131,6 +151,36 @@ resource "google_cloud_run_v2_service" "default" {
       env {
         name  = "ADMIN_EMAILS"
         value = var.admin_emails
+      }
+
+      env {
+        name = "ADMIN_EMAIL"
+        value = split(",", var.admin_emails)[0]
+      }
+
+      env {
+        name  = "SMTP_SERVER"
+        value = var.smtp_server
+      }
+
+      env {
+        name  = "SMTP_PORT"
+        value = var.smtp_port
+      }
+
+      env {
+        name  = "SMTP_USERNAME"
+        value = var.smtp_username
+      }
+
+      env {
+        name = "SMTP_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.smtp_password.secret_id
+            version = "latest"
+          }
+        }
       }
 
       env {
