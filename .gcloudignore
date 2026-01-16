@@ -1,0 +1,56 @@
+# Cloud Build ignore file
+# IMPORTANT: This file controls what gets uploaded to Cloud Build
+# By default, gcloud builds submit uses .gitignore if this file doesn't exist
+
+# We need auth.js in the build, so we explicitly create this file
+# to override .gitignore behavior
+
+# OS files
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.venv/
+venv/
+env/
+
+# Environment (but NOT auth.js)
+.env
+.env.*
+
+# Git
+.git/
+
+# Data (local development only)
+data/
+
+# Terraform (not needed in container)
+terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+
+# Development files
+*.md
+!README.md
+.agent/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Tests
+tests/
+*_test.py
+test_*.py
+
+# Cache
+.pytest_cache/
+.ruff_cache/

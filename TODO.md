@@ -14,6 +14,10 @@
 - improve the tournament selection by using niching - group similar ideas to keep with each other -> maintain multiple directions of exploration -> similar to the "island" idea but more dynamic vs frozen in from the start.
 - There is still too much dependency on the intital context prompt - similar themes are often generated --> inject more true randomness e.g return to original idea of random words but now just augment the prompt with these random words. Or ideally something better.
 - Explore combining cheaper models with expensive ones. Keep models can go wide and explore much larger space of ideas perhaps providing a sampling space for the more expensive models to get better quality ideas from.
+- Consider not replacing entire population each generation but instead only a subset (selected by either weakness, age or both) -- probably need to try larger population sizes to see if this works well.
+
 
 ## Bugs
-- When opening on "current evolution" the diversity chart initially appears with data but is then refreshed to empty. If saved it can be restored by selecting the saved evolution, but current evolution view should also work.
+
+## UX Improvements
+- Rater page should reuse the same history sidebar as the main viewer page instead of having a separate dropdown

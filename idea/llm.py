@@ -5,7 +5,7 @@ from google import genai
 from google.genai import types
 import json
 from pydantic import BaseModel
-from typing import Type, Optional, Dict, List
+from typing import Type, Optional, Dict, List, Callable
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
 import numpy as np
@@ -27,14 +27,16 @@ class LLMWrapper(ABC):
                  prompt_template: str = "",
                  temperature: float = 1.0,
                  top_p: float = 0.95,
-                  agent_name: str = "",
-                  thinking_budget: Optional[int] = None):
+                 agent_name: str = "",
+                 thinking_budget: Optional[int] = None,
+                 api_key: Optional[str] = None):
         self.provider = provider
         self.model_name = model_name
         self.prompt_template = prompt_template
         self.temperature = temperature
         self.top_p = top_p
         self.thinking_budget = thinking_budget
+        self.api_key = api_key
         self.total_token_count = 0
         self.input_token_count = 0
         self.output_token_count = 0
@@ -47,13 +49,13 @@ class LLMWrapper(ABC):
 
     def _setup_provider(self):
         if self.provider == "google_generative_ai":
-            api_key = os.environ.get("GEMINI_API_KEY")
+            api_key = self.api_key or os.environ.get("GEMINI_API_KEY")
             if not api_key:
-                print("Warning: GEMINI_API_KEY not set")
+                print("Warning: GEMINI_API_KEY not set and no api_key provided")
 
             # Initialize client once
             with self._client_lock:
-                if self.client is None:
+                if self.client is None and api_key:
                     self.client = genai.Client(api_key=api_key)
         # Add other providers here
 
@@ -165,9 +167,16 @@ class Ideator(LLMWrapper):
             context_text = text.strip()
 
         # Use more of the context - sample 30-50% instead of 10%
-        words = [word.strip() for word in context_text.split(',')]
+        words = [word.strip() for word in context_text.split(',') if word.strip()]
+
+        if not words:
+            print(f"Warning: No valid concepts found in text: '{text}'")
+            return text.strip() or "general concepts"
+
         # Use between 30-50% of the words to maintain diversity while avoiding overwhelming context
-        sample_size = max(3, min(int(len(words) * 0.4), 15))  # 40% but cap at 15 words
+        target_size = max(3, min(int(len(words) * 0.4), 15))  # 40% but cap at 15 words
+        sample_size = min(len(words), target_size)
+
         subset = random.sample(words, sample_size)
         return ", ".join(subset)
 
@@ -183,11 +192,13 @@ class Ideator(LLMWrapper):
 
         return specific_prompt
 
-    def generate_context_from_parents(self, parent_genotypes: List[str]) -> str:
-        """Generate context pool from parent genotypes by combining and sampling concepts
+    def generate_context_from_parents(self, parent_genotypes: List[str], mutation_rate: float = 0.0, mutation_context_pool: str = "") -> str:
+        """Generate context pool from parent genotypes by combining and sampling concepts, with optional mutation.
 
         Args:
             parent_genotypes: List of genotypes from parent ideas
+            mutation_rate: Probability of selecting a concept from the mutation pool (0.0 to 1.0)
+            mutation_context_pool: A string of comma-separated concepts to use for mutation
 
         Returns:
             A sampled context pool string
@@ -200,17 +211,47 @@ class Ideator(LLMWrapper):
             all_concepts.extend(concepts)
 
         # Remove duplicates while preserving order
-        unique_concepts = list(dict.fromkeys(all_concepts))
+        unique_parent_concepts = list(dict.fromkeys(all_concepts))
 
-        # Sample 50% at random as requested by user
-        if len(unique_concepts) > 1:
-            sample_size = max(1, len(unique_concepts) // 2)  # 50% but at least 1
-            sampled_concepts = random.sample(unique_concepts, sample_size)
+        # Process mutation concepts if available
+        mutation_concepts = []
+        if mutation_rate > 0 and mutation_context_pool:
+            mutation_concepts = [c.strip() for c in mutation_context_pool.split(',') if c.strip()]
+            # Remove duplicates
+            mutation_concepts = list(dict.fromkeys(mutation_concepts))
+            print(f"Mutation enabled: rate={mutation_rate}, pool size={len(mutation_concepts)}")
+
+        # Determine total sample size (aim for around 10-15 concepts total)
+        total_sample_size = max(3, min(len(unique_parent_concepts) + len(mutation_concepts), 15))
+
+        # Calculate how many to draw from each pool
+        if mutation_concepts and mutation_rate > 0:
+            mutation_count = max(1, int(total_sample_size * mutation_rate))
+            parent_count = total_sample_size - mutation_count
         else:
-            sampled_concepts = unique_concepts
+            mutation_count = 0
+            parent_count = total_sample_size
+
+        # Sample from parents
+        sampled_concepts = []
+        if unique_parent_concepts:
+            # Ensure we don't try to sample more than available
+            actual_parent_count = min(len(unique_parent_concepts), parent_count)
+            sampled_concepts.extend(random.sample(unique_parent_concepts, actual_parent_count))
+
+        # Sample from mutation pool
+        if mutation_concepts and mutation_count > 0:
+            # Ensure we don't try to sample more than available
+            actual_mutation_count = min(len(mutation_concepts), mutation_count)
+            mutated_selection = random.sample(mutation_concepts, actual_mutation_count)
+            sampled_concepts.extend(mutated_selection)
+            print(f"Injected {len(mutated_selection)} mutation concepts: {mutated_selection}")
+
+        # Shuffle the final mix
+        random.shuffle(sampled_concepts)
 
         context_pool = ", ".join(sampled_concepts)
-        print(f"Generated context from parents: {context_pool}")
+        print(f"Generated context from parents (with mutation): {context_pool}")
         return context_pool
 
     def generate_idea_from_context(self, context_pool: str, idea_type: str) -> tuple[str, str]:
@@ -486,7 +527,7 @@ class Critic(LLMWrapper):
 
         return elo_a, elo_b
 
-    def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int) -> dict:
+    def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int, progress_callback: Callable[[int, int], None] = None) -> dict:
         """Get tournament ranks with optional parallel pair evaluations.
 
         Falls back to original sequential scheduling for small tournaments to keep
@@ -538,6 +579,13 @@ class Critic(LLMWrapper):
                 elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
                 ranks[idea_idx_a] = elo_a
                 ranks[idea_idx_b] = elo_b
+
+                if progress_callback:
+                    try:
+                        progress_callback(k + 1, comparisons)
+                    except Exception as e:
+                        print(f"Error in progress callback: {e}")
+
             return ranks
 
         def select_pairs(snapshot_ranks: Dict[int, float], num_pairs: int) -> List[tuple[int, int]]:
@@ -561,39 +609,25 @@ class Critic(LLMWrapper):
                 pairs.append((idea_idx_a, idea_idx_b))
             return pairs
 
-        # Choose a batch size that balances ELO adaptation with throughput
-        batch_size = max(4, min(self._max_workers * 2, comparisons))
-        remaining = comparisons
-        while remaining > 0:
-            num_this_batch = min(batch_size, remaining)
-            pairs = select_pairs(ranks.copy(), num_this_batch)
-            # Deduplicate pairs to avoid redundant calls in the same batch
-            seen = set()
-            deduped_pairs: List[tuple[int, int]] = []
-            for a, b in pairs:
-                key = (a, b) if a <= b else (b, a)
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped_pairs.append((a, b))
+        # Generate pairs based on initial ranks
+        deduped_pairs = select_pairs(ranks, comparisons)
 
-            # Run pair evaluations in parallel using shared utility
-            results = parallel_evaluate_pairs(
-                pairs=deduped_pairs,
-                items=ideas,
-                compare_fn=self.compare_ideas,
-                idea_type=idea_type,
-                concurrency=self._max_workers,
-                randomize_presentation=True,
-            )
+        # Run parallel evaluation
+        results = parallel_evaluate_pairs(
+            pairs=deduped_pairs,
+            items=ideas,
+            compare_fn=self.compare_ideas,
+            idea_type=idea_type,
+            concurrency=self._max_workers,
+            randomize_presentation=True,
+            progress_callback=progress_callback,
+        )
 
-            for idx_a, idx_b, winner in results:
-                elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
-                ranks[idx_a] = elo_a
-                ranks[idx_b] = elo_b
-
-            # Decrement by actual completed comparisons
-            remaining -= len(results)
+        # Update ranks based on results
+        for idx_a, idx_b, winner in results:
+            elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
+            ranks[idx_a] = elo_a
+            ranks[idx_b] = elo_b
 
         return ranks
 
@@ -668,9 +702,11 @@ class Breeder(LLMWrapper):
     agent_name = "Breeder"
     parent_count = 2
 
-    def __init__(self, **kwargs):
+    def __init__(self, mutation_rate: float = 0.0, **kwargs):
         # Don't set temperature directly here, let it come from kwargs
         super().__init__(agent_name=self.agent_name, **kwargs)
+        self.mutation_rate = mutation_rate
+        print(f"Breeder initialized with mutation_rate={mutation_rate}")
 
     def encode_to_genotype(self, idea: str, idea_type: str) -> str:
         """
@@ -744,12 +780,24 @@ class Breeder(LLMWrapper):
             provider=self.provider,
             model_name=self.model_name,
             temperature=self.temperature,
-            top_p=self.top_p
+            top_p=self.top_p,
+            api_key=self.api_key
         )
 
         # Step 2: Sample 50% at random (handled in generate_context_from_parents)
         # Step 3 & 4: Using the sample to create specific prompt and generate idea
-        context_pool = ideator.generate_context_from_parents(parent_genotypes)
+
+        # Generate fresh context for mutation if enabled
+        mutation_context_pool = ""
+        if self.mutation_rate > 0:
+            print("Generating fresh context for mutation...")
+            mutation_context_pool = ideator.generate_context(idea_type)
+
+        context_pool = ideator.generate_context_from_parents(
+            parent_genotypes,
+            mutation_rate=self.mutation_rate,
+            mutation_context_pool=mutation_context_pool
+        )
         new_idea, specific_prompt = ideator.generate_idea_from_context(context_pool, idea_type)
 
         print(f"Generated new idea from parent concepts: {new_idea[:100]}...")

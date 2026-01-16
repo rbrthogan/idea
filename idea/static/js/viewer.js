@@ -12,9 +12,21 @@ let contexts = [];
 let specificPrompts = [];
 let breedingPrompts = [];  // Store breeding prompts for each generation
 let currentEvolutionId = null;
+let currentEvolutionName = null;
 let currentEvolutionData = null;
 let generations = [];
 let currentModalIdea = null;
+
+// Evolution timing tracking
+let evolutionStartTime = null;
+let lastActivityTime = null;
+let activityLog = [];
+const MAX_ACTIVITY_LOG_ITEMS = 5;
+let elapsedTimeInterval = null;
+
+// Track previous status message to detect changes for activity log
+let previousStatusMessage = '';
+let previousProgress = 0;
 
 /**
  * Load available templates and populate the idea type dropdown
@@ -132,10 +144,15 @@ window.filterTemplates = filterTemplates;
 document.addEventListener('DOMContentLoaded', async () => {
     // Load initial data
     await loadTemplateTypes();
-    await loadEvolutions();
+    await loadHistory();
 
     // Check if we have a current evolution running or saved
-    await restoreCurrentEvolution();
+    const restored = await restoreCurrentEvolution();
+
+    // If not restored from running evolution, check for resumable checkpoints
+    if (!restored) {
+        await checkForResumableCheckpoints();
+    }
 
     // Start polling for progress
     // pollProgress(); // Managed by restoreCurrentEvolution / startEvolution
@@ -170,12 +187,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
         const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
 
+        // Get mutation rate
+        const mutationRate = parseFloat(document.getElementById('mutationRate').value);
+
         // Get thinking budget value (only for Gemini 2.5 models)
         const thinkingBudget = getThinkingBudgetValue();
 
         // Get max budget
         const maxBudgetInput = document.getElementById('maxBudget');
         const maxBudget = maxBudgetInput && maxBudgetInput.value ? parseFloat(maxBudgetInput.value) : null;
+
+        // Get evolution name (optional)
+        const evolutionNameInput = document.getElementById('evolutionNameInput');
+        const evolutionName = evolutionNameInput?.value?.trim() || null;
 
         const requestBody = {
             popSize,
@@ -186,11 +210,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             topP,
             tournamentSize,
             tournamentComparisons,
+            mutationRate,
             thinkingBudget,
-            maxBudget
+            maxBudget,
+            evolutionName
         };
 
         console.log("Request body JSON:", JSON.stringify(requestBody));
+
+        // Hide name input section when starting
+        const nameSection = document.getElementById('evolutionNameSection');
+        if (nameSection) nameSection.style.display = 'none';
 
         // Reset UI state
         resetUIState();
@@ -220,6 +250,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (response.ok) {
                 const data = await response.json();
 
+                // Store evolution identity
+                currentEvolutionId = data.evolution_id;
+                currentEvolutionName = data.evolution_name;
+
                 // Reset contexts and index
                 contexts = data.contexts || [];
                 specificPrompts = data.specific_prompts || [];
@@ -228,8 +262,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 // Create progress bar container if it doesn't exist
                 if (!document.getElementById('progress-container')) {
-                    createProgressBar();
+                    createProgressBar(currentEvolutionName);
                 }
+
+                // Log that contexts are ready
+                addActivityLogItem(`✅ ${contexts.length} seed contexts ready`, 'success');
 
                 // Start polling for updates
                 isEvolutionRunning = true;
@@ -237,7 +274,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 updateContextDisplay();
             } else {
-                console.error("Failed to run evolution:", await response.text());
+                // Handle error responses
+                const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+                console.error("Failed to run evolution:", errorData);
+
+                if (response.status === 409) {
+                    // Evolution already running - show helpful message
+                    showAlreadyRunningMessage();
+                } else {
+                    // Other errors
+                    alert(`Error: ${errorData.message || 'Failed to start evolution'}`);
+                }
                 resetButtonStates();
             }
         } catch (error) {
@@ -255,6 +302,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             stopButton.textContent = 'Stopping...';
         }
 
+        // Show force stop button after 5 seconds if stop is taking too long
+        const forceStopTimeout = setTimeout(() => {
+            showForceStopButton();
+            addActivityLogItem('⏳ Stop is taking a while - Force Stop available', 'warning');
+        }, 5000);
+
         try {
             const response = await fetch('/api/stop-evolution', {
                 method: 'POST',
@@ -267,6 +320,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 // Polling will handle final reset
             } else {
                 console.error("Failed to stop evolution:", await response.text());
+                clearTimeout(forceStopTimeout);
                 if (stopButton) {
                     stopButton.disabled = false;
                     stopButton.textContent = 'Stop Evolution';
@@ -274,6 +328,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         } catch (error) {
             console.error("Error stopping evolution:", error);
+            clearTimeout(forceStopTimeout);
             if (stopButton) {
                 stopButton.disabled = false;
                 stopButton.textContent = 'Stop Evolution';
@@ -289,8 +344,59 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    // --- Force Stop Button ---
+    addListener('forceStopButton', 'click', async function () {
+        console.log("Force stopping evolution...");
+        const forceStopButton = document.getElementById('forceStopButton');
+        const stopButton = document.getElementById('stopButton');
+
+        if (forceStopButton) {
+            forceStopButton.disabled = true;
+            forceStopButton.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Forcing...';
+        }
+
+        try {
+            const response = await fetch('/api/force-stop-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log("Force stop successful:", data);
+                addActivityLogItem('⚡ Evolution force stopped - checkpoint saved', 'warning');
+
+                // Store checkpoint ID for resume
+                if (data.checkpoint_id) {
+                    localStorage.setItem('lastCheckpointId', data.checkpoint_id);
+                    showResumeButton(data.checkpoint_id);
+                }
+
+                // Reset UI
+                resetButtonStates();
+                isEvolutionRunning = false;
+            } else {
+                console.error("Failed to force stop:", await response.text());
+            }
+        } catch (error) {
+            console.error("Error force stopping:", error);
+        } finally {
+            if (forceStopButton) {
+                forceStopButton.disabled = false;
+                forceStopButton.innerHTML = '<i class="fas fa-bolt me-1"></i>Force Stop';
+                forceStopButton.style.display = 'none';
+            }
+            if (stopButton) {
+                stopButton.style.display = 'none';
+            }
+        }
+    });
+
+    // Resume/Continue buttons now handled via history panel
+    // See handleHistoryResume() and handleHistoryContinue() functions
+
     // --- Template Generation ---
-    addListener('generateTemplateBtn', 'click', handleTemplateGeneration);
+    // Note: generateTemplateBtn listener is set up in viewer.html
     addListener('saveTemplateBtn', 'click', saveAndUseTemplate);
     addListener('reviewEditBtn', 'click', reviewAndEditTemplate);
 
@@ -301,6 +407,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // --- Settings ---
     addListener('saveSettingsBtn', 'click', saveSettings);
     addListener('deleteApiKeyBtn', 'click', deleteApiKey);
+    addListener('confirmDeleteKeyBtn', 'click', confirmDeleteApiKey);
     addListener('copyApiKeyBtn', 'click', copyApiKey);
 
     // Setup button in alert (if present)
@@ -354,6 +461,68 @@ document.addEventListener('DOMContentLoaded', async () => {
             updateContextDisplay();
         }
     });
+
+    // --- Contact Form ---
+    addListener('sendContactBtn', 'click', async () => {
+        const name = document.getElementById('contactName').value.trim();
+        const email = document.getElementById('contactEmail').value.trim();
+        const message = document.getElementById('contactMessage').value.trim();
+        const btn = document.getElementById('sendContactBtn');
+
+        if (!name || !email || !message) {
+            alert('Please fill in all fields');
+            return;
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Sending...';
+
+        try {
+            const response = await fetch('/api/contact', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, email, message })
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                // Close modal
+                const modalEl = document.getElementById('contactModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                modal.hide();
+
+                // Clear form
+                document.getElementById('contactForm').reset();
+
+                // Show success (you might want a nicer toast notification here)
+                alert('Message sent successfully!');
+            } else {
+                alert(`Error: ${data.message || 'Failed to send message'}`);
+            }
+        } catch (error) {
+            console.error('Error sending contact message:', error);
+            alert('An error occurred while sending the message');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Send Message';
+        }
+    });
+
+    // --- Welcome Modal Logic ---
+    const hasSeenWelcome = localStorage.getItem('hasSeenWelcomeModal');
+    if (!hasSeenWelcome) {
+        // Show modal after a short delay
+        setTimeout(() => {
+            const welcomeModal = new bootstrap.Modal(document.getElementById('welcomeModal'));
+            welcomeModal.show();
+
+            // Set flag when modal is closed
+            document.getElementById('welcomeModal').addEventListener('hidden.bs.modal', function () {
+                localStorage.setItem('hasSeenWelcomeModal', 'true');
+            });
+        }, 1000);
+    }
 });
 
 // Function to restore current evolution from localStorage
@@ -637,7 +806,7 @@ function createCardPreview(text, maxLength = 150) {
         .replace(/`{3}[\s\S]*?`{3}/g, '[Code Block]') // Replace code blocks
         .replace(/`([^`]+)`/g, '$1') // Remove inline code
         .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1') // Replace links with just text
-        .replace(/^>+\s*/gm, '') // Remove blockquote markers
+        .replace(/^>\+\s*/gm, '') // Remove blockquote markers
         .replace(/^\s*[\*\-]\s+/gm, '• ') // Convert list markers to bullets
         .replace(/^\s*\d+\.\s+/gm, '• '); // Convert numbered lists to bullets
 
@@ -650,6 +819,37 @@ function createCardPreview(text, maxLength = 150) {
     }
 
     return preview;
+}
+
+// Helper to extract title and content from possibly nested idea structures
+// Handles: idea.title/content, idea.idea.title/content, or JSON-encoded content
+function getIdeaData(idea) {
+    let title = idea.title;
+    let content = idea.content;
+
+    // Check if data is nested under an 'idea' property
+    if (idea.idea && typeof idea.idea === 'object') {
+        title = idea.idea.title || title;
+        content = idea.idea.content || content;
+    }
+
+    // Handle case where content might be JSON-encoded
+    if (typeof content === 'string' && content.startsWith('{') && content.includes('"title"')) {
+        try {
+            const parsed = JSON.parse(content);
+            title = parsed.title || title;
+            content = parsed.content || content;
+        } catch (e) {
+            // Not valid JSON, use as-is
+        }
+    }
+
+    return {
+        title: title || 'Untitled',
+        content: content || '',
+        // Preserve other properties
+        ...idea
+    };
 }
 
 // Update the renderGenerations function to use the improved preview
@@ -713,8 +913,6 @@ function renderGenerations(gens) {
             const scrollWrapper = document.createElement('div');
             scrollWrapper.className = 'scroll-wrapper';
             scrollWrapper.id = `scroll-wrapper-${index}`;
-            scrollWrapper.style.width = '100%';
-            scrollWrapper.style.overflow = 'auto';
 
             scrollWrapper.appendChild(scrollContainer);
             contentDiv.appendChild(scrollWrapper);
@@ -756,13 +954,16 @@ function renderGenerations(gens) {
             card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
 
+            // Extract idea data (handles nested structures from Firestore)
+            const ideaData = getIdeaData(idea);
+
             // Mark elite ideas with data attribute for styling
-            if (idea.elite_selected) {
+            if (ideaData.elite_selected) {
                 card.setAttribute('data-elite', 'true');
             }
 
             // Create a plain text preview for the card
-            const plainPreview = createCardPreview(idea.content, 150);
+            const plainPreview = createCardPreview(ideaData.content, 150);
 
             // Add "Prompt" button for initial generation cards
             const viewPromptButton = index === 0 ?
@@ -815,7 +1016,7 @@ function renderGenerations(gens) {
 
             card.innerHTML = `
                 <div class="card-body">
-                    <h5 class="card-title">${idea.title || 'Untitled'}</h5>
+                    <h5 class="card-title">${ideaData.title || 'Untitled'}</h5>
                     <div class="card-text">
                         <p>${plainPreview}</p>
                     </div>
@@ -833,7 +1034,7 @@ function renderGenerations(gens) {
             // Add click handler for view button
             const viewButton = card.querySelector('.view-idea');
             viewButton.addEventListener('click', () => {
-                showIdeaModal(idea);
+                showIdeaModal(ideaData);
             });
 
             // Add click handler for initial prompt button if it exists (generation 0)
@@ -1116,84 +1317,897 @@ function generateUUID() {
 }
 
 async function loadEvolutions() {
-    const response = await fetch('/api/evolutions');
-    const evolutions = await response.json();
-
-    const select = document.getElementById('evolutionSelect');
-    select.innerHTML = '<option value="">Current Evolution</option>';
-
-    evolutions.forEach(evolution => {
-        const option = document.createElement('option');
-        option.value = evolution.id;
-        option.textContent = `Evolution from ${new Date(evolution.timestamp).toLocaleString()} - ${evolution.filename}`;
-        select.appendChild(option);
-    });
+    // Legacy function - now redirects to loadHistory
+    await loadHistory();
 }
 
-document.getElementById('evolutionSelect').addEventListener('change', async (e) => {
-    const evolutionId = e.target.value;
-    if (evolutionId) {
-        const response = await fetch(`/api/evolution/${evolutionId}`);
+// Global history state
+let historyItems = [];
+let selectedHistoryItem = null;
+let currentHistoryFilter = 'all';
+
+async function loadHistory() {
+    try {
+        const response = await fetch('/api/history');
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            historyItems = data.items || [];
+            renderHistoryList(historyItems);
+        } else {
+            console.error('Error loading history:', data.message);
+            historyItems = [];
+            renderHistoryList([]);
+        }
+    } catch (error) {
+        console.error('Error loading history:', error);
+        historyItems = [];
+        renderHistoryList([]);
+    }
+}
+
+async function refreshHistoryList() {
+    await loadHistory();
+}
+
+function filterHistory(filter) {
+    currentHistoryFilter = filter;
+
+    // Update button states
+    ['all', 'saved', 'checkpoint'].forEach(f => {
+        const btn = document.getElementById(`historyFilter${f.charAt(0).toUpperCase() + f.slice(1)}`);
+        if (btn) {
+            btn.classList.toggle('active', f === filter);
+        }
+    });
+
+    // Filter and render
+    let filtered = historyItems;
+    if (filter !== 'all') {
+        filtered = historyItems.filter(item => item.type === filter);
+    }
+    renderHistoryList(filtered, false);
+}
+
+function renderHistoryList(items, updateGlobal = true) {
+    const container = document.getElementById('historyList');
+    if (!container) return;
+
+    if (items.length === 0) {
+        container.innerHTML = `
+            <div class="history-empty">
+                <i class="fas fa-folder-open"></i>
+                <p>No evolutions found</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = items.map(item => {
+        const statusClass = `badge-status-${item.status}`;
+        const typeClass = `item-type-${item.type}`;
+        const date = item.timestamp ? new Date(item.timestamp).toLocaleDateString() : '';
+        const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+        const isSelected = selectedHistoryItem?.id === item.id;
+
+        // Truncate display name (more room in expanded view)
+        let displayName = item.display_name || item.id;
+        if (displayName.length > 35) {
+            displayName = displayName.substring(0, 32) + '...';
+        }
+
+        // Build action buttons for expanded state
+        let actionsHtml = '';
+        if (isSelected) {
+            if (item.can_resume) {
+                actionsHtml += `<button class="btn btn-sm btn-success" onclick="event.stopPropagation(); handleHistoryResume('${item.id}')">
+                    <i class="fas fa-play me-1"></i>Resume
+                </button>`;
+            }
+            if (item.can_continue) {
+                actionsHtml += `
+                    <div class="continue-action-group d-flex gap-1" id="continueActionGroup-${item.id}">
+                        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); showContinueInputInline('${item.id}', '${item.type}')">
+                            <i class="fas fa-forward me-1"></i>Continue
+                        </button>
+                    </div>`;
+            }
+            if (item.can_rate) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); navigateToRatePage('${item.type === 'legacy_saved' ? item.id : ''}')">
+                    <i class="fas fa-star me-1"></i>Rate
+                </button>`;
+            }
+            if (item.can_rename) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); showRenameInputInline('${item.id}')" title="Rename">
+                    <i class="fas fa-edit"></i>
+                </button>`;
+            }
+            if (item.can_delete) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); confirmDeleteEvolution('${item.id}')" title="Delete">
+                    <i class="fas fa-trash"></i>
+                </button>`;
+            }
+        }
+
+        return `
+            <div class="history-item ${isSelected ? 'selected expanded' : ''}"
+                 onclick="selectHistoryItem('${item.id}')"
+                 data-item-id="${item.id}">
+                <div class="item-header">
+                    <span class="item-title" id="itemTitle-${item.id}" title="${item.display_name || item.id}">${displayName}</span>
+                    <span class="item-type-badge ${typeClass}">${item.type}</span>
+                </div>
+                <div class="item-meta">
+                    <span><i class="fas fa-calendar"></i> ${date} ${time}</span>
+                    <span><i class="fas fa-layer-group"></i> Gen ${item.generations}${item.total_generations ? '/' + item.total_generations : ''}</span>
+                </div>
+                <div class="item-footer">
+                    <span class="badge ${statusClass}">${formatStatus(item.status)}</span>
+                    ${isSelected ? `<span class="idea-type"><i class="fas fa-tag me-1"></i>${item.idea_type || 'Unknown'}</span>` : ''}
+                </div>
+                ${isSelected ? `<div class="item-actions">${actionsHtml}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+}
+
+function formatStatus(status) {
+    const statusMap = {
+        'complete': 'Complete',
+        'paused': 'Paused',
+        'in_progress': 'In Progress',
+        'force_stopped': 'Force Stopped',
+        'unknown': 'Unknown'
+    };
+    return statusMap[status] || status;
+}
+
+async function selectHistoryItem(itemId) {
+    const item = historyItems.find(i => i.id === itemId);
+    if (!item) return;
+
+    // Toggle selection - clicking same item deselects
+    if (selectedHistoryItem?.id === itemId) {
+        selectedHistoryItem = null;
+    } else {
+        selectedHistoryItem = item;
+    }
+
+    // Re-render list with new selection state (expands/collapses in place)
+    renderHistoryList(historyItems, false);
+
+    // Load the evolution data into the main content area if selected
+    if (selectedHistoryItem) {
+        await loadHistoryItemData(item);
+        document.getElementById('selectedCheckpointId').value = item.id;
+    }
+}
+
+function updateSelectedEvolutionCard(item) {
+    const card = document.getElementById('selectedEvolutionCard');
+    if (!card || !item) {
+        if (card) card.style.display = 'none';
+        return;
+    }
+
+    card.style.display = 'block';
+
+    // Update status badge
+    const statusBadge = document.getElementById('selectedEvolutionStatus');
+    statusBadge.className = `badge badge-status-${item.status}`;
+    statusBadge.textContent = formatStatus(item.status);
+
+    // Update date
+    const dateEl = document.getElementById('selectedEvolutionDate');
+    if (item.timestamp) {
+        dateEl.textContent = new Date(item.timestamp).toLocaleDateString();
+    } else {
+        dateEl.textContent = '';
+    }
+
+    // Update name
+    const nameEl = document.getElementById('selectedEvolutionName');
+    nameEl.textContent = item.display_name || item.id;
+    nameEl.title = item.display_name || item.id;
+
+    // Update meta
+    const metaEl = document.getElementById('selectedEvolutionMeta');
+    metaEl.textContent = `Gen ${item.generations}${item.total_generations ? '/' + item.total_generations : ''} • ${item.idea_type || 'Unknown type'}`;
+
+    // Update actions
+    const actionsEl = document.getElementById('selectedEvolutionActions');
+    let actionsHtml = '';
+
+    // Store checkpoint ID for actions
+    if (item.checkpoint_id) {
+        document.getElementById('selectedCheckpointId').value = item.checkpoint_id;
+    } else if (item.type === 'saved') {
+        // For saved evolutions, we might need to create a checkpoint first
+        document.getElementById('selectedCheckpointId').value = '';
+    }
+
+    if (item.can_resume) {
+        actionsHtml += `<button class="btn btn-sm btn-success flex-grow-1" onclick="handleHistoryResume('${item.checkpoint_id || item.id}')">
+            <i class="fas fa-play me-1"></i>Resume
+        </button>`;
+    }
+    if (item.can_continue) {
+        // Inline continue with generation input
+        actionsHtml += `
+            <div class="continue-action-group d-flex gap-1 flex-grow-1" id="continueActionGroup">
+                <button class="btn btn-sm btn-info flex-grow-1" id="continueBtn" onclick="showContinueInput('${item.checkpoint_id || item.id}', '${item.type}')">
+                    <i class="fas fa-forward me-1"></i>Continue
+                </button>
+            </div>`;
+    }
+    if (item.can_rate) {
+        actionsHtml += `<button class="btn btn-sm btn-outline-primary" onclick="navigateToRatePage('${item.type === 'saved' ? item.id : ''}')">
+            <i class="fas fa-star me-1"></i>Rate
+        </button>`;
+    }
+
+    // Add rename button for evolutions that support it
+    if (item.can_rename) {
+        actionsHtml += `<button class="btn btn-sm btn-outline-secondary" onclick="showRenameInput('${item.id}')" title="Rename">
+            <i class="fas fa-edit"></i>
+        </button>`;
+    }
+
+    // Add delete button
+    if (item.can_delete) {
+        actionsHtml += `<button class="btn btn-sm btn-outline-danger" onclick="confirmDeleteEvolution('${item.id}')" title="Delete">
+            <i class="fas fa-trash"></i>
+        </button>`;
+    }
+
+    actionsEl.innerHTML = actionsHtml || '<span class="text-muted small">No actions available</span>';
+
+    // Store the item ID in hidden field
+    document.getElementById('evolutionSelect').value = item.type === 'saved' ? item.id : '';
+}
+
+// Show inline continue input (for history list items)
+function showContinueInputInline(itemId, itemType) {
+    const group = document.getElementById(`continueActionGroup-${itemId}`);
+    if (!group) return;
+
+    group.innerHTML = `
+        <input type="number" class="form-control form-control-sm" id="continueGensInput-${itemId}"
+               value="3" min="1" max="20" style="width: 55px; text-align: center;"
+               onclick="event.stopPropagation()">
+        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); executeContinueInline('${itemId}', '${itemType}')">
+            <i class="fas fa-play"></i>
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); cancelContinueInputInline('${itemId}', '${itemType}')">
+            <i class="fas fa-times"></i>
+        </button>
+    `;
+
+    setTimeout(() => {
+        const input = document.getElementById(`continueGensInput-${itemId}`);
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }, 50);
+}
+
+function cancelContinueInputInline(itemId, itemType) {
+    const group = document.getElementById(`continueActionGroup-${itemId}`);
+    if (!group) return;
+
+    group.innerHTML = `
+        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); showContinueInputInline('${itemId}', '${itemType}')">
+            <i class="fas fa-forward me-1"></i>Continue
+        </button>
+    `;
+}
+
+async function executeContinueInline(itemId, itemType) {
+    const input = document.getElementById(`continueGensInput-${itemId}`);
+    const additionalGens = parseInt(input?.value || '3');
+
+    if (isNaN(additionalGens) || additionalGens < 1) {
+        alert("Please enter a valid number of generations (1 or more)");
+        return;
+    }
+
+    await handleHistoryContinue(itemId, itemType, additionalGens);
+}
+
+// Show inline rename input (for history list items)
+function showRenameInputInline(itemId) {
+    const titleEl = document.getElementById(`itemTitle-${itemId}`);
+    if (!titleEl) return;
+
+    const currentName = titleEl.textContent;
+    const parent = titleEl.parentNode;
+
+    titleEl.outerHTML = `
+        <div class="rename-inline-group d-flex gap-1 flex-grow-1" id="renameGroup-${itemId}">
+            <input type="text" class="form-control form-control-sm" id="renameInput-${itemId}"
+                   value="${selectedHistoryItem?.display_name || currentName}"
+                   onclick="event.stopPropagation()">
+            <button class="btn btn-sm btn-success" onclick="event.stopPropagation(); executeRenameInline('${itemId}')">
+                <i class="fas fa-check"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); cancelRenameInline('${itemId}', '${currentName}')">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `;
+
+    setTimeout(() => {
+        const input = document.getElementById(`renameInput-${itemId}`);
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }, 50);
+}
+
+function cancelRenameInline(itemId, originalName) {
+    const group = document.getElementById(`renameGroup-${itemId}`);
+    if (group) {
+        group.outerHTML = `<span class="item-title" id="itemTitle-${itemId}" title="${originalName}">${originalName}</span>`;
+    }
+}
+
+async function executeRenameInline(itemId) {
+    const input = document.getElementById(`renameInput-${itemId}`);
+    const newName = input?.value?.trim();
+
+    if (!newName) {
+        alert('Please enter a name');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/evolution/${itemId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName })
+        });
+
         if (response.ok) {
+            // Update the item in historyItems
+            const item = historyItems.find(i => i.id === itemId);
+            if (item) {
+                item.display_name = newName;
+            }
+            if (selectedHistoryItem?.id === itemId) {
+                selectedHistoryItem.display_name = newName;
+            }
+            // Re-render
+            renderHistoryList(historyItems, false);
+        } else {
             const data = await response.json();
-            if (data.data && data.data.history) {
-                // Clear existing content
-                document.getElementById('generations-container').innerHTML = '';
+            alert(data.message || 'Failed to rename');
+        }
+    } catch (error) {
+        console.error('Error renaming:', error);
+        alert('Error renaming evolution');
+    }
+}
 
-                // Render the generations
-                renderGenerations(data.data.history);
+// Legacy functions for main view selected card (keeping for compatibility)
+function showContinueInput(itemId, itemType) {
+    showContinueInputInline(itemId, itemType);
+}
 
-                // Restore diversity plot if we have diversity data
-                if (data.data.diversity_history && data.data.diversity_history.length > 0) {
-                    console.log("Restoring diversity plot from saved evolution:", data.data.diversity_history);
-                    updateDiversityChart(data.data.diversity_history);
-                    // Ensure proper sizing after restoration
-                    setTimeout(ensureDiversityChartSizing, 200);
-                } else {
-                    console.log("No diversity data found in saved evolution, resetting plot");
-                    resetDiversityPlot();
-                }
+function cancelContinueInput(itemId, itemType) {
+    cancelContinueInputInline(itemId, itemType);
+}
 
-                // Update contexts if available
-                if (data.data.contexts) {
-                    contexts = data.data.contexts;
-                    specificPrompts = data.data.specific_prompts || [];
-                    breedingPrompts = data.data.breeding_prompts || [];
-                    currentContextIndex = 0;
-                    updateContextDisplay();
-                    document.querySelector('.context-navigation').style.display = 'block';
-                }
+async function executeContinue(itemId, itemType) {
+    await executeContinueInline(itemId, itemType);
+}
 
-                // Display token counts if available
-                if (data.data.token_counts) {
-                    console.log("Displaying token counts from saved evolution:", data.data.token_counts);
-                    displayTokenCounts(data.data.token_counts);
-                }
+// Show rename input
+function showRenameInput(evolutionId) {
+    const nameEl = document.getElementById('selectedEvolutionName');
+    if (!nameEl) return;
 
-                // Enable download button
-                document.getElementById('downloadButton').disabled = false;
+    const currentName = nameEl.textContent;
+    nameEl.outerHTML = `
+        <div class="rename-input-group d-flex gap-1" id="renameInputGroup">
+            <input type="text" class="form-control form-control-sm" id="renameInput" value="${currentName}" style="min-width: 120px;">
+            <button class="btn btn-sm btn-success" onclick="executeRename('${evolutionId}')">
+                <i class="fas fa-check"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="cancelRename('${currentName}')">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `;
+
+    // Focus and select input
+    setTimeout(() => {
+        const input = document.getElementById('renameInput');
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }, 50);
+}
+
+// Cancel rename
+function cancelRename(originalName) {
+    const group = document.getElementById('renameInputGroup');
+    if (group) {
+        group.outerHTML = `<div class="fw-medium text-truncate" id="selectedEvolutionName" style="max-width: 180px;">${originalName}</div>`;
+    }
+}
+
+// Execute rename
+async function executeRename(evolutionId) {
+    const input = document.getElementById('renameInput');
+    const newName = input?.value?.trim();
+
+    if (!newName) {
+        alert('Please enter a name');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/evolution/${evolutionId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName })
+        });
+
+        if (response.ok) {
+            // Update the display
+            cancelRename(newName);
+            // Refresh history list
+            await loadHistory();
+            // Update the selected item
+            if (selectedHistoryItem) {
+                selectedHistoryItem.display_name = newName;
             }
         } else {
-            console.error('Failed to load evolution:', await response.text());
+            const data = await response.json();
+            alert(data.message || 'Failed to rename');
         }
-    } else {
-        // Load current evolution from localStorage when "Current Evolution" is selected
-        console.log('Loading current evolution from localStorage...');
-        const restored = await restoreCurrentEvolution();
-
-        if (!restored) {
-            // Clear display if no current evolution available
-            document.getElementById('generations-container').innerHTML = '';
-            document.getElementById('contextDisplay').innerHTML =
-                '<p class="text-muted">Context will appear here when evolution starts...</p>';
-            document.querySelector('.context-navigation').style.display = 'none';
-            document.getElementById('downloadButton').disabled = true;
-
-            // Reset diversity plot when no current evolution is available
-            resetDiversityPlot();
-        }
+    } catch (error) {
+        console.error('Error renaming:', error);
+        alert('Error renaming evolution');
     }
-});
+}
+
+// Confirm and delete evolution
+async function confirmDeleteEvolution(evolutionId) {
+    if (!confirm('Are you sure you want to delete this evolution? This cannot be undone.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/evolution/${evolutionId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            // Clear selection and refresh
+            clearSelectedEvolution();
+            await loadHistory();
+        } else {
+            const data = await response.json();
+            alert(data.message || 'Failed to delete');
+        }
+    } catch (error) {
+        console.error('Error deleting:', error);
+        alert('Error deleting evolution');
+    }
+}
+
+async function loadHistoryItemData(item) {
+    try {
+        if (item.type === 'saved' || item.type === 'evolution') {
+            // Load from saved evolution file or Firestore
+            const response = await fetch(`/api/evolution/${item.id}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.data && data.data.history) {
+                    // Hide the template entry section
+                    const templateEntry = document.getElementById('templateEntry');
+                    if (templateEntry) templateEntry.style.display = 'none';
+
+                    // Hide name input section
+                    const nameSection = document.getElementById('evolutionNameSection');
+                    if (nameSection) nameSection.style.display = 'none';
+
+                    // Hide sidebar to give more canvas space
+                    const sidebar = document.querySelector('.left-sidebar');
+                    if (sidebar) sidebar.classList.remove('show');
+
+                    // Ensure generations container is visible
+                    const genContainer = document.getElementById('generations-container');
+                    if (genContainer) genContainer.style.display = 'block';
+
+                    document.getElementById('generations-container').innerHTML = '';
+                    renderGenerations(data.data.history);
+
+                    if (data.data.diversity_history && data.data.diversity_history.length > 0) {
+                        updateDiversityChart(data.data.diversity_history);
+                        setTimeout(ensureDiversityChartSizing, 200);
+                    } else {
+                        resetDiversityPlot();
+                    }
+
+                    if (data.data.contexts) {
+                        contexts = data.data.contexts;
+                        specificPrompts = data.data.specific_prompts || [];
+                        breedingPrompts = data.data.breeding_prompts || [];
+                        currentContextIndex = 0;
+                        updateContextDisplay();
+                        document.querySelector('.context-navigation').style.display = 'block';
+                    }
+
+                    if (data.data.token_counts) {
+                        displayTokenCounts(data.data.token_counts);
+                    }
+
+                    const downloadBtn = document.getElementById('downloadButton');
+                    if (downloadBtn) {
+                        downloadBtn.disabled = false;
+                    }
+                }
+            }
+        } else if (item.type === 'checkpoint') {
+            // Load from checkpoint
+            const response = await fetch(`/api/checkpoints/${item.checkpoint_id}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.history) {
+                    document.getElementById('generations-container').innerHTML = '';
+                    renderGenerations(data.history);
+
+                    if (data.diversity_history && data.diversity_history.length > 0) {
+                        updateDiversityChart(data.diversity_history);
+                        setTimeout(ensureDiversityChartSizing, 200);
+                    } else {
+                        resetDiversityPlot();
+                    }
+
+                    if (data.contexts) {
+                        contexts = data.contexts;
+                        specificPrompts = data.specific_prompts || [];
+                        breedingPrompts = data.breeding_prompts || [];
+                        currentContextIndex = 0;
+                        updateContextDisplay();
+                        document.querySelector('.context-navigation').style.display = 'block';
+                    }
+
+                    document.getElementById('downloadButton').disabled = false;
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error loading history item data:', error);
+    }
+}
+
+async function handleHistoryResume(checkpointId) {
+    if (!checkpointId) {
+        alert("No checkpoint available to resume from");
+        return;
+    }
+
+    console.log("Resuming evolution from checkpoint:", checkpointId);
+
+    // Update the action button
+    const actionsEl = document.getElementById('selectedEvolutionActions');
+    if (actionsEl) {
+        actionsEl.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Resuming...';
+    }
+
+    try {
+        const response = await fetch('/api/resume-evolution', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                checkpoint_id: checkpointId,
+                additional_generations: 0
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+
+            // Store checkpoint ID
+            localStorage.setItem('lastCheckpointId', data.checkpoint_id || checkpointId);
+
+            // Restore state
+            if (data.history) {
+                renderGenerations(data.history);
+            }
+            if (data.contexts) {
+                contexts = data.contexts;
+                specificPrompts = data.specific_prompts || [];
+                breedingPrompts = data.breeding_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
+            }
+
+            // Switch to evolution mode (hides template entry, shows evolution view)
+            if (typeof showEvolutionMode === 'function') {
+                showEvolutionMode();
+            } else {
+                // Fallback: manually hide template entry
+                const templateEntry = document.getElementById('templateEntry');
+                if (templateEntry) templateEntry.style.display = 'none';
+            }
+
+            // Store evolution name from response
+            currentEvolutionName = data.evolution_name || currentEvolutionName;
+            currentEvolutionId = data.evolution_id || currentEvolutionId;
+
+            // Create progress bar if needed
+            if (!document.getElementById('progress-container')) {
+                createProgressBar(currentEvolutionName);
+            } else {
+                // Update the name in existing progress bar
+                const nameEl = document.getElementById('evolution-name');
+                if (nameEl && currentEvolutionName) nameEl.textContent = currentEvolutionName;
+            }
+
+            // Update UI state to running
+            isEvolutionRunning = true;
+            evolutionStartTime = Date.now();
+
+            // Set buttons to running state
+            const startButton = document.getElementById('startButton');
+            const stopButton = document.getElementById('stopButton');
+            if (startButton) {
+                startButton.disabled = true;
+                startButton.textContent = 'Running...';
+            }
+            if (stopButton) {
+                stopButton.disabled = false;
+                stopButton.style.display = 'block';
+            }
+
+            updateElapsedTimeDisplay();
+
+            // Start polling
+            if (pollingInterval) clearInterval(pollingInterval);
+            pollingInterval = setInterval(pollProgress, 1000);
+
+            // Clear selection and go back to main view
+            clearSelectedEvolution();
+            showSidebarView('main');
+
+            addActivityLogItem('🔄 Resuming evolution...', 'info');
+        } else {
+            console.error("Failed to resume:", await response.text());
+            alert("Failed to resume evolution. Check console for details.");
+            await refreshHistoryList();
+        }
+    } catch (error) {
+        console.error("Error resuming:", error);
+        alert("Error resuming evolution: " + error.message);
+        await refreshHistoryList();
+    }
+}
+
+async function handleHistoryContinue(itemId, itemType, additionalGens = 3) {
+    if (!itemId) {
+        alert("No evolution available to continue");
+        return;
+    }
+
+    console.log("Continuing evolution for", additionalGens, "more generations");
+
+    // Update the action button to show starting state
+    const group = document.getElementById('continueActionGroup');
+    if (group) {
+        group.innerHTML = '<span class="text-muted small"><i class="fas fa-spinner fa-spin me-1"></i>Starting...</span>';
+    }
+
+    try {
+        let response;
+
+        if (itemType === 'checkpoint') {
+            // Continue from checkpoint
+            response = await fetch('/api/continue-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    checkpoint_id: itemId,
+                    additional_generations: additionalGens
+                })
+            });
+        } else {
+            // For saved evolutions, use the special load-and-continue endpoint
+            response = await fetch('/api/continue-saved-evolution', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    evolution_id: itemId,
+                    additional_generations: additionalGens
+                })
+            });
+        }
+
+        if (response.ok) {
+            const data = await response.json();
+
+            // Store checkpoint ID
+            localStorage.setItem('lastCheckpointId', data.checkpoint_id || itemId);
+
+            // Restore state
+            if (data.history) {
+                renderGenerations(data.history);
+            }
+            if (data.contexts) {
+                contexts = data.contexts;
+                specificPrompts = data.specific_prompts || [];
+                breedingPrompts = data.breeding_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
+            }
+
+            // Switch to evolution mode (hides template entry, shows evolution view)
+            if (typeof showEvolutionMode === 'function') {
+                showEvolutionMode();
+            } else {
+                // Fallback: manually hide template entry
+                const templateEntry = document.getElementById('templateEntry');
+                if (templateEntry) templateEntry.style.display = 'none';
+            }
+
+            // Store evolution name from response
+            currentEvolutionName = data.evolution_name || currentEvolutionName;
+            currentEvolutionId = data.evolution_id || currentEvolutionId;
+
+            // Create progress bar if needed
+            if (!document.getElementById('progress-container')) {
+                createProgressBar(currentEvolutionName);
+            } else {
+                // Update the name in existing progress bar
+                const nameEl = document.getElementById('evolution-name');
+                if (nameEl && currentEvolutionName) nameEl.textContent = currentEvolutionName;
+            }
+
+            // Update UI state to running
+            isEvolutionRunning = true;
+            evolutionStartTime = Date.now();
+
+            // Set buttons to running state
+            const startButton = document.getElementById('startButton');
+            const stopButton = document.getElementById('stopButton');
+            if (startButton) {
+                startButton.disabled = true;
+                startButton.textContent = 'Running...';
+            }
+            if (stopButton) {
+                stopButton.disabled = false;
+                stopButton.style.display = 'block';
+            }
+
+            updateElapsedTimeDisplay();
+
+            // Start polling
+            if (pollingInterval) clearInterval(pollingInterval);
+            pollingInterval = setInterval(pollProgress, 1000);
+
+            // Clear selection and go back to main view
+            clearSelectedEvolution();
+            showSidebarView('main');
+
+            addActivityLogItem(`📈 Continuing for ${additionalGens} more generations...`, 'info');
+        } else {
+            console.error("Failed to continue:", await response.text());
+            alert("Failed to continue evolution. Check console for details.");
+            // Restore the continue button
+            cancelContinueInput(itemId, itemType);
+        }
+    } catch (error) {
+        console.error("Error continuing:", error);
+        alert("Error continuing evolution: " + error.message);
+        // Restore the continue button
+        cancelContinueInput(itemId, itemType);
+    }
+}
+
+function clearSelectedEvolution() {
+    selectedHistoryItem = null;
+
+    // Hide selected evolution card in main view
+    const mainCard = document.getElementById('selectedEvolutionCard');
+    if (mainCard) mainCard.style.display = 'none';
+
+    document.getElementById('evolutionSelect').value = '';
+    document.getElementById('selectedCheckpointId').value = '';
+
+    // Clear selection highlighting in history list
+    document.querySelectorAll('.history-item').forEach(el => {
+        el.classList.remove('selected');
+    });
+
+    // Hide history detail panel
+    const detailPanel = document.getElementById('historyDetailPanel');
+    if (detailPanel) detailPanel.style.display = 'none';
+
+    // Show the name input section again
+    const nameSection = document.getElementById('evolutionNameSection');
+    if (nameSection) nameSection.style.display = 'block';
+
+    // Clear the name input
+    const nameInput = document.getElementById('evolutionNameInput');
+    if (nameInput) nameInput.value = '';
+}
+
+// Clear selection in history view
+function clearHistorySelection() {
+    selectedHistoryItem = null;
+
+    // Re-render list without selection
+    renderHistoryList(historyItems, false);
+
+    // Clear main content
+    document.getElementById('generations-container').innerHTML = '';
+    resetDiversityPlot();
+}
+
+
+// Delete evolution with confirmation
+async function confirmDeleteEvolution(evolutionId) {
+    const item = historyItems.find(i => i.id === evolutionId);
+    const name = item?.display_name || evolutionId;
+
+    if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/evolution/${evolutionId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            clearHistorySelection();
+            await loadHistory();
+        } else {
+            const data = await response.json();
+            alert(data.message || 'Failed to delete');
+        }
+    } catch (error) {
+        console.error('Error deleting:', error);
+        alert('Error deleting evolution');
+    }
+}
+
+function navigateToRatePage(evolutionId) {
+    // Switch to rate tab and load the evolution
+    const rateTab = document.querySelector('button[onclick*="rate"]') || document.getElementById('navRateBtn');
+    if (rateTab) {
+        rateTab.click();
+    }
+    // If evolution ID provided, select it in the rate page
+    if (evolutionId) {
+        // The rate page will handle loading
+    }
+}
+
+// Legacy evolutionSelect handler - now handled by history panel
+// Keeping for backward compatibility with any code that might set this value
+const evolutionSelectEl = document.getElementById('evolutionSelect');
+if (evolutionSelectEl) {
+    evolutionSelectEl.addEventListener('change', async (e) => {
+        const evolutionId = e.target.value;
+        if (evolutionId) {
+            // Find the item in history and select it
+            const item = historyItems.find(i => i.id === evolutionId);
+            if (item) {
+                await selectHistoryItem(item.id);
+            }
+        } else {
+            clearSelectedEvolution();
+            await restoreCurrentEvolution();
+        }
+    });
+}
 
 // Modify existing loadCurrentEvolution function
 async function loadCurrentEvolution() {
@@ -1210,6 +2224,29 @@ async function pollProgress() {
         const data = await response.json();
         console.log("Progress update:", data); // Add logging to see what's coming from the server
 
+        // Update evolution name if provided
+        if (data.evolution_name) {
+            currentEvolutionName = data.evolution_name;
+            const nameEl = document.getElementById('evolution-name');
+            if (nameEl) nameEl.textContent = currentEvolutionName;
+        }
+        if (data.evolution_id) {
+            currentEvolutionId = data.evolution_id;
+        }
+
+        // Sync start time from server if available
+        if (data.start_time) {
+            const serverStartTime = new Date(data.start_time).getTime();
+            // detailed check to avoid unnecessary updates but ensure sync
+            if (!evolutionStartTime || Math.abs(evolutionStartTime - serverStartTime) > 2000) {
+                console.log("Syncing evolution start time from server:", data.start_time);
+                evolutionStartTime = serverStartTime;
+                if (!elapsedTimeInterval) {
+                    startElapsedTimeUpdater();
+                }
+            }
+        }
+
         // Check if this is a new evolution (history is empty but is_running is true)
         if (data.is_running && (!data.history || data.history.length === 0)) {
             console.log("New evolution detected, resetting UI");
@@ -1221,23 +2258,64 @@ async function pollProgress() {
             // Reset diversity plot for new evolution
             resetDiversityPlot();
             showDiversityPlotLoading();
+
+            // Initialize timing for new evolution
+            if (!evolutionStartTime) {
+                evolutionStartTime = Date.now();
+                lastActivityTime = Date.now();
+                activityLog = [];
+            }
         }
 
-        // Update progress bar
+        // Update progress bar and percentage display
         const progressBar = document.getElementById('evolution-progress');
-        const progressStatus = document.getElementById('progress-status');
+        const progressPercentage = document.getElementById('progress-percentage');
 
-        if (progressBar && progressStatus) {
-            const progress = data.progress || 0;
+        if (progressBar) {
+            // Cap progress at 100% to handle edge cases in calculation
+            const progress = Math.min(data.progress || 0, 100);
             progressBar.style.width = `${progress}%`;
             progressBar.setAttribute('aria-valuenow', progress);
-            progressBar.textContent = `${Math.round(progress)}%`;
 
-            if (data.current_generation === 0) {
-                progressStatus.textContent = `Generating Generation 0 (Initial Population)... (${Math.round(progress)}%)`;
-            } else {
-                progressStatus.textContent = `Generating Generation ${data.current_generation}... (${Math.round(progress)}%)`;
+            // Update prominent percentage display
+            if (progressPercentage) {
+                progressPercentage.textContent = `${Math.round(progress)}%`;
             }
+
+            // Cap the display at 100%
+            if (progress >= 100) {
+                progressBar.style.width = '100%';
+            }
+
+            // Parse and enhance status messages for activity log
+            let activityMessage = '';
+            let activityType = 'info';
+
+            if (data.status_message) {
+                activityMessage = enhanceStatusMessage(data.status_message, data);
+            } else if (data.current_generation === 0) {
+                activityMessage = 'Building initial population...';
+            } else {
+                activityMessage = `Evolving generation ${data.current_generation}...`;
+            }
+
+            // Add to activity log if message changed (better duplicate detection)
+            if (activityMessage && activityMessage !== previousStatusMessage) {
+                addActivityLogItem(activityMessage, activityType);
+                previousStatusMessage = activityMessage;
+            }
+
+            // Update last activity time on any progress update
+            lastActivityTime = Date.now();
+            previousProgress = progress;
+        }
+
+        // Update status indicator
+        if (data.is_running) {
+            const genInfo = data.current_generation === 0
+                ? 'Initial Population'
+                : `Gen ${data.current_generation}/${data.total_generations}`;
+            updateEvolutionStatusIndicator(true, `Running: ${genInfo}`);
         }
 
         // Always update UI with current progress if there's history data
@@ -1257,9 +2335,32 @@ async function pollProgress() {
             localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
         }
 
-        // Handle diversity updates
-        if (data.diversity_history) {
+        // Handle diversity updates with activity logging
+        if (data.diversity_history && data.diversity_history.length > 0) {
+            const latestDiversity = data.diversity_history[data.diversity_history.length - 1];
+            // Only log if we have a new diversity calculation
+            if (latestDiversity && latestDiversity.diversity_score !== undefined) {
+                const diversityGenIndex = data.diversity_history.length - 1;
+                const diversityKey = `diversity_gen_${diversityGenIndex}`;
+                if (!window._loggedDiversityGens) window._loggedDiversityGens = new Set();
+                if (!window._loggedDiversityGens.has(diversityKey)) {
+                    window._loggedDiversityGens.add(diversityKey);
+                    const score = latestDiversity.diversity_score.toFixed(3);
+                    const genLabel = diversityGenIndex === 0 ? 'initial population' : `generation ${diversityGenIndex}`;
+                    addActivityLogItem(`📊 Diversity calculated for ${genLabel}: ${score}`, 'info');
+                }
+            }
             handleDiversityUpdate(data);
+        }
+
+        // Handle oracle updates with activity logging
+        if (data.oracle_update) {
+            addActivityLogItem('🔮 Oracle injected diverse idea into population', 'info');
+        }
+
+        // Handle elite selection updates
+        if (data.elite_selection_update) {
+            addActivityLogItem('⭐ Elite idea selected for next generation', 'info');
         }
 
         // Display token counts if available (Live updates)
@@ -1284,10 +2385,23 @@ async function pollProgress() {
             // Evolution complete or stopped
             isEvolutionRunning = false;
 
+            // Mark as complete with proper visual feedback
+            // Pass resumable state and checkpoint ID for pause/resume functionality
+            markEvolutionComplete(
+                data.is_stopped,
+                data.is_resumable || false,
+                data.checkpoint_id || null
+            );
+
             if (data.history && data.history.length > 0) {
                 // Save final state and enable save button
                 currentEvolutionData = data;
                 renderGenerations(data.history);
+
+                // Store checkpoint ID if available for future resume/continue
+                if (data.checkpoint_id) {
+                    localStorage.setItem('lastCheckpointId', data.checkpoint_id);
+                }
 
                 // Store the final evolution data in localStorage including diversity data and token counts
                 const evolutionStateToStore = {
@@ -1296,7 +2410,8 @@ async function pollProgress() {
                     contexts: data.contexts || contexts,
                     specific_prompts: data.specific_prompts || specificPrompts,
                     breeding_prompts: data.breeding_prompts || breedingPrompts,
-                    token_counts: data.token_counts || null
+                    token_counts: data.token_counts || null,
+                    checkpoint_id: data.checkpoint_id || null
                 };
                 localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
 
@@ -1311,15 +2426,6 @@ async function pollProgress() {
                 // Final diversity update
                 if (data.diversity_history) {
                     handleDiversityUpdate(data);
-                }
-            }
-
-            // Update progress status
-            if (progressStatus) {
-                if (data.is_stopped) {
-                    progressStatus.textContent = data.stop_message || 'Evolution stopped';
-                } else {
-                    progressStatus.textContent = 'Evolution complete!';
                 }
             }
 
@@ -1348,16 +2454,17 @@ async function pollProgress() {
                     startButton.textContent = 'Start Evolution';
                 }, 2000);
             }
+
+            // Reset tracking variables for next evolution
+            previousStatusMessage = '';
+            previousProgress = 0;
         }
 
         // Handle explicit errors from backend
         if (data.error) {
             console.error("Evolution error:", data.error);
             showErrorMessage(`Evolution Error: ${data.error}`);
-            if (progressStatus) {
-                progressStatus.textContent = `Error: ${data.error}`;
-                progressStatus.classList.add('text-danger');
-            }
+            addActivityLogItem(`❌ Error: ${data.error}`, 'error');
         }
     } catch (error) {
         console.error('Error polling progress:', error);
@@ -1556,6 +2663,7 @@ function showSuccessMessage(message) {
 function resetButtonStates() {
     const startButton = document.getElementById('startButton');
     const stopButton = document.getElementById('stopButton');
+    const forceStopButton = document.getElementById('forceStopButton');
 
     if (startButton) {
         startButton.disabled = false;
@@ -1567,6 +2675,333 @@ function resetButtonStates() {
         stopButton.textContent = 'Stop Evolution';
         stopButton.style.display = 'none';
     }
+
+    if (forceStopButton) {
+        forceStopButton.style.display = 'none';
+    }
+
+    // Show name input section again
+    const nameSection = document.getElementById('evolutionNameSection');
+    if (nameSection) nameSection.style.display = 'block';
+
+    // Clear the name input for next evolution
+    const nameInput = document.getElementById('evolutionNameInput');
+    if (nameInput) nameInput.value = '';
+}
+
+/**
+ * Show a user-friendly message when an evolution is already running
+ * Offers a button to view the current evolution progress
+ */
+function showAlreadyRunningMessage() {
+    // Check if modal already exists
+    let modal = document.getElementById('alreadyRunningModal');
+    if (!modal) {
+        // Create the modal
+        modal = document.createElement('div');
+        modal.id = 'alreadyRunningModal';
+        modal.className = 'modal fade';
+        modal.tabIndex = -1;
+        modal.innerHTML = `
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header bg-warning text-dark">
+                        <h5 class="modal-title">
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            Evolution Already Running
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>You already have an evolution in progress. You can only run one evolution at a time.</p>
+                        <p class="mb-0 text-muted">Click below to view your current evolution, or wait for it to complete before starting a new one.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-primary" id="viewCurrentEvolutionBtn">
+                            <i class="fas fa-eye me-1"></i>View Current Evolution
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        // Add event listener for the view button
+        document.getElementById('viewCurrentEvolutionBtn').addEventListener('click', async function () {
+            // Close the modal
+            const bsModal = bootstrap.Modal.getInstance(modal);
+            if (bsModal) bsModal.hide();
+
+            // Start polling to sync with the running evolution
+            isEvolutionRunning = true;
+            pollProgress();
+
+            // Show the stop button
+            const stopButton = document.getElementById('stopButton');
+            if (stopButton) {
+                stopButton.disabled = false;
+                stopButton.style.display = 'block';
+            }
+
+            // Update start button to show running state
+            const startButton = document.getElementById('startButton');
+            if (startButton) {
+                startButton.disabled = true;
+                startButton.textContent = 'Running...';
+            }
+
+            // Add activity log message
+            addActivityLogItem('🔄 Reconnected to running evolution', 'info');
+        });
+    }
+
+    // Show the modal
+    const bsModal = new bootstrap.Modal(modal);
+    bsModal.show();
+}
+
+/**
+ * Check if there's a running evolution and show a persistent banner
+ * Called after auth is complete to detect reconnection opportunities
+ */
+async function checkRunningEvolution() {
+    try {
+        const response = await fetch('/api/progress');
+        if (!response.ok) {
+            console.log("Could not check evolution status:", response.status);
+            hideRunningEvolutionBanner();
+            return;
+        }
+
+        const progressData = await response.json();
+        console.log("Evolution status check:", progressData);
+
+        if (progressData.is_running) {
+            // There's an evolution running - show the banner
+            showRunningEvolutionBanner(progressData);
+        } else {
+            // No evolution running - hide the banner if present
+            hideRunningEvolutionBanner();
+        }
+    } catch (error) {
+        console.error("Error checking running evolution:", error);
+        hideRunningEvolutionBanner();
+    }
+}
+
+/**
+ * Show the persistent "evolution running" banner at the top of the page
+ */
+function showRunningEvolutionBanner(progressData) {
+    let banner = document.getElementById('runningEvolutionBanner');
+
+    if (!banner) {
+        // Create the banner
+        banner = document.createElement('div');
+        banner.id = 'runningEvolutionBanner';
+        banner.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px 20px;
+            z-index: 9998;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            font-size: 14px;
+        `;
+
+        banner.innerHTML = `
+            <div class="d-flex align-items-center gap-2">
+                <div class="spinner-border spinner-border-sm text-light" role="status">
+                    <span class="visually-hidden">Running...</span>
+                </div>
+                <span id="bannerStatusText">Evolution running...</span>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <span id="bannerProgressText" class="badge bg-light text-dark">0%</span>
+                <button id="reconnectEvolutionBtn" class="btn btn-sm btn-light">
+                    <i class="fas fa-eye me-1"></i>View Evolution
+                </button>
+            </div>
+        `;
+
+        // Insert at the very beginning of body
+        document.body.insertBefore(banner, document.body.firstChild);
+
+        // Add top padding to body to prevent content overlap
+        document.body.style.paddingTop = (banner.offsetHeight) + 'px';
+
+        // Add click handler for reconnect button
+        document.getElementById('reconnectEvolutionBtn').addEventListener('click', reconnectToRunningEvolution);
+    }
+
+    // Update status text and progress
+    const statusText = document.getElementById('bannerStatusText');
+    const progressText = document.getElementById('bannerProgressText');
+
+    if (progressData.evolution_name) {
+        statusText.textContent = `"${progressData.evolution_name}" running...`;
+    } else {
+        statusText.textContent = `Evolution running...`;
+    }
+
+    if (progressData.progress !== undefined) {
+        progressText.textContent = `${Math.round(progressData.progress)}%`;
+    }
+
+    banner.style.display = 'flex';
+}
+
+/**
+ * Hide the running evolution banner
+ */
+function hideRunningEvolutionBanner() {
+    const banner = document.getElementById('runningEvolutionBanner');
+    if (banner) {
+        banner.style.display = 'none';
+        document.body.style.paddingTop = '0';
+    }
+}
+
+/**
+ * Reconnect to the running evolution
+ */
+async function reconnectToRunningEvolution() {
+    console.log("Reconnecting to running evolution...");
+
+    // Get current progress data to get evolution name
+    try {
+        const response = await fetch('/api/progress');
+        if (response.ok) {
+            const progressData = await response.json();
+
+            // Store evolution identity
+            if (progressData.evolution_id) {
+                currentEvolutionId = progressData.evolution_id;
+            }
+            if (progressData.evolution_name) {
+                currentEvolutionName = progressData.evolution_name;
+            }
+        }
+    } catch (e) {
+        console.log("Could not get progress data for reconnect:", e);
+    }
+
+    // Hide the template entry section (the "What kind of ideas do you want to generate?" prompt)
+    const templateEntry = document.getElementById('templateEntry');
+    if (templateEntry) {
+        templateEntry.style.display = 'none';
+    }
+
+    // Hide name input section
+    const nameSection = document.getElementById('evolutionNameSection');
+    if (nameSection) {
+        nameSection.style.display = 'none';
+    }
+
+    // Create progress bar if it doesn't exist
+    if (!document.getElementById('progress-container')) {
+        createProgressBar(currentEvolutionName);
+    }
+
+    // Start polling to sync with the running evolution
+    isEvolutionRunning = true;
+    pollProgress();
+
+    // Show the stop button
+    const stopButton = document.getElementById('stopButton');
+    if (stopButton) {
+        stopButton.disabled = false;
+        stopButton.style.display = 'block';
+    }
+
+    // Update start button to show running state
+    const startButton = document.getElementById('startButton');
+    if (startButton) {
+        startButton.disabled = true;
+        startButton.textContent = 'Running...';
+    }
+
+    // Add activity log message
+    addActivityLogItem('🔄 Reconnected to running evolution', 'info');
+
+    // Hide the banner since we're now watching
+    hideRunningEvolutionBanner();
+}
+
+// Expose checkRunningEvolution globally so auth_logic.js can call it
+window.checkRunningEvolution = checkRunningEvolution;
+
+// Function to show resume button when evolution is paused/stopped
+// Now just stores checkpoint ID - the history panel handles the UI
+function showResumeButton(checkpointId) {
+    if (checkpointId) {
+        localStorage.setItem('lastCheckpointId', checkpointId);
+    }
+    // History panel handles resume/continue UI now
+}
+
+// Function to show continue button (for completed evolutions only)
+// Now just stores checkpoint ID - the history panel handles the UI
+function showContinueButton(checkpointId) {
+    if (checkpointId) {
+        localStorage.setItem('lastCheckpointId', checkpointId);
+    }
+    // History panel handles resume/continue UI now
+}
+
+// Function to hide resume/continue buttons
+// Now a no-op - history panel handles the UI
+function hideResumeButtons() {
+    // History panel handles resume/continue UI now
+}
+
+// Function to show force stop button after a delay (when regular stop is taking too long)
+function showForceStopButton() {
+    const forceStopButton = document.getElementById('forceStopButton');
+    if (forceStopButton) {
+        forceStopButton.style.display = 'block';
+    }
+}
+
+// Function to check for resumable checkpoints on page load
+// Now just logs info - the history panel handles UI for resume/continue
+async function checkForResumableCheckpoints() {
+    try {
+        const response = await fetch('/api/checkpoints');
+        if (response.ok) {
+            const data = await response.json();
+            if (data.status === 'success' && data.checkpoints && data.checkpoints.length > 0) {
+                // Find the most recent paused or in_progress checkpoint
+                const resumable = data.checkpoints.find(cp =>
+                    cp.status === 'paused' || cp.status === 'in_progress' || cp.status === 'force_stopped'
+                );
+                if (resumable) {
+                    console.log("Found resumable checkpoint:", resumable);
+                    localStorage.setItem('lastCheckpointId', resumable.id);
+                    // Log to activity if UI is ready
+                    if (typeof addActivityLogItem === 'function') {
+                        try {
+                            addActivityLogItem(`💾 Resumable checkpoint found - check History to resume`, 'info');
+                        } catch (e) {
+                            console.log("Resumable checkpoint:", resumable.id);
+                        }
+                    }
+                    return resumable;
+                }
+            }
+        }
+    } catch (error) {
+        console.error("Error checking for checkpoints:", error);
+    }
+    return null;
 }
 
 // Function to reset the UI state
@@ -1601,22 +3036,35 @@ function resetUIState() {
         contextNav.style.display = 'none';
     }
 
-    // Reset progress bar if it exists
-    const progressBar = document.getElementById('evolution-progress');
-    const progressStatus = document.getElementById('progress-status');
-    if (progressBar && progressStatus) {
-        progressBar.style.width = '0%';
-        progressBar.setAttribute('aria-valuenow', 0);
-        progressBar.textContent = '0%';
-        progressStatus.textContent = 'Starting evolution...';
-    } else {
-        // Create progress bar if it doesn't exist
-        createProgressBar();
-    }
+    // Stop any existing elapsed time updater FIRST
+    stopElapsedTimeUpdater();
+
+    // Reset timing and activity tracking BEFORE creating new progress bar
+    evolutionStartTime = null;
+    lastActivityTime = null;
+    activityLog = [];
+    previousStatusMessage = '';
+    previousProgress = 0;
+
+    // Reset diversity tracking
+    window._loggedDiversityGens = new Set();
 
     // Reset evolution status
     isEvolutionRunning = false;
     currentEvolutionData = null;
+
+    // Reset progress bar if it exists, or create a new one
+    const existingProgressContainer = document.getElementById('progress-container');
+    if (existingProgressContainer) {
+        // Remove the old progress container
+        existingProgressContainer.remove();
+    }
+    // Create fresh progress bar with activity log (this starts the timer)
+    createProgressBar(currentEvolutionName);
+
+    // Add initial activity for context generation
+    addActivityLogItem('🎯 Generating seed contexts...', 'info');
+    updateEvolutionStatusIndicator(true, 'Generating contexts...');
 
     // Clear localStorage data
     localStorage.removeItem('currentEvolutionData');
@@ -1634,22 +3082,283 @@ function resetUIState() {
     }
 }
 
-// Function to create the progress bar
-function createProgressBar() {
+// Function to create the progress bar with enhanced visual feedback
+function createProgressBar(evolutionName = null) {
+    currentEvolutionName = evolutionName;
+
     const progressContainer = document.createElement('div');
     progressContainer.id = 'progress-container';
-    progressContainer.className = 'mb-4';
+    progressContainer.className = 'mb-4 evolution-progress-card';
     progressContainer.innerHTML = `
-        <div class="progress">
-            <div id="evolution-progress" class="progress-bar" role="progressbar"
-                 style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+        <div class="evolution-progress-header">
+            <div class="evolution-name-section">
+                <h4 class="evolution-name" id="evolution-name">${evolutionName || 'Evolution'}</h4>
+            </div>
+            <div class="evolution-status-section">
+            <div class="evolution-status-indicator">
+                <div class="evolution-spinner" id="evolution-spinner"></div>
+                <span id="evolution-status-text">Initializing...</span>
+            </div>
+            <div class="evolution-timing" id="evolution-timing">
+                <span class="timing-item" id="elapsed-time">
+                    <i class="fas fa-clock"></i> <span id="elapsed-time-value">0:00</span>
+                </span>
+                </div>
+            </div>
         </div>
-        <div id="progress-status" class="text-center mt-2">Starting evolution...</div>
+        <div class="progress-container-inner">
+            <div class="progress evolution-progress-bar">
+                <div id="evolution-progress" class="progress-bar" role="progressbar"
+                     style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                <div class="progress-bar-activity" id="progress-bar-activity"></div>
+            </div>
+            <div class="progress-percentage" id="progress-percentage">0%</div>
+        </div>
+        <div class="evolution-activity-log" id="evolution-activity-log">
+            <div class="activity-log-header">
+                <i class="fas fa-stream"></i> Recent Activity
+            </div>
+            <div class="activity-log-items" id="activity-log-items">
+                <div class="activity-item activity-item-placeholder">Waiting for first task...</div>
+            </div>
+        </div>
     `;
 
     // Insert progress bar before generations container
     const generationsContainer = document.getElementById('generations-container');
     generationsContainer.parentNode.insertBefore(progressContainer, generationsContainer);
+
+    // Initialize timing
+    evolutionStartTime = Date.now();
+    lastActivityTime = Date.now();
+    activityLog = [];
+
+    // Reset diversity tracking for new evolution
+    window._loggedDiversityGens = new Set();
+
+    // Start elapsed time updater immediately
+    startElapsedTimeUpdater();
+}
+
+// Function to start the elapsed time updater
+function startElapsedTimeUpdater() {
+    // Clear any existing interval
+    if (elapsedTimeInterval) {
+        clearInterval(elapsedTimeInterval);
+    }
+
+    // Update immediately on start
+    updateElapsedTimeDisplay();
+
+    elapsedTimeInterval = setInterval(() => {
+        updateElapsedTimeDisplay();
+    }, 1000);
+}
+
+// Function to update the elapsed time display
+function updateElapsedTimeDisplay() {
+    if (!evolutionStartTime) {
+        return;
+    }
+
+    const elapsed = Date.now() - evolutionStartTime;
+    const elapsedTimeEl = document.getElementById('elapsed-time-value');
+    if (elapsedTimeEl) {
+        elapsedTimeEl.textContent = formatDuration(elapsed);
+    }
+
+    // Check for inactivity (more than 5 seconds since last activity)
+    const timeSinceActivity = Date.now() - lastActivityTime;
+    const activityIndicator = document.getElementById('progress-bar-activity');
+    if (activityIndicator) {
+        if (timeSinceActivity > 5000) {
+            // Show pulsing animation to indicate waiting
+            activityIndicator.classList.add('waiting');
+        } else {
+            activityIndicator.classList.remove('waiting');
+        }
+    }
+}
+
+// Function to stop the elapsed time updater
+function stopElapsedTimeUpdater() {
+    if (elapsedTimeInterval) {
+        clearInterval(elapsedTimeInterval);
+        elapsedTimeInterval = null;
+    }
+}
+
+// Function to format duration in mm:ss or hh:mm:ss
+function formatDuration(ms) {
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (hours > 0) {
+        return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+// Function to enhance status messages for better readability
+function enhanceStatusMessage(rawMessage, data) {
+    if (!rawMessage) return '';
+
+    // Parse common patterns and make them more descriptive
+    // Order matters - more specific patterns first
+    const patterns = [
+        {
+            match: /Seeding idea (\d+)\/(\d+)/i,
+            transform: (m) => `🌱 Creating seed idea ${m[1]} of ${m[2]}`
+        },
+        {
+            // Breeding comes after tournament in gen 1+
+            match: /Breeding and refining idea (\d+)\/(\d+)/i,
+            transform: (m) => `🧬 Breeding offspring ${m[1]} of ${m[2]}`
+        },
+        {
+            // Refining in gen 0 (initial population polish)
+            match: /Refining idea (\d+)\/(\d+)/i,
+            transform: (m, data) => {
+                // Check if this is gen 0 (initial population) or later
+                if (data && data.current_generation === 0) {
+                    return `✨ Polishing seed ${m[1]} of ${m[2]}`;
+                }
+                return `✨ Refining idea ${m[1]} of ${m[2]}`;
+            }
+        },
+        {
+            match: /Running tournament group (\d+)\/(\d+)/i,
+            transform: (m) => `🏆 Tournament round ${m[1]} of ${m[2]}`
+        },
+        {
+            match: /Running tournament/i,
+            transform: () => '🏆 Running selection tournament...'
+        }
+    ];
+
+    for (const pattern of patterns) {
+        const match = rawMessage.match(pattern.match);
+        if (match) {
+            return pattern.transform(match, data);
+        }
+    }
+
+    // Return original message if no pattern matches
+    return rawMessage;
+}
+
+// Function to add an activity to the log
+function addActivityLogItem(message, type = 'info') {
+    lastActivityTime = Date.now();
+
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    // Add to activity log array
+    activityLog.unshift({ message, type, timestamp });
+
+    // Keep only the most recent items
+    if (activityLog.length > MAX_ACTIVITY_LOG_ITEMS) {
+        activityLog = activityLog.slice(0, MAX_ACTIVITY_LOG_ITEMS);
+    }
+
+    // Update the UI
+    const logContainer = document.getElementById('activity-log-items');
+    if (logContainer) {
+        logContainer.innerHTML = activityLog.map(item => `
+            <div class="activity-item activity-${item.type}">
+                <span class="activity-time">${item.timestamp}</span>
+                <span class="activity-message">${item.message}</span>
+            </div>
+        `).join('');
+    }
+}
+
+// Function to update the evolution status indicator
+function updateEvolutionStatusIndicator(isRunning, statusText = '') {
+    const spinner = document.getElementById('evolution-spinner');
+    const statusTextEl = document.getElementById('evolution-status-text');
+    const progressCard = document.getElementById('progress-container');
+
+    if (spinner) {
+        if (isRunning) {
+            spinner.classList.add('spinning');
+            spinner.classList.remove('complete', 'stopped');
+        } else {
+            spinner.classList.remove('spinning');
+        }
+    }
+
+    if (statusTextEl && statusText) {
+        statusTextEl.textContent = statusText;
+    }
+
+    if (progressCard) {
+        if (isRunning) {
+            progressCard.classList.add('running');
+            progressCard.classList.remove('complete', 'stopped');
+        }
+    }
+}
+
+// Function to mark evolution as complete
+function markEvolutionComplete(isStopped = false, isResumable = false, checkpointId = null) {
+    const spinner = document.getElementById('evolution-spinner');
+    const statusTextEl = document.getElementById('evolution-status-text');
+    const progressCard = document.getElementById('progress-container');
+    const activityIndicator = document.getElementById('progress-bar-activity');
+    const forceStopButton = document.getElementById('forceStopButton');
+
+    if (spinner) {
+        spinner.classList.remove('spinning');
+        spinner.classList.add(isStopped ? 'stopped' : 'complete');
+    }
+
+    if (statusTextEl) {
+        if (isStopped && isResumable) {
+            statusTextEl.textContent = 'Paused';
+        } else if (isStopped) {
+            statusTextEl.textContent = 'Stopped';
+        } else {
+            statusTextEl.textContent = 'Complete';
+        }
+    }
+
+    if (progressCard) {
+        progressCard.classList.remove('running');
+        progressCard.classList.add(isStopped ? 'stopped' : 'complete');
+    }
+
+    if (activityIndicator) {
+        activityIndicator.classList.remove('waiting');
+    }
+
+    // Hide force stop button
+    if (forceStopButton) {
+        forceStopButton.style.display = 'none';
+    }
+
+    stopElapsedTimeUpdater();
+
+    // Add final activity log entry
+    const elapsed = evolutionStartTime ? formatDuration(Date.now() - evolutionStartTime) : 'unknown';
+    if (isStopped && isResumable) {
+        addActivityLogItem(`⏸️ Paused after ${elapsed} - checkpoint saved`, 'info');
+    } else if (isStopped) {
+        addActivityLogItem(`⏹️ Stopped after ${elapsed}`, 'warning');
+    } else {
+        addActivityLogItem(`✅ Completed in ${elapsed}!`, 'success');
+    }
+
+    // Store checkpoint info for history panel
+    if (checkpointId) {
+        localStorage.setItem('lastCheckpointId', checkpointId);
+        // Refresh history to show new checkpoint
+        if (typeof loadHistory === 'function') {
+            loadHistory();
+        }
+    }
 }
 
 
@@ -2885,18 +4594,23 @@ function processDiversityData(diversityHistory) {
     const perGenerationScores = [];
     const interGenerationScores = [];
 
+    console.log("Processing diversity history:", diversityHistory);
+
     diversityHistory.forEach((diversityData, index) => {
         // Check if we have valid diversity data
         if (!diversityData) {
+            console.log(`Skipping index ${index}: Invalid data`);
             return;
         }
 
         // Handle case where diversity calculation is disabled or failed
         if (diversityData.enabled === false) {
+            console.log(`Skipping index ${index}: Diversity calculation disabled`);
             return;
         }
 
         if (diversityData.error) {
+            console.log(`Skipping index ${index}: Error in diversity data:`, diversityData.error);
             return;
         }
 
@@ -3007,8 +4721,14 @@ function updateDiversityChart(diversityHistory) {
             // Ensure proper sizing of canvas and container
             const canvas = document.getElementById('diversity-chart');
             const plotContainer = document.querySelector('.diversity-plot-container');
+            const plotSection = document.getElementById('diversity-plot-section');
 
             if (canvas && plotContainer) {
+                // Ensure parent section is visible
+                if (plotSection) {
+                    plotSection.style.display = 'block';
+                }
+
                 // Force proper sizing
                 plotContainer.style.display = 'block';
                 plotContainer.style.height = '450px';
@@ -3043,7 +4763,7 @@ function showDiversityPlotLoading() {
     const plotContainer = document.querySelector('.diversity-plot-container');
 
     if (plotSection && plotContainer) {
-        plotSection.style.display = 'block';
+        // plotSection.style.display = 'block'; // Don't show until we have data
 
         // Don't replace the entire content - just add loading overlay
         const existingCanvas = plotContainer.querySelector('#diversity-chart');
@@ -3605,14 +5325,30 @@ function showSidebarView(viewName) {
     // Logic for transitions
     const mainView = document.getElementById('view-main');
     const targetView = document.getElementById(`view-${viewName}`);
+    const sidebar = document.querySelector('.controls-panel');
 
     if (viewName === 'main') {
         mainView.classList.add('active');
+        // Collapse sidebar when returning to main
+        if (sidebar) sidebar.classList.remove('expanded');
+        // Show name input section
+        const nameSection = document.getElementById('evolutionNameSection');
+        if (nameSection) nameSection.style.display = 'block';
     } else {
         // Move main view to left (parallax)
         mainView.classList.add('slide-left');
         // Bring target view in
         if (targetView) targetView.classList.add('active');
+
+        // Expand sidebar for history view
+        if (viewName === 'history') {
+            if (sidebar) sidebar.classList.add('expanded');
+            // Load/refresh history when entering
+            loadHistory();
+        } else {
+            // Collapse for other views
+            if (sidebar) sidebar.classList.remove('expanded');
+        }
     }
 
     // Special handling for settings
@@ -3623,6 +5359,18 @@ function showSidebarView(viewName) {
 
 // Expose to window for HTML onclick attributes
 window.showSidebarView = showSidebarView;
+window.selectHistoryItem = selectHistoryItem;
+window.clearHistorySelection = clearHistorySelection;
+window.confirmDeleteEvolution = confirmDeleteEvolution;
+window.handleHistoryResume = handleHistoryResume;
+window.handleHistoryContinue = handleHistoryContinue;
+window.showContinueInputInline = showContinueInputInline;
+window.executeContinueInline = executeContinueInline;
+window.cancelContinueInputInline = cancelContinueInputInline;
+window.showRenameInputInline = showRenameInputInline;
+window.executeRenameInline = executeRenameInline;
+window.cancelRenameInline = cancelRenameInline;
+window.navigateToRatePage = navigateToRatePage;
 
 /**
  * Check if API key is set and update UI
@@ -3644,6 +5392,7 @@ async function checkSettingsStatus() {
 
             // Store masked key for copy function
             window.maskedApiKey = data.masked_key;
+            window.fullApiKey = data.api_key;
         } else {
             // No key set
             if (inputContainer) inputContainer.style.display = 'block';
@@ -3708,11 +5457,13 @@ async function saveSettings() {
 async function deleteApiKey(e) {
     if (e) e.preventDefault();
 
-    if (!confirm('Are you sure you want to delete the API key? You will need to enter it again to use the app.')) {
-        return;
-    }
+    // Show the Bootstrap modal
+    const deleteModal = new bootstrap.Modal(document.getElementById('deleteKeyModal'));
+    deleteModal.show();
+}
 
-    const btn = document.getElementById('deleteApiKeyBtn');
+async function confirmDeleteApiKey() {
+    const btn = document.getElementById('confirmDeleteKeyBtn');
     const originalText = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Deleting...';
@@ -3725,6 +5476,11 @@ async function deleteApiKey(e) {
         const data = await response.json();
 
         if (data.status === 'success') {
+            // Hide modal
+            const deleteModalEl = document.getElementById('deleteKeyModal');
+            const modal = bootstrap.Modal.getInstance(deleteModalEl);
+            if (modal) modal.hide();
+
             showStatusInSettings('API Key deleted.', 'success');
             // Refresh status to switch view
             await checkSettingsStatus();
@@ -3749,7 +5505,7 @@ async function deleteApiKey(e) {
  * Copy API Key (Masked)
  */
 function copyApiKey() {
-    const textToCopy = window.maskedApiKey || "API Key is set";
+    const textToCopy = window.fullApiKey || window.maskedApiKey || "";
     navigator.clipboard.writeText(textToCopy).then(() => {
         const btn = document.getElementById('copyApiKeyBtn');
         const originalHTML = btn.innerHTML;
@@ -3769,55 +5525,7 @@ function copyApiKey() {
     });
 }
 
-async function handleTemplateGeneration() {
-    const ideaTypeInput = document.getElementById('ideaTypeInput');
-    const ideaType = ideaTypeInput.value.trim();
-    if (!ideaType) return;
-
-    const generateBtn = document.getElementById('generateTemplateBtn');
-    const originalText = generateBtn.innerHTML;
-    generateBtn.disabled = true;
-    generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
-
-    try {
-        const response = await fetch('/api/generate-template', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ idea_type: ideaType })
-        });
-
-        const data = await response.json();
-
-        if (data.status === 'success') {
-            // Update hidden input
-            document.getElementById('ideaType').value = ideaType;
-
-            // Update new status card
-            const display = document.getElementById('ideaTypeDisplay');
-
-            if (display) {
-                display.textContent = ideaType;
-                display.classList.remove('text-muted', 'fst-italic');
-            }
-
-            // Show editor
-            currentTemplate = data.template;
-            document.getElementById('templateEditor').value = JSON.stringify(data.template, null, 2);
-
-            // Show modal
-            const modal = new bootstrap.Modal(document.getElementById('templateModal'));
-            modal.show();
-        } else {
-            alert('Error generating template: ' + data.message);
-        }
-    } catch (error) {
-        console.error('Error:', error);
-        alert('Error generating template');
-    } finally {
-        generateBtn.disabled = false;
-        generateBtn.innerHTML = originalText;
-    }
-}
+// Note: handleTemplateGeneration is defined in viewer.html with proper DOM elements
 
 function showStatusInSettings(msg, type) {
     const el = document.getElementById('settingsStatus');

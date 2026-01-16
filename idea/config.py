@@ -7,7 +7,8 @@ LLM_MODELS = [
     {"id": "gemini-2.5-flash-lite", "name": "Gemini 2.5 Flash Lite (Fast + Cheap)"},
     {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
     {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
-    {"id": "gemini-3-pro-preview", "name": "Gemini 3 Pro Preview (SOTA)"}
+    {"id": "gemini-3-flash-preview", "name": "Gemini 3 Flash Preview"},
+    {"id": "gemini-3-pro-preview", "name": "Gemini 3 Pro Preview"}
 ]
 
 # Default model
@@ -51,5 +52,14 @@ model_prices_per_million_tokens = {
     "gemini-2.5-flash-lite": {"input": 0.1, "output": 0.4},
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
+    "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
     "gemini-3-pro-preview": {"input": 2.00, "output": 12.00}
 }
+
+# SMTP Configuration
+import os
+SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")

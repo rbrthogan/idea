@@ -18,9 +18,17 @@ from typing import Dict, List, Tuple, Optional
 
 from idea.evolution import EvolutionEngine
 from idea.llm import Critic
-from idea.config import LLM_MODELS, DEFAULT_MODEL, DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
+from idea.config import LLM_MODELS, DEFAULT_MODEL, DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P, SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, ADMIN_EMAIL
 from idea.template_manager import router as template_router
 from idea.prompts.loader import list_available_templates
+from idea.admin import router as admin_router
+from idea.auth import require_auth, UserInfo
+from fastapi import Depends
+from idea import database as db
+from idea.user_state import user_states, UserEvolutionState
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -33,8 +41,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include template management routes
+# Include routers
 app.include_router(template_router)
+app.include_router(admin_router)
 
 # Mount static folder with custom config
 app.mount("/static", StaticFiles(directory="idea/static"), name="static")
@@ -42,55 +51,14 @@ app.mount("/static", StaticFiles(directory="idea/static"), name="static")
 # Templates
 templates = Jinja2Templates(directory="idea/static/html")
 
-# Global engine instance
-engine = None
-
-# (Removed duplicate definitions)
-
 # Add this near other constants
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
-# --- API Key Management ---
-def load_api_key():
-    """Load API key from .env file if it exists"""
-    env_path = Path(".env")
-    if env_path.exists():
-        try:
-            with open(env_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("GEMINI_API_KEY="):
-                        key = line.split("=", 1)[1].strip()
-                        if key:
-                            os.environ["GEMINI_API_KEY"] = key
-                            print("Loaded GEMINI_API_KEY from .env file")
-                            return True
-        except Exception as e:
-            print(f"Error loading .env file: {e}")
-    return False
+# Unified evolutions directory
+EVOLUTIONS_DIR = Path("data/evolutions")
+EVOLUTIONS_DIR.mkdir(exist_ok=True)
 
-# Load key at startup
-load_api_key()
-
-# Flag indicating whether the API key is available
-# We'll make this a function to always get the current state
-def is_api_key_missing():
-    return os.getenv("GEMINI_API_KEY") in (None, "")
-
-API_KEY_MISSING = is_api_key_missing()
-
-# Global queue for evolution updates
-evolution_queue = Queue()
-evolution_status = {
-    "current_generation": 0,
-    "total_generations": 0,
-    "is_running": False,
-    "history": []
-}
-
-# Store the latest evolution data for rating
-latest_evolution_data = []
 
 # Add this class for the request body
 class SaveEvolutionRequest(BaseModel):
@@ -100,6 +68,11 @@ class SaveEvolutionRequest(BaseModel):
 class ApiKeyRequest(BaseModel):
     api_key: str
 
+class ContactRequest(BaseModel):
+    name: str
+    email: str
+    message: str
+
 # --------------------------------------------------
 # Routes
 # --------------------------------------------------
@@ -107,79 +80,123 @@ class ApiKeyRequest(BaseModel):
 @app.get("/")
 def serve_viewer(request: Request):
     """Serves the viewer page"""
-    return templates.TemplateResponse("viewer.html", {"request": request, "api_key_missing": is_api_key_missing()})
+    return templates.TemplateResponse("viewer.html", {"request": request})
 
 @app.get("/rate")
 def serve_rater(request: Request):
     """Serves the rater page"""
-    return templates.TemplateResponse("rater.html", {"request": request, "api_key_missing": is_api_key_missing()})
+    return templates.TemplateResponse("rater.html", {"request": request})
+
+@app.get("/api/user/status")
+async def get_user_status(user: UserInfo = Depends(require_auth)):
+    """Get the status of the current user (e.g. has_api_key)"""
+    api_key = await db.get_user_api_key(user.uid)
+    return {
+        "has_api_key": api_key is not None
+    }
 
 @app.post("/api/settings/api-key")
-async def set_api_key(request: ApiKeyRequest):
-    """Save API key to .env file"""
+async def set_api_key(request: ApiKeyRequest, user: UserInfo = Depends(require_auth)):
+    """Save user's encoded API key"""
     api_key = request.api_key.strip()
     if not api_key:
         return JSONResponse({"status": "error", "message": "API key cannot be empty"}, status_code=400)
 
-    # Save to .env
-    env_path = Path(".env")
-    # Read existing lines to preserve other env vars if any
-    lines = []
-    if env_path.exists():
-        try:
-            with open(env_path, "r") as f:
-                lines = f.readlines()
-        except Exception as e:
-            print(f"Error reading .env: {e}")
-
-    # Update or append
-    key_found = False
-    new_lines = []
-    for line in lines:
-        if line.strip().startswith("GEMINI_API_KEY="):
-            new_lines.append(f"GEMINI_API_KEY={api_key}\n")
-            key_found = True
-        else:
-            new_lines.append(line)
-
-    if not key_found:
-        if new_lines and not new_lines[-1].endswith('\n'):
-            new_lines[-1] += '\n'
-        new_lines.append(f"GEMINI_API_KEY={api_key}\n")
-
     try:
-        with open(env_path, "w") as f:
-            f.writelines(new_lines)
+        await db.save_user_api_key(user.uid, api_key)
+        return JSONResponse({"status": "success", "message": "API Key saved successfully"})
     except Exception as e:
-        return JSONResponse({"status": "error", "message": f"Failed to write to .env: {str(e)}"}, status_code=500)
-
-    # Update current process env
-    os.environ["GEMINI_API_KEY"] = api_key
-
-    # Update global flag
-    global API_KEY_MISSING
-    API_KEY_MISSING = False
-
-    return JSONResponse({"status": "success", "message": "API key saved successfully"})
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.get("/api/settings/status")
-async def get_settings_status():
+async def get_settings_status(user: UserInfo = Depends(require_auth)):
     """Check if API key is set"""
-    is_missing = is_api_key_missing()
-    masked_key = None
-    if not is_missing:
-        key = os.environ.get("GEMINI_API_KEY", "")
-        if len(key) > 8:
-            masked_key = f"{key[:4]}...{key[-4:]}"
-        else:
-            masked_key = "***"
+    try:
+        api_key = await db.get_user_api_key(user.uid)
+        is_missing = api_key is None
+        masked_key = None
+        if not is_missing:
+            if len(api_key) > 8:
+                masked_key = f"{api_key[:4]}...{api_key[-4:]}"
+            else:
+                masked_key = "***"
 
-    return JSONResponse({
-        "api_key_missing": is_missing,
-        "masked_key": masked_key
-    })
+        return JSONResponse({
+            "api_key_missing": is_missing,
+            "masked_key": masked_key,
+            "api_key": api_key,
+            "is_admin": user.is_admin,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({
+            "status": "error",
+            "message": f"Internal Server Error: {str(e)}"
+        }, status_code=500)
 
 
+
+
+@app.post("/api/contact")
+async def send_contact_email(request: ContactRequest):
+    """
+    Send a contact email to the admin.
+    """
+    try:
+        if not SMTP_USERNAME or not SMTP_PASSWORD or not ADMIN_EMAIL:
+            print("SMTP not configured. Message received but not sent.")
+            print(f"From: {request.name} <{request.email}>")
+            print(f"Message: {request.message}")
+            # Return success even if email not sent, as we logged it (simulated behavior for dev)
+            return JSONResponse({
+                "status": "success",
+                "message": "Message received! (SMTP not configured, checked logs)"
+            })
+
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USERNAME
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = f"Idea App Contact: {request.name}"
+        msg['Reply-To'] = request.email
+
+        body = f"Name: {request.name}\nEmail: {request.email}\n\nMessage:\n{request.message}"
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(SMTP_USERNAME, ADMIN_EMAIL, text)
+        server.quit()
+
+        return JSONResponse({"status": "success", "message": "Email sent successfully"})
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/debug/auth")
+async def debug_auth(user: UserInfo = Depends(require_auth)):
+    """Debug endpoint to verify auth and user info."""
+    return {"status": "ok", "user": user.to_dict()}
+
+@app.get("/api/debug/db")
+
+async def debug_db(user: UserInfo = Depends(require_auth)):
+    """Debug endpoint to verify database connection."""
+    try:
+        # Test basic DB read
+        key = await db.get_user_api_key(user.uid)
+        return {"status": "ok", "key_present": key is not None}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }, status_code=500)
 
 @app.get("/api/template-types")
 async def get_template_types():
@@ -227,154 +244,689 @@ def get_default_template_id():
         return 'airesearch'
 
 @app.post("/api/start-evolution")
-async def start_evolution(request: Request):
+async def start_evolution(request: Request, user: UserInfo = Depends(require_auth)):
     """
     Runs the complete evolution and returns the final results
     """
-    global engine, evolution_status, evolution_queue, latest_evolution_data
+    try:
+        # Get user-specific state
+        state = await user_states.get(user.uid)
 
-    if is_api_key_missing():
-        return JSONResponse(
-            {"status": "error", "message": "GEMINI_API_KEY not configured"},
-            status_code=400,
+        # Check if this user already has an evolution running
+        if state.status.get("is_running"):
+            return JSONResponse(
+                {"status": "error", "message": "You already have an evolution running. Please wait for it to complete or stop it first."},
+                status_code=409,
+            )
+
+        # Check for API key in DB
+        api_key = await db.get_user_api_key(user.uid)
+        if not api_key:
+            return JSONResponse(
+                {"status": "error", "message": "API Key not configured. Please set it in Settings."},
+                status_code=400,
+            )
+
+        data = await request.json()
+        print(f"Received request data: {data}")
+
+        # Clear the latest evolution data when starting a new evolution
+        state.latest_data = []
+
+        pop_size = int(data.get('popSize', 3))
+        generations = int(data.get('generations', 2))
+        idea_type = data.get('ideaType', get_default_template_id())
+        model_type = data.get('modelType', 'gemini-2.0-flash-lite')
+
+        # Get creative and tournament parameters with defaults
+        try:
+            creative_temp = float(data.get('creativeTemp', DEFAULT_CREATIVE_TEMP))
+            top_p = float(data.get('topP', DEFAULT_TOP_P))
+            print(f"Parsed creative values: temp={creative_temp}, top_p={top_p}")
+        except ValueError as e:
+            print(f"Error parsing creative values: {e}")
+            # Use defaults if parsing fails
+            creative_temp = DEFAULT_CREATIVE_TEMP
+            top_p = DEFAULT_TOP_P
+
+        # Get tournament parameters with defaults
+        try:
+            tournament_size = int(data.get('tournamentSize', 5))
+            tournament_comparisons = int(data.get('tournamentComparisons', 35))
+            print(f"Parsed tournament values: size={tournament_size}, comparisons={tournament_comparisons}")
+        except ValueError as e:
+            print(f"Error parsing tournament values: {e}")
+            # Use defaults if parsing fails
+            tournament_size = 5
+            tournament_comparisons = 35
+
+        # Get mutation rate with default
+        try:
+            mutation_rate = float(data.get('mutationRate', 0.2))
+            print(f"Parsed mutation rate: {mutation_rate}")
+        except ValueError as e:
+            print(f"Error parsing mutation rate: {e}")
+            mutation_rate = 0.2
+
+        # Get Oracle parameters with defaults
+
+        # Get thinking budget parameter (only for Gemini 2.5 models)
+        thinking_budget = data.get('thinkingBudget')
+        if thinking_budget is not None:
+            thinking_budget = int(thinking_budget)
+            print(f"Parsed thinking budget: {thinking_budget}")
+        else:
+            print("No thinking budget specified (non-2.5 model or not set)")
+
+        # Get max budget parameter
+        max_budget = data.get('maxBudget')
+        if max_budget is not None:
+            try:
+                max_budget = float(max_budget)
+                print(f"Parsed max budget: ${max_budget}")
+            except ValueError:
+                print(f"Error parsing max budget: {max_budget}")
+                max_budget = None
+        else:
+            print("No max budget specified")
+
+        print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
+              f"idea_type={idea_type}, model_type={model_type}, "
+              f"creative_temp={creative_temp}, top_p={top_p}, "
+              f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
+              f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
+
+        # Create and run evolution with specified parameters
+        state.engine = EvolutionEngine(
+            pop_size=pop_size,
+            generations=generations,
+            idea_type=idea_type,
+            model_type=model_type,
+            creative_temp=creative_temp,
+            top_p=top_p,
+            tournament_size=tournament_size,
+            tournament_comparisons=tournament_comparisons,
+            mutation_rate=mutation_rate,
+            thinking_budget=thinking_budget,
+            max_budget=max_budget,
+            api_key=api_key,
+            user_id=user.uid,  # Store user_id for Firestore scoping
         )
 
-    data = await request.json()
-    print(f"Received request data: {data}")
+        # Initialize evolution with name (auto-generates if not provided)
+        evolution_name = (data.get('evolutionName') or '').strip() or None
+        state.engine.initialize_evolution(name=evolution_name)
+        print(f"Evolution initialized: '{state.engine.evolution_name}' (ID: {state.engine.evolution_id})")
 
-    # Clear the latest evolution data when starting a new evolution
-    latest_evolution_data = []
+        # Generate contexts for each idea
+        contexts = state.engine.generate_contexts()
 
-    pop_size = int(data.get('popSize', 3))
-    generations = int(data.get('generations', 2))
-    idea_type = data.get('ideaType', get_default_template_id())
-    model_type = data.get('modelType', 'gemini-2.0-flash-lite')
+        # Clear the queue
+        state.reset_queue()
 
-    # Get creative and tournament parameters with defaults
-    try:
-        creative_temp = float(data.get('creativeTemp', DEFAULT_CREATIVE_TEMP))
-        top_p = float(data.get('topP', DEFAULT_TOP_P))
-        print(f"Parsed creative values: temp={creative_temp}, top_p={top_p}")
-    except ValueError as e:
-        print(f"Error parsing creative values: {e}")
-        # Use defaults if parsing fails
-        creative_temp = DEFAULT_CREATIVE_TEMP
-        top_p = DEFAULT_TOP_P
+        # Set up evolution status
+        state.status = {
+            "current_generation": 0,
+            "total_generations": generations,
+            "is_running": True,
+            "history": [],
+            "contexts": contexts,
+            "progress": 0,
+            "start_time": datetime.now().isoformat()  # Track when evolution started
+        }
 
-    # Get tournament parameters with defaults
-    try:
-        tournament_size = int(data.get('tournamentSize', 5))
-        tournament_comparisons = int(data.get('tournamentComparisons', 35))
-        print(f"Parsed tournament values: size={tournament_size}, comparisons={tournament_comparisons}")
-    except ValueError as e:
-        print(f"Error parsing tournament values: {e}")
-        # Use defaults if parsing fails
-        tournament_size = 5
-        tournament_comparisons = 35
+        # Put initial status in queue
+        await state.queue.put(state.status.copy())
 
-    # Get Oracle parameters with defaults
+        # Start evolution in background task
+        asyncio.create_task(run_evolution_task(state))
 
-    # Get thinking budget parameter (only for Gemini 2.5 models)
-    thinking_budget = data.get('thinkingBudget')
-    if thinking_budget is not None:
-        thinking_budget = int(thinking_budget)
-        print(f"Parsed thinking budget: {thinking_budget}")
-    else:
-        print("No thinking budget specified (non-2.5 model or not set)")
-
-    # Get max budget parameter
-    max_budget = data.get('maxBudget')
-    if max_budget is not None:
-        try:
-            max_budget = float(max_budget)
-            print(f"Parsed max budget: ${max_budget}")
-        except ValueError:
-            print(f"Error parsing max budget: {max_budget}")
-            max_budget = None
-    else:
-        print("No max budget specified")
-
-    print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
-          f"idea_type={idea_type}, model_type={model_type}, "
-          f"creative_temp={creative_temp}, top_p={top_p}, "
-          f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
-          f"thinking_budget={thinking_budget}, max_budget={max_budget}")
-
-    # Create and run evolution with specified parameters
-    engine = EvolutionEngine(
-        pop_size=pop_size,
-        generations=generations,
-        idea_type=idea_type,
-        model_type=model_type,
-        creative_temp=creative_temp,
-        top_p=top_p,
-        tournament_size=tournament_size,
-        tournament_comparisons=tournament_comparisons,
-        thinking_budget=thinking_budget,
-        max_budget=max_budget,
-    )
-
-    # Generate contexts for each idea
-    contexts = engine.generate_contexts()
-
-    # Clear the queue
-    while not evolution_queue.empty():
-        try:
-            evolution_queue.get_nowait()
-        except:
-            break
-
-    # Set up evolution status
-    evolution_status = {
-        "current_generation": 0,
-        "total_generations": generations,
-        "is_running": True,
-        "history": [],
-        "contexts": contexts,
-        "progress": 0
-    }
-
-    # Put initial status in queue
-    await evolution_queue.put(evolution_status.copy())
-
-    # Start evolution in background task
-    asyncio.create_task(run_evolution_task(engine))
-
-    return JSONResponse({
-        "status": "success",
-        "message": "Evolution started",
-        "contexts": contexts,
-        "specific_prompts": []  # Will be populated as evolution progresses
-    })
+        return JSONResponse({
+            "status": "success",
+            "message": "Evolution started",
+            "evolution_id": state.engine.evolution_id,
+            "evolution_name": state.engine.evolution_name,
+            "contexts": contexts,
+            "specific_prompts": []  # Will be populated as evolution progresses
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }, status_code=500)
 
 @app.post("/api/stop-evolution")
-async def stop_evolution():
+async def stop_evolution(user: UserInfo = Depends(require_auth)):
     """
     Request the evolution to stop gracefully
     """
-    global engine
+    state = await user_states.get(user.uid)
 
-    if engine is None:
+    if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": "No evolution is currently running"},
             status_code=400,
         )
 
     # Request stop
-    engine.stop_evolution()
+    state.engine.stop_evolution()
 
     return JSONResponse({
         "status": "success",
         "message": "Stop request sent - evolution will halt at the next safe point"
     })
 
-async def run_evolution_task(engine):
+@app.post("/api/force-stop-evolution")
+async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
+    """
+    Force stop the evolution immediately, saving a checkpoint for later resumption.
+    Use this when the graceful stop is taking too long.
+    """
+    state = await user_states.get(user.uid)
+
+    if state.engine is None:
+        return JSONResponse(
+            {"status": "error", "message": "No evolution is currently running"},
+            status_code=400,
+        )
+
+    # Save checkpoint before forcing stop
+    checkpoint_id = None
+    try:
+        await state.engine.save_checkpoint(status='force_stopped')
+        checkpoint_id = state.engine.checkpoint_id
+    except Exception as e:
+        print(f"Warning: Failed to save checkpoint during force stop: {e}")
+
+    # Mark as stopped
+    state.engine.stop_requested = True
+    state.engine.is_stopped = True
+
+    # Update status
+    state.status["is_running"] = False
+    state.status["is_stopped"] = True
+    state.status["is_resumable"] = True
+    state.status["checkpoint_id"] = checkpoint_id
+
+    return JSONResponse({
+        "status": "success",
+        "message": "Evolution force stopped. A checkpoint has been saved.",
+        "checkpoint_id": checkpoint_id,
+        "is_resumable": True
+    })
+
+@app.get("/api/checkpoints")
+async def list_checkpoints_endpoint(user: UserInfo = Depends(require_auth)):
+    """
+    List all available evolution checkpoints for the current user.
+    """
+    try:
+        checkpoints = await EvolutionEngine.list_checkpoints_for_user(user.uid)
+        return JSONResponse({
+            "status": "success",
+            "checkpoints": checkpoints
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+@app.get("/api/checkpoints/{checkpoint_id}")
+async def get_checkpoint(checkpoint_id: str):
+    """
+    Get details of a specific checkpoint.
+    """
+    try:
+        from pathlib import Path
+        checkpoint_path = Path("data/checkpoints") / f"checkpoint_{checkpoint_id}.json"
+        if not checkpoint_path.exists():
+            return JSONResponse({
+                "status": "error",
+                "message": "Checkpoint not found"
+            }, status_code=404)
+
+        import json
+        with open(checkpoint_path) as f:
+            data = json.load(f)
+
+        return JSONResponse({
+            "status": "success",
+            "checkpoint": data
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+@app.delete("/api/checkpoints/{checkpoint_id}")
+async def delete_checkpoint(checkpoint_id: str):
+    """
+    Delete a specific checkpoint.
+    """
+    try:
+        success = EvolutionEngine.delete_checkpoint(checkpoint_id)
+        if success:
+            return JSONResponse({
+                "status": "success",
+                "message": "Checkpoint deleted"
+            })
+        else:
+            return JSONResponse({
+                "status": "error",
+                "message": "Checkpoint not found"
+            }, status_code=404)
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+@app.post("/api/resume-evolution")
+async def resume_evolution(request: Request, user: UserInfo = Depends(require_auth)):
+    """
+    Resume an evolution from a checkpoint.
+    """
+    # Get user-specific state
+    state = await user_states.get(user.uid)
+
+    # Check if already running
+    if state.status.get("is_running"):
+        return JSONResponse(
+            {"status": "error", "message": "You already have an evolution running."},
+            status_code=409,
+        )
+
+    # Check for API key in DB
+    api_key = await db.get_user_api_key(user.uid)
+    if not api_key:
+        return JSONResponse(
+            {"status": "error", "message": "API Key not configured."},
+            status_code=400,
+        )
+
+    data = await request.json()
+    checkpoint_id = data.get('checkpointId')
+
+    if not checkpoint_id:
+        return JSONResponse(
+            {"status": "error", "message": "checkpointId is required"},
+            status_code=400,
+        )
+
+    print(f"Resuming evolution from checkpoint: {checkpoint_id}")
+
+    # Load the engine from Firestore
+    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, checkpoint_id, api_key=api_key)
+    if state.engine is None:
+        return JSONResponse(
+            {"status": "error", "message": "Failed to load evolution or checkpoint"},
+            status_code=500,
+        )
+
+    # Clear the queue
+    state.reset_queue()
+
+    # Set up evolution status
+    state.status = {
+        "current_generation": state.engine.current_generation,
+        "total_generations": state.engine.generations,
+        "is_running": True,
+        "is_resuming": True,
+        "checkpoint_id": checkpoint_id,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts,
+        "breeding_prompts": state.engine.breeding_prompts,
+        "progress": (state.engine.current_generation / state.engine.generations) * 100 if state.engine.generations > 0 else 0,
+        "start_time": datetime.now().isoformat()  # Track when evolution resumed
+    }
+
+    # Put initial status in queue
+    await state.queue.put(state.status.copy())
+
+    # Start evolution in background task
+    asyncio.create_task(run_resume_evolution_task(state))
+
+    return JSONResponse({
+        "status": "success",
+        "message": f"Resuming from generation {state.engine.current_generation}/{state.engine.generations}",
+        "checkpoint_id": checkpoint_id,
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "current_generation": state.engine.current_generation,
+        "total_generations": state.engine.generations,
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts
+    })
+
+@app.post("/api/continue-evolution")
+async def continue_evolution(request: Request, user: UserInfo = Depends(require_auth)):
+    """
+    Continue a completed evolution for additional generations.
+    This can work with either a checkpoint or a saved evolution file.
+    """
+    # Get user-specific state
+    state = await user_states.get(user.uid)
+
+    # Check if already running
+    if state.status.get("is_running"):
+        return JSONResponse(
+            {"status": "error", "message": "You already have an evolution running."},
+            status_code=409,
+        )
+
+    # Check for API key in DB
+    api_key = await db.get_user_api_key(user.uid)
+    if not api_key:
+        return JSONResponse(
+            {"status": "error", "message": "API Key not configured."},
+            status_code=400,
+        )
+
+    data = await request.json()
+    # Support both camelCase and snake_case parameter names
+    checkpoint_id = data.get('checkpoint_id') or data.get('checkpointId')
+    evolution_id = data.get('evolution_id') or data.get('evolutionId')
+    additional_generations = int(data.get('additional_generations') or data.get('additionalGenerations', 3))
+
+    if not checkpoint_id and not evolution_id:
+        return JSONResponse(
+            {"status": "error", "message": "Either checkpoint_id or evolution_id is required"},
+            status_code=400,
+        )
+
+    print(f"Continuing evolution for {additional_generations} more generations")
+
+    # Load the engine from Firestore (works for both checkpoints and evolutions)
+    evolution_or_checkpoint_id = checkpoint_id or evolution_id
+    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_or_checkpoint_id, api_key=api_key)
+
+    if state.engine is None:
+        return JSONResponse(
+            {"status": "error", "message": "Failed to load evolution state"},
+            status_code=500,
+        )
+
+    # Clear the queue
+    state.reset_queue()
+
+    # Set up evolution status
+    new_total = state.engine.generations + additional_generations
+    state.status = {
+        "current_generation": state.engine.current_generation,
+        "total_generations": new_total,
+        "is_running": True,
+        "is_continuing": True,
+        "checkpoint_id": state.engine.checkpoint_id,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts,
+        "breeding_prompts": state.engine.breeding_prompts,
+        "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0,
+        "start_time": datetime.now().isoformat()  # Track when evolution continued
+    }
+
+    # Put initial status in queue
+    await state.queue.put(state.status.copy())
+
+    # Start evolution in background task with additional generations
+    asyncio.create_task(run_continue_evolution_task(state, additional_generations))
+
+    return JSONResponse({
+        "status": "success",
+        "message": f"Continuing for {additional_generations} more generations",
+        "checkpoint_id": state.engine.checkpoint_id,
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "current_generation": state.engine.current_generation,
+        "total_generations": new_total,
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts
+    })
+
+@app.post("/api/continue-saved-evolution")
+async def continue_saved_evolution(request: Request, user: UserInfo = Depends(require_auth)):
+    """
+    Continue a saved evolution (from data/*.json) for additional generations.
+    This creates a checkpoint from the saved file and then continues.
+    """
+    # Get user-specific state
+    state = await user_states.get(user.uid)
+
+    # Check if already running
+    if state.status.get("is_running"):
+        return JSONResponse(
+            {"status": "error", "message": "You already have an evolution running."},
+            status_code=409,
+        )
+
+    # Check for API key in DB
+    api_key = await db.get_user_api_key(user.uid)
+    if not api_key:
+        return JSONResponse(
+            {"status": "error", "message": "API Key not configured."},
+            status_code=400,
+        )
+
+    data = await request.json()
+    evolution_id = data.get('evolution_id')
+    additional_generations = int(data.get('additional_generations', 3))
+
+    if not evolution_id:
+        return JSONResponse(
+            {"status": "error", "message": "evolution_id is required"},
+            status_code=400,
+        )
+
+    print(f"Continuing saved evolution '{evolution_id}' for {additional_generations} more generations")
+
+    # Load evolution from Firestore
+    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_id, api_key=api_key)
+
+    if state.engine is None:
+        return JSONResponse(
+            {"status": "error", "message": f"Failed to load evolution '{evolution_id}'"},
+            status_code=500,
+        )
+
+    # Clear the queue
+    state.reset_queue()
+
+    # Set up evolution status
+    new_total = state.engine.generations + additional_generations
+    state.status = {
+        "current_generation": state.engine.current_generation,
+        "total_generations": new_total,
+        "is_running": True,
+        "is_continuing": True,
+        "checkpoint_id": state.engine.checkpoint_id,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts,
+        "breeding_prompts": state.engine.breeding_prompts,
+        "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0,
+        "start_time": datetime.now().isoformat()  # Track when evolution continued
+    }
+
+    # Put initial status in queue
+    await state.queue.put(state.status.copy())
+
+    # Start evolution in background task with additional generations
+    asyncio.create_task(run_continue_evolution_task(state, additional_generations))
+
+    return JSONResponse({
+        "status": "success",
+        "message": f"Continuing saved evolution for {additional_generations} more generations",
+        "checkpoint_id": state.engine.checkpoint_id,
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "current_generation": state.engine.current_generation,
+        "total_generations": new_total,
+        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "contexts": state.engine.contexts,
+        "specific_prompts": state.engine.specific_prompts
+    })
+
+async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] = None) -> Optional[EvolutionEngine]:
+    """
+    Create an EvolutionEngine from a saved evolution file.
+    This allows continuing evolutions that weren't saved as checkpoints.
+    """
+    try:
+        # Try unified evolutions first
+        # EvolutionEngine can handle loading from file path now
+        engine = EvolutionEngine.load_evolution(evolution_id, api_key=api_key)
+        if engine:
+            return engine
+
+        # Fallback for manual loading if needed (legacy files)
+        file_path = DATA_DIR / f"{evolution_id}.json"
+        if not file_path.exists():
+            print(f"Evolution file not found: {file_path}")
+            return None
+
+        import json
+        with open(file_path) as f:
+            data = json.load(f)
+
+        # Extract configuration from the saved data
+        config = data.get('config', {})
+        history = data.get('history', [])
+
+        if not history:
+            print("No history found in evolution file")
+            return None
+
+        # Create engine with default or saved config
+        engine = EvolutionEngine(
+            idea_type=config.get('idea_type', data.get('idea_type', get_default_template_id())),
+            pop_size=config.get('pop_size', len(history[-1]) if history else 5),
+            generations=len(history),  # Current number of generations
+            model_type=config.get('model_type', DEFAULT_MODEL),
+            creative_temp=config.get('creative_temp', DEFAULT_CREATIVE_TEMP),
+            top_p=config.get('top_p', DEFAULT_TOP_P),
+            tournament_size=config.get('tournament_size', 5),
+            tournament_comparisons=config.get('tournament_comparisons', 35),
+            thinking_budget=config.get('thinking_budget'),
+            max_budget=config.get('max_budget'),
+            mutation_rate=config.get('mutation_rate', 0.2),
+            api_key=api_key,
+        )
+
+        # Restore state from the saved evolution
+        engine.contexts = data.get('contexts', [])
+        engine.specific_prompts = data.get('specific_prompts', [])
+        engine.breeding_prompts = data.get('breeding_prompts', [])
+        engine.diversity_history = data.get('diversity_history', [])
+        engine.current_generation = len(history)
+
+        # Restore history and population
+        def deserialize_idea(idea_data):
+            if not isinstance(idea_data, dict):
+                return idea_data
+            result = dict(idea_data)
+            if 'id' in result and isinstance(result['id'], str):
+                try:
+                    result['id'] = uuid.UUID(result['id'])
+                except ValueError:
+                    result['id'] = uuid.uuid4()
+            if 'parent_ids' in result:
+                result['parent_ids'] = [
+                    uuid.UUID(pid) if isinstance(pid, str) else pid
+                    for pid in result['parent_ids']
+                ]
+            # Restore Idea object if needed
+            if 'title' in result and 'content' in result and 'idea' not in result:
+                from idea.models import Idea
+                result['idea'] = Idea(title=result.get('title'), content=result.get('content', ''))
+            return result
+
+        engine.history = [[deserialize_idea(idea) for idea in gen] for gen in history]
+        engine.population = engine.history[-1] if engine.history else []
+
+        # Generate a new checkpoint ID for this continuation
+        from datetime import datetime
+        engine.checkpoint_id = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+
+        print(f"Loaded evolution from file: {evolution_id}, generations: {len(history)}")
+        return engine
+
+    except Exception as e:
+        print(f"Error loading evolution from file: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+async def run_resume_evolution_task(state: UserEvolutionState):
+    """Run resumed evolution in background with progress updates"""
+    engine = state.engine
+
+    async def progress_callback(update_data):
+        # Convert Idea objects to dictionaries for JSON serialization
+        if 'history' in update_data and isinstance(update_data['history'], list):
+            update_data['history'] = [
+                [idea_to_dict(idea) for idea in generation]
+                for generation in update_data['history']
+            ]
+            if update_data['history']:
+                state.latest_data = update_data['history']
+
+        # Add token counts if evolution is complete
+        if update_data.get('is_running') is False and 'error' not in update_data:
+            if hasattr(engine, 'get_total_token_count'):
+                update_data['token_counts'] = engine.get_total_token_count()
+
+        state.status.update(update_data)
+
+        # Clear queue and add update
+        state.reset_queue()
+        await state.queue.put(state.status.copy())
+
+    # Run the resumed evolution
+    await engine.resume_evolution_with_updates(progress_callback)
+
+async def run_continue_evolution_task(state: UserEvolutionState, additional_generations: int):
+    """Run continued evolution in background with progress updates"""
+    engine = state.engine
+
+    async def progress_callback(update_data):
+        # Convert Idea objects to dictionaries for JSON serialization
+        if 'history' in update_data and isinstance(update_data['history'], list):
+            update_data['history'] = [
+                [idea_to_dict(idea) for idea in generation]
+                for generation in update_data['history']
+            ]
+            if update_data['history']:
+                state.latest_data = update_data['history']
+
+        # Add token counts if evolution is complete
+        if update_data.get('is_running') is False and 'error' not in update_data:
+            if hasattr(engine, 'get_total_token_count'):
+                update_data['token_counts'] = engine.get_total_token_count()
+
+        state.status.update(update_data)
+
+        # Clear queue and add update
+        state.reset_queue()
+        await state.queue.put(state.status.copy())
+
+    # Run the evolution with additional generations
+    await engine.resume_evolution_with_updates(progress_callback, additional_generations=additional_generations)
+
+async def run_evolution_task(state: UserEvolutionState):
     """Run evolution in background with progress updates"""
-    global evolution_status, evolution_queue, latest_evolution_data
+    engine = state.engine
 
     # Define the progress callback function
     async def progress_callback(update_data):
-        global evolution_status, evolution_queue, latest_evolution_data
+        # Add evolution identity to every update
+        update_data['evolution_id'] = engine.evolution_id
+        update_data['evolution_name'] = engine.evolution_name
 
         # Convert Idea objects to dictionaries for JSON serialization
         if 'history' in update_data and isinstance(update_data['history'], list):
@@ -385,7 +937,7 @@ async def run_evolution_task(engine):
 
             # Store the latest evolution data for rating
             if update_data['history']:
-                latest_evolution_data = update_data['history']
+                state.latest_data = update_data['history']
 
         # If evolution is complete, add token counts
         if update_data.get('is_running') is False and 'error' not in update_data:
@@ -394,24 +946,27 @@ async def run_evolution_task(engine):
                 update_data['token_counts'] = engine.get_total_token_count()
                 print(f"Evolution complete. Total tokens: {update_data['token_counts']['total']}")
 
-        # Update the evolution status
-        evolution_status = update_data
+        # Update the evolution status by merging the new data
+        state.status.update(update_data)
 
         # Clear the queue before adding new update to avoid backlog
-        while not evolution_queue.empty():
-            try:
-                evolution_queue.get_nowait()
-            except:
-                break
+        state.reset_queue()
 
         # Add the update to the queue
-        await evolution_queue.put(update_data)
+        # We put the full status (copy) into the queue to ensure
+        # the frontend gets the complete state, not just the partial update.
+        await state.queue.put(state.status.copy())
 
         # Log progress
         gen = update_data.get('current_generation', 0)
         progress = update_data.get('progress', 0)
+        status = update_data.get('status_message', '')
         gen_label = "0 (Initial)" if gen == 0 else gen
-        print(f"Progress update: Generation {gen_label}, Progress: {progress:.2f}%")
+
+        log_msg = f"Progress update: Generation {gen_label}, Progress: {progress:.2f}%"
+        if status:
+            log_msg += f" - {status}"
+        print(log_msg)
 
     # Run the evolution with progress updates
     await engine.run_evolution_with_updates(progress_callback)
@@ -549,25 +1104,25 @@ def idea_to_dict(idea) -> dict:
     return idea if isinstance(idea, dict) else {}
 
 @app.get("/api/generations")
-def api_get_generations():
+async def api_get_generations(user: UserInfo = Depends(require_auth)):
     """
     Returns a JSON array of arrays: each generation is an array of ideas.
     Each idea is {title, content}.
     """
-    global latest_evolution_data
+    state = await user_states.get(user.uid)
 
     # If engine is None, use the latest evolution data
-    if engine is None:
-        if latest_evolution_data:
-            print(f"Returning latest evolution data with {len(latest_evolution_data)} generations")
-            return JSONResponse(latest_evolution_data)
+    if state.engine is None:
+        if state.latest_data:
+            print(f"Returning latest evolution data with {len(state.latest_data)} generations")
+            return JSONResponse(state.latest_data)
         else:
             print("No evolution data available")
             return JSONResponse([])  # Return empty array if no data is available
 
     # If engine is available, use its history
     result = []
-    for generation in engine.history:
+    for generation in state.engine.history:
         gen_list = []
         for prop in generation:
             # Use idea_to_dict to properly serialize the idea with all metadata
@@ -575,16 +1130,19 @@ def api_get_generations():
         result.append(gen_list)
 
     # Store the result as the latest evolution data
-    latest_evolution_data = result
+    state.latest_data = result
 
     return JSONResponse(result)
 
 @app.get("/api/generations/{gen_id}")
-def api_get_generation(gen_id: int):
+async def api_get_generation(gen_id: int, user: UserInfo = Depends(require_auth)):
     """
     Returns ideas for a specific generation.
     """
-    ideas = engine.get_ideas_by_generation(gen_id)
+    state = await user_states.get(user.uid)
+    if state.engine is None:
+        return JSONResponse({"error": "No evolution running."}, status_code=404)
+    ideas = state.engine.get_ideas_by_generation(gen_id)
     if not ideas:
         return JSONResponse({"error": "Invalid generation index."}, status_code=404)
     # Use idea_to_dict to properly serialize ideas with all metadata
@@ -602,19 +1160,19 @@ def test_static():
     return {"files": files, "js_exists": os.path.exists("idea/static/js/viewer.js")}
 
 @app.get("/api/progress")
-async def get_progress():
+async def get_progress(user: UserInfo = Depends(require_auth)):
     """Returns the current progress of the evolution"""
-    global evolution_status
+    state = await user_states.get(user.uid)
 
     # If there's a new update in the queue, get it
     try:
         # Get the latest update from the queue without waiting
-        if not evolution_queue.empty():
-            evolution_status = await evolution_queue.get()
+        if not state.queue.empty():
+            state.status = await state.queue.get()
     except Exception as e:
         print(f"Error getting queue updates: {e}")
 
-    return JSONResponse(convert_uuids_to_strings(evolution_status))
+    return JSONResponse(convert_uuids_to_strings(state.status))
 
 @app.post("/api/save-evolution")
 async def save_evolution(request: Request):
@@ -658,41 +1216,206 @@ async def save_evolution(request: Request):
         }, status_code=500)
 
 @app.get('/api/evolutions')
-async def get_evolutions(request: Request):
-    """Get list of evolutions from file system"""
-    evolutions_list = []
-
+async def get_evolutions(user: UserInfo = Depends(require_auth)):
+    """Get list of evolutions for the current user from Firestore"""
     try:
-        for file_path in DATA_DIR.glob('*.json'):
-            file_stat = file_path.stat()
+        evolutions = await db.list_evolutions(user.uid)
+        evolutions_list = []
+        for ev in evolutions:
             evolutions_list.append({
-                'id': file_path.stem,  # Use filename without extension as ID
-                'timestamp': datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
-                'filename': file_path.name
+                'id': ev.get('id'),
+                'timestamp': ev.get('updated_at') or ev.get('created_at', ''),
+                'filename': ev.get('name', 'Unnamed Evolution')
             })
-
-        # Sort by timestamp descending
-        evolutions_list.sort(key=lambda x: x['timestamp'], reverse=True)
         return JSONResponse(evolutions_list)
     except Exception as e:
-        print(f"Error reading evolution files: {e}")
+        print(f"Error listing evolutions: {e}")
         return JSONResponse([])
 
-@app.get('/api/evolution/{evolution_id}')
-async def get_evolution(request: Request, evolution_id: str):
-    """Get evolution data from file"""
+@app.get('/api/history')
+async def get_unified_history(user: UserInfo = Depends(require_auth)):
+    """
+    Get unified history of all evolutions for the current user.
+    Loads from Firestore.
+    """
+    history_items = []
+
     try:
-        file_path = DATA_DIR / f"{evolution_id}.json"
-        if file_path.exists():
-            with open(file_path) as f:
-                data = json.load(f)
-                return JSONResponse({
+        # 1. Load evolutions from Firestore (user-scoped)
+        evolutions = await EvolutionEngine.list_evolutions_for_user(user.uid)
+        for ev in evolutions:
+            history_items.append({
+                'id': ev.get('id'),
+                'type': 'evolution',
+                'status': ev.get('status', 'unknown'),
+                'timestamp': ev.get('updated_at') or ev.get('created_at', ''),
+                'created_at': ev.get('created_at'),
+                'display_name': ev.get('name', 'Unnamed Evolution'),
+                'generations': ev.get('generation', 0),
+                'total_generations': ev.get('total_generations', 0),
+                'pop_size': ev.get('pop_size', 0),
+                'idea_type': ev.get('idea_type', 'Unknown'),
+                'model_type': ev.get('model_type', 'Unknown'),
+                'total_ideas': ev.get('total_ideas', 0),
+                'can_resume': ev.get('status') in ['paused', 'in_progress', 'force_stopped'],
+                'can_continue': ev.get('status') == 'complete',
+                'can_rate': ev.get('generation', 0) > 0,
+                'can_rename': True,
+                'can_delete': True,
+            })
+
+        # 2. Load legacy checkpoints from Firestore (for backwards compatibility)
+        checkpoints = await EvolutionEngine.list_checkpoints_for_user(user.uid)
+        existing_ids = {item['id'] for item in history_items}
+        for cp in checkpoints:
+            checkpoint_id = cp.get('id', '')
+            # Skip if already in unified storage
+            if checkpoint_id in existing_ids:
+                continue
+
+            history_items.append({
+                'id': checkpoint_id,
+                'type': 'legacy_checkpoint',
+                'status': cp.get('status', 'unknown'),
+                'timestamp': cp.get('time', ''),
+                'display_name': f"Checkpoint {checkpoint_id[:16]}..." if len(checkpoint_id) > 16 else checkpoint_id,
+                'generations': cp.get('generation', 0),
+                'total_generations': cp.get('total_generations', 0),
+                'pop_size': cp.get('pop_size', 0),
+                'idea_type': cp.get('idea_type', 'Unknown'),
+                'model_type': cp.get('model_type', 'Unknown'),
+                'can_resume': cp.get('status') in ['paused', 'in_progress', 'force_stopped'],
+                'can_continue': cp.get('status') == 'complete',
+                'can_rate': cp.get('generation', 0) > 0,
+                'can_rename': False,  # Legacy format can't be renamed
+                'can_delete': True,
+            })
+
+        # 3. Load legacy saved evolutions from data/*.json (for backwards compatibility)
+        for file_path in DATA_DIR.glob('*.json'):
+            try:
+                evolution_id = file_path.stem
+                # Skip if already in unified storage or checkpoints
+                if evolution_id in existing_ids or any(item['id'] == evolution_id for item in history_items):
+                    continue
+
+                file_stat = file_path.stat()
+                with open(file_path) as f:
+                    data = json.load(f)
+
+                history = data.get('history', [])
+                config = data.get('config', {})
+                num_generations = len(history)
+                pop_size = len(history[0]) if history else 0
+
+                history_items.append({
                     'id': evolution_id,
-                    'timestamp': datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(),
-                    'data': data
+                    'type': 'legacy_saved',
+                    'status': 'complete',
+                    'timestamp': datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
+                    'display_name': evolution_id.replace('_', ' ').replace('-', ' '),
+                    'generations': num_generations,
+                    'total_generations': num_generations,
+                    'pop_size': pop_size,
+                    'idea_type': config.get('idea_type') or data.get('idea_type', 'Unknown'),
+                    'model_type': config.get('model_type', 'Unknown'),
+                    'total_ideas': sum(len(gen) for gen in history),
+                    'can_continue': True,
+                    'can_rate': True,
+                    'can_rename': False,  # Legacy format
+                    'can_delete': True,
                 })
+            except Exception as e:
+                print(f"Error reading legacy file {file_path}: {e}")
+                continue
+
+        # Sort by timestamp descending (most recent first)
+        history_items.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+
+        return JSONResponse({
+            'status': 'success',
+            'items': history_items,
+            'total_count': len(history_items)
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"Error getting unified history: {e}")
+        traceback.print_exc()
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e),
+            'items': []
+        }, status_code=500)
+
+@app.post('/api/evolution/{evolution_id}/rename')
+async def rename_evolution_endpoint(request: Request, evolution_id: str, user: UserInfo = Depends(require_auth)):
+    """Rename an evolution"""
+    try:
+        data = await request.json()
+        new_name = data.get('name', '').strip()
+
+        if not new_name:
+            return JSONResponse({
+                'status': 'error',
+                'message': 'Name cannot be empty'
+            }, status_code=400)
+
+        # Rename in Firestore
+        if await EvolutionEngine.rename_evolution_for_user(user.uid, evolution_id, new_name):
+            return JSONResponse({
+                'status': 'success',
+                'message': f'Evolution renamed to "{new_name}"',
+                'name': new_name
+            })
+
+        return JSONResponse({
+            'status': 'error',
+            'message': 'Evolution not found or cannot be renamed'
+        }, status_code=404)
+
+    except Exception as e:
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status_code=500)
+
+@app.delete('/api/evolution/{evolution_id}')
+async def delete_evolution_endpoint(evolution_id: str, user: UserInfo = Depends(require_auth)):
+    """Delete an evolution"""
+    try:
+        # Delete from Firestore
+        if await EvolutionEngine.delete_evolution_for_user(user.uid, evolution_id):
+            return JSONResponse({'status': 'success', 'message': 'Evolution deleted'})
+
+        return JSONResponse({
+            'status': 'error',
+            'message': 'Evolution not found'
+        }, status_code=404)
+
+    except Exception as e:
+        return JSONResponse({
+            'status': 'error',
+            'message': str(e)
+        }, status_code=500)
+
+@app.get('/api/evolution/{evolution_id}')
+async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth)):
+    """Get evolution data from Firestore"""
+    try:
+        # Load from Firestore
+        data = await db.get_evolution(user.uid, evolution_id)
+        if data:
+            return JSONResponse({
+                'id': evolution_id,
+                'name': data.get('name', evolution_id),
+                'timestamp': data.get('updated_at') or data.get('created_at'),
+                'data': data
+            })
 
         raise HTTPException(status_code=404, detail="Evolution not found")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1589,27 +2312,10 @@ async def debug_idea_state(evolution_id: str, idea_id: str):
 
 # Run the server
 @app.delete("/api/settings/api-key")
-async def delete_api_key():
-    """Delete the API key from .env and environment variables"""
+async def delete_api_key(user: UserInfo = Depends(require_auth)):
+    """Delete the API key for the user"""
     try:
-        # Remove from environment
-        if "GEMINI_API_KEY" in os.environ:
-            del os.environ["GEMINI_API_KEY"]
-
-        # Remove from .env file
-        env_path = Path(".env")
-        if env_path.exists():
-            # Read all lines
-            with open(env_path, "r") as f:
-                lines = f.readlines()
-
-            # Filter out the key
-            new_lines = [line for line in lines if not line.strip().startswith("GEMINI_API_KEY=")]
-
-            # Write back
-            with open(env_path, "w") as f:
-                f.writelines(new_lines)
-
+        await db.delete_user_api_key(user.uid)
         return JSONResponse({"status": "success", "message": "API Key deleted successfully"})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)

@@ -22,18 +22,17 @@
 
   <!-- Custom CSS -->
   <link rel="stylesheet" href="/static/css/viewer.css" />
+
+  <!-- Firebase SDK (for cloud deployment) -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
 </head>
 
 <body>
-  {% if api_key_missing %}
-  <div class="alert alert-warning text-center mb-0" role="alert" id="apiKeyAlert">
-    <span>GEMINI_API_KEY environment variable is not set. The app will not work without it.</span>
+  <div class="alert alert-warning text-center mb-0" role="alert" id="apiKeyAlert" style="display: none;">
+    <span>API Key not configured. The app requires a Google Gemini API Key to function.</span>
     <button class="btn btn-sm btn-outline-dark ms-3" id="setupApiKeyBtn">Setup API Key</button>
   </div>
-  <script>window.apiKeyMissing = true;</script>
-  {% else %}
-  <script>window.apiKeyMissing = false;</script>
-  {% endif %}
   <div class="container-fluid">
     <div class="layout-container">
       <!-- Fixed side panel for controls -->
@@ -61,19 +60,39 @@
               </div>
             </div>
 
-            <!-- Evolution Configuration -->
+            <!-- History Section -->
             <div class="controls-section">
               <div class="d-flex justify-content-between align-items-center mb-2">
-                <h6 class="text-uppercase text-muted mb-0" style="font-size: 0.75rem; letter-spacing: 0.05em;">History
+                <h6 class="text-uppercase text-muted mb-0" style="font-size: 0.75rem; letter-spacing: 0.05em;">
+                  <i class="fas fa-history me-1"></i>History
                 </h6>
-                <button class="btn btn-sm btn-link p-0 text-decoration-none" id="newEvolutionBtn"
-                  style="display: none;">
-                  <i class="fas fa-plus me-1"></i>New
+                <button class="btn btn-sm btn-link p-0 text-decoration-none" onclick="showSidebarView('history')">
+                  <i class="fas fa-list me-1"></i>View All
                 </button>
               </div>
-              <select id="evolutionSelect" class="form-select form-select-sm mb-3">
-                <option value="">Select a previous evolution...</option>
-              </select>
+              <!-- Current/Selected evolution display -->
+              <div id="selectedEvolutionCard" class="selected-evolution-card mb-3" style="display: none;">
+                <div class="d-flex justify-content-between align-items-start">
+                  <div class="flex-grow-1">
+                    <div class="d-flex align-items-center mb-1">
+                      <span class="badge me-2" id="selectedEvolutionStatus">Complete</span>
+                      <small class="text-muted" id="selectedEvolutionDate"></small>
+                    </div>
+                    <div class="fw-medium text-truncate" id="selectedEvolutionName" style="max-width: 180px;"></div>
+                    <small class="text-muted" id="selectedEvolutionMeta"></small>
+                  </div>
+                  <button class="btn btn-sm btn-link text-danger p-0" onclick="clearSelectedEvolution()"
+                    title="Clear selection">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+                <!-- Action buttons based on status -->
+                <div class="mt-2 d-flex gap-2" id="selectedEvolutionActions">
+                  <!-- Will be populated dynamically -->
+                </div>
+              </div>
+              <input type="hidden" id="evolutionSelect" value="">
+              <input type="hidden" id="selectedCheckpointId" value="">
 
               <h6 class="text-uppercase text-muted mb-3 mt-4" style="font-size: 0.75rem; letter-spacing: 0.05em;">
                 Configuration</h6>
@@ -97,7 +116,8 @@
                   <option value="gemini-2.5-flash-lite" selected>Gemini 2.5 Flash Lite</option>
                   <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                   <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                  <option value="gemini-3-pro-preview">Gemini 3 Pro Preview (SOTA)</option>
+                  <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
+                  <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                 </select>
               </div>
 
@@ -118,6 +138,24 @@
                   placeholder="Optional">
               </div>
 
+              <!-- Support Section -->
+              <h6 class="text-uppercase text-muted mb-3 mt-4" style="font-size: 0.75rem; letter-spacing: 0.05em;">
+                Support</h6>
+              <div class="list-group list-group-flush mb-3">
+                <a href="https://github.com/rbrthogan/idea/issues/new" target="_blank"
+                  class="list-group-item list-group-item-action d-flex align-items-center py-2 px-0 border-0 bg-transparent">
+                  <i class="fab fa-github me-2 text-muted" style="width: 20px; text-align: center;"></i>
+                  <span>Report a Bug</span>
+                  <i class="fas fa-external-link-alt ms-auto text-muted small"></i>
+                </a>
+                <button
+                  class="list-group-item list-group-item-action d-flex align-items-center py-2 px-0 border-0 bg-transparent"
+                  data-bs-toggle="modal" data-bs-target="#contactModal">
+                  <i class="fas fa-envelope me-2 text-muted" style="width: 20px; text-align: center;"></i>
+                  <span>Contact Us</span>
+                </button>
+              </div>
+
               <!-- Navigation Links -->
               <div class="list-group list-group-flush mt-4 border-top border-bottom">
                 <button
@@ -136,15 +174,22 @@
             </div>
 
             <!-- Action Buttons Footer -->
-            <div class="mt-auto p-3 border-top bg-light">
+            <div class="mt-auto p-3 border-top bg-light" id="actionButtonsFooter">
+              <!-- Evolution name input (shown before starting) -->
+              <div class="mb-2" id="evolutionNameSection">
+                <label class="form-label small text-muted mb-1">Evolution Name</label>
+                <input type="text" class="form-control form-control-sm" id="evolutionNameInput"
+                  placeholder="e.g., Sci-Fi Drabbles Round 2">
+                <small class="text-muted">Leave blank for auto-generated name</small>
+              </div>
               <button class="btn btn-primary w-100 mb-2" id="startButton" {% if api_key_missing %}disabled{% endif %}>
                 Start Evolution
               </button>
               <button class="btn btn-danger w-100 mb-2" id="stopButton" disabled style="display: none;">
                 Stop Evolution
               </button>
-              <button class="btn btn-secondary w-100" id="downloadButton" disabled>
-                Save Results
+              <button class="btn btn-warning w-100 mb-2" id="forceStopButton" style="display: none;">
+                <i class="fas fa-bolt me-1"></i>Force Stop
               </button>
             </div>
           </div>
@@ -247,11 +292,25 @@
               <div class="mb-3">
                 <label for="tournamentComparisons" class="form-label d-flex justify-content-between">
                   <span>Tournament Comparisons</span>
-                  <span id="tournamentComparisonsValue">35</span>
+                  <span id="tournamentComparisonsValue">20</span>
                 </label>
                 <input type="range" class="form-range" min="5" max="100" step="5" id="tournamentComparisons" value="35"
                   oninput="document.getElementById('tournamentComparisonsValue').textContent = this.value">
                 <small class="text-muted">Number of comparisons to run in each tournament</small>
+              </div>
+
+              <h6 class="mb-3 mt-4">Breeding Controls</h6>
+
+              <!-- Mutation Rate -->
+              <div class="mb-3">
+                <label for="mutationRate" class="form-label d-flex justify-content-between">
+                  <span>Mutation Rate</span>
+                  <span id="mutationRateValue">0.20</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1" step="0.05" id="mutationRate" value="0.2"
+                  oninput="document.getElementById('mutationRateValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Probability of injecting fresh concepts during breeding (0 = no
+                  mutation)</small>
               </div>
             </div>
           </div>
@@ -277,7 +336,32 @@
                 <!-- Templates will be injected here -->
               </div>
             </div>
-          </div> <!-- SETTINGS VIEW -->
+          </div>
+
+          <!-- History View -->
+          <div class="sidebar-view" id="view-history">
+            <div class="p-3 border-bottom d-flex align-items-center justify-content-between">
+              <div class="d-flex align-items-center">
+                <button class="btn btn-link text-dark p-0 me-2" onclick="showSidebarView('main')">
+                  <i class="fas fa-arrow-left"></i>
+                </button>
+                <h5 class="mb-0">History</h5>
+              </div>
+              <button class="btn btn-sm btn-outline-secondary" onclick="refreshHistoryList()" title="Refresh">
+                <i class="fas fa-sync-alt"></i>
+              </button>
+            </div>
+            <div class="p-3">
+              <!-- History list -->
+              <div id="historyList" class="history-list">
+                <div class="text-center text-muted py-4">
+                  <i class="fas fa-spinner fa-spin"></i> Loading...
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SETTINGS VIEW -->
           <div class="sidebar-view" id="view-settings">
             <div class="sidebar-header p-3 border-bottom d-flex align-items-center">
               <button class="btn btn-sm btn-link text-decoration-none p-0 me-2" onclick="showSidebarView('main')">
@@ -293,8 +377,12 @@
                 <!-- State A: No Key -->
                 <div id="apiKeyInputContainer">
                   <input type="password" class="form-control mb-2" id="apiKeyInput" placeholder="Enter API Key">
-                  <div class="form-text small mb-3">
-                    Stored locally in <code>.env</code>.
+                  <div class="form-text small mb-2">
+                    <i class="fas fa-lock me-1 text-success"></i>
+                    <strong>Securely encrypted</strong> at rest using AES-256 encryption.
+                  </div>
+                  <div class="form-text small mb-3 text-muted">
+                    Your API key is used to call Gemini models for idea generation.
                   </div>
                   <button class="btn btn-primary w-100" id="saveSettingsBtn">
                     <i class="fas fa-save me-2"></i>Save Key
@@ -330,9 +418,15 @@
 
       <!-- Main content area -->
       <div class="main-content" id="mainContent">
-        <div class="app-header main-header">
-          <img src="/static/img/logo.png" alt="App Logo" class="app-logo">
-          <h1>Open-Ended Idea Evolution</h1>
+        <div class="app-header main-header d-flex justify-content-between align-items-center">
+          <div class="d-flex align-items-center">
+            <img src="/static/img/logo.png" alt="App Logo" class="app-logo">
+            <h1>Open-Ended Idea Evolution</h1>
+          </div>
+          <!-- Auth container for sign-in button / user info -->
+          <div id="authContainer" class="d-flex align-items-center">
+            <!-- Will be populated by auth.js -->
+          </div>
         </div>
 
         <!-- Template Generation Entry Point -->
@@ -389,6 +483,7 @@
             <!-- Generation Status -->
             <div id="generationStatus" class="mt-3" style="display: none;">
               <div class="alert" id="statusAlert">
+                <i class="fas fa-spinner fa-spin me-2" id="statusSpinner" style="display: none;"></i>
                 <span id="statusText"></span>
               </div>
             </div>
@@ -527,6 +622,60 @@
   </div>
   </div>
 
+  <!-- Contact Modal -->
+  <div class="modal fade" id="contactModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Contact Us</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted mb-3">Interested in collaborating on this project? Have some ideas you want to try?
+            Please
+            reach out!</p>
+          <form id="contactForm">
+            <div class="mb-3">
+              <label for="contactName" class="form-label">Name</label>
+              <input type="text" class="form-control" id="contactName" required>
+            </div>
+            <div class="mb-3">
+              <label for="contactEmail" class="form-label">Email</label>
+              <input type="email" class="form-control" id="contactEmail" required>
+            </div>
+            <div class="mb-3">
+              <label for="contactMessage" class="form-label">Message</label>
+              <textarea class="form-control" id="contactMessage" rows="4" required></textarea>
+            </div>
+          </form>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="sendContactBtn">Send Message</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Key Confirmation Modal -->
+  <div class="modal fade" id="deleteKeyModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Delete API Key</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p>Are you sure you want to delete the API key? You will need to enter it again to use the app.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger" id="confirmDeleteKeyBtn">Delete Key</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Save Modal -->
   <div class="modal fade" id="saveDataModal" tabindex="-1">
     <div class="modal-dialog">
@@ -573,6 +722,41 @@
       </div>
     </div>
   </div>
+  </div>
+
+  <!-- Welcome Modal -->
+  <div class="modal fade" id="welcomeModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header border-0 pb-0">
+          <h5 class="modal-title">Welcome!</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body pt-2">
+          <p>This personal side project was created for two reasons:</p>
+          <ol>
+            <li>An exploration of open endedness with LLMs</li>
+            <li>A low stakes test bed for coding agents</li>
+          </ol>
+
+          <div class="alert alert-warning py-2 mb-3">
+            <small><i class="fas fa-bug me-2"></i>It is likely full of bugs. There's a link in the sidebar to
+              report issues.</small>
+          </div>
+
+          <h5 class="fw-bold mb-2 mt-2">Research</h5>
+          <p class="mb-2">The engine itself is far from optimised, I have a lot of interesting research questions I
+            want to answer with it, but little time.</p>
+          <p class="mb-0">If you are interested in helping, reach out via contact form in sidebar</p>
+
+          <p class="text-end mt-3 mb-0">- Rob</p>
+        </div>
+        <div class="modal-footer border-0 pt-0">
+          <button type="button" class="btn btn-primary px-4" data-bs-dismiss="modal">Got it!</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Bootstrap JS -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -586,6 +770,7 @@
       const sidebarToggle = document.getElementById('sidebarToggle');
       const controlsPanel = document.getElementById('controlsPanel');
       const mainContent = document.getElementById('mainContent');
+      const evolutionContent = document.querySelector('.evolution-content');
 
       function isMobile() {
         return window.innerWidth <= 576;
@@ -596,6 +781,9 @@
       if (!isMobile() && savedCollapsed) {
         controlsPanel.classList.add('collapsed');
         mainContent.classList.add('sidebar-collapsed');
+        if (evolutionContent) {
+          evolutionContent.classList.add('sidebar-collapsed');
+        }
       }
 
       function updateIcon() {
@@ -613,6 +801,9 @@
         } else {
           controlsPanel.classList.toggle('collapsed');
           mainContent.classList.toggle('sidebar-collapsed');
+          if (evolutionContent) {
+            evolutionContent.classList.toggle('sidebar-collapsed');
+          }
           localStorage.setItem('sidebarCollapsed', controlsPanel.classList.contains('collapsed'));
         }
         updateIcon();
@@ -715,7 +906,10 @@
       document.getElementById('templateEntry').style.display = 'none';
 
       // Hide settings
-      document.getElementById('settingsSection').style.display = 'none';
+      const settingsSection = document.getElementById('settingsSection');
+      if (settingsSection) {
+        settingsSection.style.display = 'none';
+      }
 
       // Show new evolution button
       document.getElementById('newEvolutionBtn').style.display = 'inline-block';
@@ -996,7 +1190,7 @@
         // Show loading state
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
-        showStatus('Generating template with Gemini 2.5 Pro...', 'info');
+        showStatus('Generating template with Gemini 3.0 Pro...', 'info');
         hideTemplatePreview();
 
         // Generate template
@@ -1682,7 +1876,9 @@ Output: condensed list of basic elements, separated by semicolons"></textarea>
   </div>
 
   <!-- Include original viewer.js for evolution functionality -->
-  <script src="/static/js/viewer.js"></script>
+  <script src="/static/js/auth.js"></script>
+  <script src="/static/js/auth_logic.js?v=3"></script>
+  <script src="/static/js/viewer.js?v=3"></script>
 </body>
 
 </html>

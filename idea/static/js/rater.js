@@ -18,6 +18,25 @@ let currentSortColumn = null;
 let currentSortDirection = 'asc';
 let originalIdeasOrder = [];
 
+// Wait for Firebase auth to be ready before loading data
+function waitForAuth(callback, timeout = 5000) {
+    const startTime = Date.now();
+
+    function checkAuth() {
+        if (window.currentUser) {
+            console.log("Auth ready, loading data...");
+            callback();
+        } else if (Date.now() - startTime > timeout) {
+            console.warn("Auth timeout, attempting to load anyway...");
+            callback();
+        } else {
+            setTimeout(checkAuth, 100);
+        }
+    }
+
+    checkAuth();
+}
+
 // Fetch a random pair on load
 window.addEventListener("load", () => {
     // Show loading state
@@ -31,11 +50,14 @@ window.addEventListener("load", () => {
         btn.disabled = true;
     });
 
-    // Load data
-    loadEvolutions();
-    loadCurrentEvolution();
-    loadModels();
     toggleRatingMode('manual'); // Start in manual mode
+
+    // Wait for auth before fetching data
+    waitForAuth(() => {
+        loadEvolutions();
+        loadCurrentEvolution();
+        loadModels();
+    });
 
     // Set up retry mechanism for refreshPair
     setTimeout(() => {
@@ -43,9 +65,39 @@ window.addEventListener("load", () => {
             console.log("No ideas loaded yet, retrying refreshPair...");
             refreshPair();
         }
-    }, 3000);
+    }, 5000);
 });
 
+// Helper to extract title and content from possibly nested idea structures
+// Handles: idea.title/content, idea.idea.title/content, or JSON-encoded content
+function getIdeaData(idea) {
+    let title = idea.title;
+    let content = idea.content;
+
+    // Check if data is nested under an 'idea' property
+    if (idea.idea && typeof idea.idea === 'object') {
+        title = idea.idea.title || title;
+        content = idea.idea.content || content;
+    }
+
+    // Handle case where content might be JSON-encoded
+    if (typeof content === 'string' && content.startsWith('{') && content.includes('"title"')) {
+        try {
+            const parsed = JSON.parse(content);
+            title = parsed.title || title;
+            content = parsed.content || content;
+        } catch (e) {
+            // Not valid JSON, use as-is
+        }
+    }
+
+    return {
+        title: title || 'Untitled',
+        content: content || '',
+        // Preserve other properties
+        ...idea
+    };
+}
 async function initializeRating(ideas, shouldRefreshPair = true) {
     // Reset state
     ideasDb = {};
@@ -249,12 +301,16 @@ async function refreshPair() {
 
             currentPair = [ideaA, ideaB];
 
-            // Display the ideas without showing ratings
-            document.getElementById('titleA').textContent = ideaA.title || 'Untitled';
-            document.getElementById('titleB').textContent = ideaB.title || 'Untitled';
+            // Extract nested idea data
+            const ideaDataA = getIdeaData(ideaA);
+            const ideaDataB = getIdeaData(ideaB);
 
-            document.getElementById('contentA').innerHTML = renderMarkdown(ideaA.content || '');
-            document.getElementById('contentB').innerHTML = renderMarkdown(ideaB.content || '');
+            // Display the ideas without showing ratings
+            document.getElementById('titleA').textContent = ideaDataA.title;
+            document.getElementById('titleB').textContent = ideaDataB.title;
+
+            document.getElementById('contentA').innerHTML = renderMarkdown(ideaDataA.content);
+            document.getElementById('contentB').innerHTML = renderMarkdown(ideaDataB.content);
 
             console.log(`Efficient pair selected: ${ideaA.id} vs ${ideaB.id}`);
 
@@ -265,12 +321,16 @@ async function refreshPair() {
             const [ideaA, ideaB] = getRandomPair(ideas);
             currentPair = [ideaA, ideaB];
 
-            // Display the ideas without showing ratings
-            document.getElementById('titleA').textContent = ideaA.title || 'Untitled';
-            document.getElementById('titleB').textContent = ideaB.title || 'Untitled';
+            // Extract nested idea data
+            const ideaDataA = getIdeaData(ideaA);
+            const ideaDataB = getIdeaData(ideaB);
 
-            document.getElementById('contentA').innerHTML = renderMarkdown(ideaA.content || '');
-            document.getElementById('contentB').innerHTML = renderMarkdown(ideaB.content || '');
+            // Display the ideas without showing ratings
+            document.getElementById('titleA').textContent = ideaDataA.title;
+            document.getElementById('titleB').textContent = ideaDataB.title;
+
+            document.getElementById('contentA').innerHTML = renderMarkdown(ideaDataA.content);
+            document.getElementById('contentB').innerHTML = renderMarkdown(ideaDataB.content);
         }
 
         // Show the comparison view
