@@ -5,9 +5,31 @@ Supports both YAML templates and legacy Python modules
 
 from importlib import import_module
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 from .validation import validate_template_file
 from .yaml_template import YAMLTemplateWrapper
+
+# Cache for custom templates loaded from Firestore
+# Keys are template_id strings, values are template data dicts
+_custom_template_cache: Dict[str, Any] = {}
+
+
+def register_custom_template(template_id: str, template_data: dict) -> None:
+    """
+    Register a custom template in the cache so get_prompts() can find it.
+
+    Args:
+        template_id: The template ID (used as idea_type)
+        template_data: The template dictionary from Firestore
+    """
+    _custom_template_cache[template_id] = template_data
+    print(f"Registered custom template: {template_id}")
+
+
+def clear_custom_template(template_id: str) -> None:
+    """Remove a custom template from the cache."""
+    if template_id in _custom_template_cache:
+        del _custom_template_cache[template_id]
 
 
 def get_prompts(idea_type: str, use_yaml: bool = True):
@@ -22,7 +44,16 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
         module or YAMLTemplateWrapper: Module/wrapper containing the prompts for the specified idea type
     """
 
-    # First try YAML templates if requested
+    # First check the custom template cache (for Firestore templates)
+    if idea_type in _custom_template_cache:
+        try:
+            template_data = _custom_template_cache[idea_type]
+            return get_prompts_from_dict(template_data)
+        except Exception as e:
+            print(f"Failed to load cached custom template for {idea_type}: {e}")
+            # Continue to try other sources
+
+    # Then try YAML templates if requested
     if use_yaml:
         yaml_path = _get_yaml_template_path(idea_type)
         if yaml_path and yaml_path.exists():
@@ -44,6 +75,30 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
         return import_module(f"idea.prompts.{idea_type}")
     except ImportError:
         raise ValueError(f"No prompts found for idea type: {idea_type}")
+
+
+def get_prompts_from_dict(template_data: dict):
+    """
+    Load prompts from a template dictionary (e.g. from Firestore).
+
+    Args:
+        template_data (dict): Template data dictionary containing prompts, metadata, etc.
+
+    Returns:
+        YAMLTemplateWrapper: Wrapper containing the prompts for the template
+    """
+    from .validation import TemplateValidator
+
+    try:
+        # Validate and create PromptTemplate object
+        template = TemplateValidator.validate_dict(template_data)
+
+        # Create wrapper and load Oracle prompts
+        wrapper = YAMLTemplateWrapper(template)
+        _load_oracle_prompts(wrapper)
+        return wrapper
+    except Exception as e:
+        raise ValueError(f"Failed to load template from dict: {e}")
 
 
 def _get_yaml_template_path(idea_type: str) -> Optional[Path]:

@@ -336,6 +336,24 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
               f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
               f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
 
+        # Check if the selected template is a user custom template in Firestore
+        # If so, load it and register it in the cache so get_prompts() can find it
+        from idea.prompts.loader import register_custom_template, list_available_templates
+
+        # Check if this is a system template (exists on disk)
+        system_templates = list_available_templates()
+        if idea_type not in system_templates:
+            # Not a system template - try to load from Firestore
+            user_template = await db.get_user_template(user.uid, idea_type)
+            if user_template:
+                print(f"Loading custom template '{idea_type}' from Firestore")
+                register_custom_template(idea_type, user_template)
+            else:
+                return JSONResponse(
+                    {"status": "error", "message": f"Template '{idea_type}' not found"},
+                    status_code=400,
+                )
+
         # Create and run evolution with specified parameters
         state.engine = EvolutionEngine(
             pop_size=pop_size,

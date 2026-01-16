@@ -50,9 +50,11 @@ class EvolutionEngine:
         mutation_rate: float = 0.2,
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,  # Required for Firestore storage
+        template_data: Optional[Dict[str, Any]] = None,  # Custom template data from Firestore
     ):
         self.user_id = user_id  # User ID for scoped storage
         self.idea_type = idea_type or get_default_template_id()
+        self.template_data = template_data  # Store custom template data for LLM agents
         self.pop_size = pop_size
         self.generations = generations
         self.tournament_size = tournament_size
