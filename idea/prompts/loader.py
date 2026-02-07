@@ -5,9 +5,43 @@ Supports both YAML templates and legacy Python modules
 
 from importlib import import_module
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
+from threading import RLock
 from .validation import validate_template_file
 from .yaml_template import YAMLTemplateWrapper
+
+# Cache for custom templates loaded from Firestore
+# Keys are template_id strings, values are template data dicts
+_custom_template_cache: Dict[str, Any] = {}
+_custom_template_wrapper_cache: Dict[str, Any] = {}
+_yaml_wrapper_cache: Dict[str, tuple[float, Any]] = {}
+_prompt_cache: Dict[tuple[str, bool], Any] = {}
+_cache_lock = RLock()
+
+
+def register_custom_template(template_id: str, template_data: dict) -> None:
+    """
+    Register a custom template in the cache so get_prompts() can find it.
+
+    Args:
+        template_id: The template ID (used as idea_type)
+        template_data: The template dictionary from Firestore
+    """
+    with _cache_lock:
+        _custom_template_cache[template_id] = template_data
+        _custom_template_wrapper_cache.pop(template_id, None)
+        _prompt_cache.pop((template_id, True), None)
+        _prompt_cache.pop((template_id, False), None)
+    print(f"Registered custom template: {template_id}")
+
+
+def clear_custom_template(template_id: str) -> None:
+    """Remove a custom template from the cache."""
+    with _cache_lock:
+        _custom_template_cache.pop(template_id, None)
+        _custom_template_wrapper_cache.pop(template_id, None)
+        _prompt_cache.pop((template_id, True), None)
+        _prompt_cache.pop((template_id, False), None)
 
 
 def get_prompts(idea_type: str, use_yaml: bool = True):
@@ -22,11 +56,46 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
         module or YAMLTemplateWrapper: Module/wrapper containing the prompts for the specified idea type
     """
 
-    # First try YAML templates if requested
+    cache_key = (idea_type, bool(use_yaml))
+    with _cache_lock:
+        cached = _prompt_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    # First check the custom template cache (for Firestore templates)
+    with _cache_lock:
+        template_data = _custom_template_cache.get(idea_type)
+
+    if template_data is not None:
+        try:
+            with _cache_lock:
+                custom_wrapper = _custom_template_wrapper_cache.get(idea_type)
+
+            if custom_wrapper is None:
+                custom_wrapper = get_prompts_from_dict(template_data)
+                with _cache_lock:
+                    _custom_template_wrapper_cache[idea_type] = custom_wrapper
+
+            with _cache_lock:
+                _prompt_cache[cache_key] = custom_wrapper
+            return custom_wrapper
+        except Exception as e:
+            print(f"Failed to load cached custom template for {idea_type}: {e}")
+            # Continue to try other sources
+
+    # Then try YAML templates if requested
     if use_yaml:
         yaml_path = _get_yaml_template_path(idea_type)
         if yaml_path and yaml_path.exists():
             try:
+                yaml_mtime = yaml_path.stat().st_mtime
+                with _cache_lock:
+                    yaml_cached = _yaml_wrapper_cache.get(idea_type)
+                    if yaml_cached and yaml_cached[0] == yaml_mtime:
+                        wrapper = yaml_cached[1]
+                        _prompt_cache[cache_key] = wrapper
+                        return wrapper
+
                 template, warnings = validate_template_file(str(yaml_path))
                 if warnings:
                     print(f"Template warnings for {idea_type}: {warnings}")
@@ -34,6 +103,9 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
                 # Load and merge Oracle prompts from core oracle template
                 wrapper = YAMLTemplateWrapper(template)
                 _load_oracle_prompts(wrapper)
+                with _cache_lock:
+                    _yaml_wrapper_cache[idea_type] = (yaml_mtime, wrapper)
+                    _prompt_cache[cache_key] = wrapper
                 return wrapper
             except Exception as e:
                 print(f"Failed to load YAML template for {idea_type}: {e}")
@@ -41,9 +113,36 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
 
     # Fallback to Python modules (existing behavior)
     try:
-        return import_module(f"idea.prompts.{idea_type}")
+        module = import_module(f"idea.prompts.{idea_type}")
+        with _cache_lock:
+            _prompt_cache[cache_key] = module
+        return module
     except ImportError:
         raise ValueError(f"No prompts found for idea type: {idea_type}")
+
+
+def get_prompts_from_dict(template_data: dict):
+    """
+    Load prompts from a template dictionary (e.g. from Firestore).
+
+    Args:
+        template_data (dict): Template data dictionary containing prompts, metadata, etc.
+
+    Returns:
+        YAMLTemplateWrapper: Wrapper containing the prompts for the template
+    """
+    from .validation import TemplateValidator
+
+    try:
+        # Validate and create PromptTemplate object
+        template = TemplateValidator.validate_dict(template_data)
+
+        # Create wrapper and load Oracle prompts
+        wrapper = YAMLTemplateWrapper(template)
+        _load_oracle_prompts(wrapper)
+        return wrapper
+    except Exception as e:
+        raise ValueError(f"Failed to load template from dict: {e}")
 
 
 def _get_yaml_template_path(idea_type: str) -> Optional[Path]:

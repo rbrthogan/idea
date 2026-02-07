@@ -7,13 +7,28 @@ import sys
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
+from contextlib import contextmanager
 from fastapi.testclient import TestClient
 
 # Add the project root to the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from idea.viewer import app
+from idea.viewer import app, require_auth
+from idea.auth import UserInfo
+
+
+@contextmanager
+def authenticated_user():
+    """Temporarily override auth for endpoints that require a logged-in user."""
+    async def mock_require_auth():
+        return UserInfo(uid="test-user", email="test@example.com", is_admin=False)
+
+    app.dependency_overrides[require_auth] = mock_require_auth
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(require_auth, None)
 
 
 class TestRatePageAPI:
@@ -92,16 +107,19 @@ class TestRatePageAPI:
 
     def test_api_evolutions_returns_list(self):
         """Test that /api/evolutions returns a list structure"""
-        response = self.client.get("/api/evolutions")
-        assert response.status_code == 200
-        data = response.json()
-        assert isinstance(data, list)
+        with authenticated_user(), patch("idea.viewer.db.list_evolutions", new_callable=AsyncMock) as mock_list:
+            mock_list.return_value = []
+            response = self.client.get("/api/evolutions")
+            assert response.status_code == 200
+            data = response.json()
+            assert isinstance(data, list)
 
     def test_api_evolution_not_found(self):
         """Test that requesting non-existent evolution returns error"""
-        response = self.client.get("/api/evolution/nonexistent")
-        # The API currently returns 500 for missing files, not 404
-        assert response.status_code == 500
+        with authenticated_user(), patch("idea.viewer.db.get_evolution", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = None
+            response = self.client.get("/api/evolution/nonexistent")
+            assert response.status_code == 404
 
     def test_submit_rating_missing_evolution(self):
         """Test that submitting rating for non-existent evolution returns error"""
@@ -177,20 +195,32 @@ class TestEvolutionDataFlow:
             file_path = self.temp_path / "test_evolution.json"
             assert file_path.exists()
 
-            # Test loading evolutions list
-            response = self.client.get("/api/evolutions")
-            assert response.status_code == 200
-            evolutions = response.json()
-            assert len(evolutions) >= 1
-            assert any(e["id"] == "test_evolution" for e in evolutions)
+            with authenticated_user(), \
+                patch("idea.viewer.db.list_evolutions", new_callable=AsyncMock) as mock_list, \
+                patch("idea.viewer.db.get_evolution", new_callable=AsyncMock) as mock_get:
+                mock_list.return_value = [
+                    {
+                        "id": "test_evolution",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "name": "test_evolution",
+                    }
+                ]
+                mock_get.return_value = evolution_data
 
-            # Test loading specific evolution
-            response = self.client.get("/api/evolution/test_evolution")
-            assert response.status_code == 200
-            loaded_data = response.json()
-            assert "data" in loaded_data
-            assert "history" in loaded_data["data"]
-            assert len(loaded_data["data"]["history"]) == 2
+                # Test loading evolutions list
+                response = self.client.get("/api/evolutions")
+                assert response.status_code == 200
+                evolutions = response.json()
+                assert len(evolutions) >= 1
+                assert any(e["id"] == "test_evolution" for e in evolutions)
+
+                # Test loading specific evolution
+                response = self.client.get("/api/evolution/test_evolution")
+                assert response.status_code == 200
+                loaded_data = response.json()
+                assert "data" in loaded_data
+                assert "history" in loaded_data["data"]
+                assert len(loaded_data["data"]["history"]) == 2
 
     def test_evolution_data_structure_validation(self):
         """Test that evolution data has the expected structure for the rate page"""
@@ -216,24 +246,27 @@ class TestEvolutionDataFlow:
             response = self.client.post("/api/save-evolution", json=save_data)
             assert response.status_code == 200
 
-            # Load and verify structure
-            response = self.client.get("/api/evolution/test_evolution_structure")
-            assert response.status_code == 200
-            loaded_data = response.json()
+            with authenticated_user(), patch("idea.viewer.db.get_evolution", new_callable=AsyncMock) as mock_get:
+                mock_get.return_value = evolution_data
 
-            # Verify essential fields for rate page
-            assert "id" in loaded_data
-            assert "timestamp" in loaded_data
-            assert "data" in loaded_data
-            assert "history" in loaded_data["data"]
+                # Load and verify structure
+                response = self.client.get("/api/evolution/test_evolution_structure")
+                assert response.status_code == 200
+                loaded_data = response.json()
 
-            # Verify ideas structure
-            ideas = loaded_data["data"]["history"][0]
-            assert len(ideas) == 1
-            idea = ideas[0]
-            assert "id" in idea
-            assert "title" in idea
-            assert "content" in idea
+                # Verify essential fields for rate page
+                assert "id" in loaded_data
+                assert "timestamp" in loaded_data
+                assert "data" in loaded_data
+                assert "history" in loaded_data["data"]
+
+                # Verify ideas structure
+                ideas = loaded_data["data"]["history"][0]
+                assert len(ideas) == 1
+                idea = ideas[0]
+                assert "id" in idea
+                assert "title" in idea
+                assert "content" in idea
 
 
 class TestRatePageEdgeCases:
@@ -260,11 +293,13 @@ class TestRatePageEdgeCases:
                 response = self.client.post("/api/save-evolution", json=save_data)
                 assert response.status_code == 200
 
-                # Load empty evolution
-                response = self.client.get("/api/evolution/empty_evolution")
-                assert response.status_code == 200
-                loaded_data = response.json()
-                assert loaded_data["data"]["history"] == []
+                with authenticated_user(), patch("idea.viewer.db.get_evolution", new_callable=AsyncMock) as mock_get:
+                    mock_get.return_value = evolution_data
+                    # Load empty evolution
+                    response = self.client.get("/api/evolution/empty_evolution")
+                    assert response.status_code == 200
+                    loaded_data = response.json()
+                    assert loaded_data["data"]["history"] == []
         finally:
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -286,11 +321,13 @@ class TestRatePageEdgeCases:
                 response = self.client.post("/api/save-evolution", json=save_data)
                 assert response.status_code == 200
 
-                # Load malformed evolution - should not crash
-                response = self.client.get("/api/evolution/malformed_evolution")
-                assert response.status_code == 200
-                loaded_data = response.json()
-                assert "data" in loaded_data
+                with authenticated_user(), patch("idea.viewer.db.get_evolution", new_callable=AsyncMock) as mock_get:
+                    mock_get.return_value = evolution_data
+                    # Load malformed evolution - should not crash
+                    response = self.client.get("/api/evolution/malformed_evolution")
+                    assert response.status_code == 200
+                    loaded_data = response.json()
+                    assert "data" in loaded_data
         finally:
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)

@@ -114,10 +114,22 @@ if (firebase.auth) {
 
             // Render Header UI
             renderUserUI(user);
+
+            // Refresh template lists now that we have auth
+            if (typeof loadExistingTemplates === 'function') {
+                loadExistingTemplates();
+            }
+            if (typeof loadTemplateTypes === 'function') {
+                loadTemplateTypes({ preserveSelection: true, suppressDefaultSelection: false });
+            } else {
+                window.__refreshTemplatesOnViewerReady = true;
+            }
+            window.dispatchEvent(new CustomEvent('idea-auth-ready'));
         } else {
             console.log("User signed out");
             currentUser = null;
             idToken = null;
+            window.__refreshTemplatesOnViewerReady = false;
 
             // Show overlay
             loginOverlay.style.display = 'flex';

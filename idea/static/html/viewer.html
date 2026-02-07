@@ -101,7 +101,7 @@
               <div class="mb-3">
                 <label class="form-label">Selected Template</label>
                 <div class="template-selector d-flex align-items-center justify-content-between" id="templateStatusCard"
-                  onclick="showSidebarView('templates')">
+                  onclick="openTemplateLibrary({ scroll: true, focusSearch: true });">
                   <span class="text-truncate fw-medium" id="ideaTypeDisplay">No template selected</span>
                   <i class="fas fa-chevron-right text-muted small ms-2"></i>
                 </div>
@@ -275,28 +275,17 @@
                   think</small>
               </div>
 
-              <h6 class="mb-3 mt-4">Tournament Controls</h6>
+              <h6 class="mb-3 mt-4">Swiss Tournament Controls</h6>
 
-              <!-- Tournament Size -->
+              <!-- Tournament Count -->
               <div class="mb-3">
-                <label for="tournamentSize" class="form-label d-flex justify-content-between">
-                  <span>Tournament Size</span>
-                  <span id="tournamentSizeValue">5</span>
+                <label for="tournamentCount" class="form-label d-flex justify-content-between">
+                  <span>Tournament Count</span>
+                  <span id="tournamentCountValue">1.00</span>
                 </label>
-                <input type="range" class="form-range" min="2" max="10" step="1" id="tournamentSize" value="5"
-                  oninput="document.getElementById('tournamentSizeValue').textContent = this.value">
-                <small class="text-muted">Number of ideas in each tournament group</small>
-              </div>
-
-              <!-- Tournament Comparisons -->
-              <div class="mb-3">
-                <label for="tournamentComparisons" class="form-label d-flex justify-content-between">
-                  <span>Tournament Comparisons</span>
-                  <span id="tournamentComparisonsValue">20</span>
-                </label>
-                <input type="range" class="form-range" min="5" max="100" step="5" id="tournamentComparisons" value="35"
-                  oninput="document.getElementById('tournamentComparisonsValue').textContent = this.value">
-                <small class="text-muted">Number of comparisons to run in each tournament</small>
+                <input type="range" class="form-range" min="0.25" max="3" step="0.25" id="tournamentCount" value="1"
+                  oninput="document.getElementById('tournamentCountValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">1.00 = full Swiss tournament (pop size − 1 rounds). Fractions run proportional rounds.</small>
               </div>
 
               <h6 class="mb-3 mt-4">Breeding Controls</h6>
@@ -322,18 +311,21 @@
                 <button class="btn btn-link text-dark p-0 me-2" onclick="showSidebarView('main')">
                   <i class="fas fa-arrow-left"></i>
                 </button>
-                <h5 class="mb-0">Templates</h5>
+                <h5 class="mb-0">Template Setup</h5>
               </div>
-              <button class="btn btn-sm btn-primary"
-                onclick="showSidebarView('main'); document.getElementById('ideaTypeInput').focus();">
-                <i class="fas fa-plus"></i> New
-              </button>
             </div>
             <div class="p-3">
-              <input type="text" class="form-control mb-3" id="templateSearch" placeholder="Search templates..."
-                oninput="filterTemplates(this.value)">
-              <div id="templatesList" class="d-flex flex-column gap-2">
-                <!-- Templates will be injected here -->
+              <div class="alert alert-info mb-3">
+                <i class="fas fa-info-circle me-2"></i>
+                Template selection and creation now live in the main workspace to keep onboarding simple.
+              </div>
+              <div class="d-grid gap-2">
+                <button class="btn btn-primary" onclick="openTemplateLibrary({ scroll: true, focusSearch: true });">
+                  <i class="fas fa-folder-open me-2"></i>Open Template Library
+                </button>
+                <button class="btn btn-outline-secondary" onclick="openTemplateGenerator({ scroll: true });">
+                  <i class="fas fa-magic me-2"></i>Create with AI
+                </button>
               </div>
             </div>
           </div>
@@ -433,11 +425,27 @@
         <div id="templateEntry" class="template-entry-section">
           <div class="entry-card">
             <h3>
-              <i class="fas fa-magic me-2"></i>
-              What kind of ideas do you want to generate?
+              <i class="fas fa-compass me-2"></i>
+              Choose your template
             </h3>
+            <p class="text-muted mb-4">Pick one path to start. You can switch anytime.</p>
 
-            <div class="entry-form">
+            <div class="template-flow-toggle mb-4" role="tablist" aria-label="Template setup mode">
+              <button type="button" class="btn btn-outline-primary active" id="modeUseExistingBtn"
+                onclick="setTemplateFlowMode('browse', { focusSearch: true })" aria-pressed="true">
+                <i class="fas fa-folder-open me-2"></i>Use Existing
+              </button>
+              <button type="button" class="btn btn-outline-primary" id="modeGenerateBtn"
+                onclick="setTemplateFlowMode('generate', { focusInput: true })" aria-pressed="false">
+                <i class="fas fa-magic me-2"></i>Create with AI
+              </button>
+            </div>
+
+            <div class="entry-form" id="generateTemplatePanel" style="display: none;">
+              <h5 class="text-start mb-3">
+                <i class="fas fa-magic me-2"></i>
+                Describe what you want to generate
+              </h5>
               <textarea class="form-control entry-input" id="ideaTypeInput"
                 placeholder="Describe the ideas you want to generate and evolve, specifying any important constraints and/or evaluation criteria"
                 rows="3"></textarea>
@@ -449,9 +457,9 @@
 
                 <div class="text-center mt-3">
                   <small class="text-muted">
-                    <a href="#" onclick="showSidebarView('templates'); return false;"
+                    <a href="#" onclick="openTemplateLibrary({ focusSearch: true }); return false;"
                       class="text-decoration-none text-secondary">
-                      <i class="fas fa-folder-open me-1"></i> Select from existing templates
+                      <i class="fas fa-folder-open me-1"></i> Switch to existing templates
                     </a>
                   </small>
                 </div>
@@ -529,12 +537,20 @@
             <div class="d-flex justify-content-between align-items-center mb-3">
               <h5 class="mb-0">
                 <i class="fas fa-folder-open me-2"></i>
-                Or choose from existing templates:
+                Template Library
               </h5>
-              <button class="btn btn-outline-primary btn-sm" id="createTemplateBtn">
-                <i class="fas fa-plus me-1"></i>Create New
-              </button>
+              <div class="d-flex gap-2">
+                <button class="btn btn-outline-secondary btn-sm" onclick="openTemplateGenerator({ focusInput: true })">
+                  <i class="fas fa-magic me-1"></i>Create with AI
+                </button>
+                <button class="btn btn-outline-primary btn-sm" id="createTemplateBtn">
+                  <i class="fas fa-plus me-1"></i>Create Manually
+                </button>
+              </div>
             </div>
+            <p class="text-muted text-start mb-3">
+              Select one template, then configure settings in the sidebar and click <strong>Start Evolution</strong>.
+            </p>
 
             <!-- Search and filter controls -->
             <div class="row mb-3">
@@ -823,21 +839,98 @@
     let currentGeneratedTemplate = null;
     let currentGeneratedTemplateId = null;  // Track if the generated template has been saved
     let currentMode = 'new'; // 'new' or 'evolution'
+    let currentTemplateFlowMode = 'browse'; // 'browse' or 'generate'
+
+    function setDisplayById(id, displayValue) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.style.display = displayValue;
+      }
+    }
+
+    function setTemplateFlowMode(mode, options = {}) {
+      const { focusSearch = false, focusInput = false, scroll = false } = options;
+      currentTemplateFlowMode = mode === 'generate' ? 'generate' : 'browse';
+
+      const browseBtn = document.getElementById('modeUseExistingBtn');
+      const generateBtn = document.getElementById('modeGenerateBtn');
+      const generatePanel = document.getElementById('generateTemplatePanel');
+      const existingTemplates = document.getElementById('existingTemplates');
+      const generationStatus = document.getElementById('generationStatus');
+      const templatePreview = document.getElementById('templatePreview');
+
+      const isBrowse = currentTemplateFlowMode === 'browse';
+      if (browseBtn) {
+        browseBtn.classList.toggle('active', isBrowse);
+        browseBtn.setAttribute('aria-pressed', isBrowse ? 'true' : 'false');
+      }
+      if (generateBtn) {
+        generateBtn.classList.toggle('active', !isBrowse);
+        generateBtn.setAttribute('aria-pressed', !isBrowse ? 'true' : 'false');
+      }
+      if (generatePanel) {
+        generatePanel.style.display = isBrowse ? 'none' : 'block';
+      }
+      if (existingTemplates) {
+        existingTemplates.style.display = isBrowse ? 'block' : 'none';
+      }
+      if (isBrowse) {
+        if (generationStatus) generationStatus.style.display = 'none';
+        if (templatePreview) templatePreview.style.display = 'none';
+      } else if (currentGeneratedTemplate) {
+        showTemplatePreview(currentGeneratedTemplate);
+      }
+
+      if (scroll) {
+        const target = isBrowse ? existingTemplates : document.getElementById('templateEntry');
+        target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+
+      if (focusSearch && isBrowse) {
+        setTimeout(() => document.getElementById('templateSearchInput')?.focus(), 50);
+      }
+      if (focusInput && !isBrowse) {
+        setTimeout(() => document.getElementById('ideaTypeInput')?.focus(), 50);
+      }
+    }
+
+    function openTemplateLibrary(options = {}) {
+      if (typeof showSidebarView === 'function') {
+        showSidebarView('main');
+      }
+      setTemplateFlowMode('browse', options);
+    }
+
+    function openTemplateGenerator(options = {}) {
+      if (typeof showSidebarView === 'function') {
+        showSidebarView('main');
+      }
+      setTemplateFlowMode('generate', options);
+    }
+
+    function onTemplateSelectionChanged() {
+      renderFilteredTemplates();
+    }
+
+    window.setTemplateFlowMode = setTemplateFlowMode;
+    window.openTemplateLibrary = openTemplateLibrary;
+    window.openTemplateGenerator = openTemplateGenerator;
+    window.onTemplateSelectionChanged = onTemplateSelectionChanged;
 
     document.addEventListener('DOMContentLoaded', function () {
       initializeInterface();
 
       // Template generation event listeners
-      document.getElementById('generateTemplateBtn').addEventListener('click', handleTemplateGeneration);
-      document.getElementById('saveTemplateBtn').addEventListener('click', saveAndUseTemplate);
-      document.getElementById('reviewEditBtn').addEventListener('click', reviewAndEditTemplate);
+      document.getElementById('generateTemplateBtn')?.addEventListener('click', handleTemplateGeneration);
+      document.getElementById('saveTemplateBtn')?.addEventListener('click', saveAndUseTemplate);
+      document.getElementById('reviewEditBtn')?.addEventListener('click', reviewAndEditTemplate);
 
       // State management event listeners
-      document.getElementById('newEvolutionBtn').addEventListener('click', showNewEvolutionMode);
-      document.getElementById('evolutionSelect').addEventListener('change', handleEvolutionSelection);
+      document.getElementById('newEvolutionBtn')?.addEventListener('click', showNewEvolutionMode);
+      document.getElementById('evolutionSelect')?.addEventListener('change', handleEvolutionSelection);
 
       // Settings event listeners
-      document.getElementById('navEvolutionBtn').addEventListener('click', () => {
+      document.getElementById('navEvolutionBtn')?.addEventListener('click', () => {
         // If we have a selected evolution, go there, otherwise new
         const select = document.getElementById('evolutionSelect');
         if (select.value) {
@@ -846,8 +939,8 @@
           showNewEvolutionMode();
         }
       });
-      document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
-      document.getElementById('toggleApiKeyVisibility').addEventListener('click', toggleApiKeyVisibility);
+      document.getElementById('saveSettingsBtn')?.addEventListener('click', saveSettings);
+      document.getElementById('toggleApiKeyVisibility')?.addEventListener('click', toggleApiKeyVisibility);
 
       const setupBtn = document.getElementById('setupApiKeyBtn');
       if (setupBtn) {
@@ -855,7 +948,7 @@
       }
 
       // Enter key support
-      document.getElementById('ideaTypeInput').addEventListener('keydown', function (e) {
+      document.getElementById('ideaTypeInput')?.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
           handleTemplateGeneration();
         }
@@ -871,39 +964,45 @@
       currentMode = 'new';
 
       // Show template entry section
-      document.getElementById('templateEntry').style.display = 'block';
+      setDisplayById('templateEntry', 'block');
 
       // Hide settings
-      document.getElementById('settingsSection').style.display = 'none';
+      setDisplayById('settingsSection', 'none');
 
       // Hide new evolution button
-      document.getElementById('newEvolutionBtn').style.display = 'none';
+      setDisplayById('newEvolutionBtn', 'none');
 
       // Clear evolution selector
-      document.getElementById('evolutionSelect').value = '';
+      const evolutionSelect = document.getElementById('evolutionSelect');
+      if (evolutionSelect) {
+        evolutionSelect.value = '';
+      }
 
       // Clear evolution content
-      document.getElementById('generations-container').innerHTML = '';
-      document.getElementById('diversity-plot-section').style.display = 'none';
+      const generationsContainer = document.getElementById('generations-container');
+      if (generationsContainer) {
+        generationsContainer.innerHTML = '';
+      }
+      setDisplayById('diversity-plot-section', 'none');
 
       // Load and show existing templates
       await loadExistingTemplates();
 
-      // Clear any selected template in sidebar
-      const display = document.getElementById('ideaTypeDisplay');
-      display.textContent = 'No template selected';
-      display.style.color = '#6c757d';
-      display.style.fontStyle = 'italic';
-      display.classList.remove('bg-success', 'text-white');
-      display.classList.add('bg-light');
-      document.getElementById('ideaType').value = '';
+      // If nothing is selected, let the shared sidebar catalog choose last-used/default.
+      if (!document.getElementById('ideaType').value && typeof window.refreshTemplateCatalog === 'function') {
+        await window.refreshTemplateCatalog({ preserveSelection: true, suppressDefaultSelection: false });
+      }
+
+      // Keep one clear starting path: choose from library first.
+      setTemplateFlowMode('browse');
     }
 
     async function showEvolutionMode(evolutionId = null) {
       currentMode = 'evolution';
 
       // Hide template entry section
-      document.getElementById('templateEntry').style.display = 'none';
+      setDisplayById('templateEntry', 'none');
+      setDisplayById('existingTemplates', 'none');
 
       // Hide settings
       const settingsSection = document.getElementById('settingsSection');
@@ -912,7 +1011,7 @@
       }
 
       // Show new evolution button
-      document.getElementById('newEvolutionBtn').style.display = 'inline-block';
+      setDisplayById('newEvolutionBtn', 'inline-block');
 
       // If viewing a specific evolution, load it
       if (evolutionId) {
@@ -931,12 +1030,16 @@
       currentMode = 'settings';
 
       // Hide other sections
-      document.getElementById('templateEntry').style.display = 'none';
-      document.getElementById('generations-container').innerHTML = '';
-      document.getElementById('diversity-plot-section').style.display = 'none';
+      setDisplayById('templateEntry', 'none');
+      setDisplayById('existingTemplates', 'none');
+      const generationsContainer = document.getElementById('generations-container');
+      if (generationsContainer) {
+        generationsContainer.innerHTML = '';
+      }
+      setDisplayById('diversity-plot-section', 'none');
 
       // Show settings
-      document.getElementById('settingsSection').style.display = 'block';
+      setDisplayById('settingsSection', 'block');
 
       // Check status
       checkSettingsStatus();
@@ -1002,7 +1105,10 @@
 
     function toggleApiKeyVisibility() {
       const input = document.getElementById('apiKeyInput');
-      const icon = document.getElementById('toggleApiKeyVisibility').querySelector('i');
+      const btn = document.getElementById('toggleApiKeyVisibility');
+      if (!input || !btn) return;
+      const icon = btn.querySelector('i');
+      if (!icon) return;
 
       if (input.type === 'password') {
         input.type = 'text';
@@ -1039,7 +1145,10 @@
 
         if (data.status === 'success') {
           displayExistingTemplates(data.templates);
-          document.getElementById('existingTemplates').style.display = 'block';
+          setTemplateFlowMode(currentTemplateFlowMode);
+          if (typeof window.refreshTemplateCatalog === 'function') {
+            await window.refreshTemplateCatalog({ preserveSelection: true, suppressDefaultSelection: false });
+          }
         }
       } catch (error) {
         console.error('Error loading templates:', error);
@@ -1049,6 +1158,15 @@
     let allMainPageTemplates = {};
     let currentMainPageFilter = 'all';
     let currentMainPageSearch = '';
+
+    function escapeHtmlMainPage(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
 
     function displayExistingTemplates(templates) {
       allMainPageTemplates = templates;
@@ -1064,24 +1182,32 @@
       Object.entries(filteredTemplates).forEach(([id, template]) => {
         if (!template.error) {
           const isCore = isCoreTemplate(id, template);
+          const templateName = template.name || id;
+          const escapedTemplateName = escapeHtmlMainPage(templateName);
+          const safeTemplateNameForJs = templateName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+          const description = template.description || '';
+          const truncatedDescription = description.substring(0, 100);
+          const isSelected = document.getElementById('ideaType')?.value === id;
           const row = document.createElement('tr');
+          row.className = isSelected ? 'template-row-selected' : '';
           row.innerHTML = `
             <td>
               <div class="d-flex align-items-center">
-                <strong>${template.name || id}</strong>
+                <strong>${escapedTemplateName}</strong>
                 ${isCore ? '<span class="badge bg-success ms-2">Core</span>' : '<span class="badge bg-primary ms-2">Custom</span>'}
+                ${isSelected ? '<span class="badge bg-dark ms-2">Selected</span>' : ''}
               </div>
             </td>
             <td>
-              <span class="text-muted">${(template.description || '').substring(0, 100)}${(template.description || '').length > 100 ? '...' : ''}</span>
+              <span class="text-muted">${escapeHtmlMainPage(truncatedDescription)}${description.length > 100 ? '...' : ''}</span>
             </td>
             <td>
               <div class="btn-group" role="group" aria-label="Template actions">
-                <button class="btn btn-sm btn-primary" onclick="selectExistingTemplate('${id}', '${template.name || id}')">
-                  <i class="fas fa-arrow-right me-1"></i>Use
+                <button class="btn btn-sm btn-primary" onclick="selectExistingTemplate('${id}', '${safeTemplateNameForJs}')">
+                  <i class="fas fa-arrow-right me-1"></i>${isSelected ? 'Using' : 'Use'}
                 </button>
                 <button class="btn btn-sm btn-outline-secondary" onclick="editTemplateMainPage('${id}')">
-                  <i class="fas fa-edit me-1"></i>Edit
+                  <i class="fas fa-edit me-1"></i>${isCore ? 'Customize' : 'Edit'}
                 </button>
               </div>
             </td>
@@ -1136,40 +1262,44 @@
     }
 
     function isCoreTemplate(templateId, templateInfo) {
+      if (templateInfo && typeof templateInfo.is_system === 'boolean') {
+        return templateInfo.is_system;
+      }
       // Core templates are the original ones: airesearch, drabble, game_design
       const coreTemplates = ['airesearch', 'drabble', 'game_design'];
       return coreTemplates.includes(templateId) || templateInfo.author === 'Original Idea App';
     }
 
     function searchTemplatesMainPage() {
-      currentMainPageSearch = document.getElementById('templateSearchInput').value;
+      const searchInput = document.getElementById('templateSearchInput');
+      currentMainPageSearch = searchInput ? searchInput.value : '';
       renderFilteredTemplates();
     }
 
     function filterTemplatesMainPage() {
-      currentMainPageFilter = document.getElementById('templateFilterSelect').value;
+      const filterSelect = document.getElementById('templateFilterSelect');
+      currentMainPageFilter = filterSelect ? filterSelect.value : 'all';
       renderFilteredTemplates();
     }
 
     function selectExistingTemplate(templateId, templateName) {
-      // Set the hidden field value
-      document.getElementById('ideaType').value = templateId;
-
-      // Update the display
-      const display = document.getElementById('ideaTypeDisplay');
-      display.textContent = templateName;
-      display.style.color = '#212529';
-      display.style.fontStyle = 'normal';
-      display.classList.remove('bg-light');
-      display.classList.add('bg-success', 'text-white');
+      if (typeof selectTemplate === 'function' && selectTemplate(templateId, false)) {
+        // selected via shared sidebar logic
+      } else {
+        document.getElementById('ideaType').value = templateId;
+        const display = document.getElementById('ideaTypeDisplay');
+        display.textContent = templateName;
+      }
 
       // Scroll to configuration panel on mobile
       if (window.innerWidth <= 768) {
         document.getElementById('controlsPanel').scrollIntoView({ behavior: 'smooth' });
       }
+      onTemplateSelectionChanged();
     }
 
     function setEntryText(text) {
+      setTemplateFlowMode('generate');
       document.getElementById('ideaTypeInput').value = text;
       document.getElementById('ideaTypeInput').focus();
     }
@@ -1256,6 +1386,7 @@
 
       // If template was already saved, just select it
       if (currentGeneratedTemplateId) {
+        setTemplateFlowMode('browse');
         selectNewTemplate(currentGeneratedTemplateId, currentGeneratedTemplate.name);
         return;
       }
@@ -1298,6 +1429,7 @@
 
           // Auto-select the new template
           setTimeout(() => {
+            setTemplateFlowMode('browse');
             selectNewTemplate(data.template_id, currentGeneratedTemplate.name);
           }, 500);
         } else {
@@ -1317,11 +1449,13 @@
       // If template was already saved, set up as editing existing template
       if (currentGeneratedTemplateId) {
         currentEditingTemplateId = currentGeneratedTemplateId;
+        currentEditingTemplateIsSystem = false;
         document.getElementById('templateEditModalTitle').innerHTML = '<i class="fas fa-edit me-2"></i>Edit Template';
         document.getElementById('deleteTemplateMainPageBtn').style.display = 'inline-block';
       } else {
         // Set up as new template
         currentEditingTemplateId = null;
+        currentEditingTemplateIsSystem = false;
         document.getElementById('templateEditModalTitle').innerHTML = '<i class="fas fa-magic me-2"></i>Review Generated Template';
         document.getElementById('deleteTemplateMainPageBtn').style.display = 'none';
       }
@@ -1335,16 +1469,14 @@
     }
 
     function selectNewTemplate(templateId, templateName) {
-      // Set the hidden field value
-      document.getElementById('ideaType').value = templateId;
-
-      // Update the display
-      const display = document.getElementById('ideaTypeDisplay');
-      display.textContent = templateName;
-      display.style.color = '#212529';
-      display.style.fontStyle = 'normal';
-      display.classList.remove('bg-light');
-      display.classList.add('bg-success', 'text-white');
+      if (typeof selectTemplate === 'function' && selectTemplate(templateId, false)) {
+        // selected via shared sidebar logic
+      } else {
+        document.getElementById('ideaType').value = templateId;
+        const display = document.getElementById('ideaTypeDisplay');
+        display.textContent = templateName;
+        onTemplateSelectionChanged();
+      }
 
       // Clear the interface
       document.getElementById('ideaTypeInput').value = '';
@@ -1354,6 +1486,7 @@
 
       // Reload the existing templates to include the new one
       loadExistingTemplates();
+      setTemplateFlowMode('browse');
     }
 
     function showStatus(message, type) {
@@ -1412,16 +1545,40 @@
     }
     // Template editing functions for main page
     let currentEditingTemplateId = null;
+    let currentEditingTemplateIsSystem = false;
 
     async function editTemplateMainPage(templateId) {
       currentEditingTemplateId = templateId;
+      currentEditingTemplateIsSystem = false;
 
       try {
         const response = await fetch(`/api/templates/${templateId}`);
         const data = await response.json();
 
         if (data.status === 'success') {
-          populateTemplateEditForm(data.template);
+          const template = data.template || {};
+          const isSystem = !!template.is_system;
+
+          if (isSystem) {
+            // System templates are read-only in backend. Open as "customize copy".
+            currentEditingTemplateId = null;
+            currentEditingTemplateIsSystem = true;
+            const copyTemplate = {
+              ...template,
+              name: `${template.name || templateId} Copy`
+            };
+            populateTemplateEditForm(copyTemplate);
+            document.getElementById('templateEditModalTitle').innerHTML = '<i class="fas fa-copy me-2"></i>Customize System Template';
+            document.getElementById('deleteTemplateMainPageBtn').style.display = 'none';
+            showSimpleAlert('System templates are read-only. Saving will create a custom copy.', 'info');
+          } else {
+            currentEditingTemplateId = templateId;
+            currentEditingTemplateIsSystem = false;
+            populateTemplateEditForm(template);
+            document.getElementById('templateEditModalTitle').innerHTML = '<i class="fas fa-edit me-2"></i>Edit Template';
+            document.getElementById('deleteTemplateMainPageBtn').style.display = 'inline-block';
+          }
+
           const modal = new bootstrap.Modal(document.getElementById('templateEditModal'));
           modal.show();
         } else {
@@ -1434,6 +1591,7 @@
 
     async function createTemplateMainPage() {
       currentEditingTemplateId = null;
+      currentEditingTemplateIsSystem = false;
       clearTemplateEditForm();
       document.getElementById('templateEditModalTitle').innerHTML = '<i class="fas fa-plus me-2"></i>Create New Template';
       const modal = new bootstrap.Modal(document.getElementById('templateEditModal'));
@@ -1441,7 +1599,6 @@
     }
 
     function populateTemplateEditForm(template) {
-      document.getElementById('templateEditModalTitle').innerHTML = '<i class="fas fa-edit me-2"></i>Edit Template';
       document.getElementById('editTemplateName').value = template.name || '';
       document.getElementById('editTemplateDescription').value = template.description || '';
       document.getElementById('editTemplateAuthor').value = template.author || 'User';
@@ -1458,9 +1615,6 @@
       document.getElementById('editBreedPrompt').value = template.prompts?.breed || '';
       document.getElementById('editGenotypePrompt').value = template.prompts?.genotype_encode || '';
 
-      // Show delete button for existing templates
-      document.getElementById('deleteTemplateMainPageBtn').style.display = 'inline-block';
-
       // Populate comparison criteria
       const criteriaContainer = document.getElementById('editCriteriaContainer');
       criteriaContainer.innerHTML = '';
@@ -1474,6 +1628,7 @@
     }
 
     function clearTemplateEditForm() {
+      currentEditingTemplateIsSystem = false;
       document.getElementById('editTemplateName').value = '';
       document.getElementById('editTemplateDescription').value = '';
       document.getElementById('editTemplateAuthor').value = 'User';
@@ -1588,6 +1743,7 @@
       };
 
       try {
+        const wasUpdate = !!currentEditingTemplateId;
         const url = currentEditingTemplateId
           ? `/api/templates/${currentEditingTemplateId}`
           : '/api/templates/';
@@ -1604,6 +1760,7 @@
         if (data.status === 'success') {
           const modal = bootstrap.Modal.getInstance(document.getElementById('templateEditModal'));
           modal.hide();
+          const savedTemplateId = data.template_id || currentEditingTemplateId;
 
           // If this was a generated template being saved for the first time, track its ID
           if (!currentEditingTemplateId && currentGeneratedTemplate) {
@@ -1612,8 +1769,13 @@
 
           // Reload templates to show changes
           await loadExistingTemplates();
+          if (savedTemplateId && typeof selectTemplate === 'function') {
+            selectTemplate(savedTemplateId, false);
+          }
+          currentEditingTemplateId = savedTemplateId || null;
+          currentEditingTemplateIsSystem = false;
 
-          const action = currentEditingTemplateId ? 'updated' : 'created';
+          const action = wasUpdate ? 'updated' : 'created';
           showSimpleAlert(`Template ${action} successfully!`, 'success');
         } else {
           alert('Error saving template: ' + data.message);
@@ -1625,12 +1787,17 @@
 
     async function deleteTemplateMainPage() {
       if (!currentEditingTemplateId) return;
+      if (currentEditingTemplateIsSystem) {
+        showSimpleAlert('System templates cannot be deleted.', 'warning');
+        return;
+      }
 
       if (!confirm('Are you sure you want to delete this template? This action cannot be undone.')) {
         return;
       }
 
       try {
+        const deletingTemplateId = currentEditingTemplateId;
         const response = await fetch(`/api/templates/${currentEditingTemplateId}`, {
           method: 'DELETE'
         });
@@ -1643,6 +1810,12 @@
 
           // Reload templates to show changes
           await loadExistingTemplates();
+          if (document.getElementById('ideaType').value === deletingTemplateId && typeof window.refreshTemplateCatalog === 'function') {
+            document.getElementById('ideaType').value = '';
+            await window.refreshTemplateCatalog({ preserveSelection: true, suppressDefaultSelection: false });
+          }
+          currentEditingTemplateId = null;
+          currentEditingTemplateIsSystem = false;
           showSimpleAlert('Template deleted successfully!', 'success');
         } else {
           alert('Error deleting template: ' + data.message);

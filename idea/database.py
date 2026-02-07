@@ -4,6 +4,7 @@
 import os
 import json
 import base64
+import time
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from pathlib import Path
@@ -23,6 +24,156 @@ def get_db() -> firestore.Client:
     if _db is None:
         _db = firestore.Client()
     return _db
+
+
+# --- Run state / leases (for resilience & multi-tenant coordination) ---
+
+RUNS_COLLECTION = "runs"
+ACTIVE_RUN_DOC_ID = "active"
+GLOBAL_RUN_LOCK_DOC_ID = "run_lock"
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _run_doc_ref(db: firestore.Client, user_id: str):
+    return db.collection("users").document(user_id).collection(RUNS_COLLECTION).document(ACTIVE_RUN_DOC_ID)
+
+
+def _global_lock_ref(db: firestore.Client):
+    return db.collection("system").document(GLOBAL_RUN_LOCK_DOC_ID)
+
+
+async def get_active_run(user_id: str) -> Optional[Dict[str, Any]]:
+    """Get the active run state for a user (if any)."""
+    db = get_db()
+    doc = _run_doc_ref(db, user_id).get()
+    if doc.exists:
+        return doc.to_dict()
+    return None
+
+
+async def update_active_run(user_id: str, updates: Dict[str, Any], lease_seconds: Optional[int] = None,
+                           owner_id: Optional[str] = None) -> None:
+    """Update active run state (merge). Optionally refresh the lease."""
+    db = get_db()
+    now_ms = _now_ms()
+    update_data = dict(updates)
+    update_data["updated_at_ms"] = now_ms
+    if owner_id:
+        update_data["owner_id"] = owner_id
+    if lease_seconds is not None:
+        update_data["heartbeat_at_ms"] = now_ms
+        update_data["lease_expires_at_ms"] = now_ms + int(lease_seconds * 1000)
+    _run_doc_ref(db, user_id).set(update_data, merge=True)
+
+
+async def claim_active_run(user_id: str, run_data: Dict[str, Any], lease_seconds: int,
+                           owner_id: str) -> Dict[str, Any]:
+    """
+    Claim the user's active run slot. Returns {"ok": bool, "data": existing_or_new}.
+    """
+    db = get_db()
+    now_ms = _now_ms()
+    lease_expires_at_ms = now_ms + int(lease_seconds * 1000)
+    doc_ref = _run_doc_ref(db, user_id)
+    active_statuses = {"starting", "in_progress", "resuming", "continuing", "stopping"}
+
+    @firestore.transactional
+    def _claim(transaction):
+        doc = doc_ref.get(transaction=transaction)
+        if doc.exists:
+            existing = doc.to_dict()
+            existing_status = existing.get("status")
+            existing_lease = existing.get("lease_expires_at_ms", 0)
+            if existing_status in active_statuses and existing_lease > now_ms:
+                return {"ok": False, "data": existing}
+
+        data = dict(run_data)
+        data.update({
+            "owner_id": owner_id,
+            "status": data.get("status") or "in_progress",
+            "is_running": True,
+            "active": True,
+            "heartbeat_at_ms": now_ms,
+            "lease_expires_at_ms": lease_expires_at_ms,
+            "updated_at_ms": now_ms,
+            "created_at_ms": data.get("created_at_ms") or now_ms,
+        })
+        transaction.set(doc_ref, data, merge=True)
+        return {"ok": True, "data": data}
+
+    return _claim(db.transaction())
+
+
+async def claim_global_run_lock(owner_id: str, user_id: str, evolution_id: str,
+                                lease_seconds: int) -> Dict[str, Any]:
+    """
+    Claim the global run lock (single slot). Returns {"ok": bool, "data": existing_or_new}.
+    """
+    db = get_db()
+    now_ms = _now_ms()
+    lease_expires_at_ms = now_ms + int(lease_seconds * 1000)
+    doc_ref = _global_lock_ref(db)
+
+    @firestore.transactional
+    def _claim(transaction):
+        doc = doc_ref.get(transaction=transaction)
+        if doc.exists:
+            existing = doc.to_dict()
+            existing_lease = existing.get("lease_expires_at_ms", 0)
+            if existing_lease > now_ms:
+                return {"ok": False, "data": existing}
+
+        data = {
+            "owner_id": owner_id,
+            "owner_user_id": user_id,
+            "evolution_id": evolution_id,
+            "heartbeat_at_ms": now_ms,
+            "lease_expires_at_ms": lease_expires_at_ms,
+            "updated_at_ms": now_ms,
+            "created_at_ms": now_ms,
+        }
+        transaction.set(doc_ref, data, merge=True)
+        return {"ok": True, "data": data}
+
+    return _claim(db.transaction())
+
+
+async def refresh_global_run_lock(owner_id: str, lease_seconds: int) -> None:
+    """Refresh the global run lock lease if owned by this instance."""
+    db = get_db()
+    now_ms = _now_ms()
+    doc_ref = _global_lock_ref(db)
+    doc = doc_ref.get()
+    if not doc.exists:
+        return
+    data = doc.to_dict()
+    if data.get("owner_id") != owner_id:
+        return
+    doc_ref.set({
+        "heartbeat_at_ms": now_ms,
+        "lease_expires_at_ms": now_ms + int(lease_seconds * 1000),
+        "updated_at_ms": now_ms,
+    }, merge=True)
+
+
+async def release_global_run_lock(owner_id: str) -> None:
+    """Release the global run lock if owned by this instance."""
+    db = get_db()
+    doc_ref = _global_lock_ref(db)
+    doc = doc_ref.get()
+    if not doc.exists:
+        return
+    data = doc.to_dict()
+    if data.get("owner_id") != owner_id:
+        return
+    now_ms = _now_ms()
+    doc_ref.set({
+        "lease_expires_at_ms": now_ms,
+        "updated_at_ms": now_ms,
+    }, merge=True)
 
 
 # --- Encryption utilities for API keys ---

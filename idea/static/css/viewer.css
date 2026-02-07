@@ -982,6 +982,30 @@ small {
   color: var(--text-primary);
 }
 
+.template-flow-toggle {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.template-flow-toggle .btn {
+  border-radius: 999px;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  min-width: 170px;
+}
+
+.template-flow-toggle .btn.active {
+  background-color: var(--primary);
+  border-color: var(--primary);
+  color: var(--text-on-primary);
+}
+
+#generateTemplatePanel {
+  text-align: left;
+}
+
 .entry-input {
   font-size: 1.125rem;
   padding: 1rem;
@@ -1431,6 +1455,105 @@ small {
 
 /* ===== End Evolution Progress Card Styles ===== */
 
+/* ===== Tournament Details Card ===== */
+.tournament-details-card {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.25rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.tournament-details-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.tournament-details-body.collapsed {
+  display: none;
+}
+
+.tournament-gen {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  background-color: var(--surface-alt);
+}
+
+.tournament-gen summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 0.5rem;
+}
+
+.tournament-grid {
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+}
+
+.tournament-round-column {
+  min-width: 240px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.75rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.tournament-round-title {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--text-secondary);
+}
+
+.tournament-bye {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.tournament-match-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem;
+  margin-bottom: 0.6rem;
+  background: var(--primary-subtle);
+}
+
+.match-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  padding: 0.2rem 0;
+}
+
+.match-row.winner .match-name {
+  font-weight: 600;
+  color: var(--accent-hover);
+}
+
+.match-badge {
+  background: var(--accent);
+  color: var(--text-on-primary);
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+}
+
+.match-tie {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: center;
+  margin-top: 0.25rem;
+}
+
 /* Rater Page Styles */
 .idea-box .card {
   height: 100%;
@@ -1489,6 +1612,10 @@ small {
 
 #existingTemplates .table td:nth-child(3) {
   text-align: right;
+}
+
+#existingTemplates .table tr.template-row-selected td {
+  background-color: var(--primary-subtle);
 }
 
 /* ========================================

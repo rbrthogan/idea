@@ -5,17 +5,18 @@
 // CSS styles for lineage modal and buttons are now in viewer.css
 
 
-let pollingInterval;
 let isEvolutionRunning = false;
 let currentContextIndex = 0;
 let contexts = [];
 let specificPrompts = [];
 let breedingPrompts = [];  // Store breeding prompts for each generation
+let tournamentHistory = [];  // Store Swiss tournament details
 let currentEvolutionId = null;
 let currentEvolutionName = null;
 let currentEvolutionData = null;
 let generations = [];
 let currentModalIdea = null;
+let lastFullHistoryFetch = 0;
 
 // Evolution timing tracking
 let evolutionStartTime = null;
@@ -23,6 +24,11 @@ let lastActivityTime = null;
 let activityLog = [];
 const MAX_ACTIVITY_LOG_ITEMS = 5;
 let elapsedTimeInterval = null;
+let tournamentCountTouched = false;
+let lastRenderedHistoryVersion = -1;
+let lastStoredHistoryVersion = -1;
+let persistStateTimeout = null;
+const LOCAL_STORAGE_PERSIST_DELAY_MS = 1200;
 
 // Track previous status message to detect changes for activity log
 let previousStatusMessage = '';
@@ -32,11 +38,49 @@ let previousProgress = 0;
  * Load available templates and populate the idea type dropdown
  */
 let allTemplates = []; // Store templates globally
+const LAST_TEMPLATE_STORAGE_KEY = 'lastSelectedTemplateId';
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getStoredTemplateId() {
+    try {
+        return localStorage.getItem(LAST_TEMPLATE_STORAGE_KEY) || '';
+    } catch (error) {
+        return '';
+    }
+}
+
+function storeTemplateId(templateId) {
+    try {
+        localStorage.setItem(LAST_TEMPLATE_STORAGE_KEY, templateId);
+    } catch (error) {
+        // Ignore localStorage failures (private mode / quota issues).
+    }
+}
+
+function resetTemplateDisplay(message = 'No template selected') {
+    const display = document.getElementById('ideaTypeDisplay');
+    if (!display) return;
+    display.textContent = message;
+    display.classList.add('text-muted', 'fst-italic');
+}
 
 /**
  * Load available templates and populate the sidebar list
  */
-async function loadTemplateTypes() {
+async function loadTemplateTypes(options = {}) {
+    const {
+        preserveSelection = true,
+        suppressDefaultSelection = false,
+    } = options;
+
     try {
         const response = await fetch('/api/template-types');
         const data = await response.json();
@@ -45,18 +89,30 @@ async function loadTemplateTypes() {
             allTemplates = data.templates;
             renderTemplateList(allTemplates);
 
-            // Set default selection if none selected
             const currentType = document.getElementById('ideaType').value;
-            if (!currentType && allTemplates.length > 0) {
-                selectTemplate(allTemplates[0].id, false); // Don't slide back on initial load
+            const hasCurrentType = allTemplates.some(t => t.id === currentType);
+            const storedType = getStoredTemplateId();
+            const hasStoredType = allTemplates.some(t => t.id === storedType);
+
+            if (preserveSelection && hasCurrentType) {
+                selectTemplate(currentType, false);
+            } else if (hasStoredType) {
+                selectTemplate(storedType, false);
+            } else if (!suppressDefaultSelection && allTemplates.length > 0) {
+                selectTemplate(allTemplates[0].id, false);
+            } else if (!hasCurrentType) {
+                document.getElementById('ideaType').value = '';
+                resetTemplateDisplay();
             }
         } else {
             console.error('Error loading template types:', data.message);
             renderTemplateList([]);
+            resetTemplateDisplay('Unable to load templates');
         }
     } catch (error) {
         console.error('Error loading template types:', error);
         renderTemplateList([]);
+        resetTemplateDisplay('Unable to load templates');
     }
 }
 
@@ -83,11 +139,11 @@ function renderTemplateList(templates) {
         };
 
         div.innerHTML = `
-            <h6>${template.name}</h6>
-            <p>${template.description || 'No description'}</p>
+            <h6>${escapeHtml(template.name)} ${template.is_system ? '<span class="badge bg-light text-dark border ms-1">System</span>' : '<span class="badge bg-primary ms-1">Custom</span>'}</h6>
+            <p>${escapeHtml(template.description || 'No description')}</p>
             <div class="template-actions">
                 <button class="btn btn-xs btn-outline-secondary" onclick="editTemplateMainPage('${template.id}')">
-                    <i class="fas fa-edit"></i> Edit
+                    <i class="fas fa-edit"></i> ${template.is_system ? 'Customize' : 'Edit'}
                 </button>
             </div>
         `;
@@ -98,10 +154,11 @@ function renderTemplateList(templates) {
 
 function selectTemplate(id, slideBack = true) {
     const template = allTemplates.find(t => t.id === id);
-    if (!template) return;
+    if (!template) return false;
 
     // Update hidden input
     document.getElementById('ideaType').value = id;
+    storeTemplateId(id);
 
     // Update selector text
     const display = document.getElementById('ideaTypeDisplay');
@@ -112,10 +169,15 @@ function selectTemplate(id, slideBack = true) {
 
     // Re-render list to update active state
     renderTemplateList(allTemplates);
+    if (typeof window.onTemplateSelectionChanged === 'function') {
+        window.onTemplateSelectionChanged();
+    }
 
     if (slideBack) {
         showSidebarView('main');
     }
+
+    return true;
 }
 
 
@@ -138,6 +200,18 @@ function filterTemplates(query) {
 window.selectTemplate = selectTemplate;
 window.editTemplate = editTemplateMainPage;
 window.filterTemplates = filterTemplates;
+window.refreshTemplateCatalog = async function (options = {}) {
+    await loadTemplateTypes(options);
+};
+
+window.addEventListener('idea-auth-ready', () => {
+    loadTemplateTypes({ preserveSelection: true, suppressDefaultSelection: false });
+});
+
+if (window.__refreshTemplatesOnViewerReady) {
+    window.__refreshTemplatesOnViewerReady = false;
+    loadTemplateTypes({ preserveSelection: true, suppressDefaultSelection: false });
+}
 
 // Initialize
 // Initialize
@@ -168,6 +242,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     };
 
+    const updateTournamentCountFromPopSize = () => {
+        const popSizeEl = document.getElementById('popSize');
+        const countEl = document.getElementById('tournamentCount');
+        const countValueEl = document.getElementById('tournamentCountValue');
+        if (!popSizeEl || !countEl) return;
+
+        const popSize = parseInt(popSizeEl.value || '0');
+        if (!popSize || Number.isNaN(popSize)) return;
+
+        if (!tournamentCountTouched) {
+            countEl.value = '1';
+        }
+
+        if (countValueEl) {
+            countValueEl.textContent = parseFloat(countEl.value).toFixed(2);
+        }
+    };
+
+    addListener('tournamentCount', 'input', () => {
+        tournamentCountTouched = true;
+        const countEl = document.getElementById('tournamentCount');
+        const countValueEl = document.getElementById('tournamentCountValue');
+        if (countEl && countValueEl) {
+            countValueEl.textContent = parseFloat(countEl.value).toFixed(2);
+        }
+    });
+    addListener('popSize', 'input', updateTournamentCountFromPopSize);
+    updateTournamentCountFromPopSize();
+
     // --- Evolution Controls ---
 
     addListener('startButton', 'click', async function () {
@@ -180,12 +283,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         const ideaType = document.getElementById('ideaType').value;
         const modelType = document.getElementById('modelType').value;
 
+        if (!ideaType) {
+            alert('Please select a template before starting evolution.');
+            if (typeof window.openTemplateLibrary === 'function') {
+                window.openTemplateLibrary({ scroll: true, focusSearch: true });
+            } else {
+                showSidebarView('templates');
+            }
+            return;
+        }
+
         const creativeTemp = parseFloat(document.getElementById('creativeTemp').value);
         const topP = parseFloat(document.getElementById('topP').value);
 
-        // Get tournament values
-        const tournamentSize = parseInt(document.getElementById('tournamentSize').value);
-        const tournamentComparisons = parseInt(document.getElementById('tournamentComparisons').value);
+        // Tournament count (1.0 = full Swiss tournament)
+        const tournamentCount = parseFloat(document.getElementById('tournamentCount').value);
 
         // Get mutation rate
         const mutationRate = parseFloat(document.getElementById('mutationRate').value);
@@ -208,8 +320,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             modelType,
             creativeTemp,
             topP,
-            tournamentSize,
-            tournamentComparisons,
+            tournamentCount,
             mutationRate,
             thinkingBudget,
             maxBudget,
@@ -265,8 +376,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                     createProgressBar(currentEvolutionName);
                 }
 
-                // Log that contexts are ready
-                addActivityLogItem(`✅ ${contexts.length} seed contexts ready`, 'success');
+                // Log startup status
+                if (contexts.length > 0) {
+                    addActivityLogItem(`✅ ${contexts.length} seed contexts ready`, 'success');
+                } else {
+                    addActivityLogItem('✅ Evolution started. Seeding in progress...', 'success');
+                }
 
                 // Start polling for updates
                 isEvolutionRunning = true;
@@ -281,6 +396,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (response.status === 409) {
                     // Evolution already running - show helpful message
                     showAlreadyRunningMessage();
+                } else if (response.status === 429 || errorData.scope === 'global') {
+                    showSystemBusyMessage(errorData.message);
                 } else {
                     // Other errors
                     alert(`Error: ${errorData.message || 'Failed to start evolution'}`);
@@ -556,17 +673,19 @@ async function restoreCurrentEvolution() {
                 console.log("Found evolution data in localStorage:", evolutionState);
 
                 // Handle both old format (just history array) and new format (object with history and diversity_history)
-                let generationsData, diversityData, tokenCounts;
+                let generationsData, diversityData, tokenCounts, tournamentData;
                 if (Array.isArray(evolutionState)) {
                     // Old format - just the history array
                     generationsData = evolutionState;
                     diversityData = [];
                     tokenCounts = null;
+                    tournamentData = [];
                 } else if (evolutionState && evolutionState.history) {
                     // New format - object with history and diversity_history
                     generationsData = evolutionState.history;
                     diversityData = evolutionState.diversity_history || [];
                     tokenCounts = evolutionState.token_counts || null;
+                    tournamentData = evolutionState.tournament_history || [];
                     // Restore context data if available
                     if (evolutionState.contexts) {
                         contexts = evolutionState.contexts;
@@ -584,6 +703,11 @@ async function restoreCurrentEvolution() {
                 if (generationsData && generationsData.length > 0) {
                     // Render the generations
                     renderGenerations(generationsData);
+                    const restoredVersion = Number.isInteger(evolutionState?.history_version)
+                        ? evolutionState.history_version
+                        : 0;
+                    lastRenderedHistoryVersion = restoredVersion;
+                    lastStoredHistoryVersion = restoredVersion;
 
                     // Restore diversity plot if we have diversity data
                     if (diversityData && diversityData.length > 0) {
@@ -596,12 +720,18 @@ async function restoreCurrentEvolution() {
                     // Set up currentEvolutionData for download functionality
                     currentEvolutionData = {
                         history: generationsData,
+                        history_version: restoredVersion,
                         diversity_history: diversityData,
                         contexts: contexts,
                         specific_prompts: specificPrompts,
                         breeding_prompts: breedingPrompts,
+                        tournament_history: tournamentData,
                         token_counts: tokenCounts
                     };
+
+                    // Render tournament details if available
+                    tournamentHistory = tournamentData || [];
+                    renderTournamentDetails(tournamentHistory);
 
                     // Display token counts if available
                     if (tokenCounts) {
@@ -663,6 +793,30 @@ function setupDownloadButton(data) {
     };
 
     console.log("Download button setup complete, button is now:", updatedButton);
+}
+
+function applyHistoryIfNew(data, force = false) {
+    if (!data || !data.history || data.history.length === 0) return false;
+
+    const hasVersion = Number.isInteger(data.history_version);
+    const shouldRender = force || !hasVersion || data.history_version !== lastRenderedHistoryVersion;
+    if (!shouldRender) return false;
+
+    renderGenerations(data.history);
+    if (hasVersion) {
+        lastRenderedHistoryVersion = data.history_version;
+    }
+    return true;
+}
+
+function schedulePersistEvolutionState(stateData) {
+    if (!stateData) return;
+    if (persistStateTimeout) {
+        clearTimeout(persistStateTimeout);
+    }
+    persistStateTimeout = setTimeout(() => {
+        localStorage.setItem('currentEvolutionData', JSON.stringify(stateData));
+    }, LOCAL_STORAGE_PERSIST_DELAY_MS);
 }
 
 // Improve the markdown rendering function with better newline handling
@@ -1827,6 +1981,11 @@ async function loadHistoryItemData(item) {
                     document.getElementById('generations-container').innerHTML = '';
                     renderGenerations(data.data.history);
 
+                    if (data.data.tournament_history) {
+                        tournamentHistory = data.data.tournament_history;
+                        renderTournamentDetails(tournamentHistory);
+                    }
+
                     if (data.data.diversity_history && data.data.diversity_history.length > 0) {
                         updateDiversityChart(data.data.diversity_history);
                         setTimeout(ensureDiversityChartSizing, 200);
@@ -1861,6 +2020,11 @@ async function loadHistoryItemData(item) {
                 if (data.history) {
                     document.getElementById('generations-container').innerHTML = '';
                     renderGenerations(data.history);
+
+                    if (data.tournament_history) {
+                        tournamentHistory = data.tournament_history;
+                        renderTournamentDetails(tournamentHistory);
+                    }
 
                     if (data.diversity_history && data.diversity_history.length > 0) {
                         updateDiversityChart(data.diversity_history);
@@ -1919,7 +2083,10 @@ async function handleHistoryResume(checkpointId) {
 
             // Restore state
             if (data.history) {
-                renderGenerations(data.history);
+                applyHistoryIfNew(data, true);
+                if (Number.isInteger(data.history_version)) {
+                    lastStoredHistoryVersion = data.history_version;
+                }
             }
             if (data.contexts) {
                 contexts = data.contexts;
@@ -1969,9 +2136,8 @@ async function handleHistoryResume(checkpointId) {
 
             updateElapsedTimeDisplay();
 
-            // Start polling
-            if (pollingInterval) clearInterval(pollingInterval);
-            pollingInterval = setInterval(pollProgress, 1000);
+            // Start polling loop
+            pollProgress();
 
             // Clear selection and go back to main view
             clearSelectedEvolution();
@@ -1979,8 +2145,15 @@ async function handleHistoryResume(checkpointId) {
 
             addActivityLogItem('🔄 Resuming evolution...', 'info');
         } else {
-            console.error("Failed to resume:", await response.text());
-            alert("Failed to resume evolution. Check console for details.");
+            const errorData = await response.json().catch(() => ({ message: 'Failed to resume evolution' }));
+            console.error("Failed to resume:", errorData);
+            if (response.status === 409) {
+                showAlreadyRunningMessage();
+            } else if (response.status === 429 || errorData.scope === 'global') {
+                showSystemBusyMessage(errorData.message);
+            } else {
+                alert(errorData.message || "Failed to resume evolution. Check console for details.");
+            }
             await refreshHistoryList();
         }
     } catch (error) {
@@ -2037,7 +2210,10 @@ async function handleHistoryContinue(itemId, itemType, additionalGens = 3) {
 
             // Restore state
             if (data.history) {
-                renderGenerations(data.history);
+                applyHistoryIfNew(data, true);
+                if (Number.isInteger(data.history_version)) {
+                    lastStoredHistoryVersion = data.history_version;
+                }
             }
             if (data.contexts) {
                 contexts = data.contexts;
@@ -2087,9 +2263,8 @@ async function handleHistoryContinue(itemId, itemType, additionalGens = 3) {
 
             updateElapsedTimeDisplay();
 
-            // Start polling
-            if (pollingInterval) clearInterval(pollingInterval);
-            pollingInterval = setInterval(pollProgress, 1000);
+            // Start polling loop
+            pollProgress();
 
             // Clear selection and go back to main view
             clearSelectedEvolution();
@@ -2097,8 +2272,15 @@ async function handleHistoryContinue(itemId, itemType, additionalGens = 3) {
 
             addActivityLogItem(`📈 Continuing for ${additionalGens} more generations...`, 'info');
         } else {
-            console.error("Failed to continue:", await response.text());
-            alert("Failed to continue evolution. Check console for details.");
+            const errorData = await response.json().catch(() => ({ message: 'Failed to continue evolution' }));
+            console.error("Failed to continue:", errorData);
+            if (response.status === 409) {
+                showAlreadyRunningMessage();
+            } else if (response.status === 429 || errorData.scope === 'global') {
+                showSystemBusyMessage(errorData.message);
+            } else {
+                alert(errorData.message || "Failed to continue evolution. Check console for details.");
+            }
             // Restore the continue button
             cancelContinueInput(itemId, itemType);
         }
@@ -2221,7 +2403,26 @@ async function pollProgress() {
             throw new Error(`HTTP error! Status: ${response.status}`);
         }
 
-        const data = await response.json();
+        let data = await response.json();
+
+        const shouldFetchFullHistory =
+            (!data.history && data.history_changed) ||
+            (!data.history && data.history_available && (Date.now() - lastFullHistoryFetch) > 15000);
+
+        if (shouldFetchFullHistory) {
+            try {
+                const fullResponse = await fetch('/api/progress?includeHistory=1');
+                if (fullResponse.ok) {
+                    const fullData = await fullResponse.json();
+                    if (fullData.history) {
+                        data = fullData;
+                        lastFullHistoryFetch = Date.now();
+                    }
+                }
+            } catch (e) {
+                console.log("Full history fetch failed:", e);
+            }
+        }
         console.log("Progress update:", data); // Add logging to see what's coming from the server
 
         // Update evolution name if provided
@@ -2318,21 +2519,36 @@ async function pollProgress() {
             updateEvolutionStatusIndicator(true, `Running: ${genInfo}`);
         }
 
-        // Always update UI with current progress if there's history data
+        // Update UI only when there is a new history version (or when version is unavailable).
         if (data.history && data.history.length > 0) {
-            console.log("Rendering generations from progress update");
-            renderGenerations(data.history);
+            const rendered = applyHistoryIfNew(data);
+            if (rendered) {
+                const historyVersionToStore = Number.isInteger(data.history_version) ? data.history_version : null;
+                const shouldStore =
+                    historyVersionToStore === null ||
+                    historyVersionToStore !== lastStoredHistoryVersion;
+                if (shouldStore) {
+                    const evolutionStateToStore = {
+                        history: data.history,
+                        history_version: historyVersionToStore ?? lastRenderedHistoryVersion,
+                        diversity_history: data.diversity_history || [],
+                        contexts: data.contexts || contexts,
+                        specific_prompts: data.specific_prompts || specificPrompts,
+                        breeding_prompts: data.breeding_prompts || breedingPrompts,
+                        tournament_history: data.tournament_history || tournamentHistory,
+                        token_counts: data.token_counts || null
+                    };
+                    schedulePersistEvolutionState(evolutionStateToStore);
+                    if (historyVersionToStore !== null) {
+                        lastStoredHistoryVersion = historyVersionToStore;
+                    }
+                }
+            }
+        }
 
-            // Store the current evolution data in localStorage including diversity data and token counts
-            const evolutionStateToStore = {
-                history: data.history,
-                diversity_history: data.diversity_history || [],
-                contexts: data.contexts || contexts,
-                specific_prompts: data.specific_prompts || specificPrompts,
-                breeding_prompts: data.breeding_prompts || breedingPrompts,
-                token_counts: data.token_counts || null
-            };
-            localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
+        if (data.tournament_history) {
+            tournamentHistory = data.tournament_history;
+            renderTournamentDetails(tournamentHistory);
         }
 
         // Handle diversity updates with activity logging
@@ -2396,7 +2612,7 @@ async function pollProgress() {
             if (data.history && data.history.length > 0) {
                 // Save final state and enable save button
                 currentEvolutionData = data;
-                renderGenerations(data.history);
+                applyHistoryIfNew(data, true);
 
                 // Store checkpoint ID if available for future resume/continue
                 if (data.checkpoint_id) {
@@ -2406,14 +2622,24 @@ async function pollProgress() {
                 // Store the final evolution data in localStorage including diversity data and token counts
                 const evolutionStateToStore = {
                     history: data.history,
+                    history_version: Number.isInteger(data.history_version) ? data.history_version : lastRenderedHistoryVersion,
                     diversity_history: data.diversity_history || [],
                     contexts: data.contexts || contexts,
                     specific_prompts: data.specific_prompts || specificPrompts,
                     breeding_prompts: data.breeding_prompts || breedingPrompts,
+                    tournament_history: data.tournament_history || tournamentHistory,
                     token_counts: data.token_counts || null,
                     checkpoint_id: data.checkpoint_id || null
                 };
-                localStorage.setItem('currentEvolutionData', JSON.stringify(evolutionStateToStore));
+                schedulePersistEvolutionState(evolutionStateToStore);
+                if (Number.isInteger(data.history_version)) {
+                    lastStoredHistoryVersion = data.history_version;
+                }
+
+                if (data.tournament_history) {
+                    tournamentHistory = data.tournament_history;
+                    renderTournamentDetails(tournamentHistory);
+                }
 
                 // Set up the download button
                 setupDownloadButton(data);
@@ -2762,6 +2988,14 @@ function showAlreadyRunningMessage() {
 }
 
 /**
+ * Show a user-friendly message when the system is at capacity.
+ */
+function showSystemBusyMessage(message) {
+    const text = message || 'System busy. Another evolution is running. Try again shortly.';
+    alert(text);
+}
+
+/**
  * Check if there's a running evolution and show a persistent banner
  * Called after auth is complete to detect reconnection opportunities
  */
@@ -2878,9 +3112,10 @@ async function reconnectToRunningEvolution() {
 
     // Get current progress data to get evolution name
     try {
-        const response = await fetch('/api/progress');
+        const response = await fetch('/api/progress?includeHistory=1');
         if (response.ok) {
             const progressData = await response.json();
+            lastFullHistoryFetch = Date.now();
 
             // Store evolution identity
             if (progressData.evolution_id) {
@@ -2888,6 +3123,17 @@ async function reconnectToRunningEvolution() {
             }
             if (progressData.evolution_name) {
                 currentEvolutionName = progressData.evolution_name;
+            }
+
+            if (progressData.history) {
+                applyHistoryIfNew(progressData, true);
+            }
+            if (progressData.contexts) {
+                contexts = progressData.contexts;
+                specificPrompts = progressData.specific_prompts || [];
+                breedingPrompts = progressData.breeding_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
             }
         }
     } catch (e) {
@@ -3052,12 +3298,20 @@ function resetUIState() {
     // Reset evolution status
     isEvolutionRunning = false;
     currentEvolutionData = null;
+    tournamentHistory = [];
+    tournamentCountTouched = false;
+    lastRenderedHistoryVersion = -1;
+    lastStoredHistoryVersion = -1;
 
     // Reset progress bar if it exists, or create a new one
     const existingProgressContainer = document.getElementById('progress-container');
     if (existingProgressContainer) {
         // Remove the old progress container
         existingProgressContainer.remove();
+    }
+    const tournamentContainer = document.getElementById('tournament-details-container');
+    if (tournamentContainer) {
+        tournamentContainer.remove();
     }
     // Create fresh progress bar with activity log (this starts the timer)
     createProgressBar(currentEvolutionName);
@@ -3067,6 +3321,10 @@ function resetUIState() {
     updateEvolutionStatusIndicator(true, 'Generating contexts...');
 
     // Clear localStorage data
+    if (persistStateTimeout) {
+        clearTimeout(persistStateTimeout);
+        persistStateTimeout = null;
+    }
     localStorage.removeItem('currentEvolutionData');
 
     // Reset download button
@@ -3138,6 +3396,113 @@ function createProgressBar(evolutionName = null) {
 
     // Start elapsed time updater immediately
     startElapsedTimeUpdater();
+
+    // Ensure tournament details container is present
+    ensureTournamentDetailsContainer();
+}
+
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function ensureTournamentDetailsContainer() {
+    let container = document.getElementById('tournament-details-container');
+    if (container) {
+        return container;
+    }
+
+    container = document.createElement('div');
+    container.id = 'tournament-details-container';
+    container.className = 'tournament-details-card mb-4';
+    container.innerHTML = `
+        <div class="tournament-details-header">
+            <h5 class="mb-0">Swiss Tournament Details</h5>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="tournament-details-toggle">Hide</button>
+        </div>
+        <div class="tournament-details-body" id="tournament-details-body" style="display: block;">
+            <div class="text-muted">No tournament data yet.</div>
+        </div>
+    `;
+
+    const generationsContainer = document.getElementById('generations-container');
+    generationsContainer.parentNode.insertBefore(container, generationsContainer);
+
+    const toggleBtn = container.querySelector('#tournament-details-toggle');
+    const body = container.querySelector('#tournament-details-body');
+    if (toggleBtn && body) {
+        toggleBtn.addEventListener('click', () => {
+            const isHidden = body.style.display === 'none';
+            body.style.display = isHidden ? 'block' : 'none';
+            toggleBtn.textContent = isHidden ? 'Hide' : 'Show';
+        });
+    }
+
+    return container;
+}
+
+function renderTournamentDetails(history) {
+    const container = ensureTournamentDetailsContainer();
+    const body = container.querySelector('#tournament-details-body');
+    if (!body) return;
+
+    if (!history || history.length === 0) {
+        body.innerHTML = '<div class="text-muted">No tournament data yet.</div>';
+        return;
+    }
+
+    const html = history.map((entry, idx) => {
+        const genLabel = `Gen ${entry.generation}`;
+        const rounds = (entry.rounds || []).map((round) => {
+            const bye = round.bye
+                ? `<div class="tournament-bye">Bye: ${escapeHtml(round.bye.title || `Idea ${round.bye.idx}`)}</div>`
+                : '';
+            const pairs = (round.pairs || []).map((pair) => {
+                const aTitle = escapeHtml(pair.a_title || `Idea ${pair.a_idx}`);
+                const bTitle = escapeHtml(pair.b_title || `Idea ${pair.b_idx}`);
+                const aWinner = pair.winner === 'A';
+                const bWinner = pair.winner === 'B';
+                const tie = pair.winner === 'tie';
+                return `
+                    <div class="tournament-match-card">
+                        <div class="match-row ${aWinner ? 'winner' : ''}">
+                            <span class="match-name">${aTitle}</span>
+                            ${aWinner ? '<span class="match-badge">Winner</span>' : ''}
+                        </div>
+                        <div class="match-row ${bWinner ? 'winner' : ''}">
+                            <span class="match-name">${bTitle}</span>
+                            ${bWinner ? '<span class="match-badge">Winner</span>' : ''}
+                        </div>
+                        ${tie ? '<div class="match-tie">Tie</div>' : ''}
+                    </div>
+                `;
+            }).join('');
+            return `
+                <div class="tournament-round-column">
+                    <div class="tournament-round-title">Round ${round.round || ''}</div>
+                    ${bye}
+                    ${pairs || '<div class="text-muted">No matches recorded.</div>'}
+                </div>
+            `;
+        }).join('');
+
+        const openAttr = idx === history.length - 1 ? 'open' : '';
+        return `
+            <details class="tournament-gen" ${openAttr}>
+                <summary>${genLabel}</summary>
+                <div class="tournament-grid">
+                    ${rounds || '<div class="text-muted">No rounds recorded.</div>'}
+                </div>
+            </details>
+        `;
+    }).join('');
+
+    body.innerHTML = html;
 }
 
 // Function to start the elapsed time updater
@@ -3229,12 +3594,12 @@ function enhanceStatusMessage(rawMessage, data) {
             }
         },
         {
-            match: /Running tournament group (\d+)\/(\d+)/i,
-            transform: (m) => `🏆 Tournament round ${m[1]} of ${m[2]}`
+            match: /Running Swiss round (\d+)\/(\d+)/i,
+            transform: (m) => `🏆 Swiss round ${m[1]} of ${m[2]}`
         },
         {
             match: /Running tournament/i,
-            transform: () => '🏆 Running selection tournament...'
+            transform: () => '🏆 Running Swiss tournament...'
         }
     ];
 
