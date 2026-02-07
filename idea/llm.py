@@ -5,12 +5,12 @@ from google import genai
 from google.genai import types
 import json
 from pydantic import BaseModel
-from typing import Type, Optional, Dict, List, Callable
+from typing import Type, Optional, Dict, List, Callable, Tuple, Set, Any
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
 import numpy as np
 from idea.models import Idea
-from idea.prompts.loader import get_prompts
+from idea.prompts.loader import get_prompts, get_prompts_from_dict
 import uuid
 from collections import OrderedDict
 from hashlib import sha256
@@ -42,10 +42,39 @@ class LLMWrapper(ABC):
         self.output_token_count = 0
         self.agent_name = agent_name
         print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, thinking_budget: {thinking_budget}")
+        self._custom_templates: Dict[str, Dict[str, Any]] = {}
+        self._custom_prompt_wrappers: Dict[str, Any] = {}
+        self._custom_template_lock = threading.Lock()
 
         self.client = None
         self._client_lock = threading.Lock()
         self._setup_provider()
+
+    def register_custom_template(self, template_id: str, template_data: Dict[str, Any]) -> None:
+        """Register template data scoped to this LLM instance."""
+        with self._custom_template_lock:
+            self._custom_templates[template_id] = template_data
+            self._custom_prompt_wrappers.pop(template_id, None)
+
+    def _iter_custom_templates(self) -> List[Tuple[str, Dict[str, Any]]]:
+        with self._custom_template_lock:
+            return list(self._custom_templates.items())
+
+    def _resolve_prompts(self, idea_type: str):
+        with self._custom_template_lock:
+            template_data = self._custom_templates.get(idea_type)
+            cached_wrapper = self._custom_prompt_wrappers.get(idea_type)
+
+        if template_data is None:
+            return get_prompts(idea_type)
+
+        if cached_wrapper is not None:
+            return cached_wrapper
+
+        wrapper = get_prompts_from_dict(template_data)
+        with self._custom_template_lock:
+            self._custom_prompt_wrappers[idea_type] = wrapper
+        return wrapper
 
     def _setup_provider(self):
         if self.provider == "google_generative_ai":
@@ -153,7 +182,7 @@ class Ideator(LLMWrapper):
 
     def generate_context(self, idea_type: str) -> str:
         """Generate initial context for ideation"""
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
 
         # Use the configured temperature unless explicitly overridden
         text = self.generate_text(prompts.CONTEXT_PROMPT)
@@ -182,7 +211,7 @@ class Ideator(LLMWrapper):
 
     def generate_specific_prompt(self, context_pool: str, idea_type: str) -> str:
         """Generate a specific idea prompt from the context pool using the translation layer"""
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
 
         # Create the translation prompt with shuffled subset
         translation_prompt = prompts.SPECIFIC_PROMPT.format(context_pool=context_pool)
@@ -272,7 +301,7 @@ class Ideator(LLMWrapper):
         specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
 
         # Get the special requirements and extend the specific prompt with them
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
         extended_prompt = specific_prompt
 
         # If there are special requirements, append them to the specific prompt
@@ -286,7 +315,7 @@ class Ideator(LLMWrapper):
 
     def get_idea_prompt(self, idea_type: str) -> str:
         """Get prompt template for specific idea type"""
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
         return prompts.IDEA_PROMPT
 
     def seed_ideas(self, n: int, idea_type: str) -> tuple[List[str], List[str]]:
@@ -322,7 +351,7 @@ class Formatter(LLMWrapper):
 
     def format_idea(self, raw_idea: str, idea_type: str) -> str:
         """Format a raw idea into a structured format"""
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
 
         # Check if this is an Oracle-generated idea
         is_oracle_idea = isinstance(raw_idea, dict) and raw_idea.get("oracle_generated", False)
@@ -468,7 +497,7 @@ class Critic(LLMWrapper):
 
     def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
         # Extract idea text if it's a dictionary
         idea_text = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
         prompt = prompts.CRITIQUE_PROMPT.format(idea=idea_text)
@@ -479,7 +508,7 @@ class Critic(LLMWrapper):
         # Extract idea text if it's a dictionary
         idea_text = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
         critique = self.critique(idea_text, idea_type)
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
         prompt = prompts.REFINE_PROMPT.format(
             idea=idea_text,
             critique=critique
@@ -527,107 +556,287 @@ class Critic(LLMWrapper):
 
         return elo_a, elo_b
 
-    def get_tournament_ranks(self, ideas: List[str], idea_type: str, comparisons: int, progress_callback: Callable[[int, int], None] = None) -> dict:
-        """Get tournament ranks with optional parallel pair evaluations.
+    def _select_swiss_bye(self, ordered_indices: List[int], bye_counts: Dict[int, int]) -> Optional[int]:
+        """
+        Select a bye candidate for an odd-sized Swiss round.
 
-        Falls back to original sequential scheduling for small tournaments to keep
-        behavior deterministic in tests and tiny populations.
+        Preference order:
+        1) Fewest byes so far
+        2) Lowest-ranked (last in ordered list)
+        """
+        if not ordered_indices:
+            return None
+
+        min_byes = min(bye_counts.get(idx, 0) for idx in ordered_indices)
+        # Iterate from lowest-ranked to highest-ranked for deterministic selection
+        for idx in reversed(ordered_indices):
+            if bye_counts.get(idx, 0) == min_byes:
+                return idx
+        return ordered_indices[-1]
+
+    def _pair_players_swiss(
+        self,
+        ordered_indices: List[int],
+        match_history: Set[Tuple[int, int]],
+        backtrack_limit: int = 20000,
+    ) -> Optional[List[Tuple[int, int]]]:
+        """
+        Pair players in Swiss style while minimizing repeat matchups.
+
+        Returns a list of pairs (idx_a, idx_b), or None if no pairing found
+        within the backtracking limit.
+        """
+        steps = 0
+
+        def backtrack(remaining: List[int]) -> Optional[Tuple[List[Tuple[int, int]], int]]:
+            nonlocal steps
+            steps += 1
+            if steps > backtrack_limit:
+                return None
+            if not remaining:
+                return [], 0
+
+            first = remaining[0]
+            # Prefer non-repeat pairs, then stable by index order.
+            candidates = []
+            for i in range(1, len(remaining)):
+                second = remaining[i]
+                pair_key = (min(first, second), max(first, second))
+                repeat = pair_key in match_history
+                candidates.append((repeat, second, i))
+
+            candidates.sort(key=lambda x: (x[0], x[1]))
+
+            best_pairs = None
+            best_repeats = None
+
+            for repeat, second, idx in candidates:
+                next_remaining = remaining[1:idx] + remaining[idx + 1 :]
+                result = backtrack(next_remaining)
+                if result is None:
+                    continue
+                sub_pairs, sub_repeats = result
+                total_repeats = (1 if repeat else 0) + sub_repeats
+                if best_repeats is None or total_repeats < best_repeats:
+                    best_pairs = [(first, second)] + sub_pairs
+                    best_repeats = total_repeats
+                    if best_repeats == 0:
+                        break
+
+            if best_pairs is None:
+                return None
+            return best_pairs, best_repeats
+
+        result = backtrack(ordered_indices)
+        if result is None:
+            return None
+        return result[0]
+
+    def _generate_swiss_round_pairs(
+        self,
+        ranks: Dict[int, float],
+        match_history: Set[Tuple[int, int]],
+        bye_counts: Dict[int, int],
+    ) -> Tuple[List[Tuple[int, int]], Optional[int]]:
+        """
+        Generate Swiss pairings for a single round with minimal repeat matchups.
+        """
+        ordered_indices = sorted(ranks.keys(), key=lambda i: (-ranks[i], i))
+
+        bye_idx = None
+        if len(ordered_indices) % 2 == 1:
+            bye_idx = self._select_swiss_bye(ordered_indices, bye_counts)
+            if bye_idx is not None:
+                ordered_indices.remove(bye_idx)
+
+        pairs = self._pair_players_swiss(ordered_indices, match_history)
+        if pairs is None:
+            # Fallback greedy pairing if backtracking exceeded limit
+            pairs = []
+            remaining = ordered_indices[:]
+            while len(remaining) >= 2:
+                a = remaining.pop(0)
+                # Prefer non-repeat partners if available
+                partner_idx = None
+                for i, b in enumerate(remaining):
+                    pair_key = (min(a, b), max(a, b))
+                    if pair_key not in match_history:
+                        partner_idx = i
+                        break
+                if partner_idx is None:
+                    partner_idx = 0
+                b = remaining.pop(partner_idx)
+                pairs.append((a, b))
+
+        # Update match history for this round
+        for a, b in pairs:
+            match_history.add((min(a, b), max(a, b)))
+
+        if bye_idx is not None:
+            bye_counts[bye_idx] = bye_counts.get(bye_idx, 0) + 1
+
+        return pairs, bye_idx
+
+    def _extract_idea_meta(self, idea) -> Dict[str, Optional[str]]:
+        """Extract lightweight metadata for tournament display."""
+        idea_id = None
+        title = "Untitled"
+
+        if isinstance(idea, dict):
+            raw_id = idea.get("id")
+            if raw_id:
+                idea_id = str(raw_id)
+            idea_obj = idea.get("idea", idea)
+            if hasattr(idea_obj, "title"):
+                title = idea_obj.title or title
+            elif isinstance(idea_obj, dict):
+                title = idea_obj.get("title", title)
+            else:
+                title = str(idea_obj)
+        else:
+            title = str(idea)
+
+        if len(title) > 120:
+            title = title[:117] + "..."
+
+        return {"id": idea_id, "title": title}
+
+    def get_tournament_ranks(
+        self,
+        ideas: List[str],
+        idea_type: str,
+        rounds: int = 1,
+        progress_callback: Callable[[int, int], None] = None,
+        details: Optional[List[Dict[str, Any]]] = None,
+        full_tournament_rounds: Optional[int] = None,
+    ) -> dict:
+        """Get tournament ranks using a global Swiss-system tournament.
+
+        Falls back to sequential evaluation for tiny populations to keep behavior deterministic.
         """
 
         # Handle edge case: if there's only one idea or no ideas, return appropriate ranking
         if len(ideas) <= 1:
             return {0: 1500} if len(ideas) == 1 else {}
 
-        max_elo_diff = 100
+        if rounds <= 0:
+            rounds = 1
+
         ranks = {i: 1500 for i in range(len(ideas))}
 
         # Decide whether to enable parallel evaluation
         enable_parallel = (
             os.environ.get("ENABLE_PARALLEL_TOURNAMENT", "1") != "0"
             and len(ideas) >= 4
-            and comparisons >= max(8, len(ideas) * 2)
+            and rounds >= 2
         )
 
-        if not enable_parallel:
-            # Original sequential behavior for small cases
-            for k in range(comparisons):
-                if k < len(ideas):
-                    idea_idx_a = k
-                    other_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
-                    if len(other_indices) == 0:
-                        continue
-                    valid_indices = [idx for idx in other_indices if abs(ranks[idx] - ranks[idea_idx_a]) <= max_elo_diff]
-                    if len(valid_indices) == 0:
-                        idea_idx_b = int(np.random.choice(other_indices, size=1)[0])
-                    else:
-                        idea_idx_b = int(np.random.choice(valid_indices, size=1)[0])
-                else:
-                    if len(ideas) < 2:
-                        continue
-                    a, b = np.random.choice(len(ideas), size=2, replace=False)
-                    idea_idx_a, idea_idx_b = int(a), int(b)
+        match_history: Set[Tuple[int, int]] = set()
+        bye_counts: Dict[int, int] = {}
+        segment_rounds = None
+        if full_tournament_rounds and full_tournament_rounds > 0:
+            segment_rounds = int(full_tournament_rounds)
 
-                idea_a = ideas[idea_idx_a]
-                idea_b = ideas[idea_idx_b]
-                idea_a_obj = idea_a["idea"] if isinstance(idea_a, dict) and "idea" in idea_a else idea_a
-                idea_b_obj = idea_b["idea"] if isinstance(idea_b, dict) and "idea" in idea_b else idea_b
-                idea_a_dict = idea_a_obj.dict() if hasattr(idea_a_obj, 'dict') else idea_a_obj
-                idea_b_dict = idea_b_obj.dict() if hasattr(idea_b_obj, 'dict') else idea_b_obj
+        # Precompute total comparisons for progress reporting
+        total_pairs = 0
+        expected_pairs_per_round = len(ideas) // 2
+        total_pairs = expected_pairs_per_round * rounds
+        completed_pairs = 0
 
-                # Deterministic orientation in sequential mode to keep tests stable
-                winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
-                elo_a, elo_b = self._elo_update(ranks[idea_idx_a], ranks[idea_idx_b], winner)
-                ranks[idea_idx_a] = elo_a
-                ranks[idea_idx_b] = elo_b
+        def report_progress():
+            if progress_callback:
+                try:
+                    progress_callback(completed_pairs, total_pairs)
+                except Exception as e:
+                    print(f"Error in progress callback: {e}")
 
-                if progress_callback:
-                    try:
-                        progress_callback(k + 1, comparisons)
-                    except Exception as e:
-                        print(f"Error in progress callback: {e}")
+        for _round in range(rounds):
+            # For multi-tournament runs we reset Swiss bracket state at each segment,
+            # while keeping accumulated Elo scores.
+            if segment_rounds and _round > 0 and (_round % segment_rounds) == 0:
+                match_history = set()
+                bye_counts = {}
 
-            return ranks
+            pairs, bye_idx = self._generate_swiss_round_pairs(ranks, match_history, bye_counts)
 
-        def select_pairs(snapshot_ranks: Dict[int, float], num_pairs: int) -> List[tuple[int, int]]:
-            pairs: List[tuple[int, int]] = []
-            for k in range(num_pairs):
-                if k < len(ideas):
-                    idea_idx_a = k
-                    other_indices = [idx for idx in range(len(ideas)) if idx != idea_idx_a]
-                    if not other_indices:
-                        continue
-                    valid_indices = [idx for idx in other_indices if abs(snapshot_ranks[idx] - snapshot_ranks[idea_idx_a]) <= max_elo_diff]
-                    if len(valid_indices) == 0:
-                        idea_idx_b = int(np.random.choice(other_indices, size=1)[0])
-                    else:
-                        idea_idx_b = int(np.random.choice(valid_indices, size=1)[0])
-                else:
-                    if len(ideas) < 2:
-                        continue
-                    a, b = np.random.choice(len(ideas), size=2, replace=False)
-                    idea_idx_a, idea_idx_b = int(a), int(b)
-                pairs.append((idea_idx_a, idea_idx_b))
-            return pairs
+            round_pairs = []
+            for idx_a, idx_b in pairs:
+                a_meta = self._extract_idea_meta(ideas[idx_a])
+                b_meta = self._extract_idea_meta(ideas[idx_b])
+                round_pairs.append({
+                    "a_idx": idx_a,
+                    "b_idx": idx_b,
+                    "a_id": a_meta["id"],
+                    "b_id": b_meta["id"],
+                    "a_title": a_meta["title"],
+                    "b_title": b_meta["title"],
+                })
 
-        # Generate pairs based on initial ranks
-        deduped_pairs = select_pairs(ranks, comparisons)
+            round_record = {
+                "round": _round + 1,
+                "pairs": round_pairs,
+            }
+            if segment_rounds:
+                round_record["tournament_index"] = (_round // segment_rounds) + 1
+                round_record["round_in_tournament"] = (_round % segment_rounds) + 1
 
-        # Run parallel evaluation
-        results = parallel_evaluate_pairs(
-            pairs=deduped_pairs,
-            items=ideas,
-            compare_fn=self.compare_ideas,
-            idea_type=idea_type,
-            concurrency=self._max_workers,
-            randomize_presentation=True,
-            progress_callback=progress_callback,
-        )
+            if bye_idx is not None:
+                bye_meta = self._extract_idea_meta(ideas[bye_idx])
+                round_record["bye"] = {
+                    "idx": bye_idx,
+                    "id": bye_meta["id"],
+                    "title": bye_meta["title"],
+                }
 
-        # Update ranks based on results
-        for idx_a, idx_b, winner in results:
-            elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
-            ranks[idx_a] = elo_a
-            ranks[idx_b] = elo_b
+            if details is not None:
+                details.append(round_record)
+
+            if not pairs:
+                continue
+
+            if enable_parallel:
+                def on_pair_complete(_c, _t):
+                    nonlocal completed_pairs
+                    completed_pairs += 1
+                    report_progress()
+
+                results = parallel_evaluate_pairs(
+                    pairs=pairs,
+                    items=ideas,
+                    compare_fn=self.compare_ideas,
+                    idea_type=idea_type,
+                    concurrency=self._max_workers,
+                    randomize_presentation=True,
+                    progress_callback=on_pair_complete,
+                )
+
+                # Update ranks in the deterministic order of generated pairs
+                results_map = {(a, b): w for a, b, w in results}
+                for pair_index, (idx_a, idx_b) in enumerate(pairs):
+                    winner = results_map.get((idx_a, idx_b))
+                    if details is not None and pair_index < len(round_pairs):
+                        round_pairs[pair_index]["winner"] = winner
+                    elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
+                    ranks[idx_a] = elo_a
+                    ranks[idx_b] = elo_b
+            else:
+                for pair_index, (idx_a, idx_b) in enumerate(pairs):
+                    idea_a = ideas[idx_a]
+                    idea_b = ideas[idx_b]
+                    idea_a_obj = idea_a["idea"] if isinstance(idea_a, dict) and "idea" in idea_a else idea_a
+                    idea_b_obj = idea_b["idea"] if isinstance(idea_b, dict) and "idea" in idea_b else idea_b
+                    idea_a_dict = idea_a_obj.dict() if hasattr(idea_a_obj, 'dict') else idea_a_obj
+                    idea_b_dict = idea_b_obj.dict() if hasattr(idea_b_obj, 'dict') else idea_b_obj
+
+                    # Deterministic orientation in sequential mode to keep tests stable
+                    winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
+                    if details is not None and pair_index < len(round_pairs):
+                        round_pairs[pair_index]["winner"] = winner
+                    elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
+                    ranks[idx_a] = elo_a
+                    ranks[idx_b] = elo_b
+                    completed_pairs += 1
+                    report_progress()
 
         return ranks
 
@@ -637,7 +846,7 @@ class Critic(LLMWrapper):
         Compare two ideas using the LLM and determine which is better.
         Returns: "A", "B", "tie", or None if there was an error
         """
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
 
         # Get the item type from the prompt configuration
         item_type = getattr(prompts, "ITEM_TYPE", "ideas")
@@ -706,7 +915,29 @@ class Breeder(LLMWrapper):
         # Don't set temperature directly here, let it come from kwargs
         super().__init__(agent_name=self.agent_name, **kwargs)
         self.mutation_rate = mutation_rate
+        self._thread_local = threading.local()
         print(f"Breeder initialized with mutation_rate={mutation_rate}")
+
+    def _get_thread_ideator(self) -> Ideator:
+        ideator = getattr(self._thread_local, "ideator", None)
+        if ideator is None:
+            ideator = Ideator(
+                provider=self.provider,
+                model_name=self.model_name,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                api_key=self.api_key
+            )
+            for template_id, template_data in self._iter_custom_templates():
+                ideator.register_custom_template(template_id, template_data)
+            self._thread_local.ideator = ideator
+        return ideator
+
+    def register_custom_template(self, template_id: str, template_data: Dict[str, Any]) -> None:
+        super().register_custom_template(template_id, template_data)
+        ideator = getattr(self._thread_local, "ideator", None)
+        if ideator is not None:
+            ideator.register_custom_template(template_id, template_data)
 
     def encode_to_genotype(self, idea: str, idea_type: str) -> str:
         """
@@ -729,7 +960,7 @@ class Breeder(LLMWrapper):
             idea_content = str(idea_text)
 
         # Create encoding prompt based on idea type
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
 
         # Get genotype encoding prompt from template
         prompt_template = prompts.GENOTYPE_ENCODE_PROMPT
@@ -774,15 +1005,8 @@ class Breeder(LLMWrapper):
             genotype = self.encode_to_genotype(parent, idea_type)
             parent_genotypes.append(genotype)
 
-        # We need to get an instance of Ideator to use the new helper methods
-        # Use the same configuration as this Breeder instance
-        ideator = Ideator(
-            provider=self.provider,
-            model_name=self.model_name,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            api_key=self.api_key
-        )
+        # Reuse one helper ideator per worker thread to avoid repeated client setup.
+        ideator = self._get_thread_ideator()
 
         # Step 2: Sample 50% at random (handled in generate_context_from_parents)
         # Step 3 & 4: Using the sample to create specific prompt and generate idea
@@ -858,7 +1082,7 @@ class Oracle(LLMWrapper):
                 history_text += f"Idea {gen_idx}.{idea_idx}: {idea_content}\n"
 
         # Get prompts for the idea type
-        prompts = get_prompts(idea_type)
+        prompts = self._resolve_prompts(idea_type)
 
         # Get Oracle-specific prompts from the template
         mode_instruction = prompts.ORACLE_INSTRUCTION

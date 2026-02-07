@@ -23,7 +23,13 @@ class UserEvolutionState:
         "history": []
     })
     latest_data: list = field(default_factory=list)
+    history_version: int = 0
+    last_sent_history_version: int = -1
     last_activity: datetime = field(default_factory=datetime.utcnow)
+    run_owner_id: Optional[str] = None
+    run_last_write: float = 0.0
+    run_last_heartbeat: float = 0.0
+    heartbeat_task: Optional[asyncio.Task] = None
 
     def reset_queue(self):
         """Clear the queue to avoid stale updates."""
@@ -41,7 +47,27 @@ class UserEvolutionState:
             "is_running": False,
             "history": []
         }
+        self.history_version = 0
+        self.last_sent_history_version = -1
         self.reset_queue()
+
+    def reset_run_tracking(self):
+        """Reset run coordination metadata."""
+        self.run_owner_id = None
+        self.run_last_write = 0.0
+        self.run_last_heartbeat = 0.0
+        self.stop_heartbeat()
+
+    def start_heartbeat(self, task: asyncio.Task):
+        """Track a heartbeat task for this user's run."""
+        self.stop_heartbeat()
+        self.heartbeat_task = task
+
+    def stop_heartbeat(self):
+        """Stop any active heartbeat task."""
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+            self.heartbeat_task = None
 
 
 class UserStateManager:

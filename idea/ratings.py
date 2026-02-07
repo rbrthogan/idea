@@ -66,8 +66,6 @@ def parallel_evaluate_pairs(
                         w = "B"
                     elif w == "B":
                         w = "A"
-                    elif w == "B":
-                        w = "A"
                 else:
                     w = compare_fn(a, b, idea_type)
                 return ia, ib, w

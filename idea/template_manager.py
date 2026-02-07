@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 import yaml
+import re
 from datetime import datetime
 
 from idea.prompts.loader import list_available_templates, validate_template
@@ -63,6 +64,63 @@ class TemplateUpdateRequest(BaseModel):
 class TemplateGenerateRequest(BaseModel):
     """Request model for generating a draft template"""
     idea_type_suggestion: str = Field(..., description="Brief description of the idea type to generate a template for")
+
+
+def _normalize_template_id(name: str) -> str:
+    """Convert a template name to a safe template ID."""
+    normalized = name.lower().replace("-", "_")
+    normalized = re.sub(r"\s+", "_", normalized)
+    normalized = re.sub(r"[^a-z0-9_]", "", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized or "custom_template"
+
+
+async def _generate_unique_template_id(user_id: str, template_name: str) -> str:
+    """Generate a user template ID that does not collide with system or existing user IDs."""
+    base_id = _normalize_template_id(template_name)
+    taken_ids = set(list_available_templates().keys())
+
+    candidate = base_id
+    suffix = 2
+    while candidate in taken_ids or await db.get_user_template(user_id, candidate):
+        candidate = f"{base_id}_{suffix}"
+        suffix += 1
+
+    return candidate
+
+
+def _coerce_template_payload(template_id: str, source: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract/normalize template fields from stored payloads (Firestore docs may include extra keys)."""
+    prompts = source.get("prompts") or {}
+    metadata = source.get("metadata") or {}
+
+    payload = {
+        "name": source.get("name", template_id.replace("_", " ").title()),
+        "description": source.get("description", ""),
+        "version": source.get("version", "1.0.0"),
+        "author": source.get("author", "User"),
+        "created_date": source.get("created_date", datetime.now().strftime("%Y-%m-%d")),
+        "metadata": {
+            "item_type": metadata.get("item_type", "custom ideas")
+        },
+        "prompts": {
+            "context": prompts.get("context", ""),
+            "specific_prompt": prompts.get("specific_prompt", ""),
+            "idea": prompts.get("idea", ""),
+            "format": prompts.get("format", ""),
+            "critique": prompts.get("critique", ""),
+            "refine": prompts.get("refine", ""),
+            "breed": prompts.get("breed", ""),
+            "genotype_encode": prompts.get("genotype_encode", "")
+        },
+        "comparison_criteria": source.get("comparison_criteria", [])
+    }
+
+    special_requirements = source.get("special_requirements")
+    if special_requirements:
+        payload["special_requirements"] = special_requirements
+
+    return payload
 
 
 def get_template_starter() -> Dict[str, Any]:
@@ -225,17 +283,8 @@ async def get_template(template_id: str, user: UserInfo = Depends(require_auth))
 async def create_template(request: TemplateCreateRequest, user: UserInfo = Depends(require_auth)):
     """Create a new template (saved to Firestore for the user)"""
     try:
-        # Generate template ID from name
-        template_id = request.name.lower().replace(" ", "_").replace("-", "_")
-        template_id = "".join(c for c in template_id if c.isalnum() or c == "_")
-
-        # Check if user already has a template with this ID
-        existing = await db.get_user_template(user.uid, template_id)
-        if existing:
-            return JSONResponse({
-                "status": "error",
-                "message": f"Template '{template_id}' already exists"
-            }, status_code=400)
+        # Generate a safe, non-colliding template ID
+        template_id = await _generate_unique_template_id(user.uid, request.name)
 
         # Build template data
         template_data = {
@@ -290,17 +339,23 @@ async def create_template(request: TemplateCreateRequest, user: UserInfo = Depen
 
 
 @router.put("/{template_id}")
-async def update_template(template_id: str, request: TemplateUpdateRequest):
-    """Update an existing template"""
+async def update_template(template_id: str, request: TemplateUpdateRequest, user: UserInfo = Depends(require_auth)):
+    """Update an existing user template."""
     try:
         template_path = TEMPLATES_DIR / f"{template_id}.yaml"
 
-        if not template_path.exists():
+        # System templates are read-only.
+        if template_path.exists() or template_id in get_core_templates():
+            return JSONResponse({
+                "status": "error",
+                "message": "System templates are read-only. Duplicate the template to customize it."
+            }, status_code=400)
+
+        existing = await db.get_user_template(user.uid, template_id)
+        if not existing:
             raise HTTPException(status_code=404, detail="Template not found")
 
-        # Load existing template
-        with open(template_path, 'r', encoding='utf-8') as f:
-            template_data = yaml.safe_load(f)
+        template_data = _coerce_template_payload(template_id, existing)
 
         # Update fields that were provided
         if request.name is not None:
@@ -348,13 +403,13 @@ async def update_template(template_id: str, request: TemplateUpdateRequest):
                 "message": f"Template validation failed: {e}"
             }, status_code=400)
 
-        # Save updated template
-        with open(template_path, 'w', encoding='utf-8') as f:
-            yaml.dump(template_data, f, default_flow_style=False, sort_keys=False, indent=2)
+        # Save updated user template
+        await db.save_user_template(user.uid, template_id, template_data)
 
         return JSONResponse({
             "status": "success",
-            "message": f"Template '{template_id}' updated successfully"
+            "message": f"Template '{template_id}' updated successfully",
+            "template_id": template_id
         })
 
     except HTTPException:

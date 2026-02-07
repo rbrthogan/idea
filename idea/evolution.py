@@ -8,9 +8,9 @@ import json
 from pathlib import Path
 from datetime import datetime
 from idea.models import Idea
-from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
+from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P, PROGRESS_JITTER_MAX_SECONDS
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
-from idea.prompts.loader import list_available_templates, get_prompts
+from idea.prompts.loader import list_available_templates, get_prompts, get_prompts_from_dict
 from idea.diversity import DiversityCalculator
 from idea import database as db
 
@@ -43,8 +43,9 @@ class EvolutionEngine:
         model_type: str = "gemini-2.0-flash",
         creative_temp: float = DEFAULT_CREATIVE_TEMP,
         top_p: float = DEFAULT_TOP_P,
-        tournament_size: int = 5,
-        tournament_comparisons: int = 35,
+        tournament_rounds: int = 1,
+        tournament_count: Optional[float] = None,
+        full_tournament_rounds: Optional[int] = None,
         thinking_budget: Optional[int] = None,
         max_budget: Optional[float] = None,
         mutation_rate: float = 0.2,
@@ -55,10 +56,19 @@ class EvolutionEngine:
         self.user_id = user_id  # User ID for scoped storage
         self.idea_type = idea_type or get_default_template_id()
         self.template_data = template_data  # Store custom template data for LLM agents
+        self._template_prompt_wrapper = None
         self.pop_size = pop_size
         self.generations = generations
-        self.tournament_size = tournament_size
-        self.tournament_comparisons = tournament_comparisons
+        if full_tournament_rounds is None or full_tournament_rounds <= 0:
+            full_tournament_rounds = max(1, pop_size - 1)
+        if tournament_rounds is None or tournament_rounds <= 0:
+            tournament_rounds = 1
+        self.full_tournament_rounds = int(full_tournament_rounds)
+        self.tournament_rounds = int(tournament_rounds)
+        if tournament_count is None:
+            self.tournament_count = self.tournament_rounds / self.full_tournament_rounds
+        else:
+            self.tournament_count = float(tournament_count)
         self.thinking_budget = thinking_budget
         self.max_budget = max_budget
         self.mutation_rate = mutation_rate
@@ -82,10 +92,19 @@ class EvolutionEngine:
 
         self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
 
+        # Keep custom template data scoped to this engine instance (no global cross-user cache coupling).
+        if self.template_data:
+            self.ideator.register_custom_template(self.idea_type, self.template_data)
+            self.formatter.register_custom_template(self.idea_type, self.template_data)
+            self.critic.register_custom_template(self.idea_type, self.template_data)
+            self.breeder.register_custom_template(self.idea_type, self.template_data)
+            self.oracle.register_custom_template(self.idea_type, self.template_data)
+
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
         self.specific_prompts = []  # List of specific prompts generated from contexts (translation layer)
         self.breeding_prompts = []  # List of lists: breeding prompts for each generation (empty for gen 0)
+        self.tournament_history = []  # List of tournament details per generation
 
         # Initialize diversity calculator
         self.diversity_calculator = DiversityCalculator(api_key=api_key)
@@ -164,8 +183,8 @@ class EvolutionEngine:
                     # Small stagger to prevent "thundering herd" completion where all parallel tasks
                     # finish at the exact same millisecond, causing the UI to jump from 0% to 100% instantly.
                     # This makes the progress bar feel smoother.
-                    if len(tasks) > 1:
-                        await asyncio.sleep(random.uniform(0, 0.5))
+                    if len(tasks) > 1 and PROGRESS_JITTER_MAX_SECONDS > 0:
+                        await asyncio.sleep(random.uniform(0, PROGRESS_JITTER_MAX_SECONDS))
 
                     result = await task_func()
                     return index, result
@@ -223,6 +242,14 @@ class EvolutionEngine:
         self.stop_requested = False
         self.is_stopped = False
 
+    def _get_template_prompts(self):
+        """Resolve prompt wrapper for current template, preferring the engine-scoped custom template snapshot."""
+        if self.template_data:
+            if self._template_prompt_wrapper is None:
+                self._template_prompt_wrapper = get_prompts_from_dict(self.template_data)
+            return self._template_prompt_wrapper
+        return get_prompts(self.idea_type)
+
     def get_checkpoint_state(self) -> Dict[str, Any]:
         """
         Serialize the current evolution state for checkpointing.
@@ -245,7 +272,7 @@ class EvolutionEngine:
                     result[key] = value
             return result
 
-        return {
+        state = {
             'checkpoint_id': self.checkpoint_id,
             'checkpoint_time': datetime.now().isoformat(),
             'status': 'paused' if self.stop_requested else 'in_progress',
@@ -258,8 +285,9 @@ class EvolutionEngine:
                 'model_type': self.model_type,
                 'creative_temp': self.creative_temp,
                 'top_p': self.top_p,
-                'tournament_size': self.tournament_size,
-                'tournament_comparisons': self.tournament_comparisons,
+                'tournament_rounds': self.tournament_rounds,
+                'tournament_count': self.tournament_count,
+                'full_tournament_rounds': self.full_tournament_rounds,
                 'thinking_budget': self.thinking_budget,
                 'max_budget': self.max_budget,
                 'mutation_rate': self.mutation_rate,
@@ -272,6 +300,7 @@ class EvolutionEngine:
             'contexts': self.contexts,
             'specific_prompts': self.specific_prompts,
             'breeding_prompts': self.breeding_prompts,
+            'tournament_history': self.tournament_history,
             'diversity_history': self.diversity_history,
 
             # Cost tracking
@@ -281,6 +310,9 @@ class EvolutionEngine:
             # Token counts from agents
             'token_counts': self.get_total_token_count(),
         }
+        if self.template_data:
+            state['template_data'] = self.template_data
+        return state
 
     def set_name(self, name: str):
         """Set the human-readable name for this evolution."""
@@ -289,15 +321,18 @@ class EvolutionEngine:
 
     def generate_default_name(self) -> str:
         """Generate a default name based on template and date."""
-        # Get template display name
-        try:
-            templates = list_available_templates()
-            template_info = templates.get(self.idea_type, {})
-            template_name = template_info.get('name', self.idea_type)
-        except Exception:
-            template_name = self.idea_type or 'Evolution'
+        if self.template_data and self.template_data.get("name"):
+            template_name = self.template_data.get("name")
+        else:
+            # Get template display name
+            try:
+                templates = list_available_templates()
+                template_info = templates.get(self.idea_type, {})
+                template_name = template_info.get('name', self.idea_type)
+            except Exception:
+                template_name = self.idea_type or 'Evolution'
 
-        # Format date nicely
+        # Get template display name
         date_str = datetime.now().strftime('%b %d, %Y')
         return f"{template_name} - {date_str}"
 
@@ -414,6 +449,18 @@ class EvolutionEngine:
                 print(f"❌ Evolution not found: {evolution_id}")
                 return None
 
+            config = state.get("config", {})
+            idea_type = config.get("idea_type")
+            if idea_type and not state.get("template_data"):
+                templates = list_available_templates()
+                is_valid_system_template = (
+                    idea_type in templates and "error" not in templates.get(idea_type, {})
+                )
+                if not is_valid_system_template:
+                    user_template = await db.get_user_template(user_id, idea_type)
+                    if user_template:
+                        state["template_data"] = user_template
+
             engine = cls._restore_from_state(state, api_key=api_key, user_id=user_id)
             return engine
         except Exception as e:
@@ -464,6 +511,9 @@ class EvolutionEngine:
     def _restore_from_state(cls, state: Dict[str, Any], api_key: Optional[str] = None, user_id: Optional[str] = None) -> 'EvolutionEngine':
         """Restore an EvolutionEngine from a state dictionary."""
         config = state.get('config', {})
+        tournament_rounds = config.get('tournament_rounds', 1)
+        full_tournament_rounds = config.get('full_tournament_rounds')
+        tournament_count = config.get('tournament_count')
 
         # Create a new engine with the saved configuration
         engine = cls(
@@ -473,13 +523,15 @@ class EvolutionEngine:
             model_type=config.get('model_type', 'gemini-2.0-flash'),
             creative_temp=config.get('creative_temp', DEFAULT_CREATIVE_TEMP),
             top_p=config.get('top_p', DEFAULT_TOP_P),
-            tournament_size=config.get('tournament_size', 5),
-            tournament_comparisons=config.get('tournament_comparisons', 35),
+            tournament_rounds=tournament_rounds,
+            tournament_count=tournament_count,
+            full_tournament_rounds=full_tournament_rounds,
             thinking_budget=config.get('thinking_budget'),
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
             api_key=api_key,
             user_id=user_id or state.get('user_id'),
+            template_data=state.get('template_data'),
         )
 
         # Restore evolution identity
@@ -494,6 +546,7 @@ class EvolutionEngine:
         engine.contexts = state.get('contexts', [])
         engine.specific_prompts = state.get('specific_prompts', [])
         engine.breeding_prompts = state.get('breeding_prompts', [])
+        engine.tournament_history = state.get('tournament_history', [])
         engine.diversity_history = state.get('diversity_history', [])
         engine.avg_idea_cost = state.get('avg_idea_cost', 0.0)
         engine.avg_tournament_cost = state.get('avg_tournament_cost', 0.0)
@@ -587,7 +640,7 @@ class EvolutionEngine:
             idea_text, specific_prompt = await asyncio.to_thread(
                 self.ideator.generate_idea_from_context, context_pool, self.idea_type
             )
-            return {"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []}, specific_prompt
+            return context_pool, {"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []}, specific_prompt
 
         for i in range(needed_count):
             if self.stop_requested:
@@ -602,7 +655,8 @@ class EvolutionEngine:
                 "progress": ((existing_count + i) / self.pop_size) * 50  # First half of gen 0
             })
 
-            idea, prompt = await generate_single_seed()
+            context_pool, idea, prompt = await generate_single_seed()
+            self.contexts.append(context_pool)
             self.population.append(idea)
             self.specific_prompts.append(prompt)
 
@@ -704,8 +758,8 @@ class EvolutionEngine:
             })
 
             # Calculate steps for progress tracking
-            est_tournament_groups = math.ceil(self.pop_size / self.tournament_size)
-            steps_per_gen = self.pop_size + est_tournament_groups + 1
+            est_tournament_rounds = max(1, self.tournament_rounds)
+            steps_per_gen = self.pop_size + est_tournament_rounds + 1
             remaining_gens = self.generations - start_gen
             total_steps = remaining_gens * steps_per_gen
             current_step = 0
@@ -742,12 +796,6 @@ class EvolutionEngine:
 
                 print(f"Starting generation {gen + 1}...")
 
-                # Adjust tournament size if needed
-                actual_tournament_size = self.tournament_size
-                if len(self.population) < 2 * actual_tournament_size:
-                    actual_tournament_size = max(3, len(self.population) // 2)
-                    print(f"Adjusting tournament size to {actual_tournament_size}")
-
                 new_population = []
                 generation_breeding_prompts = []
                 random.shuffle(self.population)
@@ -783,29 +831,19 @@ class EvolutionEngine:
                 elite_idea = None
                 elite_breeding_prompt = None
 
-                # Run tournaments
-                print(f"Running tournaments across {len(self.population)} ideas...")
-                global_ranks = {}
-
-                tournament_groups = []
-                for i in range(0, len(self.population), actual_tournament_size):
-                    group = self.population[i:i + actual_tournament_size]
-                    tournament_groups.append((i, group))
-
-                for start_idx, group in tournament_groups:
-                    if self.stop_requested:
-                        break
-                    ranks = await asyncio.to_thread(
-                        self.critic.get_tournament_ranks,
-                        group,
-                        self.idea_type,
-                        self.tournament_comparisons,
-                        None
-                    )
-                    for idea_idx, rank in ranks.items():
-                        global_population_idx = start_idx + idea_idx
-                        if global_population_idx < len(self.population):
-                            global_ranks[global_population_idx] = rank
+                # Run global Swiss tournament
+                print(f"Running Swiss tournament across {len(self.population)} ideas for {self.tournament_rounds} rounds...")
+                tournament_rounds_details: List[Dict[str, Any]] = []
+                global_ranks = await asyncio.to_thread(
+                    self.critic.get_tournament_ranks,
+                    self.population,
+                    self.idea_type,
+                    self.tournament_rounds,
+                    None,
+                    tournament_rounds_details,
+                    self.full_tournament_rounds,
+                )
+                self._set_tournament_history(gen + 1, tournament_rounds_details)
 
                 if self.stop_requested:
                     continue  # Will be caught at top of next iteration
@@ -863,7 +901,7 @@ class EvolutionEngine:
                         oracle_result = self.oracle.analyze_and_diversify(self.history, self.idea_type)
                         replace_idx = await self._find_least_interesting_idea_idx(self.population)
                         idea_prompt = oracle_result["idea_prompt"]
-                        prompts = get_prompts(self.idea_type)
+                        prompts = self._get_template_prompts()
                         extended_prompt = idea_prompt
                         if hasattr(prompts, 'template') and prompts.template.special_requirements:
                             extended_prompt = f"{idea_prompt}\n\nConstraints:\n{prompts.template.special_requirements}"
@@ -980,13 +1018,17 @@ class EvolutionEngine:
             for generation in self.history:
                 all_ideas.extend(generation)
 
+            precomputed_embeddings = None
             # Ensure we have embeddings for all ideas (this will populate our storage)
             if all_ideas:
-                await self._get_or_compute_embeddings_for_ideas(all_ideas)
+                precomputed_embeddings = await self._get_or_compute_embeddings_for_ideas(all_ideas)
                 print(f"📦 Embedding storage now contains {len(self.all_embeddings)} embeddings")
 
             # Calculate diversity using the standard diversity calculator
-            diversity_data = await self.diversity_calculator.calculate_diversity(self.history)
+            diversity_data = await self.diversity_calculator.calculate_diversity(
+                self.history,
+                precomputed_embeddings=precomputed_embeddings,
+            )
             self.diversity_history.append(diversity_data)
 
             # Print diversity summary to logs
@@ -997,6 +1039,27 @@ class EvolutionEngine:
         except Exception as e:
             print(f"Warning: Diversity calculation failed: {e}")
             return {"enabled": True, "error": str(e)}
+
+    def _set_tournament_history(self, generation: int, rounds: List[Dict[str, Any]]) -> None:
+        """
+        Store Swiss tournament details for a generation.
+
+        Args:
+            generation: Generation index the tournament ran on
+            rounds: List of round details from the tournament
+        """
+        entry = {
+            "generation": generation,
+            "rounds": rounds
+        }
+
+        for idx, existing in enumerate(self.tournament_history):
+            if existing.get("generation") == generation:
+                self.tournament_history[idx] = entry
+                break
+        else:
+            self.tournament_history.append(entry)
+        self.tournament_history.sort(key=lambda e: e.get("generation", 0))
 
     async def _find_least_interesting_idea_idx(self, current_generation: List[str]) -> int:
         """
@@ -1185,19 +1248,19 @@ class EvolutionEngine:
             print("Generating initial population (Generation 0)...")
             self.population = []
             self.specific_prompts = []
+            self.contexts = []
 
-            # Calculate total steps: Gen 0 (Seed + Refine) + Gen 1..N (Tournaments + Breed+Refine + Elite)
-            # We estimate tournament groups based on current pop_size
-            est_tournament_groups = math.ceil(self.pop_size / self.tournament_size)
-            # Each breeding generation: tournament_groups + pop_size breeding + 1 for elite processing
-            steps_per_gen = self.pop_size + est_tournament_groups + 1
+            # Calculate total steps: Gen 0 (Seed + Refine) + Gen 1..N (Swiss Rounds + Breed+Refine + Elite)
+            est_tournament_rounds = max(1, self.tournament_rounds)
+            # Each breeding generation: tournament_rounds + pop_size breeding + 1 for elite processing
+            steps_per_gen = self.pop_size + est_tournament_rounds + 1
             total_steps = (2 * self.pop_size) + (self.generations * steps_per_gen)
 
             # --- Parallel Seeding ---
             async def generate_single_seed():
                 context_pool = await asyncio.to_thread(self.ideator.generate_context, self.idea_type)
                 idea_text, specific_prompt = await asyncio.to_thread(self.ideator.generate_idea_from_context, context_pool, self.idea_type)
-                return {"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []}, specific_prompt
+                return context_pool, {"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []}, specific_prompt
 
             seed_tasks = [generate_single_seed for _ in range(self.pop_size)]
 
@@ -1219,7 +1282,8 @@ class EvolutionEngine:
             if self.stop_requested:
                 # Handle stop during seeding
                 completed_results = [r for r in seed_results if r is not None]
-                for idea, prompt in completed_results:
+                for context_pool, idea, prompt in completed_results:
+                    self.contexts.append(context_pool)
                     self.population.append(idea)
                     self.specific_prompts.append(prompt)
 
@@ -1236,7 +1300,8 @@ class EvolutionEngine:
                 return
 
             # Unpack results
-            for idea, prompt in seed_results:
+            for context_pool, idea, prompt in seed_results:
+                self.contexts.append(context_pool)
                 self.population.append(idea)
                 self.specific_prompts.append(prompt)
 
@@ -1367,12 +1432,6 @@ class EvolutionEngine:
 
                 print(f"Starting generation {gen + 1}...")
 
-                # Adjust tournament size if population is too small
-                actual_tournament_size = self.tournament_size
-                if len(self.population) < 2 * actual_tournament_size:
-                    actual_tournament_size = max(3, len(self.population) // 2)
-                    print(f"Adjusting tournament size to {actual_tournament_size} due to small population")
-
                 new_population = []
                 generation_breeding_prompts = []  # Collect breeding prompts for this generation
                 random.shuffle(self.population)
@@ -1432,20 +1491,13 @@ class EvolutionEngine:
                 elite_idea = None
                 elite_breeding_prompt = None
 
-                # Step 1: Run tournaments on ALL groups to create global ranking
-                print(f"Running tournaments across {len(self.population)} ideas in groups of {actual_tournament_size}...")
+                # Step 1: Run global Swiss tournament to create global ranking
+                print(f"Running Swiss tournament across {len(self.population)} ideas for {self.tournament_rounds} rounds...")
 
                 # Measure tournament cost
                 tournament_start_cost = self.get_total_token_count()['cost']['total_cost']
 
                 global_ranks = {}
-                global_id_to_index = {}  # Map from original population index to idea
-
-                # Prepare tournament tasks
-                tournament_groups = []
-                for i in range(0, len(self.population), actual_tournament_size):
-                    group = self.population[i : i + actual_tournament_size]
-                    tournament_groups.append((i, group))
 
                 # Calculate base steps for this generation (needed for progress calculation)
                 # Gen 0 (2*pop) + Previous Gens (gen * steps_per_gen)
@@ -1458,39 +1510,35 @@ class EvolutionEngine:
                     "is_running": True,
                 }
 
-                async def run_tournament_group(start_idx, group):
-                    # Capture the loop from the outer async scope for thread-safe callbacks
-                    loop = asyncio.get_running_loop()
+                # Capture the loop from the outer async scope for thread-safe callbacks
+                loop = asyncio.get_running_loop()
 
-                    def thread_safe_callback(c, t):
-                        async def send_update():
-                            await progress_callback({
-                                **gen_base_progress_info,
-                                "progress": ((current_gen_start_step + (start_idx // actual_tournament_size)) / total_steps) * 100,
-                                "status": f"Running tournament group {start_idx // actual_tournament_size + 1}... ({c}/{t} comparisons)",
-                            })
+                pairs_per_round = max(1, len(self.population) // 2)
+                total_pairs = pairs_per_round * max(1, self.tournament_rounds)
 
-                        asyncio.run_coroutine_threadsafe(send_update(), loop)
+                def thread_safe_callback(completed, total):
+                    round_num = min(self.tournament_rounds, (completed // pairs_per_round) + 1)
+                    tournament_fraction = (completed / total_pairs) if total_pairs else 1.0
+                    async def send_update():
+                        await progress_callback({
+                            **gen_base_progress_info,
+                            "progress": ((current_gen_start_step + (tournament_fraction * max(1, self.tournament_rounds))) / total_steps) * 100,
+                            "status_message": f"Running Swiss round {round_num}/{self.tournament_rounds}...",
+                        })
 
-                    ranks = await asyncio.to_thread(
-                        self.critic.get_tournament_ranks,
-                        group,
-                        self.idea_type,
-                        self.tournament_comparisons,
-                        thread_safe_callback
-                    )
-                    return start_idx, ranks
+                    asyncio.run_coroutine_threadsafe(send_update(), loop)
 
-                tournament_tasks = [lambda i=i, g=g: run_tournament_group(i, g) for i, g in tournament_groups]
-
-                tournament_results = await self._run_batch_with_progress(
-                    tasks=tournament_tasks,
-                    progress_callback=progress_callback,
-                    base_progress_info=gen_base_progress_info,
-                    start_step=current_gen_start_step,
-                    total_steps=total_steps,
-                    description_template="Running tournament group {completed}/{total}..."
+                tournament_rounds_details: List[Dict[str, Any]] = []
+                global_ranks = await asyncio.to_thread(
+                    self.critic.get_tournament_ranks,
+                    self.population,
+                    self.idea_type,
+                    self.tournament_rounds,
+                    thread_safe_callback,
+                    tournament_rounds_details,
+                    self.full_tournament_rounds,
                 )
+                self._set_tournament_history(gen + 1, tournament_rounds_details)
 
                 if self.stop_requested:
                      # Handle stop during tournaments
@@ -1508,27 +1556,12 @@ class EvolutionEngine:
                     })
                      return
 
-                # Process results
-                for result in tournament_results:
-                    if result is None: continue
-                    start_idx, group_ranks = result
-
-                    print(f"Tournament group {start_idx//actual_tournament_size + 1} rankings:")
-                    for idea_idx, rank in sorted(group_ranks.items(), key=lambda x: x[1], reverse=True):
-                        # Extract title from the idea object within the dictionary
-                        # The group was self.population[start_idx : start_idx + actual_tournament_size]
-                        # idea_idx is relative to the group (0..N)
-
-                        # Need to retrieve the actual idea object to print title
-                        # We can get it from self.population
-                        global_population_idx = start_idx + idea_idx
-                        if global_population_idx < len(self.population):
-                            idea_obj = self.population[global_population_idx]["idea"]
-                            title = idea_obj.title if hasattr(idea_obj, 'title') else "Untitled"
-                            print(f"  {title} - ELO {rank}")
-
-                            global_ranks[global_population_idx] = rank
-                            global_id_to_index[global_population_idx] = global_population_idx
+                # Log top ranks for transparency
+                print("Swiss tournament rankings:")
+                for idea_idx, rank in sorted(global_ranks.items(), key=lambda x: x[1], reverse=True):
+                    idea_obj = self.population[idea_idx]["idea"]
+                    title = idea_obj.title if hasattr(idea_obj, 'title') else "Untitled"
+                    print(f"  {title} - ELO {rank}")
 
                 # Update average tournament cost
                 tournament_end_cost = self.get_total_token_count()['cost']['total_cost']
@@ -1580,7 +1613,7 @@ class EvolutionEngine:
 
                 # Base steps calculation
                 # Start of breeding is after tournaments
-                breeding_start_step = current_gen_start_step + len(tournament_groups)
+                breeding_start_step = current_gen_start_step + max(1, self.tournament_rounds)
 
                 # Add elite progress if any
                 current_gen_base = 1 if elite_processed else 0
@@ -1724,7 +1757,7 @@ class EvolutionEngine:
                         idea_prompt = oracle_result["idea_prompt"]
 
                         # Get the special requirements and extend the Oracle prompt with them
-                        prompts = get_prompts(self.idea_type)
+                        prompts = self._get_template_prompts()
                         extended_prompt = idea_prompt
 
                         # If there are special requirements, append them to the Oracle prompt

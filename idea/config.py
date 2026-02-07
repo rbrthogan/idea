@@ -63,3 +63,12 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")
+
+# Run coordination / resilience
+RUN_LEASE_SECONDS = int(os.environ.get("RUN_LEASE_SECONDS", 90))
+RUN_HEARTBEAT_SECONDS = int(os.environ.get("RUN_HEARTBEAT_SECONDS", 15))
+RUN_STATE_WRITE_INTERVAL_SECONDS = float(os.environ.get("RUN_STATE_WRITE_INTERVAL_SECONDS", 1.0))
+GLOBAL_MAX_ACTIVE_RUNS = int(os.environ.get("GLOBAL_MAX_ACTIVE_RUNS", 0))
+
+# Progress update smoothing jitter. Keep default at 0 for throughput.
+PROGRESS_JITTER_MAX_SECONDS = float(os.environ.get("PROGRESS_JITTER_MAX_SECONDS", 0.0))

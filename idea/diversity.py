@@ -1,4 +1,5 @@
 import os
+import hashlib
 import numpy as np
 from typing import List, Dict, Any, Optional
 from google import genai
@@ -21,6 +22,7 @@ class DiversityCalculator:
         """Initialize the diversity calculator with Gemini client."""
         # Use provided key or fallback to environment variable
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.embedding_model = os.environ.get("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 
         if not self.api_key:
             logger.warning("GEMINI_API_KEY not found. Diversity calculation will be disabled.")
@@ -35,6 +37,17 @@ class DiversityCalculator:
 
         # Cache for embeddings to avoid re-computing for same content
         self._embedding_cache = {}
+        # Fallback models to try if the primary model fails or returns no embeddings
+        fallback_models = [
+            "models/gemini-embedding-001",
+            "gemini-embedding-001",
+            "models/text-embedding-004",
+            "text-embedding-004",
+            "gemini-embedding-exp-03-07",
+        ]
+        self._embedding_models = [self.embedding_model] + [
+            model for model in fallback_models if model != self.embedding_model
+        ]
 
     def is_enabled(self) -> bool:
         """Check if diversity calculation is available."""
@@ -87,30 +100,72 @@ class DiversityCalculator:
         if not self.client:
             return None
 
-        # Use text hash as cache key
-        cache_key = hash(text)
+        cleaned_text = (text or "").strip()
+        if not cleaned_text:
+            return None
+
+        # Use stable text hash as cache key
+        cache_key = hashlib.sha256(cleaned_text.encode("utf-8")).hexdigest()
         if cache_key in self._embedding_cache:
             return self._embedding_cache[cache_key]
 
-        try:
-            # Generate embedding using Gemini
-            result = self.client.models.embed_content(
-                model="gemini-embedding-exp-03-07",
-                contents=text,
-                config=types.EmbedContentConfig(task_type="CLUSTERING")
-            )
+        def _extract_embedding(result) -> Optional[np.ndarray]:
+            if result is None:
+                return None
+            # Newer responses may include embeddings list
+            embeddings = getattr(result, "embeddings", None)
+            if embeddings:
+                candidate = embeddings[0]
+                values = getattr(candidate, "values", None)
+                if values is None and isinstance(candidate, dict):
+                    values = candidate.get("values")
+                if values is None:
+                    values = candidate
+                return np.array(values)
+            # Some responses may include a single embedding field
+            embedding = getattr(result, "embedding", None)
+            if embedding is not None:
+                values = getattr(embedding, "values", None)
+                if values is None and isinstance(embedding, dict):
+                    values = embedding.get("values")
+                if values is None:
+                    values = embedding
+                return np.array(values)
+            return None
 
-            if result.embeddings and len(result.embeddings) > 0:
-                # Convert to numpy array
-                embedding = np.array(result.embeddings[0].values)
-                self._embedding_cache[cache_key] = embedding
-                return embedding
+        try:
+            last_error = None
+            for model_name in self._embedding_models:
+                try:
+                    # Try embedding call with single string
+                    result = self.client.models.embed_content(
+                        model=model_name,
+                        contents=cleaned_text,
+                        config=types.EmbedContentConfig(task_type="CLUSTERING")
+                    )
+                    embedding = _extract_embedding(result)
+                    if embedding is None:
+                        # Some SDK versions expect a list of contents
+                        result = self.client.models.embed_content(
+                            model=model_name,
+                            contents=[cleaned_text],
+                            config=types.EmbedContentConfig(task_type="CLUSTERING")
+                        )
+                        embedding = _extract_embedding(result)
+                    if embedding is not None:
+                        self._embedding_cache[cache_key] = embedding
+                        return embedding
+                except Exception as e:
+                    last_error = e
+                    continue
+            if last_error:
+                logger.error(f"Error getting embedding from Gemini: {last_error}")
             else:
                 logger.warning("No embeddings returned from Gemini API")
-                return None
+            return None
 
         except Exception as e:
-            logger.error(f"Error getting embedding from Gemini: {e}")
+            logger.error(f"Unexpected error getting embedding from Gemini: {e}")
             return None
 
     async def _get_embeddings_batch(self, texts: List[str]) -> List[Optional[np.ndarray]]:
@@ -154,20 +209,16 @@ class DiversityCalculator:
         if len(embeddings) < 2:
             return 0.0
 
-        n = len(embeddings)
-        total_distance = 0.0
-        pair_count = 0
-
-        # Calculate pairwise distances
-        for i in range(n):
-            for j in range(i + 1, n):
-                # Euclidean distance
-                distance = np.sqrt(np.sum((embeddings[i] - embeddings[j]) ** 2))
-                total_distance += distance
-                pair_count += 1
-
-        # Return mean square distance
-        return total_distance / pair_count if pair_count > 0 else 0.0
+        # Vectorized pairwise Euclidean distance computation.
+        matrix = np.array(embeddings)
+        if matrix.ndim != 2 or matrix.shape[0] < 2:
+            return 0.0
+        deltas = matrix[:, None, :] - matrix[None, :, :]
+        distances = np.linalg.norm(deltas, axis=2)
+        upper = np.triu_indices(matrix.shape[0], k=1)
+        if upper[0].size == 0:
+            return 0.0
+        return float(np.mean(distances[upper]))
 
     def _calculate_inter_generation_diversity(self, history_embeddings: List[List[np.ndarray]]) -> Optional[float]:
         """
@@ -198,7 +249,11 @@ class DiversityCalculator:
 
         return self._calculate_mean_square_distance(centroids)
 
-    async def calculate_diversity(self, history: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    async def calculate_diversity(
+        self,
+        history: List[List[Dict[str, Any]]],
+        precomputed_embeddings: Optional[List[Optional[np.ndarray]]] = None,
+    ) -> Dict[str, Any]:
         """
         Calculate diversity metrics for the entire population history.
 
@@ -241,8 +296,11 @@ class DiversityCalculator:
             all_texts = [self._get_idea_text(idea) for idea in all_ideas]
             logger.info(f"Extracted text from {len(all_texts)} ideas")
 
-            # Get embeddings for all ideas
-            all_embeddings = await self._get_embeddings_batch(all_texts)
+            # Get embeddings for all ideas (or reuse precomputed values from the engine).
+            if precomputed_embeddings is not None and len(precomputed_embeddings) == len(all_ideas):
+                all_embeddings = precomputed_embeddings
+            else:
+                all_embeddings = await self._get_embeddings_batch(all_texts)
 
             # Filter out failed embeddings
             valid_embeddings = [emb for emb in all_embeddings if emb is not None]

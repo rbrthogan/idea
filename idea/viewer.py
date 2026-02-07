@@ -8,17 +8,33 @@ import os
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from asyncio import Queue
+import time
 import random
+import math
 from pathlib import Path
 import json
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 from idea.evolution import EvolutionEngine
 from idea.llm import Critic
-from idea.config import LLM_MODELS, DEFAULT_MODEL, DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P, SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, ADMIN_EMAIL
+from idea.config import (
+    LLM_MODELS,
+    DEFAULT_MODEL,
+    DEFAULT_CREATIVE_TEMP,
+    DEFAULT_TOP_P,
+    SMTP_SERVER,
+    SMTP_PORT,
+    SMTP_USERNAME,
+    SMTP_PASSWORD,
+    ADMIN_EMAIL,
+    RUN_LEASE_SECONDS,
+    RUN_HEARTBEAT_SECONDS,
+    RUN_STATE_WRITE_INTERVAL_SECONDS,
+    GLOBAL_MAX_ACTIVE_RUNS,
+)
 from idea.template_manager import router as template_router
 from idea.prompts.loader import list_available_templates
 from idea.admin import router as admin_router
@@ -59,6 +75,214 @@ DATA_DIR.mkdir(exist_ok=True)
 EVOLUTIONS_DIR = Path("data/evolutions")
 EVOLUTIONS_DIR.mkdir(exist_ok=True)
 
+# Instance identity (used for run leasing/coordination)
+INSTANCE_ID = os.getenv("HOSTNAME") or f"local-{uuid.uuid4()}"
+ACTIVE_RUN_STATUSES = {"starting", "in_progress", "resuming", "continuing", "stopping"}
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _round_half_up(value: float) -> int:
+    return int(math.floor(value + 0.5))
+
+
+def _normalize_tournament_count(value: float) -> float:
+    # UI uses 0.25 increments; normalize backend input to the same grid.
+    return max(0.25, round(value * 4) / 4)
+
+
+def _resolve_tournament_settings(
+    pop_size: int,
+    tournament_count_input: Any,
+    legacy_rounds_input: Any,
+) -> Tuple[float, int, int]:
+    full_tournament_rounds = max(1, pop_size - 1)
+
+    if tournament_count_input is not None:
+        tournament_count = _normalize_tournament_count(float(tournament_count_input))
+        target_tournament_rounds = max(
+            1,
+            _round_half_up(tournament_count * full_tournament_rounds),
+        )
+        return tournament_count, full_tournament_rounds, target_tournament_rounds
+
+    legacy_rounds = int(legacy_rounds_input if legacy_rounds_input is not None else full_tournament_rounds)
+    target_tournament_rounds = max(1, legacy_rounds)
+    tournament_count = target_tournament_rounds / full_tournament_rounds
+    return tournament_count, full_tournament_rounds, target_tournament_rounds
+
+
+def _derive_run_status(update_data: Dict[str, Any]) -> str:
+    if update_data.get("error"):
+        return "error"
+    if update_data.get("is_running") is False:
+        if update_data.get("is_stopped") or update_data.get("is_resumable"):
+            return "paused"
+        return "complete"
+    if update_data.get("is_resuming"):
+        return "resuming"
+    if update_data.get("is_continuing"):
+        return "continuing"
+    return "in_progress"
+
+
+def _is_run_stale(run_data: Dict[str, Any], now_ms: int) -> bool:
+    if not run_data:
+        return False
+    if run_data.get("status") not in ACTIVE_RUN_STATUSES:
+        return False
+    return run_data.get("lease_expires_at_ms", 0) <= now_ms
+
+
+async def _claim_run_slot(user_id: str, evolution_id: str, evolution_name: str,
+                          total_generations: int, start_time: str,
+                          tournament_count: Optional[float] = None,
+                          full_tournament_rounds: Optional[int] = None,
+                          target_tournament_rounds: Optional[int] = None) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+    """Claim the per-user run slot (and global lock if enabled)."""
+    run_payload = {
+        "evolution_id": evolution_id,
+        "evolution_name": evolution_name,
+        "current_generation": 0,
+        "total_generations": total_generations,
+        "progress": 0,
+        "start_time": start_time,
+        "status": "starting",
+        "status_message": "Starting evolution...",
+        "tournament_count": tournament_count,
+        "full_tournament_rounds": full_tournament_rounds,
+        "target_tournament_rounds": target_tournament_rounds,
+    }
+
+    if GLOBAL_MAX_ACTIVE_RUNS == 1:
+        lock_result = await db.claim_global_run_lock(
+            owner_id=INSTANCE_ID,
+            user_id=user_id,
+            evolution_id=evolution_id,
+            lease_seconds=RUN_LEASE_SECONDS,
+        )
+        if not lock_result.get("ok"):
+            return False, lock_result.get("data"), "global"
+
+    claim_result = await db.claim_active_run(
+        user_id=user_id,
+        run_data=run_payload,
+        lease_seconds=RUN_LEASE_SECONDS,
+        owner_id=INSTANCE_ID,
+    )
+
+    if not claim_result.get("ok"):
+        if GLOBAL_MAX_ACTIVE_RUNS == 1:
+            await db.release_global_run_lock(INSTANCE_ID)
+        return False, claim_result.get("data"), "user"
+
+    return True, claim_result.get("data"), None
+
+
+async def _refresh_run_state(user_id: str, state: UserEvolutionState, update_data: Dict[str, Any],
+                             force: bool = False) -> None:
+    """Persist lightweight run state for reconnect/resume."""
+    if not state.run_owner_id:
+        return
+
+    try:
+        now_monotonic = time.monotonic()
+        if not force and (now_monotonic - state.run_last_write) < RUN_STATE_WRITE_INTERVAL_SECONDS:
+            return
+
+        run_status = _derive_run_status(update_data)
+        status_message = update_data.get("status_message") or state.status.get("status_message", "")
+        progress = update_data.get("progress", state.status.get("progress", 0))
+        current_generation = update_data.get("current_generation", state.status.get("current_generation", 0))
+        total_generations = update_data.get("total_generations", state.status.get("total_generations", 0))
+        checkpoint_id = update_data.get("checkpoint_id") or state.status.get("checkpoint_id")
+
+        run_update = {
+            "status": run_status,
+            "status_message": status_message,
+            "progress": progress,
+            "current_generation": current_generation,
+            "total_generations": total_generations,
+            "history_version": update_data.get("history_version", state.history_version),
+            "is_running": update_data.get("is_running", run_status in ACTIVE_RUN_STATUSES),
+            "is_stopped": update_data.get("is_stopped"),
+            "is_resumable": update_data.get("is_resumable"),
+            "checkpoint_id": checkpoint_id,
+            "evolution_id": getattr(state.engine, "evolution_id", None),
+            "evolution_name": getattr(state.engine, "evolution_name", None),
+            "start_time": state.status.get("start_time"),
+            "tournament_count": update_data.get("tournament_count", state.status.get("tournament_count")),
+            "full_tournament_rounds": update_data.get("full_tournament_rounds", state.status.get("full_tournament_rounds")),
+            "target_tournament_rounds": update_data.get("target_tournament_rounds", state.status.get("target_tournament_rounds")),
+        }
+
+        if update_data.get("error"):
+            run_update["last_error"] = update_data.get("error")
+
+        await db.update_active_run(
+            user_id=user_id,
+            updates=run_update,
+            lease_seconds=RUN_LEASE_SECONDS,
+            owner_id=state.run_owner_id,
+        )
+
+        if GLOBAL_MAX_ACTIVE_RUNS == 1:
+            await db.refresh_global_run_lock(state.run_owner_id, RUN_LEASE_SECONDS)
+
+        state.run_last_write = now_monotonic
+    except Exception as e:
+        print(f"Warning: failed to persist run state: {e}")
+
+
+async def _heartbeat_loop(user_id: str, state: UserEvolutionState) -> None:
+    """Background heartbeat to keep leases alive during long steps."""
+    try:
+        while True:
+            await asyncio.sleep(RUN_HEARTBEAT_SECONDS)
+            if state.engine is None or not state.status.get("is_running"):
+                return
+            if not state.run_owner_id:
+                continue
+            # Check for stop request from another instance
+            run_state = await db.get_active_run(user_id)
+            if run_state and run_state.get("stop_requested") and not state.engine.stop_requested:
+                state.engine.stop_evolution()
+                await db.update_active_run(
+                    user_id=user_id,
+                    updates={"status": "stopping", "status_message": "Stop requested - waiting for safe point"},
+                    lease_seconds=RUN_LEASE_SECONDS,
+                    owner_id=state.run_owner_id,
+                )
+            await db.update_active_run(
+                user_id=user_id,
+                updates={},
+                lease_seconds=RUN_LEASE_SECONDS,
+                owner_id=state.run_owner_id,
+            )
+            if GLOBAL_MAX_ACTIVE_RUNS == 1:
+                await db.refresh_global_run_lock(state.run_owner_id, RUN_LEASE_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+
+async def _finalize_run_state(user_id: str, state: UserEvolutionState, update_data: Dict[str, Any]) -> None:
+    """Mark run as finished and release global lock."""
+    try:
+        await _refresh_run_state(user_id, state, update_data, force=True)
+        await db.update_active_run(
+            user_id=user_id,
+            updates={"is_running": False, "active": False},
+            lease_seconds=0,
+            owner_id=state.run_owner_id,
+        )
+        if GLOBAL_MAX_ACTIVE_RUNS == 1:
+            await db.release_global_run_lock(state.run_owner_id)
+    except Exception as e:
+        print(f"Warning: failed to finalize run state: {e}")
+    finally:
+        state.stop_heartbeat()
 
 # Add this class for the request body
 class SaveEvolutionRequest(BaseModel):
@@ -192,6 +416,12 @@ async def debug_db(user: UserInfo = Depends(require_auth)):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        try:
+            if 'state' in locals() and state.run_owner_id:
+                await _finalize_run_state(user.uid, state, {"error": str(e), "is_running": False})
+                state.reset_run_tracking()
+        except Exception:
+            pass
         return JSONResponse({
             "status": "error",
             "message": str(e),
@@ -199,26 +429,43 @@ async def debug_db(user: UserInfo = Depends(require_auth)):
         }, status_code=500)
 
 @app.get("/api/template-types")
-async def get_template_types():
+async def get_template_types(user: UserInfo = Depends(require_auth)):
     """Get available template types for the evolution UI dropdown"""
     try:
         templates = list_available_templates()
 
-        # Format for dropdown - include both YAML and Python templates
-        template_types = []
+        # System templates first
+        combined_templates: Dict[str, Dict[str, Any]] = {}
         for template_id, template_info in templates.items():
-            # Include templates that don't have errors
-            if 'error' not in template_info:
-                template_types.append({
-                    "id": template_id,
-                    "name": template_info.get('name', template_id.replace('_', ' ').title()),
-                    "description": template_info.get('description', ''),
-                    "type": template_info.get('type', 'unknown'),
-                    "author": template_info.get('author', 'Unknown')
-                })
+            if 'error' in template_info:
+                continue
+            combined_templates[template_id] = {
+                "id": template_id,
+                "name": template_info.get('name', template_id.replace('_', ' ').title()),
+                "description": template_info.get('description', ''),
+                "type": template_info.get('type', 'unknown'),
+                "author": template_info.get('author', 'Unknown'),
+                "is_system": True,
+            }
+
+        # Add user templates from Firestore
+        user_templates = await db.list_user_templates(user.uid)
+        for template in user_templates:
+            template_id = template.get("id")
+            if not template_id or template_id in combined_templates:
+                continue
+            combined_templates[template_id] = {
+                "id": template_id,
+                "name": template.get("name", template_id.replace("_", " ").title()),
+                "description": template.get("description", ""),
+                "type": "custom",
+                "author": template.get("author", "User"),
+                "is_system": False,
+            }
 
         # Sort by name
-        template_types.sort(key=lambda x: x['name'])
+        template_types = list(combined_templates.values())
+        template_types.sort(key=lambda x: x['name'].lower())
 
         return JSONResponse({
             "status": "success",
@@ -253,7 +500,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
         state = await user_states.get(user.uid)
 
         # Check if this user already has an evolution running
-        if state.status.get("is_running"):
+        if state.status.get("is_running") and state.engine is not None:
             return JSONResponse(
                 {"status": "error", "message": "You already have an evolution running. Please wait for it to complete or stop it first."},
                 status_code=409,
@@ -289,16 +536,24 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             creative_temp = DEFAULT_CREATIVE_TEMP
             top_p = DEFAULT_TOP_P
 
-        # Get tournament parameters with defaults
+        # Tournament semantics:
+        # - full tournament rounds = pop_size - 1
+        # - tournamentCount controls how many full tournaments (with fractional support)
         try:
-            tournament_size = int(data.get('tournamentSize', 5))
-            tournament_comparisons = int(data.get('tournamentComparisons', 35))
-            print(f"Parsed tournament values: size={tournament_size}, comparisons={tournament_comparisons}")
-        except ValueError as e:
-            print(f"Error parsing tournament values: {e}")
-            # Use defaults if parsing fails
-            tournament_size = 5
-            tournament_comparisons = 35
+            tournament_count, full_tournament_rounds, target_tournament_rounds = _resolve_tournament_settings(
+                pop_size=pop_size,
+                tournament_count_input=data.get('tournamentCount'),
+                legacy_rounds_input=data.get('tournamentRounds'),
+            )
+            print(
+                "Resolved tournament settings:",
+                f"count={tournament_count}, full_rounds={full_tournament_rounds}, target_rounds={target_tournament_rounds}",
+            )
+        except Exception as e:
+            print(f"Error resolving tournament settings: {e}")
+            tournament_count = 1.0
+            full_tournament_rounds = max(1, pop_size - 1)
+            target_tournament_rounds = full_tournament_rounds
 
         # Get mutation rate with default
         try:
@@ -333,54 +588,81 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
         print(f"Starting evolution with pop_size={pop_size}, generations={generations}, "
               f"idea_type={idea_type}, model_type={model_type}, "
               f"creative_temp={creative_temp}, top_p={top_p}, "
-              f"tournament: size={tournament_size}, comparisons={tournament_comparisons}, "
+              f"tournament: count={tournament_count}, full_rounds={full_tournament_rounds}, target_rounds={target_tournament_rounds}, "
               f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
 
-        # Check if the selected template is a user custom template in Firestore
-        # If so, load it and register it in the cache so get_prompts() can find it
-        from idea.prompts.loader import register_custom_template, list_available_templates
-
-        # Check if this is a system template (exists on disk)
+        # Resolve template source. System templates are bundled; custom templates live in Firestore.
+        template_data = None
         system_templates = list_available_templates()
-        if idea_type not in system_templates:
-            # Not a system template - try to load from Firestore
+        is_valid_system_template = (
+            idea_type in system_templates and 'error' not in system_templates.get(idea_type, {})
+        )
+
+        if not is_valid_system_template:
             user_template = await db.get_user_template(user.uid, idea_type)
             if user_template:
-                print(f"Loading custom template '{idea_type}' from Firestore")
-                register_custom_template(idea_type, user_template)
+                print(f"Using custom template '{idea_type}' from Firestore")
+                template_data = user_template
             else:
                 return JSONResponse(
                     {"status": "error", "message": f"Template '{idea_type}' not found"},
                     status_code=400,
                 )
 
-        # Create and run evolution with specified parameters
-        state.engine = EvolutionEngine(
+        # Create the evolution engine (assigned after run claim)
+        engine = EvolutionEngine(
             pop_size=pop_size,
             generations=generations,
             idea_type=idea_type,
             model_type=model_type,
             creative_temp=creative_temp,
             top_p=top_p,
-            tournament_size=tournament_size,
-            tournament_comparisons=tournament_comparisons,
+            tournament_rounds=target_tournament_rounds,
+            tournament_count=tournament_count,
+            full_tournament_rounds=full_tournament_rounds,
             mutation_rate=mutation_rate,
             thinking_budget=thinking_budget,
             max_budget=max_budget,
             api_key=api_key,
             user_id=user.uid,  # Store user_id for Firestore scoping
+            template_data=template_data,
         )
 
         # Initialize evolution with name (auto-generates if not provided)
         evolution_name = (data.get('evolutionName') or '').strip() or None
-        state.engine.initialize_evolution(name=evolution_name)
-        print(f"Evolution initialized: '{state.engine.evolution_name}' (ID: {state.engine.evolution_id})")
+        engine.initialize_evolution(name=evolution_name)
+        print(f"Evolution initialized: '{engine.evolution_name}' (ID: {engine.evolution_id})")
 
-        # Generate contexts for each idea
-        contexts = state.engine.generate_contexts()
+        # Claim run slot (and global lock if enabled)
+        start_time = datetime.now().isoformat()
+        ok, existing, scope = await _claim_run_slot(
+            user_id=user.uid,
+            evolution_id=engine.evolution_id,
+            evolution_name=engine.evolution_name,
+            total_generations=generations,
+            start_time=start_time,
+            tournament_count=engine.tournament_count,
+            full_tournament_rounds=engine.full_tournament_rounds,
+            target_tournament_rounds=engine.tournament_rounds,
+        )
+        if not ok:
+            status = 429 if scope == "global" else 409
+            message = "System busy. Another evolution is running. Try again shortly." if scope == "global" else \
+                "You already have an evolution running. Please wait for it to complete or stop it first."
+            return JSONResponse(
+                {"status": "error", "message": message, "scope": scope, "active_run": existing},
+                status_code=status,
+            )
+
+        # Bind engine to user state after claim
+        state.reset_run_tracking()
+        state.run_owner_id = INSTANCE_ID
+        state.engine = engine
 
         # Clear the queue
         state.reset_queue()
+        state.history_version = 0
+        state.last_sent_history_version = -1
 
         # Set up evolution status
         state.status = {
@@ -388,13 +670,23 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             "total_generations": generations,
             "is_running": True,
             "history": [],
-            "contexts": contexts,
+            "history_version": state.history_version,
+            "history_changed": False,
+            "contexts": [],
             "progress": 0,
-            "start_time": datetime.now().isoformat()  # Track when evolution started
+            "start_time": start_time,  # Track when evolution started
+            "evolution_id": state.engine.evolution_id,
+            "evolution_name": state.engine.evolution_name,
+            "tournament_count": state.engine.tournament_count,
+            "full_tournament_rounds": state.engine.full_tournament_rounds,
+            "target_tournament_rounds": state.engine.tournament_rounds,
         }
 
         # Put initial status in queue
         await state.queue.put(state.status.copy())
+
+        # Start heartbeat to keep leases alive during long steps
+        state.start_heartbeat(asyncio.create_task(_heartbeat_loop(user.uid, state)))
 
         # Start evolution in background task
         asyncio.create_task(run_evolution_task(state))
@@ -404,7 +696,12 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             "message": "Evolution started",
             "evolution_id": state.engine.evolution_id,
             "evolution_name": state.engine.evolution_name,
-            "contexts": contexts,
+            "contexts": [],
+            "history_version": state.history_version,
+            "history_changed": False,
+            "tournament_count": state.engine.tournament_count,
+            "full_tournament_rounds": state.engine.full_tournament_rounds,
+            "target_tournament_rounds": state.engine.tournament_rounds,
             "specific_prompts": []  # Will be populated as evolution progresses
         })
     except Exception as e:
@@ -424,13 +721,34 @@ async def stop_evolution(user: UserInfo = Depends(require_auth)):
     state = await user_states.get(user.uid)
 
     if state.engine is None:
-        return JSONResponse(
-            {"status": "error", "message": "No evolution is currently running"},
-            status_code=400,
+        # Allow stop requests from non-owner instances via Firestore
+        active_run = await db.get_active_run(user.uid)
+        if not active_run or active_run.get("status") not in ACTIVE_RUN_STATUSES:
+            return JSONResponse(
+                {"status": "error", "message": "No evolution is currently running"},
+                status_code=400,
+            )
+        await db.update_active_run(
+            user_id=user.uid,
+            updates={"status": "stopping", "status_message": "Stop requested", "stop_requested": True},
+            lease_seconds=RUN_LEASE_SECONDS,
+            owner_id=active_run.get("owner_id"),
         )
+        return JSONResponse({
+            "status": "success",
+            "message": "Stop request queued - evolution will halt at the next safe point"
+        })
 
     # Request stop
     state.engine.stop_evolution()
+
+    if state.run_owner_id:
+        await db.update_active_run(
+            user_id=user.uid,
+            updates={"status": "stopping", "status_message": "Stop requested - waiting for safe point", "stop_requested": True},
+            lease_seconds=RUN_LEASE_SECONDS,
+            owner_id=state.run_owner_id,
+        )
 
     return JSONResponse({
         "status": "success",
@@ -468,6 +786,20 @@ async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
     state.status["is_stopped"] = True
     state.status["is_resumable"] = True
     state.status["checkpoint_id"] = checkpoint_id
+
+    if state.run_owner_id:
+        await _finalize_run_state(
+            user_id=user.uid,
+            state=state,
+            update_data={
+                "is_running": False,
+                "is_stopped": True,
+                "is_resumable": True,
+                "checkpoint_id": checkpoint_id,
+                "status_message": "Evolution force stopped",
+            },
+        )
+        state.reset_run_tracking()
 
     return JSONResponse({
         "status": "success",
@@ -586,8 +918,44 @@ async def resume_evolution(request: Request, user: UserInfo = Depends(require_au
             status_code=500,
         )
 
+    # Claim run slot (and global lock if enabled)
+    start_time = datetime.now().isoformat()
+    ok, existing, scope = await _claim_run_slot(
+        user_id=user.uid,
+        evolution_id=state.engine.evolution_id,
+        evolution_name=state.engine.evolution_name,
+        total_generations=state.engine.generations,
+        start_time=start_time,
+        tournament_count=state.engine.tournament_count,
+        full_tournament_rounds=state.engine.full_tournament_rounds,
+        target_tournament_rounds=state.engine.tournament_rounds,
+    )
+    if not ok:
+        status = 429 if scope == "global" else 409
+        message = "System busy. Another evolution is running. Try again shortly." if scope == "global" else \
+            "You already have an evolution running."
+        state.engine = None
+        state.reset_run_tracking()
+        return JSONResponse(
+            {"status": "error", "message": message, "scope": scope, "active_run": existing},
+            status_code=status,
+        )
+
+    state.reset_run_tracking()
+    state.run_owner_id = INSTANCE_ID
+    await db.update_active_run(
+        user_id=user.uid,
+        updates={"status": "resuming", "status_message": f"Resuming from generation {state.engine.current_generation}..."},
+        lease_seconds=RUN_LEASE_SECONDS,
+        owner_id=state.run_owner_id,
+    )
+
     # Clear the queue
     state.reset_queue()
+    initial_history = [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history]
+    state.latest_data = initial_history
+    state.history_version = 1 if initial_history else 0
+    state.last_sent_history_version = -1
 
     # Set up evolution status
     state.status = {
@@ -596,16 +964,26 @@ async def resume_evolution(request: Request, user: UserInfo = Depends(require_au
         "is_running": True,
         "is_resuming": True,
         "checkpoint_id": checkpoint_id,
-        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "history": initial_history,
+        "history_version": state.history_version,
+        "history_changed": True,
         "contexts": state.engine.contexts,
         "specific_prompts": state.engine.specific_prompts,
         "breeding_prompts": state.engine.breeding_prompts,
         "progress": (state.engine.current_generation / state.engine.generations) * 100 if state.engine.generations > 0 else 0,
-        "start_time": datetime.now().isoformat()  # Track when evolution resumed
+        "start_time": start_time,  # Track when evolution resumed
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "tournament_count": state.engine.tournament_count,
+        "full_tournament_rounds": state.engine.full_tournament_rounds,
+        "target_tournament_rounds": state.engine.tournament_rounds,
     }
 
     # Put initial status in queue
     await state.queue.put(state.status.copy())
+
+    # Start heartbeat to keep leases alive during long steps
+    state.start_heartbeat(asyncio.create_task(_heartbeat_loop(user.uid, state)))
 
     # Start evolution in background task
     asyncio.create_task(run_resume_evolution_task(state))
@@ -619,7 +997,12 @@ async def resume_evolution(request: Request, user: UserInfo = Depends(require_au
         "current_generation": state.engine.current_generation,
         "total_generations": state.engine.generations,
         "contexts": state.engine.contexts,
-        "specific_prompts": state.engine.specific_prompts
+        "specific_prompts": state.engine.specific_prompts,
+        "history_version": state.history_version,
+        "history_changed": True,
+        "tournament_count": state.engine.tournament_count,
+        "full_tournament_rounds": state.engine.full_tournament_rounds,
+        "target_tournament_rounds": state.engine.tournament_rounds,
     })
 
 @app.post("/api/continue-evolution")
@@ -670,8 +1053,44 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
             status_code=500,
         )
 
+    # Claim run slot (and global lock if enabled)
+    start_time = datetime.now().isoformat()
+    ok, existing, scope = await _claim_run_slot(
+        user_id=user.uid,
+        evolution_id=state.engine.evolution_id,
+        evolution_name=state.engine.evolution_name,
+        total_generations=state.engine.generations + additional_generations,
+        start_time=start_time,
+        tournament_count=state.engine.tournament_count,
+        full_tournament_rounds=state.engine.full_tournament_rounds,
+        target_tournament_rounds=state.engine.tournament_rounds,
+    )
+    if not ok:
+        status = 429 if scope == "global" else 409
+        message = "System busy. Another evolution is running. Try again shortly." if scope == "global" else \
+            "You already have an evolution running."
+        state.engine = None
+        state.reset_run_tracking()
+        return JSONResponse(
+            {"status": "error", "message": message, "scope": scope, "active_run": existing},
+            status_code=status,
+        )
+
+    state.reset_run_tracking()
+    state.run_owner_id = INSTANCE_ID
+    await db.update_active_run(
+        user_id=user.uid,
+        updates={"status": "continuing", "status_message": f"Continuing from generation {state.engine.current_generation}..."},
+        lease_seconds=RUN_LEASE_SECONDS,
+        owner_id=state.run_owner_id,
+    )
+
     # Clear the queue
     state.reset_queue()
+    initial_history = [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history]
+    state.latest_data = initial_history
+    state.history_version = 1 if initial_history else 0
+    state.last_sent_history_version = -1
 
     # Set up evolution status
     new_total = state.engine.generations + additional_generations
@@ -681,16 +1100,26 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
         "is_running": True,
         "is_continuing": True,
         "checkpoint_id": state.engine.checkpoint_id,
-        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "history": initial_history,
+        "history_version": state.history_version,
+        "history_changed": True,
         "contexts": state.engine.contexts,
         "specific_prompts": state.engine.specific_prompts,
         "breeding_prompts": state.engine.breeding_prompts,
         "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0,
-        "start_time": datetime.now().isoformat()  # Track when evolution continued
+        "start_time": start_time,  # Track when evolution continued
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "tournament_count": state.engine.tournament_count,
+        "full_tournament_rounds": state.engine.full_tournament_rounds,
+        "target_tournament_rounds": state.engine.tournament_rounds,
     }
 
     # Put initial status in queue
     await state.queue.put(state.status.copy())
+
+    # Start heartbeat to keep leases alive during long steps
+    state.start_heartbeat(asyncio.create_task(_heartbeat_loop(user.uid, state)))
 
     # Start evolution in background task with additional generations
     asyncio.create_task(run_continue_evolution_task(state, additional_generations))
@@ -704,7 +1133,12 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
         "current_generation": state.engine.current_generation,
         "total_generations": new_total,
         "contexts": state.engine.contexts,
-        "specific_prompts": state.engine.specific_prompts
+        "specific_prompts": state.engine.specific_prompts,
+        "history_version": state.history_version,
+        "history_changed": True,
+        "tournament_count": state.engine.tournament_count,
+        "full_tournament_rounds": state.engine.full_tournament_rounds,
+        "target_tournament_rounds": state.engine.tournament_rounds,
     })
 
 @app.post("/api/continue-saved-evolution")
@@ -752,8 +1186,44 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
             status_code=500,
         )
 
+    # Claim run slot (and global lock if enabled)
+    start_time = datetime.now().isoformat()
+    ok, existing, scope = await _claim_run_slot(
+        user_id=user.uid,
+        evolution_id=state.engine.evolution_id,
+        evolution_name=state.engine.evolution_name,
+        total_generations=state.engine.generations + additional_generations,
+        start_time=start_time,
+        tournament_count=state.engine.tournament_count,
+        full_tournament_rounds=state.engine.full_tournament_rounds,
+        target_tournament_rounds=state.engine.tournament_rounds,
+    )
+    if not ok:
+        status = 429 if scope == "global" else 409
+        message = "System busy. Another evolution is running. Try again shortly." if scope == "global" else \
+            "You already have an evolution running."
+        state.engine = None
+        state.reset_run_tracking()
+        return JSONResponse(
+            {"status": "error", "message": message, "scope": scope, "active_run": existing},
+            status_code=status,
+        )
+
+    state.reset_run_tracking()
+    state.run_owner_id = INSTANCE_ID
+    await db.update_active_run(
+        user_id=user.uid,
+        updates={"status": "continuing", "status_message": f"Continuing from generation {state.engine.current_generation}..."},
+        lease_seconds=RUN_LEASE_SECONDS,
+        owner_id=state.run_owner_id,
+    )
+
     # Clear the queue
     state.reset_queue()
+    initial_history = [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history]
+    state.latest_data = initial_history
+    state.history_version = 1 if initial_history else 0
+    state.last_sent_history_version = -1
 
     # Set up evolution status
     new_total = state.engine.generations + additional_generations
@@ -763,16 +1233,26 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
         "is_running": True,
         "is_continuing": True,
         "checkpoint_id": state.engine.checkpoint_id,
-        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "history": initial_history,
+        "history_version": state.history_version,
+        "history_changed": True,
         "contexts": state.engine.contexts,
         "specific_prompts": state.engine.specific_prompts,
         "breeding_prompts": state.engine.breeding_prompts,
         "progress": (state.engine.current_generation / new_total) * 100 if new_total > 0 else 0,
-        "start_time": datetime.now().isoformat()  # Track when evolution continued
+        "start_time": start_time,  # Track when evolution continued
+        "evolution_id": state.engine.evolution_id,
+        "evolution_name": state.engine.evolution_name,
+        "tournament_count": state.engine.tournament_count,
+        "full_tournament_rounds": state.engine.full_tournament_rounds,
+        "target_tournament_rounds": state.engine.tournament_rounds,
     }
 
     # Put initial status in queue
     await state.queue.put(state.status.copy())
+
+    # Start heartbeat to keep leases alive during long steps
+    state.start_heartbeat(asyncio.create_task(_heartbeat_loop(user.uid, state)))
 
     # Start evolution in background task with additional generations
     asyncio.create_task(run_continue_evolution_task(state, additional_generations))
@@ -785,9 +1265,14 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
         "evolution_name": state.engine.evolution_name,
         "current_generation": state.engine.current_generation,
         "total_generations": new_total,
-        "history": [[idea_to_dict(idea) for idea in gen] for gen in state.engine.history],
+        "history": initial_history,
         "contexts": state.engine.contexts,
-        "specific_prompts": state.engine.specific_prompts
+        "specific_prompts": state.engine.specific_prompts,
+        "history_version": state.history_version,
+        "history_changed": True,
+        "tournament_count": state.engine.tournament_count,
+        "full_tournament_rounds": state.engine.full_tournament_rounds,
+        "target_tournament_rounds": state.engine.tournament_rounds,
     })
 
 async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] = None) -> Optional[EvolutionEngine]:
@@ -828,8 +1313,9 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
             model_type=config.get('model_type', DEFAULT_MODEL),
             creative_temp=config.get('creative_temp', DEFAULT_CREATIVE_TEMP),
             top_p=config.get('top_p', DEFAULT_TOP_P),
-            tournament_size=config.get('tournament_size', 5),
-            tournament_comparisons=config.get('tournament_comparisons', 35),
+            tournament_rounds=config.get('tournament_rounds', 1),
+            tournament_count=config.get('tournament_count'),
+            full_tournament_rounds=config.get('full_tournament_rounds'),
             thinking_budget=config.get('thinking_budget'),
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
@@ -840,6 +1326,7 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
         engine.contexts = data.get('contexts', [])
         engine.specific_prompts = data.get('specific_prompts', [])
         engine.breeding_prompts = data.get('breeding_prompts', [])
+        engine.tournament_history = data.get('tournament_history', [])
         engine.diversity_history = data.get('diversity_history', [])
         engine.current_generation = len(history)
 
@@ -887,12 +1374,25 @@ async def run_resume_evolution_task(state: UserEvolutionState):
     async def progress_callback(update_data):
         # Convert Idea objects to dictionaries for JSON serialization
         if 'history' in update_data and isinstance(update_data['history'], list):
-            update_data['history'] = [
+            serialized_history = [
                 [idea_to_dict(idea) for idea in generation]
                 for generation in update_data['history']
             ]
-            if update_data['history']:
-                state.latest_data = update_data['history']
+            if serialized_history and serialized_history != state.latest_data:
+                state.latest_data = serialized_history
+                state.history_version += 1
+                update_data["history_changed"] = True
+                update_data["history"] = serialized_history
+            else:
+                update_data["history_changed"] = False
+                update_data.pop("history", None)
+        else:
+            update_data["history_changed"] = False
+
+        update_data["history_version"] = state.history_version
+        update_data["tournament_count"] = engine.tournament_count
+        update_data["full_tournament_rounds"] = engine.full_tournament_rounds
+        update_data["target_tournament_rounds"] = engine.tournament_rounds
 
         # Add token counts if evolution is complete
         if update_data.get('is_running') is False and 'error' not in update_data:
@@ -904,6 +1404,13 @@ async def run_resume_evolution_task(state: UserEvolutionState):
         # Clear queue and add update
         state.reset_queue()
         await state.queue.put(state.status.copy())
+
+        # Persist run state for reconnects
+        if update_data.get("is_running") is False or update_data.get("error"):
+            await _finalize_run_state(engine.user_id, state, update_data)
+            state.reset_run_tracking()
+        else:
+            await _refresh_run_state(engine.user_id, state, update_data)
 
     # Run the resumed evolution
     await engine.resume_evolution_with_updates(progress_callback)
@@ -915,12 +1422,25 @@ async def run_continue_evolution_task(state: UserEvolutionState, additional_gene
     async def progress_callback(update_data):
         # Convert Idea objects to dictionaries for JSON serialization
         if 'history' in update_data and isinstance(update_data['history'], list):
-            update_data['history'] = [
+            serialized_history = [
                 [idea_to_dict(idea) for idea in generation]
                 for generation in update_data['history']
             ]
-            if update_data['history']:
-                state.latest_data = update_data['history']
+            if serialized_history and serialized_history != state.latest_data:
+                state.latest_data = serialized_history
+                state.history_version += 1
+                update_data["history_changed"] = True
+                update_data["history"] = serialized_history
+            else:
+                update_data["history_changed"] = False
+                update_data.pop("history", None)
+        else:
+            update_data["history_changed"] = False
+
+        update_data["history_version"] = state.history_version
+        update_data["tournament_count"] = engine.tournament_count
+        update_data["full_tournament_rounds"] = engine.full_tournament_rounds
+        update_data["target_tournament_rounds"] = engine.tournament_rounds
 
         # Add token counts if evolution is complete
         if update_data.get('is_running') is False and 'error' not in update_data:
@@ -932,6 +1452,13 @@ async def run_continue_evolution_task(state: UserEvolutionState, additional_gene
         # Clear queue and add update
         state.reset_queue()
         await state.queue.put(state.status.copy())
+
+        # Persist run state for reconnects
+        if update_data.get("is_running") is False or update_data.get("error"):
+            await _finalize_run_state(engine.user_id, state, update_data)
+            state.reset_run_tracking()
+        else:
+            await _refresh_run_state(engine.user_id, state, update_data)
 
     # Run the evolution with additional generations
     await engine.resume_evolution_with_updates(progress_callback, additional_generations=additional_generations)
@@ -945,17 +1472,29 @@ async def run_evolution_task(state: UserEvolutionState):
         # Add evolution identity to every update
         update_data['evolution_id'] = engine.evolution_id
         update_data['evolution_name'] = engine.evolution_name
+        update_data["tournament_count"] = engine.tournament_count
+        update_data["full_tournament_rounds"] = engine.full_tournament_rounds
+        update_data["target_tournament_rounds"] = engine.tournament_rounds
 
         # Convert Idea objects to dictionaries for JSON serialization
         if 'history' in update_data and isinstance(update_data['history'], list):
-            update_data['history'] = [
+            serialized_history = [
                 [idea_to_dict(idea) for idea in generation]
                 for generation in update_data['history']
             ]
 
             # Store the latest evolution data for rating
-            if update_data['history']:
-                state.latest_data = update_data['history']
+            if serialized_history and serialized_history != state.latest_data:
+                state.latest_data = serialized_history
+                state.history_version += 1
+                update_data["history_changed"] = True
+                update_data["history"] = serialized_history
+            else:
+                update_data["history_changed"] = False
+                update_data.pop("history", None)
+        else:
+            update_data["history_changed"] = False
+        update_data["history_version"] = state.history_version
 
         # If evolution is complete, add token counts
         if update_data.get('is_running') is False and 'error' not in update_data:
@@ -985,6 +1524,13 @@ async def run_evolution_task(state: UserEvolutionState):
         if status:
             log_msg += f" - {status}"
         print(log_msg)
+
+        # Persist run state for reconnects
+        if update_data.get("is_running") is False or update_data.get("error"):
+            await _finalize_run_state(engine.user_id, state, update_data)
+            state.reset_run_tracking()
+        else:
+            await _refresh_run_state(engine.user_id, state, update_data)
 
     # Run the evolution with progress updates
     await engine.run_evolution_with_updates(progress_callback)
@@ -1178,17 +1724,111 @@ def test_static():
     return {"files": files, "js_exists": os.path.exists("idea/static/js/viewer.js")}
 
 @app.get("/api/progress")
-async def get_progress(user: UserInfo = Depends(require_auth)):
+async def get_progress(request: Request, user: UserInfo = Depends(require_auth)):
     """Returns the current progress of the evolution"""
     state = await user_states.get(user.uid)
+    include_history = request.query_params.get("includeHistory", "").lower() in {"1", "true", "yes"}
 
-    # If there's a new update in the queue, get it
-    try:
-        # Get the latest update from the queue without waiting
-        if not state.queue.empty():
-            state.status = await state.queue.get()
-    except Exception as e:
-        print(f"Error getting queue updates: {e}")
+    if state.engine is not None:
+        # If there's a new update in the queue, get it
+        try:
+            if not state.queue.empty():
+                state.status = await state.queue.get()
+        except Exception as e:
+            print(f"Error getting queue updates: {e}")
+
+        # Always include latest tournament history if available
+        if hasattr(state.engine, "tournament_history"):
+            state.status["tournament_history"] = state.engine.tournament_history
+
+        response = state.status.copy()
+        response["history_version"] = state.history_version
+        history_changed = state.history_version != state.last_sent_history_version
+        response["history_changed"] = history_changed
+        response["history_available"] = bool(state.latest_data)
+
+        include_history_now = include_history or history_changed
+        if include_history_now and state.latest_data:
+            response["history"] = state.latest_data
+            state.last_sent_history_version = state.history_version
+        else:
+            response.pop("history", None)
+
+        return JSONResponse(convert_uuids_to_strings(response))
+
+    # Fallback to Firestore-backed run state for reconnects or cross-instance requests
+    run_state = await db.get_active_run(user.uid)
+    if run_state:
+        now_ms = _now_ms()
+        stale = _is_run_stale(run_state, now_ms)
+
+        response = {
+            "current_generation": run_state.get("current_generation", 0),
+            "total_generations": run_state.get("total_generations", 0),
+            "progress": run_state.get("progress", 0),
+            "status_message": run_state.get("status_message", ""),
+            "start_time": run_state.get("start_time"),
+            "evolution_id": run_state.get("evolution_id"),
+            "evolution_name": run_state.get("evolution_name"),
+            "checkpoint_id": run_state.get("checkpoint_id"),
+            "is_running": run_state.get("status") in ACTIVE_RUN_STATUSES and not stale,
+            "tournament_count": run_state.get("tournament_count"),
+            "full_tournament_rounds": run_state.get("full_tournament_rounds"),
+            "target_tournament_rounds": run_state.get("target_tournament_rounds"),
+            "history_version": run_state.get("history_version", 0),
+            "history_changed": False,
+        }
+
+        if run_state.get("is_stopped"):
+            response["is_stopped"] = True
+        if run_state.get("is_resumable"):
+            response["is_resumable"] = True
+
+        if run_state.get("status") in {"paused", "force_stopped", "stopped"} or stale:
+            response["is_stopped"] = True
+            response["is_resumable"] = True
+            response["stop_message"] = "Evolution paused (worker disconnected). You can resume."
+
+        if run_state.get("status") == "complete":
+            response["is_running"] = False
+
+        if run_state.get("last_error"):
+            response["error"] = run_state.get("last_error")
+
+        if stale:
+            await db.update_active_run(
+                user_id=user.uid,
+                updates={
+                    "status": "paused",
+                    "is_running": False,
+                    "is_stopped": True,
+                    "is_resumable": True,
+                    "status_message": "Evolution paused (worker disconnected).",
+                },
+                lease_seconds=0,
+                owner_id=run_state.get("owner_id"),
+            )
+
+        # Attach history/context from persisted evolution if available
+        evolution_id = run_state.get("evolution_id")
+        if evolution_id:
+            response["history_available"] = True
+            if include_history:
+                evolution_data = await db.get_evolution(user.uid, evolution_id)
+                if evolution_data:
+                    response.update({
+                        "history": evolution_data.get("history", []),
+                        "contexts": evolution_data.get("contexts", []),
+                        "specific_prompts": evolution_data.get("specific_prompts", []),
+                        "breeding_prompts": evolution_data.get("breeding_prompts", []),
+                        "diversity_history": evolution_data.get("diversity_history", []),
+                        "token_counts": evolution_data.get("token_counts"),
+                    })
+        else:
+            response["history_available"] = False
+
+        state.status = response
+        return JSONResponse(convert_uuids_to_strings(response))
 
     return JSONResponse(convert_uuids_to_strings(state.status))
 
@@ -1819,8 +2459,8 @@ async def auto_rate(request: Request):
                 idea_b['match_count'] += 1
 
                 # Increment auto match counts specifically
-            idea_a['auto_match_count'] += 1
-            idea_b['auto_match_count'] += 1
+                idea_a['auto_match_count'] += 1
+                idea_b['auto_match_count'] += 1
 
             # Convert to outcome format (1 = A wins, 0 = B wins, 0.5 = tie)
             if winner == "A":
