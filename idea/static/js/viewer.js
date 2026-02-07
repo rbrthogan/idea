@@ -28,6 +28,7 @@ let tournamentCountTouched = false;
 let lastRenderedHistoryVersion = -1;
 let lastStoredHistoryVersion = -1;
 let persistStateTimeout = null;
+let openTournamentPanelGeneration = null;
 const LOCAL_STORAGE_PERSIST_DELAY_MS = 1200;
 
 // Track previous status message to detect changes for activity log
@@ -1050,9 +1051,31 @@ function renderGenerations(gens) {
             toggleButton.onclick = () => toggleGeneration(index);
             toggleButton.innerHTML = '<i class="fas fa-chevron-up"></i>';
 
+            const tournamentChip = document.createElement('button');
+            tournamentChip.type = 'button';
+            tournamentChip.className = 'generation-tournament-chip';
+            tournamentChip.id = `generation-tournament-chip-${index}`;
+            tournamentChip.setAttribute('aria-label', `Toggle tournament details for Generation ${index}`);
+            tournamentChip.setAttribute('aria-expanded', 'false');
+            tournamentChip.setAttribute('aria-controls', `generation-tournament-popout-${index}`);
+            tournamentChip.onclick = () => toggleGenerationTournament(index);
+            tournamentChip.innerHTML = '<i class="fas fa-trophy"></i><span>Tournament</span>';
+            tournamentChip.hidden = true;
+
+            const headerControls = document.createElement('div');
+            headerControls.className = 'generation-header-controls';
+            headerControls.appendChild(tournamentChip);
+            headerControls.appendChild(toggleButton);
+
             headerDiv.appendChild(header);
-            headerDiv.appendChild(toggleButton);
+            headerDiv.appendChild(headerControls);
             genDiv.appendChild(headerDiv);
+
+            const tournamentPopout = document.createElement('div');
+            tournamentPopout.className = 'generation-tournament-popout';
+            tournamentPopout.id = `generation-tournament-popout-${index}`;
+            tournamentPopout.hidden = true;
+            genDiv.appendChild(tournamentPopout);
 
             // Add ideas container with proper containment
             const contentDiv = document.createElement('div');
@@ -1074,6 +1097,8 @@ function renderGenerations(gens) {
 
             container.appendChild(genDiv);
         }
+
+        renderGenerationTournamentDetails(index);
 
         // Get the scroll container for this generation
         const scrollContainer = document.getElementById(`scroll-container-${index}`);
@@ -1261,6 +1286,7 @@ function toggleGeneration(generationId) {
         content.style.display = 'none';
         icon.className = 'fas fa-chevron-down';
         button.setAttribute('aria-expanded', 'false');
+        closeGenerationTournament(generationId);
     }
 }
 
@@ -1981,10 +2007,8 @@ async function loadHistoryItemData(item) {
                     document.getElementById('generations-container').innerHTML = '';
                     renderGenerations(data.data.history);
 
-                    if (data.data.tournament_history) {
-                        tournamentHistory = data.data.tournament_history;
-                        renderTournamentDetails(tournamentHistory);
-                    }
+                    tournamentHistory = data.data.tournament_history || [];
+                    renderTournamentDetails(tournamentHistory);
 
                     if (data.data.diversity_history && data.data.diversity_history.length > 0) {
                         updateDiversityChart(data.data.diversity_history);
@@ -2021,10 +2045,8 @@ async function loadHistoryItemData(item) {
                     document.getElementById('generations-container').innerHTML = '';
                     renderGenerations(data.history);
 
-                    if (data.tournament_history) {
-                        tournamentHistory = data.tournament_history;
-                        renderTournamentDetails(tournamentHistory);
-                    }
+                    tournamentHistory = data.tournament_history || [];
+                    renderTournamentDetails(tournamentHistory);
 
                     if (data.diversity_history && data.diversity_history.length > 0) {
                         updateDiversityChart(data.diversity_history);
@@ -3299,6 +3321,7 @@ function resetUIState() {
     isEvolutionRunning = false;
     currentEvolutionData = null;
     tournamentHistory = [];
+    openTournamentPanelGeneration = null;
     tournamentCountTouched = false;
     lastRenderedHistoryVersion = -1;
     lastStoredHistoryVersion = -1;
@@ -3308,10 +3331,6 @@ function resetUIState() {
     if (existingProgressContainer) {
         // Remove the old progress container
         existingProgressContainer.remove();
-    }
-    const tournamentContainer = document.getElementById('tournament-details-container');
-    if (tournamentContainer) {
-        tournamentContainer.remove();
     }
     // Create fresh progress bar with activity log (this starts the timer)
     createProgressBar(currentEvolutionName);
@@ -3397,8 +3416,6 @@ function createProgressBar(evolutionName = null) {
     // Start elapsed time updater immediately
     startElapsedTimeUpdater();
 
-    // Ensure tournament details container is present
-    ensureTournamentDetailsContainer();
 }
 
 function escapeHtml(str) {
@@ -3411,98 +3428,144 @@ function escapeHtml(str) {
         .replace(/'/g, '&#039;');
 }
 
-function ensureTournamentDetailsContainer() {
-    let container = document.getElementById('tournament-details-container');
-    if (container) {
-        return container;
-    }
-
-    container = document.createElement('div');
-    container.id = 'tournament-details-container';
-    container.className = 'tournament-details-card mb-4';
-    container.innerHTML = `
-        <div class="tournament-details-header">
-            <h5 class="mb-0">Swiss Tournament Details</h5>
-            <button type="button" class="btn btn-sm btn-outline-secondary" id="tournament-details-toggle">Hide</button>
-        </div>
-        <div class="tournament-details-body" id="tournament-details-body" style="display: block;">
-            <div class="text-muted">No tournament data yet.</div>
-        </div>
-    `;
-
-    const generationsContainer = document.getElementById('generations-container');
-    generationsContainer.parentNode.insertBefore(container, generationsContainer);
-
-    const toggleBtn = container.querySelector('#tournament-details-toggle');
-    const body = container.querySelector('#tournament-details-body');
-    if (toggleBtn && body) {
-        toggleBtn.addEventListener('click', () => {
-            const isHidden = body.style.display === 'none';
-            body.style.display = isHidden ? 'block' : 'none';
-            toggleBtn.textContent = isHidden ? 'Hide' : 'Show';
-        });
-    }
-
-    return container;
+function getTournamentEntryForGeneration(generationIndex) {
+    return tournamentHistory.find((entry) => Number(entry.generation) === Number(generationIndex)) || null;
 }
 
-function renderTournamentDetails(history) {
-    const container = ensureTournamentDetailsContainer();
-    const body = container.querySelector('#tournament-details-body');
-    if (!body) return;
-
-    if (!history || history.length === 0) {
-        body.innerHTML = '<div class="text-muted">No tournament data yet.</div>';
-        return;
-    }
-
-    const html = history.map((entry, idx) => {
-        const genLabel = `Gen ${entry.generation}`;
-        const rounds = (entry.rounds || []).map((round) => {
-            const bye = round.bye
-                ? `<div class="tournament-bye">Bye: ${escapeHtml(round.bye.title || `Idea ${round.bye.idx}`)}</div>`
-                : '';
-            const pairs = (round.pairs || []).map((pair) => {
-                const aTitle = escapeHtml(pair.a_title || `Idea ${pair.a_idx}`);
-                const bTitle = escapeHtml(pair.b_title || `Idea ${pair.b_idx}`);
-                const aWinner = pair.winner === 'A';
-                const bWinner = pair.winner === 'B';
-                const tie = pair.winner === 'tie';
-                return `
-                    <div class="tournament-match-card">
-                        <div class="match-row ${aWinner ? 'winner' : ''}">
-                            <span class="match-name">${aTitle}</span>
-                            ${aWinner ? '<span class="match-badge">Winner</span>' : ''}
-                        </div>
-                        <div class="match-row ${bWinner ? 'winner' : ''}">
-                            <span class="match-name">${bTitle}</span>
-                            ${bWinner ? '<span class="match-badge">Winner</span>' : ''}
-                        </div>
-                        ${tie ? '<div class="match-tie">Tie</div>' : ''}
-                    </div>
-                `;
-            }).join('');
+function buildTournamentRoundsHtml(rounds) {
+    return (rounds || []).map((round) => {
+        const bye = round.bye
+            ? `<div class="tournament-bye">Bye: ${escapeHtml(round.bye.title || `Idea ${round.bye.idx}`)}</div>`
+            : '';
+        const pairs = (round.pairs || []).map((pair) => {
+            const aTitle = escapeHtml(pair.a_title || `Idea ${pair.a_idx}`);
+            const bTitle = escapeHtml(pair.b_title || `Idea ${pair.b_idx}`);
+            const aWinner = pair.winner === 'A';
+            const bWinner = pair.winner === 'B';
+            const tie = pair.winner === 'tie';
             return `
-                <div class="tournament-round-column">
-                    <div class="tournament-round-title">Round ${round.round || ''}</div>
-                    ${bye}
-                    ${pairs || '<div class="text-muted">No matches recorded.</div>'}
+                <div class="tournament-match-card">
+                    <div class="match-row ${aWinner ? 'winner' : ''}">
+                        <span class="match-name">${aTitle}</span>
+                        ${aWinner ? '<span class="match-badge">Winner</span>' : ''}
+                    </div>
+                    <div class="match-row ${bWinner ? 'winner' : ''}">
+                        <span class="match-name">${bTitle}</span>
+                        ${bWinner ? '<span class="match-badge">Winner</span>' : ''}
+                    </div>
+                    ${tie ? '<div class="match-tie">Tie</div>' : ''}
                 </div>
             `;
         }).join('');
 
-        const openAttr = idx === history.length - 1 ? 'open' : '';
         return `
-            <details class="tournament-gen" ${openAttr}>
-                <summary>${genLabel}</summary>
-                <div class="tournament-grid">
-                    ${rounds || '<div class="text-muted">No rounds recorded.</div>'}
-                </div>
-            </details>
+            <div class="tournament-round-column">
+                <div class="tournament-round-title">Round ${round.round || ''}</div>
+                ${bye}
+                ${pairs || '<div class="text-muted">No matches recorded.</div>'}
+            </div>
         `;
     }).join('');
+}
 
-    body.innerHTML = html;
+function closeGenerationTournament(generationIndex) {
+    const chip = document.getElementById(`generation-tournament-chip-${generationIndex}`);
+    const panel = document.getElementById(`generation-tournament-popout-${generationIndex}`);
+    if (chip) {
+        chip.classList.remove('is-open');
+        chip.setAttribute('aria-expanded', 'false');
+    }
+    if (panel) {
+        panel.hidden = true;
+    }
+    if (openTournamentPanelGeneration === generationIndex) {
+        openTournamentPanelGeneration = null;
+    }
+}
+
+function openGenerationTournament(generationIndex) {
+    if (openTournamentPanelGeneration !== null && openTournamentPanelGeneration !== generationIndex) {
+        closeGenerationTournament(openTournamentPanelGeneration);
+    }
+    const chip = document.getElementById(`generation-tournament-chip-${generationIndex}`);
+    const panel = document.getElementById(`generation-tournament-popout-${generationIndex}`);
+    if (!chip || !panel || chip.hidden) {
+        return;
+    }
+    chip.classList.add('is-open');
+    chip.setAttribute('aria-expanded', 'true');
+    panel.hidden = false;
+    openTournamentPanelGeneration = generationIndex;
+}
+
+function toggleGenerationTournament(generationIndex) {
+    if (openTournamentPanelGeneration === generationIndex) {
+        closeGenerationTournament(generationIndex);
+        return;
+    }
+    openGenerationTournament(generationIndex);
+}
+
+function renderGenerationTournamentDetails(generationIndex) {
+    const chip = document.getElementById(`generation-tournament-chip-${generationIndex}`);
+    const panel = document.getElementById(`generation-tournament-popout-${generationIndex}`);
+    if (!chip || !panel) {
+        return;
+    }
+
+    const entry = getTournamentEntryForGeneration(generationIndex);
+    if (!entry) {
+        chip.hidden = true;
+        panel.hidden = true;
+        panel.innerHTML = '';
+        if (openTournamentPanelGeneration === generationIndex) {
+            openTournamentPanelGeneration = null;
+        }
+        return;
+    }
+
+    chip.hidden = false;
+
+    const roundsHtml = buildTournamentRoundsHtml(entry.rounds || []);
+    panel.innerHTML = `
+        <div class="generation-tournament-popout-header">
+            <h6 class="mb-0">Swiss Tournament Details · Gen ${escapeHtml(entry.generation)}</h6>
+            <button type="button" class="generation-tournament-close">Close</button>
+        </div>
+        <div class="tournament-grid">
+            ${roundsHtml || '<div class="text-muted">No rounds recorded.</div>'}
+        </div>
+    `;
+
+    const closeButton = panel.querySelector('.generation-tournament-close');
+    if (closeButton) {
+        closeButton.addEventListener('click', () => closeGenerationTournament(generationIndex));
+    }
+
+    if (openTournamentPanelGeneration === generationIndex) {
+        openGenerationTournament(generationIndex);
+    } else {
+        closeGenerationTournament(generationIndex);
+    }
+}
+
+function renderTournamentDetails(history) {
+    tournamentHistory = Array.isArray(history) ? history : [];
+
+    if (
+        openTournamentPanelGeneration !== null &&
+        !getTournamentEntryForGeneration(openTournamentPanelGeneration)
+    ) {
+        openTournamentPanelGeneration = null;
+    }
+
+    const generationSections = document.querySelectorAll('.generation-section');
+    generationSections.forEach((section) => {
+        const match = section.id.match(/^generation-(\d+)$/);
+        if (!match) return;
+        const generationIndex = Number(match[1]);
+        renderGenerationTournamentDetails(generationIndex);
+    });
 }
 
 // Function to start the elapsed time updater

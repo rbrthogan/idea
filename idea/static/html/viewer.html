@@ -533,38 +533,40 @@
 
         <!-- Existing Templates Section -->
         <div id="existingTemplates" class="mt-4" style="display: none;">
-          <div class="entry-card">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-              <h5 class="mb-0">
-                <i class="fas fa-folder-open me-2"></i>
-                Template Library
-              </h5>
-              <div class="d-flex gap-2">
+          <div class="entry-card template-library-card">
+            <div class="template-library-header">
+              <div>
+                <h5 class="mb-1">
+                  <i class="fas fa-folder-open me-2"></i>
+                  Template Library
+                </h5>
+                <p class="template-library-subtitle mb-0">
+                  Click any row to select a template and view full details, then use sidebar settings and click <strong>Start Evolution</strong>.
+                </p>
+              </div>
+              <div class="template-library-header-actions">
+                <span class="template-count-pill" id="templateLibraryCount">0 templates</span>
                 <button class="btn btn-outline-secondary btn-sm" onclick="openTemplateGenerator({ focusInput: true })">
                   <i class="fas fa-magic me-1"></i>Create with AI
                 </button>
-                <button class="btn btn-outline-primary btn-sm" id="createTemplateBtn">
+                <button class="btn btn-primary btn-sm" id="createTemplateBtn">
                   <i class="fas fa-plus me-1"></i>Create Manually
                 </button>
               </div>
             </div>
-            <p class="text-muted text-start mb-3">
-              Select one template, then configure settings in the sidebar and click <strong>Start Evolution</strong>.
-            </p>
 
-            <!-- Search and filter controls -->
-            <div class="row mb-3">
-              <div class="col-md-8">
+            <div class="template-library-controls">
+              <div class="template-library-search">
                 <div class="input-group">
                   <span class="input-group-text">
                     <i class="fas fa-search"></i>
                   </span>
                   <input type="text" class="form-control" id="templateSearchInput"
-                    placeholder="Search templates by name, description, or author..."
+                    placeholder="Search by template name, description, or author..."
                     onkeyup="searchTemplatesMainPage()">
                 </div>
               </div>
-              <div class="col-md-4">
+              <div class="template-library-filter">
                 <select class="form-select" id="templateFilterSelect" onchange="filterTemplatesMainPage()">
                   <option value="all">All Templates</option>
                   <option value="core">Core Templates</option>
@@ -573,19 +575,15 @@
               </div>
             </div>
 
-            <div class="table-responsive">
-              <table class="table table-hover">
-                <thead class="table-light">
-                  <tr>
-                    <th>Template Name</th>
-                    <th>Description</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="templatesTableBody">
-                  <!-- Templates will be loaded here -->
-                </tbody>
-              </table>
+            <div class="template-library-table-wrap">
+              <div class="template-library-grid-head">
+                <span>Template</span>
+                <span>What It Does</span>
+                <span class="template-actions-head">Manage</span>
+              </div>
+              <div id="templatesTableBody" class="template-library-list">
+                <!-- Templates will be loaded here -->
+              </div>
             </div>
           </div>
         </div>
@@ -839,7 +837,7 @@
     let currentGeneratedTemplate = null;
     let currentGeneratedTemplateId = null;  // Track if the generated template has been saved
     let currentMode = 'new'; // 'new' or 'evolution'
-    let currentTemplateFlowMode = 'browse'; // 'browse' or 'generate'
+    let currentTemplateFlowMode = 'idle'; // 'idle', 'browse', or 'generate'
 
     function setDisplayById(id, displayValue) {
       const el = document.getElementById(id);
@@ -850,7 +848,13 @@
 
     function setTemplateFlowMode(mode, options = {}) {
       const { focusSearch = false, focusInput = false, scroll = false } = options;
-      currentTemplateFlowMode = mode === 'generate' ? 'generate' : 'browse';
+      if (mode === 'generate') {
+        currentTemplateFlowMode = 'generate';
+      } else if (mode === 'browse') {
+        currentTemplateFlowMode = 'browse';
+      } else {
+        currentTemplateFlowMode = 'idle';
+      }
 
       const browseBtn = document.getElementById('modeUseExistingBtn');
       const generateBtn = document.getElementById('modeGenerateBtn');
@@ -860,21 +864,22 @@
       const templatePreview = document.getElementById('templatePreview');
 
       const isBrowse = currentTemplateFlowMode === 'browse';
+      const isGenerate = currentTemplateFlowMode === 'generate';
       if (browseBtn) {
         browseBtn.classList.toggle('active', isBrowse);
         browseBtn.setAttribute('aria-pressed', isBrowse ? 'true' : 'false');
       }
       if (generateBtn) {
-        generateBtn.classList.toggle('active', !isBrowse);
-        generateBtn.setAttribute('aria-pressed', !isBrowse ? 'true' : 'false');
+        generateBtn.classList.toggle('active', isGenerate);
+        generateBtn.setAttribute('aria-pressed', isGenerate ? 'true' : 'false');
       }
       if (generatePanel) {
-        generatePanel.style.display = isBrowse ? 'none' : 'block';
+        generatePanel.style.display = isGenerate ? 'block' : 'none';
       }
       if (existingTemplates) {
         existingTemplates.style.display = isBrowse ? 'block' : 'none';
       }
-      if (isBrowse) {
+      if (!isGenerate) {
         if (generationStatus) generationStatus.style.display = 'none';
         if (templatePreview) templatePreview.style.display = 'none';
       } else if (currentGeneratedTemplate) {
@@ -993,8 +998,8 @@
         await window.refreshTemplateCatalog({ preserveSelection: true, suppressDefaultSelection: false });
       }
 
-      // Keep one clear starting path: choose from library first.
-      setTemplateFlowMode('browse');
+      // Start in neutral mode and show details only after user picks a path.
+      setTemplateFlowMode('idle');
     }
 
     async function showEvolutionMode(evolutionId = null) {
@@ -1174,58 +1179,75 @@
     }
 
     function renderFilteredTemplates() {
-      const tbody = document.getElementById('templatesTableBody');
-      tbody.innerHTML = '';
+      const listContainer = document.getElementById('templatesTableBody');
+      listContainer.innerHTML = '';
 
       const filteredTemplates = filterAndSearchMainPageTemplates();
+      const totalTemplates = Object.values(allMainPageTemplates).filter(template => !template.error).length;
+      const visibleTemplates = Object.keys(filteredTemplates).length;
+      const countPill = document.getElementById('templateLibraryCount');
+      if (countPill) {
+        countPill.textContent = visibleTemplates === totalTemplates
+          ? `${totalTemplates} templates`
+          : `${visibleTemplates} of ${totalTemplates}`;
+      }
 
       Object.entries(filteredTemplates).forEach(([id, template]) => {
         if (!template.error) {
           const isCore = isCoreTemplate(id, template);
           const templateName = template.name || id;
           const escapedTemplateName = escapeHtmlMainPage(templateName);
-          const safeTemplateNameForJs = templateName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
           const description = template.description || '';
-          const truncatedDescription = description.substring(0, 100);
+          const truncatedDescription = description.substring(0, 180);
+          const escapedDescription = escapeHtmlMainPage(description);
           const isSelected = document.getElementById('ideaType')?.value === id;
-          const row = document.createElement('tr');
-          row.className = isSelected ? 'template-row-selected' : '';
+          const descriptionForDisplay = isSelected ? escapedDescription : `${escapeHtmlMainPage(truncatedDescription)}${description.length > 180 ? '...' : ''}`;
+          const row = document.createElement('div');
+          row.className = `template-library-row ${isSelected ? 'template-row-selected' : ''}`;
+          row.setAttribute('role', 'button');
+          row.setAttribute('tabindex', '0');
+          row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+          row.setAttribute('aria-label', `Select template ${templateName}`);
           row.innerHTML = `
-            <td>
-              <div class="d-flex align-items-center">
-                <strong>${escapedTemplateName}</strong>
-                ${isCore ? '<span class="badge bg-success ms-2">Core</span>' : '<span class="badge bg-primary ms-2">Custom</span>'}
-                ${isSelected ? '<span class="badge bg-dark ms-2">Selected</span>' : ''}
+            <div class="template-library-col template-library-col-name">
+              <div class="template-name-cell">
+                <div class="template-name-line">
+                  <span class="template-name">${escapedTemplateName}</span>
+                  ${isCore ? '<span class="template-type-badge template-type-core">Core</span>' : '<span class="template-type-badge template-type-custom">Custom</span>'}
+                </div>
               </div>
-            </td>
-            <td>
-              <span class="text-muted">${escapeHtmlMainPage(truncatedDescription)}${description.length > 100 ? '...' : ''}</span>
-            </td>
-            <td>
-              <div class="btn-group" role="group" aria-label="Template actions">
-                <button class="btn btn-sm btn-primary" onclick="selectExistingTemplate('${id}', '${safeTemplateNameForJs}')">
-                  <i class="fas fa-arrow-right me-1"></i>${isSelected ? 'Using' : 'Use'}
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" onclick="editTemplateMainPage('${id}')">
+            </div>
+            <div class="template-library-col template-library-col-description">
+              <p class="template-description mb-0" title="${escapedDescription}">${descriptionForDisplay}</p>
+            </div>
+            <div class="template-library-col template-library-col-actions">
+              <div class="template-action-group" role="group" aria-label="Template actions">
+                <button class="btn btn-sm template-manage-btn" onclick="event.stopPropagation(); editTemplateMainPage('${id}')">
                   <i class="fas fa-edit me-1"></i>${isCore ? 'Customize' : 'Edit'}
                 </button>
               </div>
-            </td>
+            </div>
           `;
-          tbody.appendChild(row);
+          row.addEventListener('click', () => selectExistingTemplate(id, templateName));
+          row.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              selectExistingTemplate(id, templateName);
+            }
+          });
+          listContainer.appendChild(row);
         }
       });
 
       // Show empty state if no templates match filter
       if (Object.keys(filteredTemplates).length === 0) {
-        const row = document.createElement('tr');
+        const row = document.createElement('div');
+        row.className = 'text-center text-muted py-5 template-empty-state';
         row.innerHTML = `
-          <td colspan="3" class="text-center text-muted py-4">
             <i class="fas fa-search fa-2x mb-2"></i><br>
-            No templates found matching your search criteria.
-          </td>
+            No templates match your current search or filter.
         `;
-        tbody.appendChild(row);
+        listContainer.appendChild(row);
       }
     }
 
