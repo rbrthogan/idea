@@ -74,8 +74,8 @@ class _FakeEngine:
         self.avg_tournament_cost = 0.0
 
         self.population = [
-            {"id": uuid.uuid4(), "idea": "A", "parent_ids": []},
-            {"id": uuid.uuid4(), "idea": "B", "parent_ids": []},
+            {"id": uuid.uuid4(), "idea": "A", "parent_ids": [], "birth_generation": 0},
+            {"id": uuid.uuid4(), "idea": "B", "parent_ids": [], "birth_generation": 0},
         ]
         self.history = [self.population.copy()]
         self.contexts = ["ctx0", "ctx1"]
@@ -97,6 +97,45 @@ class _FakeEngine:
 
     def _allocate_parent_slots(self, _ranks, _ideas_to_breed):
         return {}
+
+    def _compute_replacement_count(self, population_size):
+        if population_size <= 1:
+            return 0
+        return 1
+
+    async def _score_population_fitness(self, population, ranks):
+        return {
+            idx: {
+                "elo": float(ranks.get(idx, 1500)),
+                "diversity": 0.1 * idx,
+                "elo_norm": 0.5,
+                "diversity_norm": 0.5,
+                "fitness": 0.5 + (0.1 * (len(population) - idx)),
+            }
+            for idx in range(len(population))
+        }
+
+    def _score_survival_with_age_decay(self, _population, fitness_map, target_generation=None):
+        result = {}
+        for idx, row in fitness_map.items():
+            result[idx] = {
+                **row,
+                "age": 0.0,
+                "age_decay": 1.0,
+                "survival_score": row["fitness"],
+            }
+        return result
+
+    def _select_survivor_indices(self, survival_scores, survivor_count):
+        ordered = sorted(
+            survival_scores.keys(),
+            key=lambda idx: survival_scores[idx]["survival_score"],
+            reverse=True,
+        )
+        return ordered[:survivor_count]
+
+    def _get_birth_generation(self, idea):
+        return idea.get("birth_generation", 0) if isinstance(idea, dict) else 0
 
     def _select_parents_from_slots(self, _slots, available_indices):
         return available_indices[:2]

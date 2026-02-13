@@ -56,6 +56,10 @@ class EvolutionSerializer:
                 "thinking_budget": engine.thinking_budget,
                 "max_budget": engine.max_budget,
                 "mutation_rate": engine.mutation_rate,
+                "replacement_rate": engine.replacement_rate,
+                "fitness_alpha": engine.fitness_alpha,
+                "age_decay_rate": engine.age_decay_rate,
+                "age_decay_floor": engine.age_decay_floor,
             },
             "current_generation": engine.current_generation,
             "population": [cls.serialize_idea(idea) for idea in engine.population],
@@ -67,6 +71,8 @@ class EvolutionSerializer:
             "diversity_history": engine.diversity_history,
             "avg_idea_cost": engine.avg_idea_cost,
             "avg_tournament_cost": engine.avg_tournament_cost,
+            "fitness_elo_stats": engine.fitness_elo_stats,
+            "fitness_diversity_stats": engine.fitness_diversity_stats,
             "token_counts": engine.get_total_token_count(),
         }
         if engine.template_data:
@@ -100,6 +106,18 @@ class EvolutionSerializer:
 
     @classmethod
     def restore_runtime_state(cls, engine: Any, state: Dict[str, Any]) -> None:
+        def _coerce_stats(raw: Any) -> Dict[str, float]:
+            if not isinstance(raw, dict):
+                return {"count": 0, "mean": 0.0, "m2": 0.0}
+            try:
+                return {
+                    "count": int(raw.get("count", 0)),
+                    "mean": float(raw.get("mean", 0.0)),
+                    "m2": float(raw.get("m2", 0.0)),
+                }
+            except (TypeError, ValueError):
+                return {"count": 0, "mean": 0.0, "m2": 0.0}
+
         engine.evolution_id = state.get("evolution_id")
         engine.evolution_name = state.get("name")
         engine.created_at = state.get("created_at")
@@ -116,6 +134,10 @@ class EvolutionSerializer:
         engine.diversity_history = state.get("diversity_history", [])
         engine.avg_idea_cost = state.get("avg_idea_cost", 0.0)
         engine.avg_tournament_cost = state.get("avg_tournament_cost", 0.0)
+        engine.fitness_elo_stats = _coerce_stats(state.get("fitness_elo_stats"))
+        engine.fitness_diversity_stats = _coerce_stats(
+            state.get("fitness_diversity_stats")
+        )
 
         engine.population = [cls.deserialize_idea(idea) for idea in state.get("population", [])]
         engine.history = [[cls.deserialize_idea(idea) for idea in gen] for gen in state.get("history", [])]
@@ -299,6 +321,10 @@ class EvolutionRepository:
             thinking_budget=config.get("thinking_budget"),
             max_budget=config.get("max_budget"),
             mutation_rate=config.get("mutation_rate", 0.2),
+            replacement_rate=config.get("replacement_rate", 0.5),
+            fitness_alpha=config.get("fitness_alpha", 0.7),
+            age_decay_rate=config.get("age_decay_rate", 0.25),
+            age_decay_floor=config.get("age_decay_floor", 0.35),
             api_key=api_key,
             user_id=user_id or state.get("user_id"),
             template_data=state.get("template_data"),

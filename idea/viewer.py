@@ -78,6 +78,7 @@ EVOLUTIONS_DIR.mkdir(exist_ok=True)
 # Instance identity (used for run leasing/coordination)
 INSTANCE_ID = os.getenv("HOSTNAME") or f"local-{uuid.uuid4()}"
 ACTIVE_RUN_STATUSES = {"starting", "in_progress", "resuming", "continuing", "stopping"}
+TRANSIENT_PROGRESS_FLAGS = {"oracle_update", "elite_selection_update", "checkpoint_saved"}
 
 
 def _now_ms() -> int:
@@ -249,6 +250,19 @@ async def _refresh_run_state(user_id: str, state: UserEvolutionState, update_dat
         state.run_last_write = now_monotonic
     except Exception as e:
         print(f"Warning: failed to persist run state: {e}")
+
+
+def _merge_status_update(state: UserEvolutionState, update_data: Dict[str, Any]) -> None:
+    """
+    Merge a progress update into state.status while keeping event-like flags transient.
+
+    Flags such as oracle/elite/checkpoint updates should only be true on the update
+    that emits them; they must not remain sticky across subsequent polls.
+    """
+    for flag in TRANSIENT_PROGRESS_FLAGS:
+        if flag not in update_data:
+            state.status.pop(flag, None)
+    state.status.update(update_data)
 
 
 async def _heartbeat_loop(user_id: str, state: UserEvolutionState) -> None:
@@ -578,6 +592,27 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             print(f"Error parsing mutation rate: {e}")
             mutation_rate = 0.2
 
+        try:
+            replacement_rate = float(data.get('replacementRate', 0.5))
+            print(f"Parsed replacement rate: {replacement_rate}")
+        except ValueError as e:
+            print(f"Error parsing replacement rate: {e}")
+            replacement_rate = 0.5
+
+        try:
+            fitness_alpha = float(data.get('fitnessAlpha', 0.7))
+            print(f"Parsed fitness alpha: {fitness_alpha}")
+        except ValueError as e:
+            print(f"Error parsing fitness alpha: {e}")
+            fitness_alpha = 0.7
+
+        try:
+            age_decay_rate = float(data.get('ageDecayRate', 0.25))
+            print(f"Parsed age decay rate: {age_decay_rate}")
+        except ValueError as e:
+            print(f"Error parsing age decay rate: {e}")
+            age_decay_rate = 0.25
+
         # Get Oracle parameters with defaults
 
         # Get thinking budget parameter (only for Gemini 2.5 models)
@@ -604,7 +639,9 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
               f"idea_type={idea_type}, model_type={model_type}, "
               f"creative_temp={creative_temp}, top_p={top_p}, "
               f"tournament: count={tournament_count}, full_rounds={full_tournament_rounds}, target_rounds={target_tournament_rounds}, "
-              f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
+              f"mutation_rate={mutation_rate}, replacement_rate={replacement_rate}, "
+              f"fitness_alpha={fitness_alpha}, age_decay_rate={age_decay_rate}, "
+              f"thinking_budget={thinking_budget}, max_budget={max_budget}")
 
         # Resolve template source. System templates are bundled; custom templates live in Firestore.
         template_data = None
@@ -636,6 +673,9 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             tournament_count=tournament_count,
             full_tournament_rounds=full_tournament_rounds,
             mutation_rate=mutation_rate,
+            replacement_rate=replacement_rate,
+            fitness_alpha=fitness_alpha,
+            age_decay_rate=age_decay_rate,
             thinking_budget=thinking_budget,
             max_budget=max_budget,
             api_key=api_key,
@@ -1392,6 +1432,10 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
             thinking_budget=config.get('thinking_budget'),
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
+            replacement_rate=config.get('replacement_rate', 0.5),
+            fitness_alpha=config.get('fitness_alpha', 0.7),
+            age_decay_rate=config.get('age_decay_rate', 0.25),
+            age_decay_floor=config.get('age_decay_floor', 0.35),
             api_key=api_key,
         )
 
@@ -1402,6 +1446,10 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
         engine.tournament_history = data.get('tournament_history', [])
         engine.diversity_history = data.get('diversity_history', [])
         engine.current_generation = len(history)
+        engine.fitness_elo_stats = data.get("fitness_elo_stats", {"count": 0, "mean": 0.0, "m2": 0.0})
+        engine.fitness_diversity_stats = data.get(
+            "fitness_diversity_stats", {"count": 0, "mean": 0.0, "m2": 0.0}
+        )
 
         # Restore history and population
         def deserialize_idea(idea_data):
@@ -1472,7 +1520,7 @@ async def run_resume_evolution_task(state: UserEvolutionState):
             if hasattr(engine, 'get_total_token_count'):
                 update_data['token_counts'] = engine.get_total_token_count()
 
-        state.status.update(update_data)
+        _merge_status_update(state, update_data)
 
         # Clear queue and add update
         state.reset_queue()
@@ -1520,7 +1568,7 @@ async def run_continue_evolution_task(state: UserEvolutionState, additional_gene
             if hasattr(engine, 'get_total_token_count'):
                 update_data['token_counts'] = engine.get_total_token_count()
 
-        state.status.update(update_data)
+        _merge_status_update(state, update_data)
 
         # Clear queue and add update
         state.reset_queue()
@@ -1577,7 +1625,7 @@ async def run_evolution_task(state: UserEvolutionState):
                 print(f"Evolution complete. Total tokens: {update_data['token_counts']['total']}")
 
         # Update the evolution status by merging the new data
-        state.status.update(update_data)
+        _merge_status_update(state, update_data)
 
         # Clear the queue before adding new update to avoid backlog
         state.reset_queue()
@@ -1826,6 +1874,11 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
             state.last_sent_history_version = state.history_version
         else:
             response.pop("history", None)
+
+        # One-shot event flags should be emitted once, then cleared.
+        for flag in TRANSIENT_PROGRESS_FLAGS:
+            if response.get(flag):
+                state.status.pop(flag, None)
 
         return JSONResponse(convert_uuids_to_strings(response))
 

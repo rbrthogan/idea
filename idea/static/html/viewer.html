@@ -299,6 +299,36 @@
                 <small class="text-muted">Probability of injecting fresh concepts during breeding (0 = no
                   mutation)</small>
               </div>
+
+              <div class="mb-3">
+                <label for="replacementRate" class="form-label d-flex justify-content-between">
+                  <span>Replacement Rate</span>
+                  <span id="replacementRateValue">0.50</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1" step="0.05" id="replacementRate" value="0.5"
+                  oninput="document.getElementById('replacementRateValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Fraction of population replaced with new children each generation.</small>
+              </div>
+
+              <div class="mb-3">
+                <label for="fitnessAlpha" class="form-label d-flex justify-content-between">
+                  <span>Fitness Alpha (Elo Weight)</span>
+                  <span id="fitnessAlphaValue">0.70</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1" step="0.05" id="fitnessAlpha" value="0.7"
+                  oninput="document.getElementById('fitnessAlphaValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Hybrid fitness = alpha*Elo + (1-alpha)*diversity (normalized).</small>
+              </div>
+
+              <div class="mb-3">
+                <label for="ageDecayRate" class="form-label d-flex justify-content-between">
+                  <span>Age Decay Rate</span>
+                  <span id="ageDecayRateValue">0.25</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1.5" step="0.05" id="ageDecayRate" value="0.25"
+                  oninput="document.getElementById('ageDecayRateValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Higher values retire old ideas faster during survivor selection.</small>
+              </div>
             </div>
           </div>
 

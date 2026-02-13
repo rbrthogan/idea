@@ -40,6 +40,8 @@ let lastProgressBarValue = -1;
 let lastContextSignature = '';
 let lastTournamentHistorySignature = '';
 let lastTokenCountsSignature = '';
+let lastOracleUpdateKey = '';
+let lastEliteUpdateKey = '';
 
 /**
  * Load available templates and populate the idea type dropdown
@@ -316,6 +318,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Get mutation rate
         const mutationRate = parseFloat(document.getElementById('mutationRate').value);
+        const replacementRate = parseFloat(document.getElementById('replacementRate').value);
+        const fitnessAlpha = parseFloat(document.getElementById('fitnessAlpha').value);
+        const ageDecayRate = parseFloat(document.getElementById('ageDecayRate').value);
 
         // Get thinking budget value (only for Gemini 2.5 models)
         const thinkingBudget = getThinkingBudgetValue();
@@ -337,6 +342,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             topP,
             tournamentCount,
             mutationRate,
+            replacementRate,
+            fitnessAlpha,
+            ageDecayRate,
             thinkingBudget,
             maxBudget,
             evolutionName
@@ -2484,8 +2492,11 @@ async function pollProgress() {
             }
         }
 
-        // Check if this is a new evolution (history is empty but is_running is true)
-        if (data.is_running && (!data.history || data.history.length === 0)) {
+        // Reset the display only for truly new runs (no history available yet).
+        const noInlineHistory = !data.history || data.history.length === 0;
+        const noHistoryAvailable = !data.history_available;
+        const nothingRenderedYet = lastRenderedHistoryVersion < 0;
+        if (data.is_running && noInlineHistory && noHistoryAvailable && nothingRenderedYet) {
             console.log("New evolution detected, resetting UI");
             // Reset generations display but keep progress bar
             const container = document.getElementById('generations-container');
@@ -2618,12 +2629,20 @@ async function pollProgress() {
 
         // Handle oracle updates with activity logging
         if (data.oracle_update) {
-            addActivityLogItem('🔮 Oracle injected diverse idea into population', 'info');
+            const oracleKey = `${currentEvolutionId || 'na'}:${Number.isInteger(data.history_version) ? data.history_version : 'na'}:${data.current_generation || 'na'}:${Math.round((data.progress || 0) * 10) / 10}`;
+            if (oracleKey !== lastOracleUpdateKey) {
+                addActivityLogItem('🔮 Oracle injected diverse idea into population', 'info');
+                lastOracleUpdateKey = oracleKey;
+            }
         }
 
         // Handle elite selection updates
         if (data.elite_selection_update) {
-            addActivityLogItem('⭐ Elite idea selected for next generation', 'info');
+            const eliteKey = `${currentEvolutionId || 'na'}:${Number.isInteger(data.history_version) ? data.history_version : 'na'}:${data.current_generation || 'na'}:${Math.round((data.progress || 0) * 10) / 10}`;
+            if (eliteKey !== lastEliteUpdateKey) {
+                addActivityLogItem('⭐ Elite idea selected for next generation', 'info');
+                lastEliteUpdateKey = eliteKey;
+            }
         }
 
         // Display token counts if available (Live updates)
@@ -3353,6 +3372,8 @@ function resetUIState() {
     lastContextSignature = '';
     lastTournamentHistorySignature = '';
     lastTokenCountsSignature = '';
+    lastOracleUpdateKey = '';
+    lastEliteUpdateKey = '';
 
     // Reset diversity tracking
     window._loggedDiversityGens = new Set();

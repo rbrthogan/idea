@@ -86,7 +86,8 @@ class EvolutionOrchestrator:
         print("Generating initial population (Generation 0)...")
 
         est_tournament_rounds = max(1, self.engine.tournament_rounds)
-        steps_per_gen = self.engine.pop_size + est_tournament_rounds + 1
+        estimated_children_per_gen = self.engine._compute_replacement_count(self.engine.pop_size)
+        steps_per_gen = estimated_children_per_gen + est_tournament_rounds + 1
         total_steps = (2 * self.engine.pop_size) + (self.engine.generations * steps_per_gen)
 
         await self._seed_initial_population(total_steps=total_steps)
@@ -100,8 +101,8 @@ class EvolutionOrchestrator:
         current_cost = token_counts["cost"]["total_cost"]
         self.engine.avg_idea_cost = current_cost / max(1, self.engine.pop_size)
 
-        total_ideas_to_generate = self.engine.pop_size * (self.engine.generations + 1)
-        remaining_ideas = total_ideas_to_generate - self.engine.pop_size
+        children_per_gen = self.engine._compute_replacement_count(self.engine.pop_size)
+        remaining_ideas = self.engine.generations * children_per_gen
         remaining_tournaments = self.engine.generations
         estimated_total_cost = current_cost + (
             remaining_ideas * self.engine.avg_idea_cost
@@ -192,7 +193,8 @@ class EvolutionOrchestrator:
         await self.progress.emit(self.progress_callback, initial_payload)
 
         est_tournament_rounds = max(1, self.engine.tournament_rounds)
-        steps_per_gen = self.engine.pop_size + est_tournament_rounds + 1
+        estimated_children_per_gen = self.engine._compute_replacement_count(self.engine.pop_size)
+        steps_per_gen = estimated_children_per_gen + est_tournament_rounds + 1
         remaining_gens = self.engine.generations - start_generation
         total_steps = max(1, remaining_gens * steps_per_gen)
 
@@ -224,7 +226,12 @@ class EvolutionOrchestrator:
             )
             return (
                 context_pool,
-                {"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []},
+                {
+                    "id": uuid.uuid4(),
+                    "idea": idea_text,
+                    "parent_ids": [],
+                    "birth_generation": 0,
+                },
                 specific_prompt,
             )
 
@@ -336,7 +343,12 @@ class EvolutionOrchestrator:
             )
             return (
                 context_pool,
-                {"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []},
+                {
+                    "id": uuid.uuid4(),
+                    "idea": idea_text,
+                    "parent_ids": [],
+                    "birth_generation": 0,
+                },
                 specific_prompt,
             )
 
@@ -423,9 +435,6 @@ class EvolutionOrchestrator:
         work_state: GenerationWorkState,
         resuming: bool,
     ) -> None:
-        elite_idea = work_state.elite_idea
-        elite_breeding_prompt = work_state.elite_breeding_prompt
-
         for gen in range(start_generation, self.engine.generations):
             if self.engine.stop_requested:
                 self.engine.is_stopped = True
@@ -461,44 +470,15 @@ class EvolutionOrchestrator:
                 return
 
             print(f"Starting generation {gen + 1}...")
-
-            new_population: List[Any] = []
-            generation_breeding_prompts: List[Optional[str]] = []
             random.shuffle(self.engine.population)
 
-            elite_processed = False
-            if elite_idea is not None:
-                refined_elite = await asyncio.to_thread(
-                    self.engine.critic.refine, elite_idea, self.engine.idea_type
-                )
-                formatted_elite = await asyncio.to_thread(
-                    self.engine.formatter.format_idea,
-                    refined_elite,
-                    self.engine.idea_type,
-                )
-
-                if isinstance(formatted_elite, dict):
-                    formatted_elite["elite_selected"] = True
-                    formatted_elite["elite_source_id"] = elite_idea.get("id")
-                    formatted_elite["elite_source_generation"] = gen
-                else:
-                    formatted_elite = {
-                        "id": uuid.uuid4(),
-                        "idea": formatted_elite,
-                        "parent_ids": [],
-                        "elite_selected": True,
-                        "elite_source_id": elite_idea.get("id"),
-                        "elite_source_generation": gen,
-                    }
-
-                new_population.append(formatted_elite)
-                generation_breeding_prompts.append(elite_breeding_prompt)
-                elite_processed = True
-
             current_pop_size = len(self.engine.population)
-            ideas_to_breed = current_pop_size - (1 if elite_processed else 0)
-            elite_idea = None
-            elite_breeding_prompt = None
+            ideas_to_breed = self.engine._compute_replacement_count(current_pop_size)
+            survivor_count = max(0, current_pop_size - ideas_to_breed)
+            print(
+                f"Generation {gen + 1}: carrying {survivor_count}/{current_pop_size} "
+                f"survivors and breeding {ideas_to_breed} children"
+            )
 
             tournament_start_cost = self.engine.get_total_token_count()["cost"]["total_cost"]
 
@@ -583,22 +563,82 @@ class EvolutionOrchestrator:
                     self.engine.avg_tournament_cost + current_tournament_cost
                 ) / 2
 
-            global_parent_slots = self.engine._allocate_parent_slots(global_ranks, ideas_to_breed)
+            fitness_map = await self.engine._score_population_fitness(
+                self.engine.population, global_ranks
+            )
+            if not fitness_map:
+                fitness_map = {
+                    idx: {
+                        "elo": float(global_ranks.get(idx, 0.0)),
+                        "diversity": 0.0,
+                        "elo_norm": 0.5,
+                        "diversity_norm": 0.5,
+                        "fitness": 0.5,
+                    }
+                    for idx in global_ranks.keys()
+                }
+
+            next_generation_index = gen + 1
+            survival_scores = self.engine._score_survival_with_age_decay(
+                self.engine.population, fitness_map, target_generation=next_generation_index
+            )
+
+            survivor_indices = self.engine._select_survivor_indices(
+                survival_scores, survivor_count
+            )
+            if len(survivor_indices) < survivor_count:
+                remaining = [
+                    idx for idx in range(current_pop_size) if idx not in set(survivor_indices)
+                ]
+                random.shuffle(remaining)
+                survivor_indices.extend(remaining[: (survivor_count - len(survivor_indices))])
+
+            def clone_survivor(idea: Any) -> Any:
+                if not isinstance(idea, dict):
+                    return idea
+                cloned = dict(idea)
+                cloned["birth_generation"] = self.engine._get_birth_generation(idea)
+                cloned["survived_to_generation"] = next_generation_index
+                return cloned
+
+            new_population: List[Any] = [
+                clone_survivor(self.engine.population[idx]) for idx in survivor_indices
+            ]
+            generation_breeding_prompts: List[Optional[str]] = [None] * len(new_population)
+
+            parent_fitness = {
+                idx: float(data.get("fitness", 0.0)) for idx, data in fitness_map.items()
+            }
+            available_parent_indices = sorted(parent_fitness.keys())
+            if not available_parent_indices:
+                available_parent_indices = list(range(current_pop_size))
+                parent_fitness = {idx: 1.0 for idx in available_parent_indices}
+
+            global_parent_slots = self.engine._allocate_parent_slots(
+                parent_fitness, ideas_to_breed
+            )
 
             breeding_tasks_data = []
             for _ in range(ideas_to_breed):
+                if not available_parent_indices:
+                    break
+
                 if global_parent_slots:
                     parent_indices = self.engine._select_parents_from_slots(
-                        global_parent_slots, list(global_ranks.keys())
+                        global_parent_slots, available_parent_indices
                     )
-                    parent_ideas = [self.engine.population[idx] for idx in parent_indices]
                 else:
+                    parent_indices = []
+
+                if len(parent_indices) < self.engine.breeder.parent_count:
+                    replace = len(available_parent_indices) < self.engine.breeder.parent_count
                     parent_indices = np.random.choice(
-                        list(global_ranks.keys()),
-                        size=self.engine.breeder.parent_count,
-                        replace=False,
-                    )
-                    parent_ideas = [self.engine.population[idx] for idx in parent_indices]
+                        available_parent_indices,
+                        size=min(self.engine.breeder.parent_count, len(available_parent_indices)),
+                        replace=replace,
+                    ).tolist()
+
+                parent_ideas = [self.engine.population[idx] for idx in parent_indices]
                 breeding_tasks_data.append(parent_ideas)
 
             async def breed_single_child(parent_ideas):
@@ -618,6 +658,15 @@ class EvolutionOrchestrator:
                     refined_idea,
                     self.engine.idea_type,
                 )
+                if isinstance(formatted_idea, dict):
+                    formatted_idea.setdefault("birth_generation", next_generation_index)
+                else:
+                    formatted_idea = {
+                        "id": uuid.uuid4(),
+                        "idea": formatted_idea,
+                        "parent_ids": [],
+                        "birth_generation": next_generation_index,
+                    }
                 return formatted_idea, prompt
 
             breeding_tasks = [
@@ -625,13 +674,12 @@ class EvolutionOrchestrator:
             ]
 
             breeding_start_step = current_gen_start_step + max(1, self.engine.tournament_rounds)
-            current_gen_base = 1 if elite_processed else 0
 
             breeding_results = await self.engine._run_batch_with_progress(
                 tasks=breeding_tasks,
                 progress_callback=self.progress_callback,
                 base_progress_info=gen_base_progress_info,
-                start_step=breeding_start_step + current_gen_base,
+                start_step=breeding_start_step,
                 total_steps=max(1, total_steps),
                 description_template="Breeding and refining idea {completed}/{total}...",
             )
@@ -661,19 +709,47 @@ class EvolutionOrchestrator:
 
             for result in breeding_results:
                 if result is None:
-                    generation_breeding_prompts.append(None)
                     continue
 
                 idea, prompt = result
                 new_population.append(idea)
                 generation_breeding_prompts.append(prompt)
 
+            # Keep generation size stable if some child tasks failed.
+            if len(new_population) < current_pop_size:
+                missing = current_pop_size - len(new_population)
+                fallback_order = sorted(
+                    range(current_pop_size),
+                    key=lambda idx: float(
+                        survival_scores.get(idx, {}).get("survival_score", 0.0)
+                    ),
+                    reverse=True,
+                )
+                picked = set(survivor_indices)
+                for idx in fallback_order:
+                    if idx in picked:
+                        continue
+                    new_population.append(clone_survivor(self.engine.population[idx]))
+                    generation_breeding_prompts.append(None)
+                    picked.add(idx)
+                    missing -= 1
+                    if missing <= 0:
+                        break
+
+            if len(new_population) > current_pop_size:
+                new_population = new_population[:current_pop_size]
+                generation_breeding_prompts = generation_breeding_prompts[:current_pop_size]
+
             token_counts = self.engine.get_total_token_count()
             current_cost = token_counts["cost"]["total_cost"]
 
-            total_ideas = self.engine.pop_size * (self.engine.generations + 1)
-            completed_ideas = self.engine.pop_size + (gen * self.engine.pop_size) + len(new_population)
-            remaining_ideas_in_run = total_ideas - completed_ideas
+            expected_children_per_gen = self.engine._compute_replacement_count(
+                self.engine.pop_size
+            )
+            total_children = self.engine.generations * expected_children_per_gen
+            produced_children_this_gen = max(0, len(generation_breeding_prompts) - survivor_count)
+            produced_children = (gen * expected_children_per_gen) + produced_children_this_gen
+            remaining_ideas_in_run = max(0, total_children - produced_children)
             remaining_tournaments = self.engine.generations - 1 - gen
 
             estimated_total_cost = current_cost + (
@@ -723,8 +799,7 @@ class EvolutionOrchestrator:
                     "progress": (
                         (
                             breeding_start_step
-                            + current_gen_base
-                            + len(new_population)
+                            + len(breeding_tasks_data)
                         )
                         / max(1, total_steps)
                     )
@@ -742,9 +817,6 @@ class EvolutionOrchestrator:
             await self.engine._calculate_and_store_diversity()
 
             await self._apply_oracle_if_enabled(gen)
-
-            if gen < self.engine.generations - 1:
-                elite_idea, elite_breeding_prompt = await self._select_elite_for_next_generation(gen)
 
             self.engine.current_generation = gen + 1
 
@@ -803,6 +875,7 @@ class EvolutionOrchestrator:
                 "id": uuid.uuid4(),
                 "idea": new_idea,
                 "parent_ids": [],
+                "birth_generation": gen + 1,
                 "oracle_generated": True,
                 "oracle_analysis": oracle_result["oracle_analysis"],
             }
@@ -817,6 +890,7 @@ class EvolutionOrchestrator:
                 formatted_oracle_idea["oracle_analysis"] = oracle_idea.get(
                     "oracle_analysis", ""
                 )
+            formatted_oracle_idea.setdefault("birth_generation", gen + 1)
 
             old_idea = self.engine.population[replace_idx]
             old_idea_id = str(old_idea.get("id", "")) if isinstance(old_idea, dict) else ""

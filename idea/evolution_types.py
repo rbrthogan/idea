@@ -16,6 +16,10 @@ class EvolutionConfig:
     thinking_budget: Optional[int]
     max_budget: Optional[float]
     mutation_rate: float
+    replacement_rate: float
+    fitness_alpha: float
+    age_decay_rate: float
+    age_decay_floor: float
 
 
 @dataclass

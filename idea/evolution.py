@@ -49,6 +49,10 @@ class EvolutionEngine:
         thinking_budget: Optional[int] = None,
         max_budget: Optional[float] = None,
         mutation_rate: float = 0.2,
+        replacement_rate: float = 0.5,
+        fitness_alpha: float = 0.7,
+        age_decay_rate: float = 0.25,
+        age_decay_floor: float = 0.35,
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,  # Required for Firestore storage
         template_data: Optional[Dict[str, Any]] = None,  # Custom template data from Firestore
@@ -72,6 +76,10 @@ class EvolutionEngine:
         self.thinking_budget = thinking_budget
         self.max_budget = max_budget
         self.mutation_rate = mutation_rate
+        self.replacement_rate = max(0.0, min(1.0, float(replacement_rate)))
+        self.fitness_alpha = max(0.0, min(1.0, float(fitness_alpha)))
+        self.age_decay_rate = max(0.0, float(age_decay_rate))
+        self.age_decay_floor = max(0.0, min(1.0, float(age_decay_floor)))
         self.api_key = api_key
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
@@ -135,6 +143,14 @@ class EvolutionEngine:
         self.creative_temp = creative_temp
         self.top_p = top_p
         self.mutation_rate = mutation_rate
+        self.replacement_rate = max(0.0, min(1.0, float(replacement_rate)))
+        self.fitness_alpha = max(0.0, min(1.0, float(fitness_alpha)))
+        self.age_decay_rate = max(0.0, float(age_decay_rate))
+        self.age_decay_floor = max(0.0, min(1.0, float(age_decay_floor)))
+
+        # Running normalization state (persisted) to keep fitness scores comparable across generations.
+        self.fitness_elo_stats = {"count": 0, "mean": 0.0, "m2": 0.0}
+        self.fitness_diversity_stats = {"count": 0, "mean": 0.0, "m2": 0.0}
 
         # Evolution identity and tracking
         self.evolution_id = None  # Unique ID for this evolution (UUID)
@@ -271,6 +287,10 @@ class EvolutionEngine:
             thinking_budget=self.thinking_budget,
             max_budget=self.max_budget,
             mutation_rate=self.mutation_rate,
+            replacement_rate=self.replacement_rate,
+            fitness_alpha=self.fitness_alpha,
+            age_decay_rate=self.age_decay_rate,
+            age_decay_floor=self.age_decay_floor,
         )
         self.identity_state = EvolutionIdentity(
             evolution_id=self.evolution_id,
@@ -910,12 +930,203 @@ class EvolutionEngine:
 
         return embeddings
 
+    @staticmethod
+    def _update_running_stats(stats: Dict[str, float], values: List[float]) -> None:
+        """Update Welford running stats for cross-generation metric normalization."""
+        for value in values:
+            count = stats["count"] + 1
+            delta = value - stats["mean"]
+            mean = stats["mean"] + (delta / count)
+            delta2 = value - mean
+            m2 = stats["m2"] + (delta * delta2)
+            stats["count"] = count
+            stats["mean"] = mean
+            stats["m2"] = m2
+
+    @staticmethod
+    def _normalize_with_running_stats(value: float, stats: Dict[str, float]) -> float:
+        """
+        Normalize a value into [0, 1] using running z-score statistics.
+
+        We clamp z-scores to [-3, 3] to prevent outliers from dominating.
+        """
+        count = int(stats.get("count", 0))
+        m2 = float(stats.get("m2", 0.0))
+        mean = float(stats.get("mean", 0.0))
+        if count < 2 or m2 <= 0:
+            return 0.5
+
+        variance = m2 / max(1, count - 1)
+        std = math.sqrt(max(variance, 1e-12))
+        z = (value - mean) / std
+        z = max(-3.0, min(3.0, z))
+        return (z + 3.0) / 6.0
+
+    def _get_birth_generation(self, idea: Any) -> int:
+        """Read persisted birth generation metadata (defaults to 0 for legacy ideas)."""
+        if not isinstance(idea, dict):
+            return 0
+        raw = idea.get("birth_generation", 0)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+
+    def _compute_replacement_count(self, population_size: int) -> int:
+        """Compute how many child slots to create for the next generation."""
+        if population_size <= 0:
+            return 0
+
+        replace_count = int(round(population_size * self.replacement_rate))
+        if self.replacement_rate > 0 and replace_count == 0:
+            replace_count = 1
+
+        if self.replacement_rate < 1.0 and replace_count >= population_size:
+            replace_count = population_size - 1
+
+        return max(0, min(population_size, replace_count))
+
+    async def _calculate_population_diversity_scores(
+        self, population: List[Any]
+    ) -> Dict[int, float]:
+        """
+        Compute per-idea diversity as distance from the current population centroid.
+
+        Returns:
+            Dict mapping population index -> raw diversity distance.
+        """
+        if not population:
+            return {}
+
+        default_scores = {idx: 0.0 for idx in range(len(population))}
+        if not self.diversity_calculator.is_enabled() or len(population) < 2:
+            return default_scores
+
+        embeddings = await self._get_or_compute_embeddings_for_ideas(population)
+
+        valid_embeddings = []
+        valid_indices = []
+        for idx, embedding in enumerate(embeddings):
+            if embedding is not None:
+                valid_embeddings.append(embedding)
+                valid_indices.append(idx)
+
+        if len(valid_embeddings) < 2:
+            return default_scores
+
+        centroid = np.mean(valid_embeddings, axis=0)
+        diversity_scores = default_scores.copy()
+        for emb_idx, pop_idx in enumerate(valid_indices):
+            embedding = valid_embeddings[emb_idx]
+            distance = float(np.sqrt(np.sum((embedding - centroid) ** 2)))
+            diversity_scores[pop_idx] = distance
+
+        return diversity_scores
+
+    async def _score_population_fitness(
+        self, population: List[Any], ranks: Dict[int, float]
+    ) -> Dict[int, Dict[str, float]]:
+        """
+        Compute normalized hybrid fitness for the current population.
+
+        fitness = alpha * elo_norm + (1 - alpha) * diversity_norm
+        """
+        if not population or not ranks:
+            return {}
+
+        valid_indices = [idx for idx in ranks.keys() if 0 <= idx < len(population)]
+        if not valid_indices:
+            return {}
+
+        diversity_scores = await self._calculate_population_diversity_scores(population)
+        elo_values = [float(ranks[idx]) for idx in valid_indices]
+        diversity_values = [float(diversity_scores.get(idx, 0.0)) for idx in valid_indices]
+
+        self._update_running_stats(self.fitness_elo_stats, elo_values)
+        self._update_running_stats(self.fitness_diversity_stats, diversity_values)
+
+        fitness_map: Dict[int, Dict[str, float]] = {}
+        for idx in valid_indices:
+            elo = float(ranks[idx])
+            diversity = float(diversity_scores.get(idx, 0.0))
+            elo_norm = self._normalize_with_running_stats(elo, self.fitness_elo_stats)
+            diversity_norm = self._normalize_with_running_stats(
+                diversity, self.fitness_diversity_stats
+            )
+            fitness = (self.fitness_alpha * elo_norm) + (
+                (1.0 - self.fitness_alpha) * diversity_norm
+            )
+            fitness_map[idx] = {
+                "elo": elo,
+                "diversity": diversity,
+                "elo_norm": elo_norm,
+                "diversity_norm": diversity_norm,
+                "fitness": fitness,
+            }
+
+        return fitness_map
+
+    def _score_survival_with_age_decay(
+        self, population: List[Any], fitness_map: Dict[int, Dict[str, float]], target_generation: int
+    ) -> Dict[int, Dict[str, float]]:
+        """
+        Combine hybrid fitness with age decay to produce survivor selection weights.
+        """
+        survival_scores: Dict[int, Dict[str, float]] = {}
+        for idx, data in fitness_map.items():
+            if idx >= len(population):
+                continue
+
+            birth_generation = self._get_birth_generation(population[idx])
+            age = max(0, int(target_generation) - birth_generation)
+            decay = self.age_decay_floor + (
+                (1.0 - self.age_decay_floor) * math.exp(-self.age_decay_rate * age)
+            )
+            score = float(data.get("fitness", 0.0)) * decay
+            survival_scores[idx] = {
+                **data,
+                "age": float(age),
+                "age_decay": decay,
+                "survival_score": score,
+            }
+        return survival_scores
+
+    def _select_survivor_indices(
+        self, survival_scores: Dict[int, Dict[str, float]], survivor_count: int
+    ) -> List[int]:
+        """Weighted sampling without replacement for survivor selection."""
+        if survivor_count <= 0 or not survival_scores:
+            return []
+
+        available = sorted(survival_scores.keys())
+        if not available:
+            return []
+
+        weights = np.array(
+            [max(0.0, float(survival_scores[idx].get("survival_score", 0.0))) for idx in available],
+            dtype=float,
+        )
+        if float(weights.sum()) <= 0:
+            weights = np.ones_like(weights, dtype=float)
+
+        selected: List[int] = []
+        draw_count = min(survivor_count, len(available))
+        for _ in range(draw_count):
+            probabilities = weights / float(weights.sum())
+            chosen_pos = int(np.random.choice(len(available), p=probabilities))
+            selected.append(available.pop(chosen_pos))
+            weights = np.delete(weights, chosen_pos)
+            if weights.size > 0 and float(weights.sum()) <= 0:
+                weights = np.ones_like(weights, dtype=float)
+
+        return selected
+
     def _allocate_parent_slots(self, ranks, ideas_to_breed):
         """
-        Allocate parent slots based on tournament ranks with caps to prevent convergence.
+        Allocate parent slots based on hybrid fitness scores with caps to prevent convergence.
 
         Args:
-            ranks: Dict mapping idea indices to ELO ratings
+            ranks: Dict mapping idea indices to fitness score
             ideas_to_breed: Number of children to produce (determines total parent slots needed)
 
         Returns:
@@ -924,7 +1135,7 @@ class EvolutionEngine:
         if not ranks or ideas_to_breed <= 0:
             return {}
 
-        # Sort ideas by rank (higher ELO = better rank)
+        # Sort ideas by score (higher fitness = better rank)
         sorted_ideas = sorted(ranks.items(), key=lambda x: x[1], reverse=True)
         num_ideas = len(sorted_ideas)
 
@@ -989,9 +1200,9 @@ class EvolutionEngine:
 
         # Log allocation for transparency
         print(f"Parent slot allocation for {ideas_to_breed} children ({total_slots} slots):")
-        for i, (idea_idx, elo) in enumerate(sorted_ideas):
+        for i, (idea_idx, score) in enumerate(sorted_ideas):
             slots = allocation.get(idea_idx, 0)
-            print(f"  Rank {i+1} (ELO {elo:.0f}): {slots} slots")
+            print(f"  Rank {i+1} (fitness {score:.3f}): {slots} slots")
 
         return allocation
 
