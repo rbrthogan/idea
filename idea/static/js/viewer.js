@@ -30,10 +30,16 @@ let lastStoredHistoryVersion = -1;
 let persistStateTimeout = null;
 let openTournamentPanelGeneration = null;
 const LOCAL_STORAGE_PERSIST_DELAY_MS = 1200;
+let lastDiversityRenderSignature = '';
+let diversityPlotSized = false;
 
 // Track previous status message to detect changes for activity log
 let previousStatusMessage = '';
 let previousProgress = 0;
+let lastProgressBarValue = -1;
+let lastContextSignature = '';
+let lastTournamentHistorySignature = '';
+let lastTokenCountsSignature = '';
 
 /**
  * Load available templates and populate the idea type dropdown
@@ -48,6 +54,14 @@ function escapeHtml(value) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function safeSignature(value) {
+    try {
+        return JSON.stringify(value ?? null);
+    } catch (error) {
+        return String(value ?? '');
+    }
 }
 
 function getStoredTemplateId() {
@@ -2497,16 +2511,23 @@ async function pollProgress() {
         if (progressBar) {
             // Cap progress at 100% to handle edge cases in calculation
             const progress = Math.min(data.progress || 0, 100);
-            progressBar.style.width = `${progress}%`;
-            progressBar.setAttribute('aria-valuenow', progress);
+            const roundedProgress = Math.round(progress * 10) / 10;
+            if (roundedProgress !== lastProgressBarValue) {
+                progressBar.style.width = `${progress}%`;
+                progressBar.setAttribute('aria-valuenow', progress);
+                lastProgressBarValue = roundedProgress;
+            }
 
             // Update prominent percentage display
             if (progressPercentage) {
-                progressPercentage.textContent = `${Math.round(progress)}%`;
+                const progressLabel = `${Math.round(progress)}%`;
+                if (progressPercentage.textContent !== progressLabel) {
+                    progressPercentage.textContent = progressLabel;
+                }
             }
 
             // Cap the display at 100%
-            if (progress >= 100) {
+            if (progress >= 100 && progressBar.style.width !== '100%') {
                 progressBar.style.width = '100%';
             }
 
@@ -2569,8 +2590,12 @@ async function pollProgress() {
         }
 
         if (data.tournament_history) {
-            tournamentHistory = data.tournament_history;
-            renderTournamentDetails(tournamentHistory);
+            const nextTournamentSignature = safeSignature(data.tournament_history);
+            if (nextTournamentSignature !== lastTournamentHistorySignature) {
+                tournamentHistory = data.tournament_history;
+                renderTournamentDetails(tournamentHistory);
+                lastTournamentHistorySignature = nextTournamentSignature;
+            }
         }
 
         // Handle diversity updates with activity logging
@@ -2607,12 +2632,23 @@ async function pollProgress() {
         }
 
         if (data.contexts && data.contexts.length > 0) {
-            contexts = data.contexts;
-            specificPrompts = data.specific_prompts || [];
-            breedingPrompts = data.breeding_prompts || [];
-            currentContextIndex = 0;
-            updateContextDisplay();
-            document.querySelector('.context-navigation').style.display = 'block';
+            const nextContextSignature = safeSignature({
+                contexts: data.contexts,
+                specific_prompts: data.specific_prompts || [],
+                breeding_prompts: data.breeding_prompts || [],
+            });
+            if (nextContextSignature !== lastContextSignature) {
+                contexts = data.contexts;
+                specificPrompts = data.specific_prompts || [];
+                breedingPrompts = data.breeding_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
+                const contextNav = document.querySelector('.context-navigation');
+                if (contextNav) {
+                    contextNav.style.display = 'block';
+                }
+                lastContextSignature = nextContextSignature;
+            }
         }
 
         // Continue polling if evolution is still running
@@ -3313,6 +3349,10 @@ function resetUIState() {
     activityLog = [];
     previousStatusMessage = '';
     previousProgress = 0;
+    lastProgressBarValue = -1;
+    lastContextSignature = '';
+    lastTournamentHistorySignature = '';
+    lastTokenCountsSignature = '';
 
     // Reset diversity tracking
     window._loggedDiversityGens = new Set();
@@ -3718,7 +3758,7 @@ function updateEvolutionStatusIndicator(isRunning, statusText = '') {
         }
     }
 
-    if (statusTextEl && statusText) {
+    if (statusTextEl && statusText && statusTextEl.textContent !== statusText) {
         statusTextEl.textContent = statusText;
     }
 
@@ -4362,6 +4402,16 @@ function createAncestorCard(ancestor, index, ancestorType) {
 // Function to display token counts
 function displayTokenCounts(tokenCounts) {
     console.log("Displaying token counts:", tokenCounts);
+    const nextSignature = safeSignature({
+        total: tokenCounts.total,
+        total_input: tokenCounts.total_input,
+        total_output: tokenCounts.total_output,
+        cost: tokenCounts.cost,
+    });
+    if (nextSignature === lastTokenCountsSignature) {
+        return;
+    }
+    lastTokenCountsSignature = nextSignature;
 
     // Create or get the token counts container
     let tokenCountsContainer = document.getElementById('token-counts-container');
@@ -4383,45 +4433,62 @@ function displayTokenCounts(tokenCounts) {
                 generationsContainer.parentNode.insertBefore(tokenCountsContainer, generationsContainer);
             }
         }
-    }
 
-    // Get cost information
-    const totalCost = tokenCounts.cost.total_cost.toFixed(4);
-    const totalTokens = tokenCounts.total.toLocaleString();
+        tokenCountsContainer.innerHTML = `
+            <div class="card-body d-flex justify-content-between align-items-center p-3">
+                <div class="d-flex">
+                    <div>
+                        <h6 class="mb-0">Cost: <strong id="token-cost-value">$0.0000</strong></h6>
+                        <small class="text-muted" id="token-total-value">0 tokens</small>
+                    </div>
+                    <div id="token-estimated-total-wrap" class="ms-3 border-start ps-3" style="display:none;">
+                        <h6 class="mb-0">Est. Total: <strong id="token-estimated-value">$0.0000</strong></h6>
+                        <small class="text-muted">Projected</small>
+                    </div>
+                </div>
+                <button id="token-details-btn" class="btn btn-sm btn-outline-primary">
+                    <i class="fas fa-info-circle"></i> Details
+                </button>
+            </div>
+        `;
 
-    // Get estimated total cost if available
-    let estimatedCostHtml = '';
-    if (tokenCounts.cost.estimated_total_cost !== undefined) {
-        const estimatedCost = tokenCounts.cost.estimated_total_cost.toFixed(4);
-        estimatedCostHtml = `<div class="ms-3 border-start ps-3">
-            <h6 class="mb-0">Est. Total: <strong>$${estimatedCost}</strong></h6>
-            <small class="text-muted">Projected</small>
-        </div>`;
+        const detailsButton = tokenCountsContainer.querySelector('#token-details-btn');
+        if (detailsButton) {
+            detailsButton.addEventListener('click', function () {
+                try {
+                    const latest = JSON.parse(tokenCountsContainer.dataset.tokenCounts || '{}');
+                    showTokenDetailsModal(latest);
+                } catch (error) {
+                    console.error('Failed to parse token counts for details modal:', error);
+                }
+            });
+        }
     }
 
     // Store the token data for the modal
     tokenCountsContainer.dataset.tokenCounts = JSON.stringify(tokenCounts);
 
-    // Update the container content with a simple cost display
-    tokenCountsContainer.innerHTML = `
-        <div class="card-body d-flex justify-content-between align-items-center p-3">
-            <div class="d-flex">
-                <div>
-                    <h6 class="mb-0">Cost: <strong>$${totalCost}</strong></h6>
-                    <small class="text-muted">${totalTokens} tokens</small>
-                </div>
-                ${estimatedCostHtml}
-            </div>
-            <button id="token-details-btn" class="btn btn-sm btn-outline-primary">
-                <i class="fas fa-info-circle"></i> Details
-            </button>
-        </div>
-    `;
+    // Update in place to avoid replacing DOM every poll.
+    const costEl = tokenCountsContainer.querySelector('#token-cost-value');
+    if (costEl) {
+        costEl.textContent = `$${tokenCounts.cost.total_cost.toFixed(4)}`;
+    }
 
-    // Add event listener to the details button
-    document.getElementById('token-details-btn').addEventListener('click', function () {
-        showTokenDetailsModal(tokenCounts);
-    });
+    const totalEl = tokenCountsContainer.querySelector('#token-total-value');
+    if (totalEl) {
+        totalEl.textContent = `${tokenCounts.total.toLocaleString()} tokens`;
+    }
+
+    const estWrapEl = tokenCountsContainer.querySelector('#token-estimated-total-wrap');
+    const estValueEl = tokenCountsContainer.querySelector('#token-estimated-value');
+    if (estWrapEl && estValueEl) {
+        if (tokenCounts.cost.estimated_total_cost !== undefined) {
+            estWrapEl.style.display = '';
+            estValueEl.textContent = `$${tokenCounts.cost.estimated_total_cost.toFixed(4)}`;
+        } else {
+            estWrapEl.style.display = 'none';
+        }
+    }
 }
 
 // Function to show the token details modal
@@ -4995,6 +5062,8 @@ function initializeDiversityChart() {
 
         // Create the chart
         diversityChart = new Chart(ctx, config);
+        lastDiversityRenderSignature = '';
+        diversityPlotSized = false;
 
         // Hide loading state
         const loadingElement = document.querySelector('.diversity-loading');
@@ -5083,6 +5152,19 @@ function processDiversityData(diversityHistory) {
     };
 }
 
+function buildDiversitySignature(processedData) {
+    if (!processedData || !processedData.labels) {
+        return '';
+    }
+
+    return [
+        processedData.labels.join(','),
+        processedData.overall.join(','),
+        processedData.perGeneration.join(','),
+        processedData.interGeneration.join(','),
+    ].join('|');
+}
+
 /**
  * Update the diversity chart with new data
  * @param {Array} diversityHistory - Updated diversity history
@@ -5125,15 +5207,23 @@ function updateDiversityChart(diversityHistory) {
     try {
         // Process the data
         const processedData = processDiversityData(diversityHistory);
+        const nextSignature = buildDiversitySignature(processedData);
+
+        // Skip redraws when data has not changed.
+        if (nextSignature === lastDiversityRenderSignature) {
+            return false;
+        }
 
         // Update chart data
         diversityChart.data.labels = processedData.labels;
         diversityChart.data.datasets[0].data = processedData.overall;
         diversityChart.data.datasets[1].data = processedData.perGeneration;
         diversityChart.data.datasets[2].data = processedData.interGeneration;
+        diversityData = processedData;
+        lastDiversityRenderSignature = nextSignature;
 
-        // Update the chart with animation
-        diversityChart.update('default');
+        // Update without animation to avoid visible flicker during polling.
+        diversityChart.update('none');
 
         // Show the diversity plot section if there's data
         const plotSection = document.getElementById('diversity-plot-section');
@@ -5170,16 +5260,21 @@ function updateDiversityChart(diversityHistory) {
                 canvas.style.height = '400px';
                 canvas.style.maxWidth = '100%';
 
-                // Force chart to resize to container
-                setTimeout(() => {
-                    if (diversityChart) {
-                        diversityChart.resize();
-                    }
-                }, 100);
+                if (!diversityPlotSized) {
+                    // Only force a resize when first displayed.
+                    setTimeout(() => {
+                        if (diversityChart) {
+                            diversityChart.resize();
+                        }
+                        diversityPlotSized = true;
+                    }, 100);
+                }
             }
         }
+        return true;
     } catch (error) {
         console.error('❌ Error updating diversity chart:', error);
+        return false;
     }
 }
 
@@ -5239,8 +5334,11 @@ function resetDiversityPlot() {
     // Reset global diversity data
     diversityData = {
         overall: [],
-        perGeneration: []
+        perGeneration: [],
+        interGeneration: []
     };
+    lastDiversityRenderSignature = '';
+    diversityPlotSized = false;
 }
 
 /**
@@ -5288,8 +5386,6 @@ function ensureDiversityChartSizing() {
 function handleDiversityUpdate(progressData) {
     if (progressData && progressData.diversity_history) {
         updateDiversityChart(progressData.diversity_history);
-        // Ensure proper sizing after update
-        setTimeout(ensureDiversityChartSizing, 100);
     }
 }
 

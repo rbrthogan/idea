@@ -136,6 +136,20 @@ def _is_run_stale(run_data: Dict[str, Any], now_ms: int) -> bool:
     return run_data.get("lease_expires_at_ms", 0) <= now_ms
 
 
+def _should_honor_remote_stop(run_state: Optional[Dict[str, Any]]) -> bool:
+    """
+    Determine whether a run-state stop flag should stop the in-memory engine.
+
+    We only honor explicit active stop requests (`status == \"stopping\"`) to avoid
+    stale stop flags from previous runs immediately stopping newly started runs.
+    """
+    if not run_state:
+        return False
+    if not run_state.get("stop_requested"):
+        return False
+    return run_state.get("status") == "stopping"
+
+
 async def _claim_run_slot(user_id: str, evolution_id: str, evolution_name: str,
                           total_generations: int, start_time: str,
                           tournament_count: Optional[float] = None,
@@ -154,6 +168,7 @@ async def _claim_run_slot(user_id: str, evolution_id: str, evolution_name: str,
         "tournament_count": tournament_count,
         "full_tournament_rounds": full_tournament_rounds,
         "target_tournament_rounds": target_tournament_rounds,
+        "stop_requested": False,
     }
 
     if GLOBAL_MAX_ACTIVE_RUNS == 1:
@@ -247,7 +262,7 @@ async def _heartbeat_loop(user_id: str, state: UserEvolutionState) -> None:
                 continue
             # Check for stop request from another instance
             run_state = await db.get_active_run(user_id)
-            if run_state and run_state.get("stop_requested") and not state.engine.stop_requested:
+            if _should_honor_remote_stop(run_state) and not state.engine.stop_requested:
                 state.engine.stop_evolution()
                 await db.update_active_run(
                     user_id=user_id,
@@ -273,7 +288,7 @@ async def _finalize_run_state(user_id: str, state: UserEvolutionState, update_da
         await _refresh_run_state(user_id, state, update_data, force=True)
         await db.update_active_run(
             user_id=user_id,
-            updates={"is_running": False, "active": False},
+            updates={"is_running": False, "active": False, "stop_requested": False},
             lease_seconds=0,
             owner_id=state.run_owner_id,
         )
@@ -723,15 +738,22 @@ async def stop_evolution(user: UserInfo = Depends(require_auth)):
     if state.engine is None:
         # Allow stop requests from non-owner instances via Firestore
         active_run = await db.get_active_run(user.uid)
-        if not active_run or active_run.get("status") not in ACTIVE_RUN_STATUSES:
+        run_appears_active = bool(
+            active_run and (
+                active_run.get("status") in ACTIVE_RUN_STATUSES
+                or active_run.get("is_running")
+                or active_run.get("active")
+            )
+        )
+        if not run_appears_active:
             return JSONResponse(
                 {"status": "error", "message": "No evolution is currently running"},
                 status_code=400,
             )
+        # Do not refresh lease here; that can keep stale runs alive after worker crashes.
         await db.update_active_run(
             user_id=user.uid,
             updates={"status": "stopping", "status_message": "Stop requested", "stop_requested": True},
-            lease_seconds=RUN_LEASE_SECONDS,
             owner_id=active_run.get("owner_id"),
         )
         return JSONResponse({
@@ -764,9 +786,60 @@ async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
     state = await user_states.get(user.uid)
 
     if state.engine is None:
+        # Handle stale/cross-instance runs where this process doesn't own an in-memory engine.
+        active_run = await db.get_active_run(user.uid)
+        run_appears_active = bool(
+            active_run and (
+                active_run.get("status") in ACTIVE_RUN_STATUSES
+                or active_run.get("is_running")
+                or active_run.get("active")
+            )
+        )
+        if not run_appears_active:
+            return JSONResponse(
+                {"status": "error", "message": "No evolution is currently running"},
+                status_code=400,
+            )
+
+        checkpoint_id = active_run.get("checkpoint_id")
+        await db.update_active_run(
+            user_id=user.uid,
+            updates={
+                "status": "force_stopped",
+                "status_message": "Evolution force stopped",
+                "is_running": False,
+                "active": False,
+                "is_stopped": True,
+                "is_resumable": True,
+                "stop_requested": False,
+                "checkpoint_id": checkpoint_id,
+            },
+            lease_seconds=0,
+            owner_id=active_run.get("owner_id"),
+        )
+
+        # Best-effort release in single-run mode.
+        if GLOBAL_MAX_ACTIVE_RUNS == 1 and active_run.get("owner_id"):
+            await db.release_global_run_lock(active_run.get("owner_id"))
+
+        state.reset_run_tracking()
+        state.status.update(
+            {
+                "is_running": False,
+                "is_stopped": True,
+                "is_resumable": True,
+                "checkpoint_id": checkpoint_id,
+                "status_message": "Evolution force stopped",
+            }
+        )
+
         return JSONResponse(
-            {"status": "error", "message": "No evolution is currently running"},
-            status_code=400,
+            {
+                "status": "success",
+                "message": "Stale run state force stopped.",
+                "checkpoint_id": checkpoint_id,
+                "is_resumable": True,
+            }
         )
 
     # Save checkpoint before forcing stop
@@ -1829,6 +1902,15 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
 
         state.status = response
         return JSONResponse(convert_uuids_to_strings(response))
+
+    # No active run in Firestore and no in-memory engine. Ensure stale local running flags
+    # do not keep the UI in a phantom "running" state.
+    if state.status.get("is_running"):
+        state.status["is_running"] = False
+        state.status["is_stopped"] = True
+        state.status["is_resumable"] = bool(state.status.get("checkpoint_id"))
+        if not state.status.get("status_message"):
+            state.status["status_message"] = "No active evolution run found."
 
     return JSONResponse(convert_uuids_to_strings(state.status))
 
