@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
 def extract_title_content(item: Any) -> Dict[str, str]:
@@ -40,17 +42,25 @@ def parallel_evaluate_pairs(
     concurrency: int = 8,
     randomize_presentation: bool = True,
     progress_callback: Callable[[int, int], None] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> List[Tuple[int, int, str]]:
     """Run LLM comparisons for pairs in parallel and return winners.
 
     Returns a list of tuples (idx_a, idx_b, winner) in completion order.
     """
-    futures = []
+    futures: Dict[Any, Tuple[int, int]] = {}
     results: List[Tuple[int, int, str]] = []
     total_pairs = len(pairs)
     completed_count = 0
+    timeout_raw = os.environ.get("PAIR_EVAL_TIMEOUT_SECONDS", "90")
+    try:
+        pair_eval_timeout = max(1.0, float(timeout_raw))
+    except ValueError:
+        pair_eval_timeout = 90.0
+    poll_seconds = 0.25
 
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+    executor = ThreadPoolExecutor(max_workers=max(1, int(concurrency)))
+    try:
         for idx_a, idx_b in pairs:
             item_a = items[idx_a]
             item_b = items[idx_b]
@@ -70,15 +80,65 @@ def parallel_evaluate_pairs(
                     w = compare_fn(a, b, idea_type)
                 return ia, ib, w
 
-            futures.append(executor.submit(task))
+            future = executor.submit(task)
+            futures[future] = (idx_a, idx_b)
 
-        for f in as_completed(futures):
-            results.append(f.result())
-            completed_count += 1
-            if progress_callback:
+        pending = set(futures.keys())
+        deadline = time.monotonic() + pair_eval_timeout
+        stop_reason = None
+
+        while pending:
+            if callable(should_stop) and should_stop():
+                stop_reason = "stop requested"
+                break
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stop_reason = f"timeout ({pair_eval_timeout:.1f}s)"
+                break
+
+            done, pending = wait(
+                pending,
+                timeout=min(poll_seconds, remaining),
+                return_when=FIRST_COMPLETED,
+            )
+
+            for future in done:
+                idx_a, idx_b = futures[future]
                 try:
-                    progress_callback(completed_count, total_pairs)
-                except Exception as e:
-                    print(f"Error in progress callback: {e}")
+                    out_a, out_b, winner = future.result()
+                except Exception:
+                    out_a, out_b, winner = idx_a, idx_b, "tie"
+
+                if winner not in {"A", "B", "tie"}:
+                    winner = "tie"
+
+                results.append((out_a, out_b, winner))
+                completed_count += 1
+                if progress_callback:
+                    try:
+                        progress_callback(completed_count, total_pairs)
+                    except Exception as e:
+                        print(f"Error in progress callback: {e}")
+
+        if pending:
+            if stop_reason:
+                print(
+                    f"parallel_evaluate_pairs ended early ({stop_reason}); "
+                    f"marking {len(pending)} unfinished comparisons as ties."
+                )
+            for future in pending:
+                idx_a, idx_b = futures[future]
+                future.cancel()
+                results.append((idx_a, idx_b, "tie"))
+                completed_count += 1
+                if progress_callback:
+                    try:
+                        progress_callback(completed_count, total_pairs)
+                    except Exception as e:
+                        print(f"Error in progress callback: {e}")
+    finally:
+        # Never block shutdown waiting on worker threads that might be stuck in network calls.
+        executor.shutdown(wait=False, cancel_futures=True)
 
     return results

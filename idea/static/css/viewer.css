@@ -1649,9 +1649,15 @@ small {
 .match-row {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 0.5rem;
   font-size: 0.9rem;
   padding: 0.2rem 0;
+}
+
+.match-name {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .match-row.winner .match-name {
@@ -1660,10 +1666,16 @@ small {
 }
 
 .match-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  white-space: nowrap;
   background: var(--accent);
   color: var(--text-on-primary);
   font-size: 0.7rem;
-  padding: 0.1rem 0.4rem;
+  line-height: 1;
+  padding: 0.2rem 0.55rem;
   border-radius: 999px;
 }
 

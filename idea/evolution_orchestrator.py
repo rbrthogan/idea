@@ -604,15 +604,19 @@ class EvolutionOrchestrator:
                 asyncio.run_coroutine_threadsafe(send_update(), loop)
 
             tournament_rounds_details: List[Dict[str, Any]] = []
-            global_ranks = await asyncio.to_thread(
-                self.engine.critic.get_tournament_ranks,
-                self.engine.population,
-                self.engine.idea_type,
-                self.engine.tournament_rounds,
-                thread_safe_callback,
-                tournament_rounds_details,
-                self.engine.full_tournament_rounds,
-            )
+
+            def run_tournament():
+                return self.engine.critic.get_tournament_ranks(
+                    self.engine.population,
+                    self.engine.idea_type,
+                    self.engine.tournament_rounds,
+                    thread_safe_callback,
+                    tournament_rounds_details,
+                    self.engine.full_tournament_rounds,
+                    should_stop=lambda: self.engine.stop_requested,
+                )
+
+            global_ranks = await asyncio.to_thread(run_tournament)
             self.engine._set_tournament_history(gen + 1, tournament_rounds_details)
 
             if self.engine.stop_requested:

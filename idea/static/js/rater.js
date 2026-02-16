@@ -28,8 +28,8 @@ const chartFocusLookup = {
 };
 
 // Sorting state
-let currentSortColumn = null;
-let currentSortDirection = 'asc';
+let currentSortColumn = 'fitness';
+let currentSortDirection = 'desc';
 let originalIdeasOrder = [];
 
 // Wait for Firebase auth to be ready before loading data
@@ -1197,12 +1197,9 @@ function updateRankingsTable(ideas) {
     const normalizedIdeas = (ideas || []).map((idea, index) =>
         normalizeIdeaRecord(idea, `ranked-${index}`)
     );
+    decorateIdeasWithTableMetrics(normalizedIdeas);
 
-    // Show rankings with clickable rows and generation info
-    const rankingsTable = document.getElementById('rankingsTable');
-    rankingsTable.innerHTML = ''; // Clear existing content
-
-    // Store ideas in a global variable for modal access
+    // Store ideas in a global variable for modal access/sorting
     window.rankedIdeas = normalizedIdeas;
 
     // Store original order for sorting
@@ -1210,69 +1207,19 @@ function updateRankingsTable(ideas) {
         originalIdeasOrder = [...normalizedIdeas];
     }
 
-    normalizedIdeas.forEach((idea, index) => {
-        const row = document.createElement('tr');
-        row.className = 'idea-row';
-        row.dataset.ideaIndex = index;
-        row.style.cursor = 'pointer';
-
-        // Get the appropriate rating values
-        const autoRating = idea.ratings?.auto || idea.elo || 1500;
-        const manualRating = idea.ratings?.manual || 1500;
-        const diffRating = autoRating - manualRating;
-
-        // Get the appropriate match count based on the current rating type
-        let matchCount = 0;
-        if (currentRatingType === 'auto') {
-            matchCount = idea.auto_match_count || 0;
-
-            row.innerHTML = `
-                <td>${index + 1}</td>
-                <td>${idea.title || 'Untitled'}</td>
-                <td>${autoRating}</td>
-                <td>${matchCount}</td>
-                <td>${getIdeaGenerationLabel(idea)}</td>
-            `;
-        } else if (currentRatingType === 'manual') {
-            matchCount = idea.manual_match_count || 0;
-
-            row.innerHTML = `
-                <td>${index + 1}</td>
-                <td>${idea.title || 'Untitled'}</td>
-                <td>${manualRating}</td>
-                <td>${matchCount}</td>
-                <td>${getIdeaGenerationLabel(idea)}</td>
-            `;
-        } else {
-            // For 'diff' or any other type, use the total match count
-            matchCount = idea.match_count || 0;
-
-            // Add color coding for diff
-            const diffClass = diffRating > 0 ? 'text-success' : (diffRating < 0 ? 'text-danger' : '');
-            const diffSign = diffRating > 0 ? '+' : '';
-
-            row.innerHTML = `
-                <td>${index + 1}</td>
-                <td>${idea.title || 'Untitled'}</td>
-                <td class="${diffClass}">${diffSign}${diffRating} (A:${autoRating}/M:${manualRating})</td>
-                <td>${matchCount}</td>
-                <td>${getIdeaGenerationLabel(idea)}</td>
-            `;
-        }
-
-        // Add click event to show the idea details
-        row.addEventListener('click', function () {
-            showIdeaDetails(index);
-        });
-
-        rankingsTable.appendChild(row);
-    });
-
     // Set up sorting event listeners
     setupTableSorting();
 
+    // Default to overall fitness descending
+    if (!currentSortColumn) {
+        currentSortColumn = 'fitness';
+        currentSortDirection = 'desc';
+    }
+    updateSortIndicators();
+    sortTable(currentSortColumn, currentSortDirection);
+
     // Create the ELO chart
-    createEloChart(normalizedIdeas, currentRatingType);
+    createEloChart(window.rankedIdeas || normalizedIdeas, currentRatingType);
 }
 
 // Table sorting functionality
@@ -1280,6 +1227,10 @@ function setupTableSorting() {
     const headers = document.querySelectorAll('.sortable-header');
 
     headers.forEach(header => {
+        if (header.dataset.sortBound === 'true') {
+            return;
+        }
+        header.dataset.sortBound = 'true';
         header.addEventListener('click', function (e) {
             e.preventDefault();
 
@@ -1338,20 +1289,11 @@ function sortTable(column, direction) {
                 break;
 
             case 'rating':
-                if (currentRatingType === 'auto') {
-                    aValue = a.ratings?.auto || a.elo || 1500;
-                    bValue = b.ratings?.auto || b.elo || 1500;
-                } else if (currentRatingType === 'manual') {
-                    aValue = a.ratings?.manual || 1500;
-                    bValue = b.ratings?.manual || 1500;
-                } else {
-                    // For diff, sort by absolute difference
-                    const aAuto = a.ratings?.auto || a.elo || 1500;
-                    const aManual = a.ratings?.manual || 1500;
-                    const bAuto = b.ratings?.auto || b.elo || 1500;
-                    const bManual = b.ratings?.manual || 1500;
-                    aValue = Math.abs(aAuto - aManual);
-                    bValue = Math.abs(bAuto - bManual);
+                aValue = getRatingValueByType(a, currentRatingType);
+                bValue = getRatingValueByType(b, currentRatingType);
+                if (currentRatingType === 'diff') {
+                    aValue = Math.abs(aValue);
+                    bValue = Math.abs(bValue);
                 }
                 break;
 
@@ -1368,9 +1310,34 @@ function sortTable(column, direction) {
                 }
                 break;
 
+            case 'diversity':
+                aValue = getIdeaTableDiversityScore(a);
+                bValue = getIdeaTableDiversityScore(b);
+                break;
+
+            case 'fitness':
+                aValue = getIdeaTableFitnessScore(a);
+                bValue = getIdeaTableFitnessScore(b);
+                break;
+
+            case 'birth_generation':
+                aValue = getIdeaGenerationValue(a, 'birth');
+                bValue = getIdeaGenerationValue(b, 'birth');
+                aValue = aValue !== null ? aValue : -1;
+                bValue = bValue !== null ? bValue : -1;
+                break;
+
+            case 'death_generation':
+                aValue = getIdeaGenerationValue(a, 'death');
+                bValue = getIdeaGenerationValue(b, 'death');
+                aValue = aValue !== null ? aValue : -1;
+                bValue = bValue !== null ? bValue : -1;
+                break;
+
             case 'generation':
-                aValue = getIdeaGenerationValue(a);
-                bValue = getIdeaGenerationValue(b);
+                // Backward-compatible alias
+                aValue = getIdeaGenerationValue(a, 'death');
+                bValue = getIdeaGenerationValue(b, 'death');
                 aValue = aValue !== null ? aValue : -1;
                 bValue = bValue !== null ? bValue : -1;
                 break;
@@ -1382,9 +1349,22 @@ function sortTable(column, direction) {
         // Handle string vs numeric comparison
         if (typeof aValue === 'string' && typeof bValue === 'string') {
             return direction === 'asc' ? aValue.localeCompare(bValue) : bValue.localeCompare(aValue);
-        } else {
-            return direction === 'asc' ? aValue - bValue : bValue - aValue;
         }
+
+        // Keep missing numeric values at the bottom regardless of direction
+        const aFinite = Number.isFinite(aValue);
+        const bFinite = Number.isFinite(bValue);
+        if (!aFinite && !bFinite) {
+            return 0;
+        }
+        if (!aFinite) {
+            return 1;
+        }
+        if (!bFinite) {
+            return -1;
+        }
+
+        return direction === 'asc' ? aValue - bValue : bValue - aValue;
     });
 
     // Update the table with sorted ideas
@@ -1396,6 +1376,7 @@ function updateRankingsTableContent(ideas) {
     const normalizedIdeas = (ideas || []).map((idea, index) =>
         normalizeIdeaRecord(idea, `ranked-sort-${index}`)
     );
+    decorateIdeasWithTableMetrics(normalizedIdeas);
 
     const rankingsTable = document.getElementById('rankingsTable');
     rankingsTable.innerHTML = ''; // Clear existing content
@@ -1406,49 +1387,7 @@ function updateRankingsTableContent(ideas) {
         row.dataset.ideaIndex = index;
         row.style.cursor = 'pointer';
 
-        // Get the appropriate rating values
-        const autoRating = idea.ratings?.auto || idea.elo || 1500;
-        const manualRating = idea.ratings?.manual || 1500;
-        const diffRating = autoRating - manualRating;
-
-        // Get the appropriate match count based on the current rating type
-        let matchCount = 0;
-        if (currentRatingType === 'auto') {
-            matchCount = idea.auto_match_count || 0;
-
-            row.innerHTML = `
-                <td>${index + 1}</td>
-                <td>${idea.title || 'Untitled'}</td>
-                <td>${autoRating}</td>
-                <td>${matchCount}</td>
-                <td>${getIdeaGenerationLabel(idea)}</td>
-            `;
-        } else if (currentRatingType === 'manual') {
-            matchCount = idea.manual_match_count || 0;
-
-            row.innerHTML = `
-                <td>${index + 1}</td>
-                <td>${idea.title || 'Untitled'}</td>
-                <td>${manualRating}</td>
-                <td>${matchCount}</td>
-                <td>${getIdeaGenerationLabel(idea)}</td>
-            `;
-        } else {
-            // For 'diff' or any other type, use the total match count
-            matchCount = idea.match_count || 0;
-
-            // Add color coding for diff
-            const diffClass = diffRating > 0 ? 'text-success' : (diffRating < 0 ? 'text-danger' : '');
-            const diffSign = diffRating > 0 ? '+' : '';
-
-            row.innerHTML = `
-                <td>${index + 1}</td>
-                <td>${idea.title || 'Untitled'}</td>
-                <td class="${diffClass}">${diffSign}${diffRating} (A:${autoRating}/M:${manualRating})</td>
-                <td>${matchCount}</td>
-                <td>${getIdeaGenerationLabel(idea)}</td>
-            `;
-        }
+        row.innerHTML = buildRankingRowHtml(idea, index);
 
         // Add click event to show the idea details
         row.addEventListener('click', function () {
@@ -1457,6 +1396,156 @@ function updateRankingsTableContent(ideas) {
 
         rankingsTable.appendChild(row);
     });
+}
+
+function getIdeaRawDiversityScore(idea, diversityLookup = null) {
+    const directCandidates = [
+        idea?.diversity_score,
+        idea?.diversity,
+        idea?.selection_metrics?.diversity,
+        idea?.survival_metrics?.diversity
+    ];
+    for (const candidate of directCandidates) {
+        const parsed = normalizeToFiniteNumber(candidate);
+        if (parsed !== null) {
+            return parsed;
+        }
+    }
+
+    const generation = getIdeaGenerationValue(idea, 'death')
+        ?? getIdeaGenerationValue(idea, 'birth')
+        ?? normalizeGenerationValue(idea?.generation);
+    if (generation === null) {
+        return null;
+    }
+
+    const lookup = diversityLookup || buildGenerationDiversityLookup(currentEvolutionAnalytics?.diversity_history ?? []);
+    if (Object.prototype.hasOwnProperty.call(lookup.zeroBasedLookup, generation)) {
+        return normalizeToFiniteNumber(lookup.zeroBasedLookup[generation]);
+    }
+    if (Object.prototype.hasOwnProperty.call(lookup.oneBasedLookup, generation)) {
+        return normalizeToFiniteNumber(lookup.oneBasedLookup[generation]);
+    }
+
+    return null;
+}
+
+function getExplicitIdeaFitnessScore(idea) {
+    const directCandidates = [
+        idea?.overall_fitness,
+        idea?.fitness,
+        idea?.fitness_score,
+        idea?.selection_metrics?.fitness,
+        idea?.selection_metrics?.overall_fitness,
+        idea?.survival_score,
+        idea?.survival_metrics?.survival_score
+    ];
+    for (const candidate of directCandidates) {
+        const parsed = normalizeToFiniteNumber(candidate);
+        if (parsed !== null) {
+            return parsed;
+        }
+    }
+    return null;
+}
+
+function getIdeaTableDiversityScore(idea) {
+    return normalizeToFiniteNumber(idea?.table_diversity_score)
+        ?? getIdeaRawDiversityScore(idea);
+}
+
+function getIdeaTableFitnessScore(idea) {
+    return getExplicitIdeaFitnessScore(idea)
+        ?? normalizeToFiniteNumber(idea?.table_overall_fitness);
+}
+
+function decorateIdeasWithTableMetrics(ideas) {
+    const rankedIdeas = Array.isArray(ideas) ? ideas : [];
+    if (rankedIdeas.length === 0) {
+        return rankedIdeas;
+    }
+
+    const diversityLookup = buildGenerationDiversityLookup(currentEvolutionAnalytics?.diversity_history ?? []);
+    const diversityValues = rankedIdeas.map((idea) => getIdeaRawDiversityScore(idea, diversityLookup));
+    const autoRatings = rankedIdeas.map((idea) =>
+        normalizeToFiniteNumber(idea?.ratings?.auto) ?? normalizeToFiniteNumber(idea?.elo) ?? 1500
+    );
+
+    const normalizedRatings = normalizeSeriesMinMax(autoRatings);
+    const normalizedDiversity = normalizeSeriesMinMax(diversityValues);
+    const fitnessAlpha = clampUnitInterval(currentEvolutionAnalytics?.fitness_alpha, 0.7);
+
+    rankedIdeas.forEach((idea, index) => {
+        const explicitFitness = getExplicitIdeaFitnessScore(idea);
+        const ratingComponent = normalizedRatings[index];
+        const diversityComponent = normalizedDiversity[index];
+
+        let fallbackFitness = null;
+        if (Number.isFinite(ratingComponent) && Number.isFinite(diversityComponent)) {
+            fallbackFitness = (fitnessAlpha * ratingComponent) + ((1 - fitnessAlpha) * diversityComponent);
+        } else if (Number.isFinite(ratingComponent)) {
+            fallbackFitness = ratingComponent;
+        } else if (Number.isFinite(diversityComponent)) {
+            fallbackFitness = diversityComponent;
+        }
+
+        idea.table_diversity_score = diversityValues[index];
+        idea.table_overall_fitness = explicitFitness !== null ? explicitFitness : fallbackFitness;
+    });
+
+    return rankedIdeas;
+}
+
+function formatRankingMetric(value, decimals = 4) {
+    const parsed = normalizeToFiniteNumber(value);
+    if (parsed === null) {
+        return '—';
+    }
+    return parsed.toFixed(decimals);
+}
+
+function getIdeaRatingCellHtml(idea) {
+    const autoRating = normalizeToFiniteNumber(idea?.ratings?.auto) ?? normalizeToFiniteNumber(idea?.elo) ?? 1500;
+    const manualRating = normalizeToFiniteNumber(idea?.ratings?.manual) ?? 1500;
+    const diffRating = autoRating - manualRating;
+
+    if (currentRatingType === 'manual') {
+        return `<td>${Math.round(manualRating)}</td>`;
+    }
+    if (currentRatingType === 'diff') {
+        const diffClass = diffRating > 0 ? 'text-success' : (diffRating < 0 ? 'text-danger' : '');
+        const diffSign = diffRating > 0 ? '+' : '';
+        return `<td class="${diffClass}">${diffSign}${Math.round(diffRating)} (A:${Math.round(autoRating)}/M:${Math.round(manualRating)})</td>`;
+    }
+    return `<td>${Math.round(autoRating)}</td>`;
+}
+
+function getIdeaMatchCountByType(idea) {
+    if (currentRatingType === 'auto') {
+        return idea?.auto_match_count || 0;
+    }
+    if (currentRatingType === 'manual') {
+        return idea?.manual_match_count || 0;
+    }
+    return idea?.match_count || 0;
+}
+
+function buildRankingRowHtml(idea, index) {
+    const diversityScore = getIdeaTableDiversityScore(idea);
+    const overallFitness = getIdeaTableFitnessScore(idea);
+    const birthGeneration = getIdeaGenerationLabel(idea, 'birth');
+    const deathGeneration = getIdeaGenerationLabel(idea, 'death');
+
+    return `
+        <td>${index + 1}</td>
+        <td>${idea.title || 'Untitled'}</td>
+        ${getIdeaRatingCellHtml(idea)}
+        <td>${getIdeaMatchCountByType(idea)}</td>
+        <td>${formatRankingMetric(diversityScore, 4)}</td>
+        <td>${formatRankingMetric(overallFitness, 4)}</td>
+        <td>${birthGeneration}</td>
+        <td>${deathGeneration}</td>
+    `;
 }
 
 // Add this function to show idea details in a modal
@@ -1531,8 +1620,8 @@ function toggleRatingType(type) {
     currentRatingType = type;
 
     // Reset sorting state when switching rating types
-    currentSortColumn = null;
-    currentSortDirection = 'asc';
+    currentSortColumn = 'fitness';
+    currentSortDirection = 'desc';
 
     // Update button states
     document.getElementById('autoRatingTypeBtn').classList.remove('active');

@@ -26,7 +26,16 @@ class _FakeAgent:
 
 
 class _FakeCritic(_FakeAgent):
-    def get_tournament_ranks(self, population, _idea_type, _rounds, callback, rounds_details, _full):
+    def get_tournament_ranks(
+        self,
+        population,
+        _idea_type,
+        _rounds,
+        callback,
+        rounds_details,
+        _full,
+        should_stop=None,
+    ):
         if callback:
             callback(1, 1)
         rounds_details.append({"round": 1, "pairs": []})

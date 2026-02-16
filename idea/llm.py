@@ -171,6 +171,16 @@ class LLMWrapper(ABC):
         self._resolved_api_key: Optional[str] = None
         self._thread_local_client = threading.local()
         self._client_lock = threading.Lock()
+        timeout_raw = os.environ.get("GENAI_HTTP_TIMEOUT_MS", "60000")
+        try:
+            self._http_timeout_ms = max(1000, int(timeout_raw))
+        except ValueError:
+            self._http_timeout_ms = 60000
+            self._increment_diagnostic(
+                "invalid_http_timeout_ms",
+                detail=f"GENAI_HTTP_TIMEOUT_MS={timeout_raw!r}",
+            )
+        self._http_options = types.HttpOptions(timeout=self._http_timeout_ms)
         self._setup_provider()
 
     def register_custom_template(self, template_id: str, template_data: Dict[str, Any]) -> None:
@@ -258,7 +268,7 @@ class LLMWrapper(ABC):
         if not api_key:
             return self.client
 
-        thread_client = genai.Client(api_key=api_key)
+        thread_client = genai.Client(api_key=api_key, http_options=self._http_options)
         self._thread_local_client.client = thread_client
         return thread_client
 
@@ -272,7 +282,7 @@ class LLMWrapper(ABC):
             # Initialize client once
             with self._client_lock:
                 if self.client is None and api_key:
-                    self.client = genai.Client(api_key=api_key)
+                    self.client = genai.Client(api_key=api_key, http_options=self._http_options)
         # Add other providers here
 
     @retry(
@@ -1015,6 +1025,7 @@ class Critic(LLMWrapper):
         progress_callback: Callable[[int, int], None] = None,
         details: Optional[List[Dict[str, Any]]] = None,
         full_tournament_rounds: Optional[int] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> dict:
         """Get tournament ranks using a global Swiss-system tournament.
 
@@ -1057,6 +1068,10 @@ class Critic(LLMWrapper):
                     print(f"Error in progress callback: {e}")
 
         for _round in range(rounds):
+            if callable(should_stop) and should_stop():
+                print("Tournament stop requested. Ending tournament rounds early.")
+                break
+
             # For multi-tournament runs we reset Swiss bracket state at each segment,
             # while keeping accumulated Elo scores.
             if segment_rounds and _round > 0 and (_round % segment_rounds) == 0:
@@ -1114,6 +1129,7 @@ class Critic(LLMWrapper):
                     concurrency=self._max_workers,
                     randomize_presentation=True,
                     progress_callback=on_pair_complete,
+                    should_stop=should_stop,
                 )
 
                 # Update ranks in the deterministic order of generated pairs
