@@ -10,8 +10,22 @@ let currentPair = null;
 let currentEvolutionId = null;
 let ideasDb = {};
 let currentRatingType = 'auto';
+let currentGenerationView = 'death';
 let autoRatingInProgress = false;
 let currentModalIdea = null;
+let currentEvolutionAnalytics = {
+    history: [],
+    diversity_history: [],
+    fitness_alpha: 0.7
+};
+let chartFocusModalInstance = null;
+let focusedChartInstance = null;
+let pendingFocusedChartConfig = null;
+const chartFocusLookup = {
+    eloChart: () => window.eloChart,
+    diversityChart: () => window.diversityChart,
+    fitnessChart: () => window.fitnessChart
+};
 
 // Sorting state
 let currentSortColumn = null;
@@ -71,13 +85,14 @@ window.addEventListener("load", () => {
 // Helper to extract title and content from possibly nested idea structures
 // Handles: idea.title/content, idea.idea.title/content, or JSON-encoded content
 function getIdeaData(idea) {
-    let title = idea.title;
-    let content = idea.content;
+    const sourceIdea = (idea && typeof idea === 'object') ? idea : {};
+    let title = sourceIdea.title;
+    let content = sourceIdea.content;
 
     // Check if data is nested under an 'idea' property
-    if (idea.idea && typeof idea.idea === 'object') {
-        title = idea.idea.title || title;
-        content = idea.idea.content || content;
+    if (sourceIdea.idea && typeof sourceIdea.idea === 'object') {
+        title = sourceIdea.idea.title || title;
+        content = sourceIdea.idea.content || content;
     }
 
     // Handle case where content might be JSON-encoded
@@ -92,25 +107,204 @@ function getIdeaData(idea) {
     }
 
     return {
-        title: title || 'Untitled',
-        content: content || '',
         // Preserve other properties
-        ...idea
+        ...sourceIdea,
+        title: title || 'Untitled',
+        content: content || ''
     };
 }
+
+function normalizeIdeaRecord(idea, fallbackId = null) {
+    const sourceIdea = (idea && typeof idea === 'object') ? idea : {};
+    const normalized = getIdeaData(sourceIdea);
+
+    if (!normalized.id) {
+        normalized.id = fallbackId || generateUUID();
+    }
+
+    const legacyRating = typeof normalized.ratings === 'number'
+        ? normalizeToFiniteNumber(normalized.ratings)
+        : null;
+    const autoRating = normalizeToFiniteNumber(normalized.ratings?.auto)
+        ?? legacyRating
+        ?? normalizeToFiniteNumber(normalized.elo)
+        ?? 1500;
+    const manualRating = normalizeToFiniteNumber(normalized.ratings?.manual)
+        ?? legacyRating
+        ?? 1500;
+    normalized.ratings = {
+        auto: Math.round(autoRating),
+        manual: Math.round(manualRating)
+    };
+    normalized.elo = normalized.ratings.auto;
+
+    const totalMatches = normalizeToFiniteNumber(normalized.match_count) ?? 0;
+    const autoMatches = normalizeToFiniteNumber(normalized.auto_match_count) ?? 0;
+    const manualMatches = normalizeToFiniteNumber(normalized.manual_match_count) ?? 0;
+    normalized.match_count = Math.max(0, Math.trunc(totalMatches));
+    normalized.auto_match_count = Math.max(0, Math.trunc(autoMatches));
+    normalized.manual_match_count = Math.max(0, Math.trunc(manualMatches));
+
+    return normalized;
+}
+
+function setManualSwissStatus(swissStatus) {
+    const statusEl = document.getElementById('manualSwissStatus');
+    if (!statusEl) {
+        return;
+    }
+
+    if (!swissStatus) {
+        statusEl.textContent = 'Swiss pairing active';
+        return;
+    }
+
+    const roundNumber = swissStatus.round_number ?? 0;
+    const remainingPairs = swissStatus.remaining_pairs_in_round;
+    const byeIdeaId = swissStatus.bye_idea_id;
+
+    let text = `Round ${roundNumber}`;
+    if (typeof remainingPairs === 'number') {
+        text += ` · ${remainingPairs} pairs remaining`;
+    }
+    if (byeIdeaId) {
+        text += ` · Bye: ${byeIdeaId}`;
+    }
+    statusEl.textContent = text;
+}
+
+function normalizeGenerationValue(generation) {
+    if (generation === null || generation === undefined || generation === '') {
+        return null;
+    }
+    const value = Number(generation);
+    if (!Number.isFinite(value)) {
+        return null;
+    }
+    return Math.trunc(value);
+}
+
+function normalizeToFiniteNumber(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clampUnitInterval(value, fallback = 0.7) {
+    const parsed = normalizeToFiniteNumber(value);
+    if (parsed === null) {
+        return fallback;
+    }
+    return Math.max(0, Math.min(1, parsed));
+}
+
+function setCurrentEvolutionAnalytics(rawEvolutionData) {
+    const evolutionData = rawEvolutionData && typeof rawEvolutionData === 'object'
+        ? rawEvolutionData
+        : {};
+
+    const history = Array.isArray(evolutionData.history) ? evolutionData.history : [];
+    const diversityHistory = Array.isArray(evolutionData.diversity_history)
+        ? evolutionData.diversity_history
+        : [];
+    const config = evolutionData.config && typeof evolutionData.config === 'object'
+        ? evolutionData.config
+        : {};
+
+    currentEvolutionAnalytics = {
+        history,
+        diversity_history: diversityHistory,
+        fitness_alpha: clampUnitInterval(
+            config.fitness_alpha ?? evolutionData.fitness_alpha,
+            0.7
+        )
+    };
+}
+
+function flattenGenerationHistory(generationsData, fallbackPrefix = 'idea') {
+    const flattened = [];
+    (generationsData || []).forEach((generation, genIndex) => {
+        (generation || []).forEach((idea, ideaIndex) => {
+            const fallbackId = `${fallbackPrefix}_${genIndex}_${ideaIndex}`;
+            const normalizedIdea = normalizeIdeaRecord(idea, fallbackId);
+            flattened.push({
+                ...normalizedIdea,
+                id: normalizedIdea.id || fallbackId,
+                elo: normalizedIdea.elo ?? normalizedIdea.ratings?.auto ?? 1500,
+                generation: normalizedIdea.generation !== undefined ? normalizedIdea.generation : genIndex
+            });
+        });
+    });
+    return flattened;
+}
+
+function getIdeaGenerationValue(idea, generationView = currentGenerationView) {
+    const birth = normalizeGenerationValue(idea.birth_generation);
+    const death = normalizeGenerationValue(idea.death_generation);
+    const fallback = normalizeGenerationValue(idea.generation);
+
+    if (generationView === 'birth') {
+        return birth ?? death ?? fallback;
+    }
+    return death ?? birth ?? fallback;
+}
+
+function getIdeaGenerationLabel(idea, generationView = currentGenerationView) {
+    const generation = getIdeaGenerationValue(idea, generationView);
+    return generation !== null ? formatGenerationLabel(generation) : '?';
+}
+
 async function initializeRating(ideas, shouldRefreshPair = true) {
     // Reset state
     ideasDb = {};
+    ideas = (ideas || []).map((idea, index) => normalizeIdeaRecord(idea, `idea_${index}`));
+
+    const lifecycleById = {};
 
     // Initialize ideas database with IDs
     ideas.forEach(idea => {
         if (!idea.id) {
             idea.id = generateUUID();
         }
-        if (!idea.elo) {
-            idea.elo = 1500;
+        if (!Number.isFinite(Number(idea.elo))) {
+            idea.elo = normalizeToFiniteNumber(idea.ratings?.auto) ?? 1500;
         }
-        ideasDb[idea.id] = idea;
+
+        const observed = normalizeGenerationValue(idea.generation);
+        const explicitBirth = normalizeGenerationValue(idea.birth_generation);
+        const explicitDeath = normalizeGenerationValue(idea.death_generation);
+        const birthCandidate = explicitBirth ?? observed ?? explicitDeath;
+        const deathCandidate = explicitDeath ?? observed ?? explicitBirth;
+
+        if (!lifecycleById[idea.id]) {
+            lifecycleById[idea.id] = {
+                birth: birthCandidate,
+                death: deathCandidate
+            };
+        } else {
+            const current = lifecycleById[idea.id];
+            if (birthCandidate !== null) {
+                current.birth = current.birth === null ? birthCandidate : Math.min(current.birth, birthCandidate);
+            }
+            if (deathCandidate !== null) {
+                current.death = current.death === null ? deathCandidate : Math.max(current.death, deathCandidate);
+            }
+        }
+    });
+
+    ideas.forEach(idea => {
+        const lifecycle = lifecycleById[idea.id];
+        if (lifecycle) {
+            if (lifecycle.birth !== null) {
+                idea.birth_generation = lifecycle.birth;
+            }
+            if (lifecycle.death !== null) {
+                idea.death_generation = lifecycle.death;
+            }
+            if (idea.generation === undefined || idea.generation === null || idea.generation === '') {
+                idea.generation = lifecycle.death ?? lifecycle.birth ?? 0;
+            }
+        }
+        ideasDb[idea.id] = normalizeIdeaRecord(idea, idea.id);
     });
 
     if (shouldRefreshPair) {
@@ -267,10 +461,7 @@ async function refreshPair() {
             btn.disabled = false;
         });
 
-        // Get efficient pair from backend API
-        const eloRangeInput = document.getElementById('manualEloRange');
-        const eloRange = eloRangeInput ? parseInt(eloRangeInput.value) || 100 : 100;
-
+        // Get next Swiss pair from backend API
         try {
             const response = await fetch('/api/get-efficient-pair', {
                 method: 'POST',
@@ -278,8 +469,7 @@ async function refreshPair() {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    evolution_id: currentEvolutionId,
-                    elo_range: eloRange
+                    evolution_id: currentEvolutionId
                 })
             });
 
@@ -288,8 +478,12 @@ async function refreshPair() {
             }
 
             const data = await response.json();
-            const ideaA = data.idea_a;
-            const ideaB = data.idea_b;
+            if (!data.idea_a || !data.idea_b) {
+                throw new Error('Incomplete pair payload');
+            }
+            const ideaA = normalizeIdeaRecord(data.idea_a, data.idea_a?.id);
+            const ideaB = normalizeIdeaRecord(data.idea_b, data.idea_b?.id);
+            setManualSwissStatus(data.swiss_status);
 
             // Update local database with the returned ideas (they may have been modified)
             if (ideaA && ideaA.id) {
@@ -312,10 +506,11 @@ async function refreshPair() {
             document.getElementById('contentA').innerHTML = renderMarkdown(ideaDataA.content);
             document.getElementById('contentB').innerHTML = renderMarkdown(ideaDataB.content);
 
-            console.log(`Efficient pair selected: ${ideaA.id} vs ${ideaB.id}`);
+            console.log(`Swiss pair selected: ${ideaA.id} vs ${ideaB.id}`);
 
         } catch (error) {
-            console.error('Error getting efficient pair, falling back to random selection:', error);
+            console.error('Error getting Swiss pair, falling back to random selection:', error);
+            setManualSwissStatus(null);
 
             // Fallback to random selection if API call fails
             const [ideaA, ideaB] = getRandomPair(ideas);
@@ -422,7 +617,12 @@ async function showRanking() {
         document.getElementById('ratingProgress').style.display = 'none';
 
         // Get all ideas
-        const ideas = Object.values(ideasDb);
+        const ideas = Object.values(ideasDb).map((idea, index) =>
+            normalizeIdeaRecord(idea, `ranking-${index}`)
+        );
+        ideas.forEach((idea) => {
+            ideasDb[idea.id] = idea;
+        });
 
         // Calculate total match counts for each type
         const totalMatches = ideas.reduce((sum, idea) => sum + (idea.match_count || 0), 0);
@@ -568,9 +768,11 @@ async function loadCurrentEvolution() {
                     if (Array.isArray(evolutionState)) {
                         // Old format - just the history array
                         generationsData = evolutionState;
+                        setCurrentEvolutionAnalytics({ history: generationsData });
                     } else if (evolutionState && evolutionState.history) {
                         // New format - object with history and diversity_history
                         generationsData = evolutionState.history;
+                        setCurrentEvolutionAnalytics(evolutionState);
                     } else {
                         console.error("Invalid evolution data format");
                         // Continue to API call if localStorage parsing fails
@@ -578,12 +780,7 @@ async function loadCurrentEvolution() {
                     }
 
                     if (generationsData && generationsData.length > 0) {
-                        // Flatten all generations into a single array of ideas
-                        const ideas = generationsData.flat().map(idea => ({
-                            ...idea,
-                            id: generateUUID(),
-                            elo: 1500
-                        }));
+                        const ideas = flattenGenerationHistory(generationsData, 'current-local');
                         console.log("Processed ideas from localStorage:", ideas);
                         await initializeRating(ideas, false);
                         await refreshPair(); // Ensure refreshPair is called
@@ -604,12 +801,8 @@ async function loadCurrentEvolution() {
             console.log("Loaded generations from API:", generations);
 
             if (generations && generations.length > 0) {
-                // Flatten all generations into a single array of ideas
-                const ideas = generations.flat().map(idea => ({
-                    ...idea,
-                    id: generateUUID(),
-                    elo: 1500
-                }));
+                setCurrentEvolutionAnalytics({ history: generations });
+                const ideas = flattenGenerationHistory(generations, 'current-api');
                 console.log("Processed ideas from API:", ideas);
                 await initializeRating(ideas, false);
 
@@ -672,14 +865,8 @@ document.getElementById('evolutionSelect').addEventListener('change', async (e) 
                 console.log('Loaded evolution data:', data);
 
                 if (data.data && data.data.history) {
-                    // Flatten all generations into a single array of ideas
-                    const ideas = data.data.history.flat().map((idea, index) => ({
-                        ...idea,
-                        id: idea.id || generateUUID(),
-                        elo: idea.elo || idea.ratings?.auto || 1500,
-                        // Add generation info if not present
-                        generation: idea.generation !== undefined ? idea.generation : Math.floor(index / (data.data.history[0]?.length || 1))
-                    }));
+                    setCurrentEvolutionAnalytics(data.data);
+                    const ideas = flattenGenerationHistory(data.data.history, `evo-${evolutionId}`);
                     console.log('Processed ideas:', ideas);
 
                     await initializeRating(ideas, false);
@@ -765,26 +952,30 @@ function updateProgressBar(percent) {
     console.log(`After update - width: ${progressBar.style.width}, aria-valuenow: ${progressBar.getAttribute('aria-valuenow')}`);
 }
 
-// Update the auto-rating event listener to include clickable ideas and generation info
+// Start Swiss auto-rating run
 const startAutoRatingBtn = document.getElementById('startAutoRating');
 startAutoRatingBtn.addEventListener('click', async function () {
     if (autoRatingInProgress) {
         return; // prevent multiple simultaneous runs
     }
 
-    const numComparisons = parseInt(document.getElementById('numComparisons').value);
+    const numSwissRounds = parseInt(document.getElementById('numSwissRounds').value);
     const evolutionId = document.getElementById('evolutionSelect').value;
     const modelId = document.getElementById('modelSelect').value;
-    const eloRange = parseInt(document.getElementById('eloRange').value || 100);
 
     if (!evolutionId) {
         alert('Please select an evolution first');
         return;
     }
 
+    if (!Number.isFinite(numSwissRounds) || numSwissRounds < 1) {
+        alert('Please enter at least 1 Swiss round');
+        return;
+    }
+
     autoRatingInProgress = true;
     startAutoRatingBtn.disabled = true;
-    startAutoRatingBtn.textContent = 'Auto Rating...';
+    startAutoRatingBtn.textContent = 'Auto Swiss Rating...';
 
     // Hide the idea comparison view
     document.querySelector('.ideas-container').style.display = 'none';
@@ -814,18 +1005,20 @@ startAutoRatingBtn.addEventListener('click', async function () {
         console.error("Progress bar element not found during initialization!");
     }
 
-    document.getElementById('ratingStats').innerHTML = 'Processing...';
+    document.getElementById('ratingStats').innerHTML = 'Processing Swiss rounds...';
     document.getElementById('rankingsTable').innerHTML = '';
 
     try {
-        // Break the process into smaller chunks (e.g., 5 comparisons per request)
-        const chunkSize = 5;
-        const chunks = Math.ceil(numComparisons / chunkSize);
-        let completedComparisons = 0;
+        const estimatedMatchesPerRound = Math.max(1, Math.floor(Object.keys(ideasDb).length / 2));
+        const estimatedTotalMatches = Math.max(1, numSwissRounds * estimatedMatchesPerRound);
+
+        let completedRounds = 0;
+        let resolvedMatches = 0;
         let totalCompletedComparisons = 0;
         let allResults = [];
         let finalIdeas = [];
         let finalTokenCounts = null;
+
         let accumulatedTokenCounts = {
             total: 0,
             total_input: 0,
@@ -847,159 +1040,125 @@ startAutoRatingBtn.addEventListener('click', async function () {
             estimates: {}
         };
 
-        for (let i = 0; i < chunks; i++) {
-            // Calculate how many comparisons to do in this chunk
-            const comparisonsInChunk = Math.min(chunkSize, numComparisons - completedComparisons);
-
-            // Make the API call for this chunk
+        for (let round = 0; round < numSwissRounds; round++) {
             const response = await fetch('/api/auto-rate', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    numComparisons: comparisonsInChunk,
+                    numRounds: 1,
                     evolutionId: evolutionId,
                     modelId: modelId,
-                    eloRange: eloRange,
-                    skipSave: false // Always save to ensure match counts are tracked properly
+                    skipSave: false
                 })
             });
 
             if (!response.ok) {
-                throw new Error('Failed to perform automated rating');
+                let errorMessage = 'Failed to perform automated Swiss rating';
+                try {
+                    const errorPayload = await response.json();
+                    if (errorPayload?.message) {
+                        errorMessage = errorPayload.message;
+                    } else if (errorPayload?.detail) {
+                        errorMessage = errorPayload.detail;
+                    }
+                } catch (_) {
+                    // Keep default message when response isn't JSON
+                }
+                throw new Error(errorMessage);
             }
 
             const data = await response.json();
+            const roundResults = data.results || [];
+            const roundComparisons = data.new_comparisons || roundResults.length;
 
-            // Add results from this chunk
-            allResults = allResults.concat(data.results || []);
+            allResults = allResults.concat(roundResults);
+            resolvedMatches += roundComparisons;
+            completedRounds += (data.new_rounds || data.completed_rounds || 1);
+            totalCompletedComparisons = data.completed_comparisons || (totalCompletedComparisons + roundComparisons);
+            finalIdeas = (data.ideas || finalIdeas).map((idea, ideaIndex) =>
+                normalizeIdeaRecord(idea, `auto-${round}-${ideaIndex}`)
+            );
 
-            // Track new comparisons completed in this chunk
-            const newComparisons = data.new_comparisons || data.results?.length || 0;
-            completedComparisons += newComparisons;
-
-            // Get the total completed comparisons (including previous ones)
-            totalCompletedComparisons = data.completed_comparisons || completedComparisons;
-
-            // Store the latest ideas data
-            finalIdeas = data.ideas || [];
-
-            // Accumulate token count data from each chunk
             if (data.token_counts) {
                 const chunkTokens = data.token_counts;
-
-                // Accumulate totals
                 accumulatedTokenCounts.total += chunkTokens.total || 0;
                 accumulatedTokenCounts.total_input += chunkTokens.total_input || 0;
                 accumulatedTokenCounts.total_output += chunkTokens.total_output || 0;
 
-                // Accumulate costs
                 if (chunkTokens.cost) {
                     accumulatedTokenCounts.cost.input_cost += chunkTokens.cost.input_cost || 0;
                     accumulatedTokenCounts.cost.output_cost += chunkTokens.cost.output_cost || 0;
                     accumulatedTokenCounts.cost.total_cost += chunkTokens.cost.total_cost || 0;
                 }
 
-                // Accumulate critic data
                 if (chunkTokens.critic) {
                     accumulatedTokenCounts.critic.total += chunkTokens.critic.total || 0;
                     accumulatedTokenCounts.critic.input += chunkTokens.critic.input || 0;
                     accumulatedTokenCounts.critic.output += chunkTokens.critic.output || 0;
                     accumulatedTokenCounts.critic.cost += chunkTokens.critic.cost || 0;
-
-                    // Set model info from first chunk
                     if (!accumulatedTokenCounts.critic.model && chunkTokens.critic.model) {
                         accumulatedTokenCounts.critic.model = chunkTokens.critic.model;
                     }
                 }
 
-                // Set models info from first chunk
                 if (chunkTokens.models && Object.keys(accumulatedTokenCounts.models).length === 0) {
                     accumulatedTokenCounts.models = chunkTokens.models;
                 }
 
-                // Accumulate estimates by updating them using the accumulated token counts
                 if (chunkTokens.estimates) {
-                    for (const [modelId, estimate] of Object.entries(chunkTokens.estimates)) {
-                        if (!accumulatedTokenCounts.estimates[modelId]) {
-                            accumulatedTokenCounts.estimates[modelId] = {
+                    for (const [estModelId, estimate] of Object.entries(chunkTokens.estimates)) {
+                        if (!accumulatedTokenCounts.estimates[estModelId]) {
+                            accumulatedTokenCounts.estimates[estModelId] = {
                                 name: estimate.name,
                                 cost: 0
                             };
                         }
-                        accumulatedTokenCounts.estimates[modelId].cost += estimate.cost || 0;
+                        accumulatedTokenCounts.estimates[estModelId].cost += estimate.cost || 0;
                     }
                 }
 
-                // Store the accumulated counts as the final token counts
                 finalTokenCounts = accumulatedTokenCounts;
             }
 
-            // Update the local ideasDb with the latest data from the server
             finalIdeas.forEach(idea => {
-                if (idea.id && ideasDb[idea.id]) {
-                    // Update the existing idea in the database with the latest data
-                    ideasDb[idea.id].elo = idea.elo;
-                    ideasDb[idea.id].ratings = idea.ratings;
-                    ideasDb[idea.id].match_count = idea.match_count || 0;
-                    ideasDb[idea.id].auto_match_count = idea.auto_match_count || 0;
-                    ideasDb[idea.id].manual_match_count = idea.manual_match_count || 0;
+                if (idea.id) {
+                    ideasDb[idea.id] = normalizeIdeaRecord({
+                        ...(ideasDb[idea.id] || {}),
+                        ...idea
+                    }, idea.id);
                 }
             });
 
-            // Update progress bar - based on our requested comparisons
-            const progressPercent = Math.min(100, (completedComparisons / numComparisons) * 100);
-            updateProgressBar(progressPercent);
+            updateRankingsTable(finalIdeas);
 
-            // Update stats during processing
-            const stats = document.getElementById('ratingStats');
-            stats.innerHTML = `
-                <p>Progress: ${completedComparisons}/${numComparisons} comparisons</p>
+            const roundProgress = (completedRounds / numSwissRounds) * 100;
+            const matchProgress = (resolvedMatches / estimatedTotalMatches) * 100;
+            updateProgressBar(Math.min(99, Math.max(roundProgress, matchProgress)));
+
+            document.getElementById('ratingStats').innerHTML = `
+                <p>Round ${Math.min(completedRounds, numSwissRounds)} of ${numSwissRounds}</p>
+                <p>Resolved matches: ${resolvedMatches}/${estimatedTotalMatches} (estimated)</p>
                 <p>Total comparisons completed: ${totalCompletedComparisons}</p>
                 <p>A wins: ${allResults.filter(r => r.outcome === 'A').length}</p>
                 <p>B wins: ${allResults.filter(r => r.outcome === 'B').length}</p>
                 <p>Ties: ${allResults.filter(r => r.outcome === 'tie').length}</p>
             `;
-
-            // Update the rankings table after each chunk to show progress
-            updateRankingsTable(finalIdeas);
         }
 
-        // Final update to ensure everything is in sync
-        // Update the local ideasDb with the final data
-        finalIdeas.forEach(idea => {
-            if (idea.id && ideasDb[idea.id]) {
-                // Update the existing idea in the database with the latest data
-                ideasDb[idea.id].elo = idea.elo;
-                ideasDb[idea.id].ratings = idea.ratings;
-                ideasDb[idea.id].match_count = idea.match_count || 0;
-                ideasDb[idea.id].auto_match_count = idea.auto_match_count || 0;
-                ideasDb[idea.id].manual_match_count = idea.manual_match_count || 0;
-            }
-        });
-
-        // Update the rankings table with the final data
-        updateRankingsTable(finalIdeas);
-
-        // Ensure progress bar shows 100% at the end
-        console.log("Setting final progress to 100%");
         updateProgressBar(100);
 
-        // Add a small delay to ensure the UI updates
-        await new Promise(resolve => setTimeout(resolve, 300));
-
-        // Update final stats including cost information
         const stats = document.getElementById('ratingStats');
         let statsHtml = `
-            <p>Completed: ${completedComparisons}/${numComparisons} comparisons</p>
+            <p>Completed: ${completedRounds}/${numSwissRounds} Swiss rounds</p>
+            <p>Resolved matches: ${resolvedMatches}</p>
             <p>Total comparisons completed: ${totalCompletedComparisons}</p>
             <p>A wins: ${allResults.filter(r => r.outcome === 'A').length}</p>
             <p>B wins: ${allResults.filter(r => r.outcome === 'B').length}</p>
             <p>Ties: ${allResults.filter(r => r.outcome === 'tie').length}</p>
         `;
 
-        // Add cost information if available
         if (finalTokenCounts) {
             const totalCost = finalTokenCounts.cost.total_cost.toFixed(4);
             const totalTokens = finalTokenCounts.total.toLocaleString();
@@ -1016,7 +1175,6 @@ startAutoRatingBtn.addEventListener('click', async function () {
 
         stats.innerHTML = statsHtml;
 
-        // Add event listener for cost details button if it exists
         const costDetailsBtn = document.getElementById('autorating-cost-details-btn');
         if (costDetailsBtn && finalTokenCounts) {
             costDetailsBtn.addEventListener('click', function () {
@@ -1028,7 +1186,7 @@ startAutoRatingBtn.addEventListener('click', async function () {
         console.error('Error during auto-rating:', error);
         document.getElementById('ratingStats').innerHTML = `<p class="text-danger">Error: ${error.message}</p>`;
     } finally {
-        startAutoRatingBtn.textContent = 'Start Auto Rating';
+        startAutoRatingBtn.textContent = 'Start Auto Swiss Rating';
         startAutoRatingBtn.disabled = false;
         autoRatingInProgress = false;
     }
@@ -1036,19 +1194,23 @@ startAutoRatingBtn.addEventListener('click', async function () {
 
 // Helper function to update the rankings table
 function updateRankingsTable(ideas) {
+    const normalizedIdeas = (ideas || []).map((idea, index) =>
+        normalizeIdeaRecord(idea, `ranked-${index}`)
+    );
+
     // Show rankings with clickable rows and generation info
     const rankingsTable = document.getElementById('rankingsTable');
     rankingsTable.innerHTML = ''; // Clear existing content
 
     // Store ideas in a global variable for modal access
-    window.rankedIdeas = ideas;
+    window.rankedIdeas = normalizedIdeas;
 
     // Store original order for sorting
     if (originalIdeasOrder.length === 0) {
-        originalIdeasOrder = [...ideas];
+        originalIdeasOrder = [...normalizedIdeas];
     }
 
-    ideas.forEach((idea, index) => {
+    normalizedIdeas.forEach((idea, index) => {
         const row = document.createElement('tr');
         row.className = 'idea-row';
         row.dataset.ideaIndex = index;
@@ -1069,7 +1231,7 @@ function updateRankingsTable(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td>${autoRating}</td>
                 <td>${matchCount}</td>
-                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+                <td>${getIdeaGenerationLabel(idea)}</td>
             `;
         } else if (currentRatingType === 'manual') {
             matchCount = idea.manual_match_count || 0;
@@ -1079,7 +1241,7 @@ function updateRankingsTable(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td>${manualRating}</td>
                 <td>${matchCount}</td>
-                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+                <td>${getIdeaGenerationLabel(idea)}</td>
             `;
         } else {
             // For 'diff' or any other type, use the total match count
@@ -1094,7 +1256,7 @@ function updateRankingsTable(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td class="${diffClass}">${diffSign}${diffRating} (A:${autoRating}/M:${manualRating})</td>
                 <td>${matchCount}</td>
-                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+                <td>${getIdeaGenerationLabel(idea)}</td>
             `;
         }
 
@@ -1110,7 +1272,7 @@ function updateRankingsTable(ideas) {
     setupTableSorting();
 
     // Create the ELO chart
-    createEloChart(ideas, currentRatingType);
+    createEloChart(normalizedIdeas, currentRatingType);
 }
 
 // Table sorting functionality
@@ -1207,8 +1369,10 @@ function sortTable(column, direction) {
                 break;
 
             case 'generation':
-                aValue = a.generation !== undefined ? a.generation : -1;
-                bValue = b.generation !== undefined ? b.generation : -1;
+                aValue = getIdeaGenerationValue(a);
+                bValue = getIdeaGenerationValue(b);
+                aValue = aValue !== null ? aValue : -1;
+                bValue = bValue !== null ? bValue : -1;
                 break;
 
             default:
@@ -1229,10 +1393,14 @@ function sortTable(column, direction) {
 }
 
 function updateRankingsTableContent(ideas) {
+    const normalizedIdeas = (ideas || []).map((idea, index) =>
+        normalizeIdeaRecord(idea, `ranked-sort-${index}`)
+    );
+
     const rankingsTable = document.getElementById('rankingsTable');
     rankingsTable.innerHTML = ''; // Clear existing content
 
-    ideas.forEach((idea, index) => {
+    normalizedIdeas.forEach((idea, index) => {
         const row = document.createElement('tr');
         row.className = 'idea-row';
         row.dataset.ideaIndex = index;
@@ -1253,7 +1421,7 @@ function updateRankingsTableContent(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td>${autoRating}</td>
                 <td>${matchCount}</td>
-                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+                <td>${getIdeaGenerationLabel(idea)}</td>
             `;
         } else if (currentRatingType === 'manual') {
             matchCount = idea.manual_match_count || 0;
@@ -1263,7 +1431,7 @@ function updateRankingsTableContent(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td>${manualRating}</td>
                 <td>${matchCount}</td>
-                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+                <td>${getIdeaGenerationLabel(idea)}</td>
             `;
         } else {
             // For 'diff' or any other type, use the total match count
@@ -1278,7 +1446,7 @@ function updateRankingsTableContent(ideas) {
                 <td>${idea.title || 'Untitled'}</td>
                 <td class="${diffClass}">${diffSign}${diffRating} (A:${autoRating}/M:${manualRating})</td>
                 <td>${matchCount}</td>
-                <td>${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</td>
+                <td>${getIdeaGenerationLabel(idea)}</td>
             `;
         }
 
@@ -1310,7 +1478,9 @@ function showIdeaDetails(ideaIndex) {
         <div class="card">
             <div class="card-body">
                 <h4>${idea.title || 'Untitled'}</h4>
-                <p><strong>Generation:</strong> ${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</p>
+                <p><strong>Generation (${currentGenerationView === 'birth' ? 'Birth' : 'Death'} view):</strong> ${getIdeaGenerationLabel(idea)}</p>
+                <p><strong>Birth Generation:</strong> ${getIdeaGenerationLabel(idea, 'birth')}</p>
+                <p><strong>Death Generation:</strong> ${getIdeaGenerationLabel(idea, 'death')}</p>
                 <p><strong>ELO Rating:</strong> ${idea.elo}</p>
                 <hr>
                 <div class="idea-content">
@@ -1341,6 +1511,8 @@ document.addEventListener('DOMContentLoaded', function () {
             navigator.clipboard.writeText(text).catch(err => console.error('Copy failed', err));
         });
     }
+
+    initializeChartFocusInteractions();
 });
 
 // Make sure the showComparisonView function is properly defined
@@ -1380,6 +1552,22 @@ function toggleRatingType(type) {
         } else {
             showRanking();
         }
+    }
+}
+
+function toggleGenerationView(view) {
+    currentGenerationView = view === 'birth' ? 'birth' : 'death';
+
+    const birthBtn = document.getElementById('birthGenerationViewBtn');
+    const deathBtn = document.getElementById('deathGenerationViewBtn');
+    if (birthBtn && deathBtn) {
+        birthBtn.classList.remove('active');
+        deathBtn.classList.remove('active');
+        document.getElementById(`${currentGenerationView}GenerationViewBtn`).classList.add('active');
+    }
+
+    if (document.getElementById('autoRatingResults').style.display === 'block') {
+        showRanking();
     }
 }
 
@@ -1639,7 +1827,9 @@ function showIdeaDetails(ideaIndex) {
         <div class="card">
             <div class="card-body">
                 <h4>${idea.title || 'Untitled'}</h4>
-                <p><strong>Generation:</strong> ${idea.generation !== undefined ? formatGenerationLabel(idea.generation) : '?'}</p>
+                <p><strong>Generation (${currentGenerationView === 'birth' ? 'Birth' : 'Death'} view):</strong> ${getIdeaGenerationLabel(idea)}</p>
+                <p><strong>Birth Generation:</strong> ${getIdeaGenerationLabel(idea, 'birth')}</p>
+                <p><strong>Death Generation:</strong> ${getIdeaGenerationLabel(idea, 'death')}</p>
                 <p><strong>Auto Rating:</strong> ${autoRating}</p>
                 <p><strong>Manual Rating:</strong> ${manualRating}</p>
                 <p><strong>Difference:</strong> <span class="${diffClass}">${diffSign}${diffRating}</span></p>
@@ -1665,44 +1855,28 @@ async function loadEvolution(evolutionId) {
 
         const data = await response.json();
         currentEvolutionId = evolutionId;
+        setCurrentEvolutionAnalytics(data.data);
 
-        // Extract all ideas from all generations
-        const allIdeas = [];
-        data.data.history.forEach((generation, genIndex) => {
-            generation.forEach(idea => {
-                // Add generation info
-                idea.generation = genIndex;
+        const allIdeas = flattenGenerationHistory(data.data.history, `load-${evolutionId}`);
 
-                // Ensure idea has an ID
-                if (!idea.id) {
-                    idea.id = generateUUID();
-                }
+        allIdeas.forEach(idea => {
+            if (!idea.ratings) {
+                idea.ratings = {
+                    auto: idea.elo || 1500,
+                    manual: 1500
+                };
+            } else if (typeof idea.ratings === 'number') {
+                const oldElo = idea.ratings;
+                idea.ratings = {
+                    auto: oldElo,
+                    manual: oldElo
+                };
+            }
 
-                // Initialize ratings structure if needed
-                if (!idea.ratings) {
-                    idea.ratings = {
-                        auto: idea.elo || 1500,
-                        manual: 1500
-                    };
-                } else if (typeof idea.ratings === 'number') {
-                    // Convert old format
-                    const oldElo = idea.ratings;
-                    idea.ratings = {
-                        auto: oldElo,
-                        manual: oldElo
-                    };
-                }
-
-                // Ensure backward compatibility
-                idea.elo = idea.ratings.auto;
-
-                // Ensure match count properties exist
-                idea.match_count = idea.match_count || 0;
-                idea.auto_match_count = idea.auto_match_count || 0;
-                idea.manual_match_count = idea.manual_match_count || 0;
-
-                allIdeas.push(idea);
-            });
+            idea.elo = idea.ratings.auto;
+            idea.match_count = idea.match_count || 0;
+            idea.auto_match_count = idea.auto_match_count || 0;
+            idea.manual_match_count = idea.manual_match_count || 0;
         });
 
         await initializeRating(allIdeas);
@@ -1743,69 +1917,432 @@ function getRandomPair(ideas) {
     return [idea1, idea2];
 }
 
-// Fix the createEloChart function to handle the case when there's no existing chart
-function createEloChart(ideas, ratingType) {
-    // Group ideas by generation
-    const generationGroups = {};
+function getRatingValueByType(idea, ratingType) {
+    const autoRating = normalizeToFiniteNumber(idea?.ratings?.auto) ?? normalizeToFiniteNumber(idea?.elo) ?? 1500;
+    const manualRating = normalizeToFiniteNumber(idea?.ratings?.manual) ?? 1500;
 
-    ideas.forEach(idea => {
-        const gen = idea.generation || 0;
-        if (!generationGroups[gen]) {
-            generationGroups[gen] = [];
+    if (ratingType === 'manual') {
+        return manualRating;
+    }
+    if (ratingType === 'diff') {
+        return autoRating - manualRating;
+    }
+    return autoRating;
+}
+
+function normalizeSeriesMinMax(values) {
+    const finiteValues = values.filter(value => Number.isFinite(value));
+    if (finiteValues.length === 0) {
+        return values.map(() => null);
+    }
+
+    const minValue = Math.min(...finiteValues);
+    const maxValue = Math.max(...finiteValues);
+
+    if (Math.abs(maxValue - minValue) < 1e-12) {
+        return values.map(value => (Number.isFinite(value) ? 0.5 : null));
+    }
+
+    return values.map(value => {
+        if (!Number.isFinite(value)) {
+            return null;
         }
-        generationGroups[gen].push(idea);
+        return (value - minValue) / (maxValue - minValue);
     });
+}
 
-    // Calculate max, mean, and median ELO for each generation
-    const generations = Object.keys(generationGroups).sort((a, b) => a - b);
-    const maxElos = [];
-    const meanElos = [];
-    const medianElos = [];
+function buildGenerationDiversityLookup(diversityHistory) {
+    const zeroBasedLookup = {};
+    const oneBasedLookup = {};
 
-    generations.forEach(gen => {
-        const genIdeas = generationGroups[gen];
+    if (!Array.isArray(diversityHistory)) {
+        return { zeroBasedLookup, oneBasedLookup };
+    }
 
-        // Get the appropriate rating field based on type
-        let ratings;
-        if (ratingType === 'auto') {
-            ratings = genIdeas.map(idea => idea.ratings?.auto || idea.elo || 1500);
-        } else if (ratingType === 'manual') {
-            ratings = genIdeas.map(idea => idea.ratings?.manual || 1500);
-        } else if (ratingType === 'diff') {
-            ratings = genIdeas.map(idea => {
-                const auto = idea.ratings?.auto || idea.elo || 1500;
-                const manual = idea.ratings?.manual || 1500;
-                return auto - manual;
+    diversityHistory.forEach((snapshot, snapshotIndex) => {
+        if (!snapshot || typeof snapshot !== 'object') {
+            return;
+        }
+
+        if (Array.isArray(snapshot.generation_diversities)) {
+            snapshot.generation_diversities.forEach((genData) => {
+                const generation = normalizeGenerationValue(genData?.generation);
+                const score = normalizeToFiniteNumber(genData?.diversity_score);
+                if (generation === null || score === null) {
+                    return;
+                }
+                zeroBasedLookup[generation] = score;
+                oneBasedLookup[generation + 1] = score;
             });
         }
 
-        const maxElo = Math.max(...ratings);
-        const meanElo = ratings.reduce((sum, elo) => sum + elo, 0) / ratings.length;
-
-        // Calculate median ELO
-        const sortedRatings = [...ratings].sort((a, b) => a - b);
-        const medianElo = sortedRatings.length % 2 === 0
-            ? (sortedRatings[sortedRatings.length / 2 - 1] + sortedRatings[sortedRatings.length / 2]) / 2
-            : sortedRatings[Math.floor(sortedRatings.length / 2)];
-
-        maxElos.push(maxElo);
-        meanElos.push(meanElo);
-        medianElos.push(medianElo);
+        const inferredGeneration = normalizeGenerationValue(snapshot.generation) ?? snapshotIndex;
+        const inferredScore = normalizeToFiniteNumber(snapshot.current_generation_diversity)
+            ?? normalizeToFiniteNumber(snapshot.diversity_score);
+        if (inferredScore !== null) {
+            zeroBasedLookup[inferredGeneration] = inferredScore;
+            oneBasedLookup[inferredGeneration + 1] = inferredScore;
+        }
     });
 
-    // Create the chart
+    return { zeroBasedLookup, oneBasedLookup };
+}
+
+function getGenerationDiversitySeries(generations) {
+    const diversityHistory = currentEvolutionAnalytics?.diversity_history ?? [];
+    const { zeroBasedLookup, oneBasedLookup } = buildGenerationDiversityLookup(diversityHistory);
+    return generations.map((generation) => {
+        const normalizedGeneration = normalizeGenerationValue(generation);
+        if (normalizedGeneration === null) {
+            return null;
+        }
+        if (Object.prototype.hasOwnProperty.call(zeroBasedLookup, normalizedGeneration)) {
+            return zeroBasedLookup[normalizedGeneration];
+        }
+        if (Object.prototype.hasOwnProperty.call(oneBasedLookup, normalizedGeneration)) {
+            return oneBasedLookup[normalizedGeneration];
+        }
+        return null;
+    });
+}
+
+function cloneConfigValue(value) {
+    if (Array.isArray(value)) {
+        return value.map(cloneConfigValue);
+    }
+    if (value && typeof value === 'object') {
+        const cloned = {};
+        Object.keys(value).forEach((key) => {
+            cloned[key] = cloneConfigValue(value[key]);
+        });
+        return cloned;
+    }
+    return value;
+}
+
+function destroyFocusedChart() {
+    if (typeof Chart === 'undefined') {
+        focusedChartInstance = null;
+        return;
+    }
+    if (focusedChartInstance instanceof Chart) {
+        focusedChartInstance.destroy();
+        focusedChartInstance = null;
+    }
+}
+
+function renderFocusedChart() {
+    if (typeof Chart === 'undefined') {
+        return;
+    }
+    if (!pendingFocusedChartConfig) {
+        return;
+    }
+
+    const canvas = document.getElementById('chartFocusCanvas');
+    if (!canvas) {
+        return;
+    }
+
+    destroyFocusedChart();
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+        return;
+    }
+
+    focusedChartInstance = new Chart(ctx, pendingFocusedChartConfig);
+    pendingFocusedChartConfig = null;
+}
+
+function openFocusedChart(chartId, chartTitle) {
+    if (typeof Chart === 'undefined') {
+        return;
+    }
+    const chartGetter = chartFocusLookup[chartId];
+    const sourceChart = typeof chartGetter === 'function' ? chartGetter() : null;
+    if (!(sourceChart instanceof Chart)) {
+        return;
+    }
+
+    const modalElement = document.getElementById('chartFocusModal');
+    const modalTitle = document.getElementById('chartFocusModalLabel');
+    if (!modalElement) {
+        return;
+    }
+
+    const focusedOptions = cloneConfigValue(sourceChart.options || {});
+    focusedOptions.responsive = true;
+    focusedOptions.maintainAspectRatio = false;
+
+    pendingFocusedChartConfig = {
+        type: sourceChart.config.type,
+        data: cloneConfigValue(sourceChart.data),
+        options: focusedOptions
+    };
+
+    if (modalTitle) {
+        modalTitle.textContent = chartTitle || 'Chart Focus';
+    }
+
+    if (!chartFocusModalInstance) {
+        chartFocusModalInstance = new bootstrap.Modal(modalElement);
+        modalElement.addEventListener('shown.bs.modal', renderFocusedChart);
+        modalElement.addEventListener('hidden.bs.modal', () => {
+            pendingFocusedChartConfig = null;
+            destroyFocusedChart();
+        });
+    }
+
+    chartFocusModalInstance.show();
+    if (modalElement.classList.contains('show')) {
+        renderFocusedChart();
+    }
+}
+
+function initializeChartFocusInteractions() {
+    const triggers = document.querySelectorAll('.chart-focus-trigger[data-focus-chart]');
+    triggers.forEach((trigger) => {
+        if (trigger.dataset.chartFocusReady === 'true') {
+            return;
+        }
+        trigger.dataset.chartFocusReady = 'true';
+
+        const openChart = () => {
+            const chartId = trigger.dataset.focusChart;
+            const chartTitle = trigger.dataset.chartTitle;
+            openFocusedChart(chartId, chartTitle);
+        };
+
+        trigger.addEventListener('click', (event) => {
+            event.preventDefault();
+            openChart();
+        });
+
+        trigger.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') {
+                return;
+            }
+            event.preventDefault();
+            openChart();
+        });
+    });
+}
+
+function createDiversityChart(labels, diversitySeries) {
+    const canvas = document.getElementById('diversityChart');
+    if (!canvas) {
+        return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (window.diversityChart instanceof Chart) {
+        window.diversityChart.destroy();
+    }
+
+    const hasDiversityData = diversitySeries.some(value => Number.isFinite(value));
+    window.diversityChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: 'Diversity Score',
+                    data: diversitySeries,
+                    borderColor: 'rgba(153, 102, 255, 1)',
+                    backgroundColor: 'rgba(153, 102, 255, 0.2)',
+                    tension: 0.2
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                title: {
+                    display: true,
+                    text: hasDiversityData ? 'Diversity by Generation' : 'Diversity by Generation (not available)'
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function (context) {
+                            if (!Number.isFinite(context.raw)) {
+                                return `${context.dataset.label}: n/a`;
+                            }
+                            return `${context.dataset.label}: ${context.raw.toFixed(4)}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: 'Diversity Score'
+                    }
+                },
+                x: {
+                    title: {
+                        display: true,
+                        text: 'Generation'
+                    }
+                }
+            }
+        }
+    });
+}
+
+function createFitnessChart(labels, combinedFitnessSeries, normalizedEloSeries, normalizedDiversitySeries, fitnessAlpha) {
+    const canvas = document.getElementById('fitnessChart');
+    if (!canvas) {
+        return;
+    }
+
+    const formulaEl = document.getElementById('fitnessFormula');
+    if (formulaEl) {
+        formulaEl.textContent = `fitness = ${fitnessAlpha.toFixed(2)} × norm(mean ELO) + ${(1 - fitnessAlpha).toFixed(2)} × norm(diversity)`;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (window.fitnessChart instanceof Chart) {
+        window.fitnessChart.destroy();
+    }
+
+    const hasFitnessData = combinedFitnessSeries.some(value => Number.isFinite(value));
+    window.fitnessChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: 'Combined Fitness',
+                    data: combinedFitnessSeries,
+                    borderColor: 'rgba(255, 159, 64, 1)',
+                    backgroundColor: 'rgba(255, 159, 64, 0.2)',
+                    tension: 0.2
+                },
+                {
+                    label: 'Normalized Mean ELO',
+                    data: normalizedEloSeries,
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderDash: [6, 4],
+                    tension: 0.2
+                },
+                {
+                    label: 'Normalized Diversity',
+                    data: normalizedDiversitySeries,
+                    borderColor: 'rgba(153, 102, 255, 1)',
+                    borderDash: [6, 4],
+                    tension: 0.2
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                title: {
+                    display: true,
+                    text: hasFitnessData ? 'Combined Fitness by Generation' : 'Combined Fitness by Generation (insufficient data)'
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function (context) {
+                            if (!Number.isFinite(context.raw)) {
+                                return `${context.dataset.label}: n/a`;
+                            }
+                            return `${context.dataset.label}: ${context.raw.toFixed(4)}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    max: 1,
+                    title: {
+                        display: true,
+                        text: 'Normalized Score'
+                    }
+                },
+                x: {
+                    title: {
+                        display: true,
+                        text: 'Generation'
+                    }
+                }
+            }
+        }
+    });
+}
+
+// Fix the createEloChart function to handle the case when there's no existing chart
+function createEloChart(ideas, ratingType) {
+    const generationGroups = {};
+
+    ideas.forEach(idea => {
+        const generation = getIdeaGenerationValue(idea, currentGenerationView);
+        const normalizedGeneration = generation !== null ? generation : 0;
+        if (!generationGroups[normalizedGeneration]) {
+            generationGroups[normalizedGeneration] = [];
+        }
+        generationGroups[normalizedGeneration].push(idea);
+    });
+
+    const generations = Object.keys(generationGroups)
+        .map(generation => Number(generation))
+        .filter(generation => Number.isFinite(generation))
+        .sort((a, b) => a - b);
+
+    const maxElos = [];
+    const meanElos = [];
+    const medianElos = [];
+    const meanAutoElos = [];
+
+    generations.forEach(generation => {
+        const genIdeas = generationGroups[generation] || [];
+        const ratings = genIdeas
+            .map(idea => getRatingValueByType(idea, ratingType))
+            .filter(value => Number.isFinite(value));
+
+        if (ratings.length === 0) {
+            maxElos.push(null);
+            meanElos.push(null);
+            medianElos.push(null);
+        } else {
+            const maxElo = Math.max(...ratings);
+            const meanElo = ratings.reduce((sum, elo) => sum + elo, 0) / ratings.length;
+            const sortedRatings = [...ratings].sort((a, b) => a - b);
+            const medianElo = sortedRatings.length % 2 === 0
+                ? (sortedRatings[sortedRatings.length / 2 - 1] + sortedRatings[sortedRatings.length / 2]) / 2
+                : sortedRatings[Math.floor(sortedRatings.length / 2)];
+            maxElos.push(maxElo);
+            meanElos.push(meanElo);
+            medianElos.push(medianElo);
+        }
+
+        const autoRatings = genIdeas
+            .map(idea => getRatingValueByType(idea, 'auto'))
+            .filter(value => Number.isFinite(value));
+        if (autoRatings.length === 0) {
+            meanAutoElos.push(null);
+        } else {
+            meanAutoElos.push(autoRatings.reduce((sum, elo) => sum + elo, 0) / autoRatings.length);
+        }
+    });
+
+    const generationLabels = generations.map(generation => formatGenerationLabel(generation));
     const ctx = document.getElementById('eloChart').getContext('2d');
 
-    // Safely destroy existing chart if it exists
     if (window.eloChart instanceof Chart) {
         window.eloChart.destroy();
     }
 
-    // Create new chart
     window.eloChart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: generations.map(gen => gen === '0' ? 'Initial Population' : `Gen ${gen}`),
+            labels: generationLabels,
             datasets: [
                 {
                     label: 'Max ELO',
@@ -1832,6 +2369,7 @@ function createEloChart(ideas, ratingType) {
         },
         options: {
             responsive: true,
+            maintainAspectRatio: false,
             plugins: {
                 title: {
                     display: true,
@@ -1840,6 +2378,9 @@ function createEloChart(ideas, ratingType) {
                 tooltip: {
                     callbacks: {
                         label: function (context) {
+                            if (!Number.isFinite(context.raw)) {
+                                return `${context.dataset.label}: n/a`;
+                            }
                             return `${context.dataset.label}: ${Math.round(context.raw)}`;
                         }
                     }
@@ -1862,4 +2403,47 @@ function createEloChart(ideas, ratingType) {
             }
         }
     });
+
+    const analyticsHistory = Array.isArray(currentEvolutionAnalytics?.history)
+        ? currentEvolutionAnalytics.history
+        : [];
+    let fitnessGenerations = generations;
+    let meanAutoFitnessSeries = meanAutoElos;
+
+    if (analyticsHistory.length > 0) {
+        fitnessGenerations = analyticsHistory.map((_, index) => index);
+        meanAutoFitnessSeries = analyticsHistory.map((generation) => {
+            const autoRatings = (generation || [])
+                .map(idea => getRatingValueByType(idea, 'auto'))
+                .filter(value => Number.isFinite(value));
+            if (autoRatings.length === 0) {
+                return null;
+            }
+            return autoRatings.reduce((sum, elo) => sum + elo, 0) / autoRatings.length;
+        });
+    }
+
+    const fitnessLabels = fitnessGenerations.map(generation => formatGenerationLabel(generation));
+    const diversitySeries = getGenerationDiversitySeries(fitnessGenerations);
+    createDiversityChart(fitnessLabels, diversitySeries);
+
+    const normalizedEloSeries = normalizeSeriesMinMax(meanAutoFitnessSeries);
+    const normalizedDiversitySeries = normalizeSeriesMinMax(diversitySeries);
+    const fitnessAlpha = clampUnitInterval(currentEvolutionAnalytics?.fitness_alpha, 0.7);
+    const combinedFitnessSeries = fitnessGenerations.map((_, index) => {
+        const eloComponent = normalizedEloSeries[index];
+        const diversityComponent = normalizedDiversitySeries[index];
+        if (!Number.isFinite(eloComponent) || !Number.isFinite(diversityComponent)) {
+            return null;
+        }
+        return (fitnessAlpha * eloComponent) + ((1 - fitnessAlpha) * diversityComponent);
+    });
+
+    createFitnessChart(
+        fitnessLabels,
+        combinedFitnessSeries,
+        normalizedEloSeries,
+        normalizedDiversitySeries,
+        fitnessAlpha
+    );
 }

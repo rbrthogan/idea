@@ -43,6 +43,7 @@ def test_repository_restore_from_state():
             "thinking_budget": None,
             "max_budget": None,
             "mutation_rate": 0.2,
+            "seed_context_pool_size": 3,
         },
         "evolution_id": "evo-1",
         "name": "Test Evolution",
@@ -90,5 +91,6 @@ def test_repository_restore_from_state():
     assert engine.contexts == ["ctx"]
     assert engine.specific_prompts == ["sp"]
     assert engine.breeding_prompts == [["bp"]]
+    assert engine.seed_context_pool_size == 3
     assert isinstance(engine.population[0]["idea"], Idea)
     assert engine.population[0]["idea"].title == "A"

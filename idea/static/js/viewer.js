@@ -42,6 +42,8 @@ let lastTournamentHistorySignature = '';
 let lastTokenCountsSignature = '';
 let lastOracleUpdateKey = '';
 let lastEliteUpdateKey = '';
+let lastDiagnosticsSummaryKey = '';
+let latestDiagnosticsTokenCounts = null;
 
 /**
  * Load available templates and populate the idea type dropdown
@@ -64,6 +66,61 @@ function safeSignature(value) {
     } catch (error) {
         return String(value ?? '');
     }
+}
+
+function prettifyDiagnosticKey(key) {
+    return String(key || '').replace(/_/g, ' ');
+}
+
+function getDiagnosticDescription(key) {
+    const descriptions = {
+        generation_errors: 'LLM generation request failed and was retried or bypassed.',
+        blocked_or_empty_responses: 'Model response was blocked/empty and fallback handling was used.',
+        provider_client_unavailable: 'Provider client was unavailable for at least one request.',
+        context_missing_concepts_marker: 'Expected CONCEPTS marker was missing; fallback parsing was used.',
+        context_empty_after_parse: 'Context response could not be parsed into concepts.',
+        formatter_schema_parse_failures: 'Structured formatter JSON parse failed and fallback parsing was used.',
+        formatter_json_clean_recovery_failures: 'JSON clean-up fallback also failed during formatting.',
+        formatter_fallback_used: 'Formatter fallback path was used instead of strict schema output.',
+        formatter_json_clean_recovery: 'Formatter recovered using JSON clean-up fallback.',
+        formatter_title_content_recovery: 'Formatter recovered via Title/Content extraction fallback.',
+        compare_ideas_errors: 'Pairwise comparison call failed for at least one matchup.',
+        oracle_parse_fallbacks: 'Oracle returned unstructured output and fallback parsing was used.',
+        oracle_parse_errors: 'Oracle parsing raised an error and fallback handling was used.',
+        seed_generation_failures: 'Seed generation attempt failed and was retried.',
+        seed_context_novelty_regenerations: 'Seed context was regenerated to improve novelty.',
+        seed_context_novelty_guardrail_exhausted: 'Novelty retries were exhausted for one or more seeds.',
+    };
+    return descriptions[key] || 'No description available for this diagnostic key.';
+}
+
+function formatDiagnosticTimestamp(value) {
+    if (!value) return '';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    return parsed.toLocaleString();
+}
+
+function getDiagnosticsSummary(tokenCounts) {
+    const totals = tokenCounts?.diagnostics?.totals;
+    if (!totals || typeof totals !== 'object') {
+        return null;
+    }
+
+    const entries = Object.entries(totals)
+        .filter(([, value]) => Number.isFinite(value) && value > 0)
+        .sort((a, b) => b[1] - a[1]);
+
+    const totalCount = entries.reduce((sum, [, value]) => sum + value, 0);
+    const topEntries = entries
+        .slice(0, 3)
+        .map(([key, value]) => `${prettifyDiagnosticKey(key)}: ${value}`);
+
+    return {
+        totalCount,
+        topEntries,
+        signature: safeSignature(entries),
+    };
 }
 
 function getStoredTemplateId() {
@@ -318,6 +375,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Get mutation rate
         const mutationRate = parseFloat(document.getElementById('mutationRate').value);
+        const seedContextPoolSizeInput = document.getElementById('seedContextPoolSize');
+        const seedContextPoolSize = seedContextPoolSizeInput ? parseInt(seedContextPoolSizeInput.value) : null;
         const replacementRate = parseFloat(document.getElementById('replacementRate').value);
         const fitnessAlpha = parseFloat(document.getElementById('fitnessAlpha').value);
         const ageDecayRate = parseFloat(document.getElementById('ageDecayRate').value);
@@ -342,6 +401,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             topP,
             tournamentCount,
             mutationRate,
+            seedContextPoolSize: Number.isInteger(seedContextPoolSize) ? seedContextPoolSize : null,
             replacementRate,
             fitnessAlpha,
             ageDecayRate,
@@ -2724,6 +2784,26 @@ async function pollProgress() {
                 // Display token counts if available
                 if (data.token_counts) {
                     displayTokenCounts(data.token_counts);
+                    const diagnosticsSummary = getDiagnosticsSummary(data.token_counts);
+                    if (diagnosticsSummary) {
+                        latestDiagnosticsTokenCounts = data.token_counts;
+                        const diagnosticsKey = `${currentEvolutionId || 'na'}:${diagnosticsSummary.signature}`;
+                        if (diagnosticsKey !== lastDiagnosticsSummaryKey) {
+                            if (diagnosticsSummary.totalCount > 0) {
+                                const detailText = diagnosticsSummary.topEntries.length > 0
+                                    ? ` (${diagnosticsSummary.topEntries.join(', ')})`
+                                    : '';
+                                addActivityLogItem(
+                                    `🧪 Diagnostics recorded ${diagnosticsSummary.totalCount} recoverable issue(s)${detailText}`,
+                                    'warning',
+                                    { action: 'show-diagnostics', actionLabel: 'View details' }
+                                );
+                            } else {
+                                addActivityLogItem('🧪 Diagnostics clean: no recoverable parsing/generation issues', 'success');
+                            }
+                            lastDiagnosticsSummaryKey = diagnosticsKey;
+                        }
+                    }
                 }
 
                 // Final diversity update
@@ -3739,13 +3819,31 @@ function enhanceStatusMessage(rawMessage, data) {
 }
 
 // Function to add an activity to the log
-function addActivityLogItem(message, type = 'info') {
+function handleActivityAction(action) {
+    if (action === 'show-diagnostics') {
+        if (latestDiagnosticsTokenCounts) {
+            showTokenDetailsModal(latestDiagnosticsTokenCounts, { focus: 'diagnostics' });
+            return;
+        }
+        addActivityLogItem('Diagnostics details are not available for this run yet.', 'warning');
+    }
+}
+
+function addActivityLogItem(message, type = 'info', options = {}) {
     lastActivityTime = Date.now();
 
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const itemId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Add to activity log array
-    activityLog.unshift({ message, type, timestamp });
+    activityLog.unshift({
+        id: itemId,
+        message,
+        type,
+        timestamp,
+        action: options.action || null,
+        actionLabel: options.actionLabel || 'View details',
+    });
 
     // Keep only the most recent items
     if (activityLog.length > MAX_ACTIVITY_LOG_ITEMS) {
@@ -3755,10 +3853,23 @@ function addActivityLogItem(message, type = 'info') {
     // Update the UI
     const logContainer = document.getElementById('activity-log-items');
     if (logContainer) {
+        if (!logContainer.dataset.boundActions) {
+            logContainer.addEventListener('click', (event) => {
+                const button = event.target.closest('.activity-action-btn');
+                if (!button) return;
+                const action = button.dataset.action;
+                if (action) {
+                    handleActivityAction(action);
+                }
+            });
+            logContainer.dataset.boundActions = 'true';
+        }
+
         logContainer.innerHTML = activityLog.map(item => `
             <div class="activity-item activity-${item.type}">
                 <span class="activity-time">${item.timestamp}</span>
                 <span class="activity-message">${item.message}</span>
+                ${item.action ? `<button type="button" class="btn btn-link btn-sm activity-action-btn ms-2 p-0 align-baseline" data-action="${escapeHtml(item.action)}">${escapeHtml(item.actionLabel)}</button>` : ''}
             </div>
         `).join('');
     }
@@ -4423,6 +4534,7 @@ function createAncestorCard(ancestor, index, ancestorType) {
 // Function to display token counts
 function displayTokenCounts(tokenCounts) {
     console.log("Displaying token counts:", tokenCounts);
+    latestDiagnosticsTokenCounts = tokenCounts;
     const nextSignature = safeSignature({
         total: tokenCounts.total,
         total_input: tokenCounts.total_input,
@@ -4461,6 +4573,7 @@ function displayTokenCounts(tokenCounts) {
                     <div>
                         <h6 class="mb-0">Cost: <strong id="token-cost-value">$0.0000</strong></h6>
                         <small class="text-muted" id="token-total-value">0 tokens</small>
+                        <small class="text-muted d-block" id="token-diagnostics-value" style="display:none;"></small>
                     </div>
                     <div id="token-estimated-total-wrap" class="ms-3 border-start ps-3" style="display:none;">
                         <h6 class="mb-0">Est. Total: <strong id="token-estimated-value">$0.0000</strong></h6>
@@ -4500,6 +4613,18 @@ function displayTokenCounts(tokenCounts) {
         totalEl.textContent = `${tokenCounts.total.toLocaleString()} tokens`;
     }
 
+    const diagnosticsEl = tokenCountsContainer.querySelector('#token-diagnostics-value');
+    if (diagnosticsEl) {
+        const diagnosticsSummary = getDiagnosticsSummary(tokenCounts);
+        if (diagnosticsSummary && diagnosticsSummary.totalCount > 0) {
+            diagnosticsEl.style.display = '';
+            diagnosticsEl.textContent = `Diagnostics: ${diagnosticsSummary.totalCount} events`;
+        } else {
+            diagnosticsEl.style.display = 'none';
+            diagnosticsEl.textContent = '';
+        }
+    }
+
     const estWrapEl = tokenCountsContainer.querySelector('#token-estimated-total-wrap');
     const estValueEl = tokenCountsContainer.querySelector('#token-estimated-value');
     if (estWrapEl && estValueEl) {
@@ -4513,7 +4638,8 @@ function displayTokenCounts(tokenCounts) {
 }
 
 // Function to show the token details modal
-function showTokenDetailsModal(tokenCounts) {
+function showTokenDetailsModal(tokenCounts, options = {}) {
+    const focusDiagnostics = options.focus === 'diagnostics';
     // Format the token counts
     const totalTokens = tokenCounts.total.toLocaleString();
     const totalInputTokens = tokenCounts.total_input.toLocaleString();
@@ -4531,6 +4657,33 @@ function showTokenDetailsModal(tokenCounts) {
         estimatesList = Object.values(tokenCounts.estimates).map(e => {
             return `<li class="list-group-item d-flex justify-content-between align-items-center">${e.name}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
         }).join('');
+    }
+
+    const diagnosticsTotals = tokenCounts?.diagnostics?.totals || {};
+    const diagnosticsEntries = Object.entries(diagnosticsTotals)
+        .filter(([, value]) => Number.isFinite(value) && value > 0)
+        .sort((a, b) => b[1] - a[1]);
+    const diagnosticsCount = diagnosticsEntries.reduce((sum, [, value]) => sum + value, 0);
+    let diagnosticsSectionHtml = `
+        <hr>
+        <h6 id="diagnostics-section">Diagnostics</h6>
+        <p class="small text-muted mb-0">No recoverable parsing/generation issues were recorded.</p>
+    `;
+    if (diagnosticsEntries.length > 0) {
+        const diagnosticsItems = diagnosticsEntries.map(([key, value]) => (
+            `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center small diagnostic-item-btn" data-diagnostic-key="${escapeHtml(key)}" data-diagnostic-total="${value}">${escapeHtml(prettifyDiagnosticKey(key))}<span class="badge bg-warning text-dark rounded-pill">${value}</span></button>`
+        )).join('');
+        diagnosticsSectionHtml = `
+            <hr>
+            <h6 id="diagnostics-section">Diagnostics</h6>
+            <p class="small text-muted mb-2">${diagnosticsCount} recoverable issue(s) captured across agents.</p>
+            <ul class="list-group mb-3">
+                ${diagnosticsItems}
+            </ul>
+            <div id="diagnostics-detail-panel" class="small text-muted border rounded p-2 bg-light">
+                Click a diagnostic item to view details.
+            </div>
+        `;
     }
 
     // Dynamically build component data for all available components
@@ -4638,6 +4791,7 @@ function showTokenDetailsModal(tokenCounts) {
                                     <ul class="list-group mb-3 small">
                                         ${estimatesList}
                                     </ul>
+                                    ${diagnosticsSectionHtml}
                                 </div>
                             </div>
 
@@ -4672,6 +4826,89 @@ function showTokenDetailsModal(tokenCounts) {
 
     // Create charts after the modal is shown
     modalContainer.addEventListener('shown.bs.modal', function () {
+        const diagnosticsPanel = modalContainer.querySelector('#diagnostics-detail-panel');
+        const diagnosticsButtons = Array.from(
+            modalContainer.querySelectorAll('.diagnostic-item-btn')
+        );
+        if (diagnosticsPanel && diagnosticsButtons.length > 0) {
+            diagnosticsButtons.forEach((button) => {
+                button.addEventListener('click', () => {
+                    if (button.classList.contains('active')) {
+                        button.classList.remove('active');
+                        diagnosticsPanel.innerHTML = 'Click a diagnostic item to view details.';
+                        return;
+                    }
+
+                    diagnosticsButtons.forEach((candidate) => candidate.classList.remove('active'));
+                    button.classList.add('active');
+
+                    const key = button.dataset.diagnosticKey || '';
+                    const total = Number(button.dataset.diagnosticTotal || 0);
+                    const description = getDiagnosticDescription(key);
+                    const perAgent = Object.entries(tokenCounts?.diagnostics?.agents || {})
+                        .map(([agent, stats]) => {
+                            const count = Number((stats && stats[key]) || 0);
+                            return { agent, count };
+                        })
+                        .filter(({ count }) => count > 0)
+                        .sort((a, b) => b.count - a.count);
+
+                    const rawEvents = Object.entries(tokenCounts?.diagnostics?.events || {})
+                        .flatMap(([agentName, events]) => {
+                            if (!Array.isArray(events)) return [];
+                            return events.map((event) => ({
+                                ...event,
+                                agent: event?.agent || agentName,
+                            }));
+                        })
+                        .filter((event) => event && event.key === key)
+                        .sort((a, b) => {
+                            const at = new Date(a.timestamp || 0).getTime();
+                            const bt = new Date(b.timestamp || 0).getTime();
+                            return bt - at;
+                        });
+
+                    let agentBreakdown = '<li class="text-muted">No per-agent breakdown available.</li>';
+                    if (perAgent.length > 0) {
+                        agentBreakdown = perAgent
+                            .map(({ agent, count }) => `<li>${escapeHtml(agent)}: <strong>${count}</strong></li>`)
+                            .join('');
+                    }
+
+                    let rawErrorHtml = '<li class="text-muted">No raw diagnostic events captured for this key.</li>';
+                    if (rawEvents.length > 0) {
+                        rawErrorHtml = rawEvents
+                            .slice(0, 15)
+                            .map((event) => {
+                                const metadata = event.metadata && typeof event.metadata === 'object'
+                                    ? ` | meta: ${escapeHtml(JSON.stringify(event.metadata))}`
+                                    : '';
+                                const detail = event.detail ? escapeHtml(event.detail) : '(no detail)';
+                                const timestamp = formatDiagnosticTimestamp(event.timestamp);
+                                return `<li><span class="text-muted">${escapeHtml(timestamp)} | ${escapeHtml(event.agent || 'unknown')}</span><br><code class="small">${detail}${metadata}</code></li>`;
+                            })
+                            .join('');
+                    }
+
+                    diagnosticsPanel.innerHTML = `
+                        <div class="fw-semibold mb-1">${escapeHtml(prettifyDiagnosticKey(key))} (${total})</div>
+                        <div class="mb-2">${escapeHtml(description)}</div>
+                        <div class="fw-semibold">By agent</div>
+                        <ul class="mb-2 ps-3">${agentBreakdown}</ul>
+                        <div class="fw-semibold">Recent raw events</div>
+                        <ul class="mb-0 ps-3">${rawErrorHtml}</ul>
+                    `;
+                });
+            });
+        }
+
+        if (focusDiagnostics) {
+            const diagnosticsEl = modalContainer.querySelector('#diagnostics-section');
+            if (diagnosticsEl) {
+                diagnosticsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+
         // Create a pie chart for token distribution by component
         const pieCtx = document.getElementById('tokenPieChart').getContext('2d');
         new Chart(pieCtx, {

@@ -1,8 +1,9 @@
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from idea.viewer import idea_to_dict
+from idea.viewer import idea_to_dict, _normalize_rating_fields
 from idea.models import Idea
 
 
@@ -98,3 +99,34 @@ def test_idea_to_dict_without_oracle_metadata():
     assert result["parent_ids"] == []
     assert "oracle_generated" not in result
     assert "oracle_analysis" not in result
+
+
+def test_normalize_rating_fields_uses_nested_idea_payload():
+    idea = {
+        "id": "nested-idea-1",
+        "idea": {
+            "title": "Nested Title",
+            "content": "Nested content body",
+        },
+    }
+
+    _normalize_rating_fields(idea, "fallback-id")
+
+    assert idea["title"] == "Nested Title"
+    assert idea["content"] == "Nested content body"
+    assert idea["ratings"] == {"auto": 1500, "manual": 1500}
+
+
+def test_normalize_rating_fields_parses_json_encoded_content():
+    idea = {
+        "content": json.dumps({
+            "title": "Decoded Title",
+            "content": "Decoded content body",
+        }),
+    }
+
+    _normalize_rating_fields(idea, "fallback-json")
+
+    assert idea["id"] == "fallback-json"
+    assert idea["title"] == "Decoded Title"
+    assert idea["content"] == "Decoded content body"

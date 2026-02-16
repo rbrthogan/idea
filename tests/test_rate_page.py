@@ -130,8 +130,7 @@ class TestRatePageAPI:
             "evolution_id": "nonexistent"
         }
         response = self.client.post("/api/submit-rating", json=rating_data)
-        # The API currently returns 500 for missing files, not 404
-        assert response.status_code == 500
+        assert response.status_code == 404
 
 
 class TestEvolutionDataFlow:

@@ -226,6 +226,17 @@
                 <small class="text-muted">Controls the diversity of the LLM's responses.</small>
               </div>
 
+              <!-- Seed Context Pool Size -->
+              <div class="mb-3">
+                <label for="seedContextPoolSize" class="form-label d-flex justify-content-between">
+                  <span>Seed Context Pool Size</span>
+                  <span id="seedContextPoolSizeValue">2</span>
+                </label>
+                <input type="range" class="form-range" min="1" max="8" step="1" id="seedContextPoolSize" value="2"
+                  oninput="document.getElementById('seedContextPoolSizeValue').textContent = this.value">
+                <small class="text-muted">Number of context-generation calls used to build the initial seed concept bank. Each +1 typically adds ~50-60 more candidate concepts before random subsampling.</small>
+              </div>
+
               <!-- Thinking Budget (only for Gemini 2.5 models) -->
               <div class="mb-3" id="thinkingBudgetContainer" style="display: none;">
                 <label class="form-label">Thinking Budget</label>

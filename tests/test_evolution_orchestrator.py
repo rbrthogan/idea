@@ -1,7 +1,10 @@
 import asyncio
+import random
 import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import numpy as np
 
 from idea.evolution import EvolutionEngine
 from idea.evolution_orchestrator import EvolutionOrchestrator
@@ -94,6 +97,23 @@ class _FakeEngine:
 
     def _set_tournament_history(self, generation, rounds):
         self.tournament_history.append({"generation": generation, "rounds": rounds})
+
+    def random_shuffle(self, values):
+        random.shuffle(values)
+
+    def random_choice(self, a, *, size=None, replace=True, p=None):
+        if size is None:
+            if isinstance(a, int):
+                return random.randrange(a)
+            return random.choice(list(a))
+
+        options = list(a)
+        if not options or size <= 0:
+            return np.array([])
+        if replace:
+            return np.array([random.choice(options) for _ in range(size)])
+        size = min(size, len(options))
+        return np.array(random.sample(options, size))
 
     def _allocate_parent_slots(self, _ranks, _ideas_to_breed):
         return {}
@@ -276,3 +296,32 @@ def test_stop_during_breeding_emits_stopped_update():
 
     assert any(update.get("is_stopped") for update in updates)
     assert any("breeding" in update.get("stop_message", "") for update in updates)
+
+
+def test_seed_novelty_guardrail_regenerates_similar_context():
+    engine = _FakeEngine()
+    engine.context_novelty_threshold = 0.5
+    engine.context_novelty_max_attempts = 2
+    orchestrator = EvolutionOrchestrator(engine, lambda _data: asyncio.sleep(0))
+
+    async def generate_novel_seed():
+        return (
+            "x, y, z",
+            {"id": uuid.uuid4(), "idea": "novel", "parent_ids": [], "birth_generation": 0},
+            "prompt",
+        )
+
+    orchestrator._generate_single_seed = generate_novel_seed
+
+    seed_result = (
+        "a, b, c",
+        {"id": uuid.uuid4(), "idea": "dup", "parent_ids": [], "birth_generation": 0},
+        "prompt",
+    )
+    existing = [{"a", "b", "c"}]
+
+    context_pool, _idea, _prompt = asyncio.run(
+        orchestrator._ensure_seed_novelty(seed_result, existing)
+    )
+
+    assert context_pool == "x, y, z"

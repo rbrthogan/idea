@@ -61,6 +61,7 @@ class YAMLTemplateWrapper:
         # Basic metadata
         self.ITEM_TYPE = self.template.metadata.item_type
         self.COMPARISON_CRITERIA = self.template.comparison_criteria or []
+        self.REQUIREMENTS_DIGEST = self._build_requirements_digest()
 
         # Core prompts
         self.CONTEXT_PROMPT = self.template.prompts.context
@@ -68,11 +69,11 @@ class YAMLTemplateWrapper:
         self.SPECIFIC_PROMPT = self._interpolate_prompt(self.template.prompts.specific_prompt)
 
         self.FORMAT_PROMPT = self.template.prompts.format
-        self.CRITIQUE_PROMPT = self.template.prompts.critique
+        self.CRITIQUE_PROMPT = self._interpolate_prompt(self.template.prompts.critique)
         self.REFINE_PROMPT = self._interpolate_prompt(self.template.prompts.refine)
         self.BREED_PROMPT = self._interpolate_prompt(self.template.prompts.breed)
 
-        self.GENOTYPE_ENCODE_PROMPT = self.template.prompts.genotype_encode
+        self.GENOTYPE_ENCODE_PROMPT = self._interpolate_prompt(self.template.prompts.genotype_encode)
 
         # Generate comparison prompt dynamically from criteria
         self.COMPARISON_PROMPT = generate_comparison_prompt(
@@ -82,6 +83,32 @@ class YAMLTemplateWrapper:
 
         # Oracle prompts will be set by the loader
 
+    def _build_requirements_digest(self, max_lines: int = 6) -> str:
+        """Build a short bullet digest of special requirements for lightweight injection."""
+        requirements = self.template.special_requirements or ""
+        if not requirements.strip():
+            return ""
+
+        candidates = []
+        for line in requirements.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            lowered = stripped.lower()
+            if lowered.startswith("format your response as"):
+                continue
+            if lowered.startswith("title:") or lowered.startswith("content:"):
+                continue
+            cleaned = stripped.lstrip("- ").strip()
+            if cleaned:
+                candidates.append(cleaned)
+
+        if not candidates:
+            return ""
+
+        unique = list(dict.fromkeys(candidates))[:max_lines]
+        return "\n".join(f"- {item}" for item in unique)
+
     def _interpolate_prompt(self, prompt_text: str) -> str:
         """
         Interpolate template-specific requirements into prompt text
@@ -90,6 +117,8 @@ class YAMLTemplateWrapper:
 
         if self.template.special_requirements and '{requirements}' in result:
             result = result.replace('{requirements}', self.template.special_requirements)
+        if self.REQUIREMENTS_DIGEST and '{requirements_digest}' in result:
+            result = result.replace('{requirements_digest}', self.REQUIREMENTS_DIGEST)
 
         return result
 

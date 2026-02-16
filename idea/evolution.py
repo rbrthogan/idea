@@ -1,5 +1,7 @@
 from typing import List, Dict, Any, Callable, Awaitable, Optional
 import random
+import secrets
+import threading
 import numpy as np
 import asyncio
 import uuid
@@ -43,16 +45,20 @@ class EvolutionEngine:
         model_type: str = "gemini-2.0-flash",
         creative_temp: float = DEFAULT_CREATIVE_TEMP,
         top_p: float = DEFAULT_TOP_P,
+        random_seed: Optional[int] = None,
         tournament_rounds: int = 1,
         tournament_count: Optional[float] = None,
         full_tournament_rounds: Optional[int] = None,
         thinking_budget: Optional[int] = None,
         max_budget: Optional[float] = None,
         mutation_rate: float = 0.2,
+        seed_context_pool_size: Optional[int] = None,
         replacement_rate: float = 0.5,
         fitness_alpha: float = 0.7,
         age_decay_rate: float = 0.25,
         age_decay_floor: float = 0.35,
+        context_novelty_threshold: float = 0.8,
+        context_novelty_max_attempts: int = 2,
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,  # Required for Firestore storage
         template_data: Optional[Dict[str, Any]] = None,  # Custom template data from Firestore
@@ -76,11 +82,26 @@ class EvolutionEngine:
         self.thinking_budget = thinking_budget
         self.max_budget = max_budget
         self.mutation_rate = mutation_rate
+        try:
+            self.seed_context_pool_size = (
+                max(1, int(seed_context_pool_size))
+                if seed_context_pool_size is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            self.seed_context_pool_size = None
         self.replacement_rate = max(0.0, min(1.0, float(replacement_rate)))
         self.fitness_alpha = max(0.0, min(1.0, float(fitness_alpha)))
         self.age_decay_rate = max(0.0, float(age_decay_rate))
         self.age_decay_floor = max(0.0, min(1.0, float(age_decay_floor)))
+        self.context_novelty_threshold = max(0.0, min(1.0, float(context_novelty_threshold)))
+        self.context_novelty_max_attempts = max(0, int(context_novelty_max_attempts))
         self.api_key = api_key
+        self.random_seed = int(random_seed) if random_seed is not None else int(secrets.randbits(64))
+        self._py_rng = random.Random(self.random_seed)
+        self._np_rng = np.random.default_rng(self.random_seed)
+        self._py_rng_lock = threading.Lock()
+        self._np_rng_lock = threading.Lock()
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
@@ -88,17 +109,57 @@ class EvolutionEngine:
         # Initialize LLM components with appropriate temperatures
         print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}, thinking_budget={thinking_budget}")
 
-        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
+        self.ideator = Ideator(
+            provider="google_generative_ai",
+            model_name=model_type,
+            temperature=creative_temp,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+            seed_context_pool_size=self.seed_context_pool_size,
+        )
 
         # Always use 2.5 Flash for formatting as it has better instruction following for structured output
         # than 2.0 Flash or older models
-        self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-2.5-flash", api_key=api_key)
+        self.formatter = Formatter(
+            provider="google_generative_ai",
+            model_name="gemini-2.5-flash",
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+        )
 
         critic_model_name = "gemini-2.5-flash" if model_type == "gemini-2.5-pro" else model_type
-        self.critic = Critic(provider="google_generative_ai", model_name=critic_model_name, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
-        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, mutation_rate=mutation_rate, api_key=api_key)
+        self.critic = Critic(
+            provider="google_generative_ai",
+            model_name=critic_model_name,
+            temperature=creative_temp,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+        )
+        self.breeder = Breeder(
+            provider="google_generative_ai",
+            model_name=model_type,
+            temperature=creative_temp,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            mutation_rate=mutation_rate,
+            seed_context_pool_size=self.seed_context_pool_size,
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+        )
 
-        self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
+        self.oracle = Oracle(
+            provider="google_generative_ai",
+            model_name=model_type,
+            temperature=creative_temp,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+        )
 
         # Keep custom template data scoped to this engine instance (no global cross-user cache coupling).
         if self.template_data:
@@ -164,6 +225,29 @@ class EvolutionEngine:
         self.checkpoint_callback = None  # Callback for saving checkpoints
         self._sync_typed_state_from_attrs()
 
+    def _random_randbits(self, bits: int) -> int:
+        with self._py_rng_lock:
+            return self._py_rng.getrandbits(bits)
+
+    def random_uniform(self, a: float, b: float) -> float:
+        with self._py_rng_lock:
+            return self._py_rng.uniform(a, b)
+
+    def random_shuffle(self, values: List[Any]) -> None:
+        with self._py_rng_lock:
+            self._py_rng.shuffle(values)
+
+    def random_choice(
+        self,
+        a: Any,
+        *,
+        size: Optional[int] = None,
+        replace: bool = True,
+        p: Optional[Any] = None,
+    ) -> Any:
+        with self._np_rng_lock:
+            return self._np_rng.choice(a, size=size, replace=replace, p=p)
+
     async def _run_batch_with_progress(
         self,
         tasks: List[Callable[[], Awaitable[Any]]],
@@ -201,7 +285,7 @@ class EvolutionEngine:
                     # finish at the exact same millisecond, causing the UI to jump from 0% to 100% instantly.
                     # This makes the progress bar feel smoother.
                     if len(tasks) > 1 and PROGRESS_JITTER_MAX_SECONDS > 0:
-                        await asyncio.sleep(random.uniform(0, PROGRESS_JITTER_MAX_SECONDS))
+                        await asyncio.sleep(self.random_uniform(0, PROGRESS_JITTER_MAX_SECONDS))
 
                     result = await task_func()
                     return index, result
@@ -287,6 +371,7 @@ class EvolutionEngine:
             thinking_budget=self.thinking_budget,
             max_budget=self.max_budget,
             mutation_rate=self.mutation_rate,
+            seed_context_pool_size=self.seed_context_pool_size,
             replacement_rate=self.replacement_rate,
             fitness_alpha=self.fitness_alpha,
             age_decay_rate=self.age_decay_rate,
@@ -812,6 +897,30 @@ class EvolutionEngine:
             }
         }
 
+        diagnostics_by_agent = {
+            "ideator": getattr(self.ideator, "get_diagnostics", lambda: {})(),
+            "formatter": getattr(self.formatter, "get_diagnostics", lambda: {})(),
+            "critic": getattr(self.critic, "get_diagnostics", lambda: {})(),
+            "breeder": getattr(self.breeder, "get_diagnostics", lambda: {})(),
+            "oracle": getattr(self.oracle, "get_diagnostics", lambda: {})(),
+        }
+        diagnostic_events_by_agent = {
+            "ideator": getattr(self.ideator, "get_diagnostic_events", lambda: [])(),
+            "formatter": getattr(self.formatter, "get_diagnostic_events", lambda: [])(),
+            "critic": getattr(self.critic, "get_diagnostic_events", lambda: [])(),
+            "breeder": getattr(self.breeder, "get_diagnostic_events", lambda: [])(),
+            "oracle": getattr(self.oracle, "get_diagnostic_events", lambda: [])(),
+        }
+        diagnostic_totals: Dict[str, int] = {}
+        for stats in diagnostics_by_agent.values():
+            for key, value in stats.items():
+                diagnostic_totals[key] = diagnostic_totals.get(key, 0) + int(value)
+        token_data["diagnostics"] = {
+            "agents": diagnostics_by_agent,
+            "totals": diagnostic_totals,
+            "events": diagnostic_events_by_agent,
+        }
+
         # Calculate estimated total cost for each available model using the
         # overall token counts. This gives users a rough idea of what the
         # evolution would have cost if a different model had been selected.
@@ -1113,7 +1222,7 @@ class EvolutionEngine:
         draw_count = min(survivor_count, len(available))
         for _ in range(draw_count):
             probabilities = weights / float(weights.sum())
-            chosen_pos = int(np.random.choice(len(available), p=probabilities))
+            chosen_pos = int(self.random_choice(len(available), p=probabilities))
             selected.append(available.pop(chosen_pos))
             weights = np.delete(weights, chosen_pos)
             if weights.size > 0 and float(weights.sum()) <= 0:
@@ -1229,7 +1338,11 @@ class EvolutionEngine:
         if len(parent_pool) < self.breeder.parent_count:
             # Fallback: if not enough parents in pool, use available indices
             print(f"Warning: Only {len(parent_pool)} parents in pool, need {self.breeder.parent_count}")
-            return np.random.choice(available_indices, size=min(self.breeder.parent_count, len(available_indices)), replace=False).tolist()
+            return self.random_choice(
+                available_indices,
+                size=min(self.breeder.parent_count, len(available_indices)),
+                replace=False,
+            ).tolist()
 
         # Simple random selection without replacement
         selected_parents = []
@@ -1240,7 +1353,7 @@ class EvolutionEngine:
                 break
 
             # Select random parent from pool
-            selected_idx = np.random.choice(len(pool_copy))
+            selected_idx = self.random_choice(len(pool_copy))
             parent_idx = pool_copy.pop(selected_idx)
 
             # Avoid selecting the same parent twice for this breeding
@@ -1250,7 +1363,7 @@ class EvolutionEngine:
                 # If we selected a duplicate, try to find a different one
                 available_alternatives = [p for p in set(pool_copy) if p not in selected_parents]
                 if available_alternatives:
-                    alternative = np.random.choice(available_alternatives)
+                    alternative = self.random_choice(available_alternatives)
                     selected_parents.append(alternative)
                     # Remove the alternative from pool
                     pool_copy = [p for p in pool_copy if p != alternative]

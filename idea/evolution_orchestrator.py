@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
-
-import numpy as np
 
 from idea.evolution_progress import ProgressEmitter
 from idea.evolution_types import GenerationWorkState
@@ -22,6 +19,89 @@ class EvolutionOrchestrator:
         self.engine = engine
         self.progress_callback = progress_callback
         self.progress = ProgressEmitter(engine)
+
+    @staticmethod
+    def _extract_context_terms(context_pool: str) -> set[str]:
+        if not context_pool:
+            return set()
+        return {
+            token.strip().lower()
+            for token in str(context_pool).split(",")
+            if token and token.strip()
+        }
+
+    @staticmethod
+    def _jaccard_similarity(a: set[str], b: set[str]) -> float:
+        if not a or not b:
+            return 0.0
+        union = a | b
+        if not union:
+            return 0.0
+        return len(a & b) / len(union)
+
+    async def _generate_single_seed(self) -> tuple[str, Dict[str, Any], str]:
+        context_pool = await asyncio.to_thread(
+            self.engine.ideator.generate_context, self.engine.idea_type
+        )
+        idea_text, specific_prompt = await asyncio.to_thread(
+            self.engine.ideator.generate_idea_from_context,
+            context_pool,
+            self.engine.idea_type,
+        )
+        return (
+            context_pool,
+            {
+                "id": uuid.uuid4(),
+                "idea": idea_text,
+                "parent_ids": [],
+                "birth_generation": 0,
+            },
+            specific_prompt,
+        )
+
+    async def _ensure_seed_novelty(
+        self,
+        seed_result: tuple[str, Dict[str, Any], str],
+        existing_context_sets: List[set[str]],
+    ) -> tuple[str, Dict[str, Any], str]:
+        threshold = float(getattr(self.engine, "context_novelty_threshold", 0.8))
+        max_attempts = int(getattr(self.engine, "context_novelty_max_attempts", 2))
+        max_attempts = max(0, max_attempts)
+
+        context_pool, idea, prompt = seed_result
+        candidate_terms = self._extract_context_terms(context_pool)
+
+        if not existing_context_sets or not candidate_terms:
+            existing_context_sets.append(candidate_terms)
+            return context_pool, idea, prompt
+
+        max_similarity = max(
+            self._jaccard_similarity(candidate_terms, existing_terms)
+            for existing_terms in existing_context_sets
+        )
+
+        attempts = 0
+        while max_similarity >= threshold and attempts < max_attempts:
+            attempts += 1
+            increment_diagnostic = getattr(self.engine.ideator, "_increment_diagnostic", None)
+            if callable(increment_diagnostic):
+                increment_diagnostic("seed_context_novelty_regenerations")
+            context_pool, idea, prompt = await self._generate_single_seed()
+            candidate_terms = self._extract_context_terms(context_pool)
+            if not candidate_terms:
+                break
+            max_similarity = max(
+                self._jaccard_similarity(candidate_terms, existing_terms)
+                for existing_terms in existing_context_sets
+            )
+
+        if max_similarity >= threshold:
+            increment_diagnostic = getattr(self.engine.ideator, "_increment_diagnostic", None)
+            if callable(increment_diagnostic):
+                increment_diagnostic("seed_context_novelty_guardrail_exhausted")
+
+        existing_context_sets.append(candidate_terms)
+        return context_pool, idea, prompt
 
     async def run(
         self,
@@ -215,27 +295,7 @@ class EvolutionOrchestrator:
         )
 
     async def _seed_initial_population(self, *, total_steps: int) -> None:
-        async def generate_single_seed():
-            context_pool = await asyncio.to_thread(
-                self.engine.ideator.generate_context, self.engine.idea_type
-            )
-            idea_text, specific_prompt = await asyncio.to_thread(
-                self.engine.ideator.generate_idea_from_context,
-                context_pool,
-                self.engine.idea_type,
-            )
-            return (
-                context_pool,
-                {
-                    "id": uuid.uuid4(),
-                    "idea": idea_text,
-                    "parent_ids": [],
-                    "birth_generation": 0,
-                },
-                specific_prompt,
-            )
-
-        seed_tasks = [generate_single_seed for _ in range(self.engine.pop_size)]
+        seed_tasks = [self._generate_single_seed for _ in range(self.engine.pop_size)]
 
         base_info = {
             "current_generation": 0,
@@ -276,7 +336,24 @@ class EvolutionOrchestrator:
             await self.progress.emit(self.progress_callback, payload)
             return
 
-        for context_pool, idea, prompt in seed_results:
+        existing_context_sets: List[set[str]] = []
+        for seed_result in seed_results:
+            if seed_result is None:
+                increment_diagnostic = getattr(self.engine.ideator, "_increment_diagnostic", None)
+                if callable(increment_diagnostic):
+                    increment_diagnostic("seed_generation_failures")
+                try:
+                    seed_result = await self._generate_single_seed()
+                except Exception as exc:
+                    if callable(increment_diagnostic):
+                        increment_diagnostic("seed_generation_failures", detail=str(exc))
+                    continue
+
+            context_pool, idea, prompt = seed_result
+            context_pool, idea, prompt = await self._ensure_seed_novelty(
+                (context_pool, idea, prompt),
+                existing_context_sets,
+            )
             self.engine.contexts.append(context_pool)
             self.engine.population.append(idea)
             self.engine.specific_prompts.append(prompt)
@@ -331,26 +408,9 @@ class EvolutionOrchestrator:
         print(
             f"🌱 Completing initial seeding: {existing_count} existing, need {needed_count} more"
         )
-
-        async def generate_single_seed():
-            context_pool = await asyncio.to_thread(
-                self.engine.ideator.generate_context, self.engine.idea_type
-            )
-            idea_text, specific_prompt = await asyncio.to_thread(
-                self.engine.ideator.generate_idea_from_context,
-                context_pool,
-                self.engine.idea_type,
-            )
-            return (
-                context_pool,
-                {
-                    "id": uuid.uuid4(),
-                    "idea": idea_text,
-                    "parent_ids": [],
-                    "birth_generation": 0,
-                },
-                specific_prompt,
-            )
+        existing_context_sets: List[set[str]] = [
+            self._extract_context_terms(ctx) for ctx in self.engine.contexts
+        ]
 
         for i in range(needed_count):
             if self.engine.stop_requested:
@@ -370,7 +430,23 @@ class EvolutionOrchestrator:
                 },
             )
 
-            context_pool, idea, prompt = await generate_single_seed()
+            seed_result = None
+            for _ in range(3):
+                try:
+                    seed_result = await self._generate_single_seed()
+                    break
+                except Exception as exc:
+                    increment_diagnostic = getattr(self.engine.ideator, "_increment_diagnostic", None)
+                    if callable(increment_diagnostic):
+                        increment_diagnostic("seed_generation_failures", detail=str(exc))
+            if seed_result is None:
+                continue
+
+            context_pool, idea, prompt = seed_result
+            context_pool, idea, prompt = await self._ensure_seed_novelty(
+                (context_pool, idea, prompt),
+                existing_context_sets,
+            )
             self.engine.contexts.append(context_pool)
             self.engine.population.append(idea)
             self.engine.specific_prompts.append(prompt)
@@ -470,7 +546,7 @@ class EvolutionOrchestrator:
                 return
 
             print(f"Starting generation {gen + 1}...")
-            random.shuffle(self.engine.population)
+            self.engine.random_shuffle(self.engine.population)
 
             current_pop_size = len(self.engine.population)
             ideas_to_breed = self.engine._compute_replacement_count(current_pop_size)
@@ -590,7 +666,7 @@ class EvolutionOrchestrator:
                 remaining = [
                     idx for idx in range(current_pop_size) if idx not in set(survivor_indices)
                 ]
-                random.shuffle(remaining)
+                self.engine.random_shuffle(remaining)
                 survivor_indices.extend(remaining[: (survivor_count - len(survivor_indices))])
 
             def clone_survivor(idea: Any) -> Any:
@@ -632,7 +708,7 @@ class EvolutionOrchestrator:
 
                 if len(parent_indices) < self.engine.breeder.parent_count:
                     replace = len(available_parent_indices) < self.engine.breeder.parent_count
-                    parent_indices = np.random.choice(
+                    parent_indices = self.engine.random_choice(
                         available_parent_indices,
                         size=min(self.engine.breeder.parent_count, len(available_parent_indices)),
                         replace=replace,
