@@ -132,6 +132,50 @@ class TestRatePageAPI:
         response = self.client.post("/api/submit-rating", json=rating_data)
         assert response.status_code == 404
 
+    def test_auto_rate_progress_defaults_when_unauthenticated(self):
+        response = self.client.get("/api/auto-rate/progress")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["is_running"] is False
+        assert data["status"] == "idle"
+
+    def test_auto_rate_progress_returns_user_state(self):
+        from idea.viewer import get_current_user
+        from idea.auth import UserInfo
+        from idea.user_state import UserEvolutionState, user_states as real_user_states
+
+        mock_user = UserInfo(uid="autorate_user", email="autorate@example.com", is_admin=False)
+        mock_state = UserEvolutionState()
+        mock_state.autorating_status = {
+            "is_running": True,
+            "status": "in_progress",
+            "status_message": "Running Swiss round 1/3...",
+            "progress": 42,
+            "completed_matches": 7,
+            "total_matches": 16,
+            "version": 3,
+        }
+
+        async def mock_get_current_user():
+            return mock_user
+
+        async def mock_get_state(_user_id):
+            return mock_state
+
+        app.dependency_overrides[get_current_user] = mock_get_current_user
+        try:
+            with patch.object(real_user_states, "get", mock_get_state):
+                response = self.client.get("/api/auto-rate/progress")
+                assert response.status_code == 200
+                data = response.json()
+                assert data["is_running"] is True
+                assert data["status"] == "in_progress"
+                assert data["completed_matches"] == 7
+                assert data["total_matches"] == 16
+                assert data["version"] == 3
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+
 
 class TestEvolutionDataFlow:
     """Test the evolution data loading and processing flow"""

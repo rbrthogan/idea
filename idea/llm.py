@@ -57,6 +57,13 @@ TRANSIENT_MARKERS = (
     "gateway timeout",
 )
 
+THINKING_LEVEL_TO_BUDGET_FALLBACK = {
+    "off": 0,
+    "low": 1024,
+    "medium": 8192,
+    "high": -1,  # Dynamic/high-think fallback
+}
+
 
 def _extract_http_status(exc: BaseException) -> Optional[int]:
     """Best-effort extraction of HTTP status from provider exceptions."""
@@ -141,6 +148,7 @@ class LLMWrapper(ABC):
                  top_p: float = 0.95,
                  agent_name: str = "",
                  thinking_budget: Optional[int] = None,
+                 thinking_level: Optional[str] = None,
                  api_key: Optional[str] = None,
                  random_seed: Optional[int] = None):
         self.provider = provider
@@ -149,12 +157,18 @@ class LLMWrapper(ABC):
         self.temperature = temperature
         self.top_p = top_p
         self.thinking_budget = thinking_budget
+        self.thinking_level = (
+            str(thinking_level).strip().lower() if thinking_level is not None else None
+        )
         self.api_key = api_key
         self.total_token_count = 0
         self.input_token_count = 0
         self.output_token_count = 0
         self.agent_name = agent_name
-        print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, thinking_budget: {thinking_budget}")
+        print(
+            f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, "
+            f"thinking_budget: {thinking_budget}, thinking_level: {self.thinking_level}"
+        )
         self._custom_templates: Dict[str, Dict[str, Any]] = {}
         self._custom_prompt_wrappers: Dict[str, Any] = {}
         self._custom_template_lock = threading.Lock()
@@ -322,17 +336,53 @@ class LLMWrapper(ABC):
                 "max_output_tokens": self.MAX_TOKENS,
             }
 
-            # Add thinking config if applicable
-            if self.thinking_budget is not None:
-                if self.thinking_budget == -1:
-                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=-1) # Dynamic
-                    # print(f"{self.agent_name} using dynamic thinking budget")
-                elif self.thinking_budget == 0:
-                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=0) # Disabled
-                    # print(f"{self.agent_name} thinking disabled")
+            # Add thinking config when requested.
+            thinking_fields = getattr(types.ThinkingConfig, "model_fields", {}) or {}
+            supports_thinking_level = "thinking_level" in thinking_fields
+            supports_thinking_budget = "thinking_budget" in thinking_fields
+            thinking_kwargs: Dict[str, Any] = {}
+
+            normalized_level = self.thinking_level
+            if normalized_level is not None and normalized_level not in THINKING_LEVEL_TO_BUDGET_FALLBACK:
+                self._increment_diagnostic(
+                    "invalid_thinking_level",
+                    detail=f"thinking_level={self.thinking_level!r}",
+                )
+                normalized_level = None
+
+            if normalized_level is not None:
+                if supports_thinking_level:
+                    thinking_kwargs["thinking_level"] = normalized_level
+                elif supports_thinking_budget:
+                    mapped_budget = THINKING_LEVEL_TO_BUDGET_FALLBACK[normalized_level]
+                    thinking_kwargs["thinking_budget"] = mapped_budget
+                    self._increment_diagnostic(
+                        "thinking_level_budget_fallbacks",
+                        detail=f"SDK lacks thinking_level; mapped {normalized_level} -> {mapped_budget}",
+                    )
                 else:
-                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=self.thinking_budget)
-                    # print(f"{self.agent_name} using thinking budget: {self.thinking_budget}")
+                    self._increment_diagnostic(
+                        "thinking_config_unsupported",
+                        detail="SDK exposes neither thinking_level nor thinking_budget.",
+                    )
+
+            if self.thinking_budget is not None and "thinking_budget" not in thinking_kwargs:
+                if supports_thinking_budget:
+                    try:
+                        thinking_kwargs["thinking_budget"] = int(self.thinking_budget)
+                    except (TypeError, ValueError):
+                        self._increment_diagnostic(
+                            "invalid_thinking_budget",
+                            detail=f"thinking_budget={self.thinking_budget!r}",
+                        )
+                else:
+                    self._increment_diagnostic(
+                        "thinking_budget_unsupported",
+                        detail="SDK does not expose thinking_budget.",
+                    )
+
+            if thinking_kwargs:
+                config_dict["thinking_config"] = types.ThinkingConfig(**thinking_kwargs)
 
             if response_schema:
                 config_dict["response_schema"] = response_schema
@@ -371,7 +421,7 @@ class LLMWrapper(ABC):
             )
 
             try:
-                return response.text
+                text = response.text
             except ValueError:
                 self._increment_diagnostic(
                     "blocked_or_empty_responses",
@@ -379,6 +429,14 @@ class LLMWrapper(ABC):
                 )
                 print("Warning: Client response blocked or empty.")
                 return "No response."
+            if text is None or str(text).strip() == "":
+                self._increment_diagnostic(
+                    "blocked_or_empty_responses",
+                    detail="Provider returned an empty text payload.",
+                )
+                print("Warning: Client response text was empty.")
+                return "No response."
+            return str(text)
 
         except Exception as e:
             self._increment_diagnostic("generation_errors", detail=str(e))
@@ -783,6 +841,20 @@ class Formatter(LLMWrapper):
             temperature=0.7
         )
 
+        fallback_idea_text = ""
+        if isinstance(idea_text, str):
+            fallback_idea_text = idea_text.strip()
+        elif hasattr(idea_text, "content"):
+            fallback_idea_text = str(getattr(idea_text, "content", "") or "").strip()
+        elif isinstance(idea_text, dict):
+            fallback_idea_text = str(
+                idea_text.get("content")
+                or idea_text.get("idea")
+                or ""
+            ).strip()
+        elif idea_text is not None:
+            fallback_idea_text = str(idea_text).strip()
+
         # Clean up markdown code blocks if present
         clean_response = response.strip()
         if clean_response.startswith("```json"):
@@ -863,6 +935,16 @@ class Formatter(LLMWrapper):
                 if content_lines:
                     content = "\n".join(content_lines).strip()
                 self._increment_diagnostic("formatter_title_content_recovery")
+
+            normalized_content = content.strip() if isinstance(content, str) else ""
+            if normalized_content.lower() in {"", "no response", "no response."}:
+                normalized_fallback = fallback_idea_text.strip()
+                if normalized_fallback.lower() not in {"", "no response", "no response."}:
+                    content = normalized_fallback
+                    self._increment_diagnostic("formatter_empty_content_recovery")
+                else:
+                    content = "Model response was empty."
+                    self._increment_diagnostic("formatter_empty_content_recovery")
 
             print(f"FORMATTER: Fallback extracted - Title: '{title}', Content length: {len(content)}")
             formatted_idea = Idea(title=title, content=content)

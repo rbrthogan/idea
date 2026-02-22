@@ -25,6 +25,17 @@ class _FakeAgent:
         return idea
 
 
+class _EmptyChildFormatter(_FakeAgent):
+    def format_idea(self, idea, _idea_type):
+        if isinstance(idea, dict) and idea.get("idea") == "child":
+            return {
+                "id": idea["id"],
+                "idea": SimpleNamespace(title="Untitled", content=""),
+                "parent_ids": idea.get("parent_ids", []),
+            }
+        return idea
+
+
 class _FakeCritic(_FakeAgent):
     def get_tournament_ranks(
         self,
@@ -334,3 +345,70 @@ def test_seed_novelty_guardrail_regenerates_similar_context():
     )
 
     assert context_pool == "x, y, z"
+
+
+def test_is_usable_idea_rejects_empty_or_placeholder_payloads():
+    assert not EvolutionOrchestrator._is_usable_idea({"idea": SimpleNamespace(content="", title="x")})
+    assert not EvolutionOrchestrator._is_usable_idea({"idea": "No response."})
+    assert EvolutionOrchestrator._is_usable_idea({"idea": "valid content"})
+
+
+def test_invalid_bred_child_is_dropped_before_next_generation():
+    engine = _FakeEngine()
+    engine.formatter = _EmptyChildFormatter()
+    updates = []
+
+    async def callback(data):
+        updates.append(data)
+
+    async def run_batch_with_failures_as_none(
+        tasks,
+        progress_callback,
+        base_progress_info,
+        start_step,
+        total_steps,
+        description_template,
+    ):
+        results = []
+        for idx, task in enumerate(tasks, start=1):
+            try:
+                value = await task()
+            except Exception:
+                value = None
+            results.append(value)
+            await progress_callback(
+                {
+                    **base_progress_info,
+                    "progress": (start_step + idx) / max(1, total_steps) * 100,
+                    "status_message": description_template.format(
+                        completed=idx,
+                        total=len(tasks),
+                    ),
+                }
+            )
+        return results
+
+    engine._run_batch_with_progress = run_batch_with_failures_as_none
+
+    orchestrator = EvolutionOrchestrator(engine, callback)
+    state = GenerationWorkState(
+        generation_index=0,
+        start_generation=0,
+        total_generations=1,
+        total_steps=4,
+        steps_per_generation=4,
+    )
+
+    asyncio.run(
+        orchestrator._evolve_generations(
+            start_generation=0,
+            total_steps=4,
+            step_offset=0,
+            work_state=state,
+            resuming=False,
+        )
+    )
+
+    assert len(engine.population) == engine.pop_size
+    assert all(EvolutionOrchestrator._is_usable_idea(idea) for idea in engine.population)
+    assert updates

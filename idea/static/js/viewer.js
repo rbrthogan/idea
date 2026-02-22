@@ -344,6 +344,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     addListener('popSize', 'input', updateTournamentCountFromPopSize);
     updateTournamentCountFromPopSize();
+    setupModelChangeListener();
 
     // --- Evolution Controls ---
 
@@ -381,8 +382,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const fitnessAlpha = parseFloat(document.getElementById('fitnessAlpha').value);
         const ageDecayRate = parseFloat(document.getElementById('ageDecayRate').value);
 
-        // Get thinking budget value (only for Gemini 2.5 models)
-        const thinkingBudget = getThinkingBudgetValue();
+        // Get model-aware thinking settings.
+        const thinkingSettings = getThinkingSettings();
 
         // Get max budget
         const maxBudgetInput = document.getElementById('maxBudget');
@@ -405,7 +406,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             replacementRate,
             fitnessAlpha,
             ageDecayRate,
-            thinkingBudget,
+            thinkingBudget: thinkingSettings.thinkingBudget,
+            thinkingLevel: thinkingSettings.thinkingLevel,
             maxBudget,
             evolutionName
         };
@@ -5866,234 +5868,245 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
     }
 }
 
+const THINKING_UI_CONFIGS = {
+    'gemini-2.5-flash-lite': {
+        supportsThinking: true,
+        allowOff: true,
+        allowMedium: true,
+        defaultMode: 'off',
+        min: 512,
+        max: 24576,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+    },
+    'gemini-2.5-flash': {
+        supportsThinking: true,
+        allowOff: true,
+        allowMedium: true,
+        defaultMode: 'off',
+        min: 128,
+        max: 24576,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+    },
+    'gemini-2.5-pro': {
+        supportsThinking: true,
+        allowOff: false,
+        allowMedium: true,
+        defaultMode: 'low',
+        min: 128,
+        max: 32768,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Low on Pro models. Increase to Medium/High or set a custom budget for deeper reasoning.'
+    },
+    'gemini-3-flash-preview': {
+        supportsThinking: true,
+        allowOff: true,
+        allowMedium: true,
+        defaultMode: 'off',
+        min: 0,
+        max: 24576,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+    },
+    'gemini-3-pro-preview': {
+        supportsThinking: true,
+        allowOff: false,
+        allowMedium: true,
+        defaultMode: 'low',
+        min: 128,
+        max: 32768,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Low on Pro models. Increase to Medium/High or set a custom budget for deeper reasoning.'
+    }
+};
+
+function getThinkingModelConfig(modelName) {
+    return THINKING_UI_CONFIGS[modelName] || null;
+}
+
 /**
- * Set up model change listener to show/hide thinking budget control
+ * Set up model change listener to show/hide thinking control
  */
 function setupModelChangeListener() {
     const modelSelect = document.getElementById('modelType');
     const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
+    if (!modelSelect || !thinkingBudgetContainer) return;
 
-    if (modelSelect && thinkingBudgetContainer) {
-        modelSelect.addEventListener('change', function () {
-            updateThinkingBudgetVisibility();
-        });
-
-        // Initialize visibility on page load
+    modelSelect.addEventListener('change', function () {
         updateThinkingBudgetVisibility();
-    }
+    });
+    updateThinkingBudgetVisibility();
 }
 
 /**
- * Update thinking budget control visibility based on selected model
+ * Update thinking control visibility based on selected model
  */
 function updateThinkingBudgetVisibility() {
     const modelSelect = document.getElementById('modelType');
     const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
-    const dynamicRadio = document.getElementById('thinkingDynamic');
-    const customContainer = document.getElementById('thinkingBudgetCustomContainer');
-
     if (!modelSelect || !thinkingBudgetContainer) return;
 
     const selectedModel = modelSelect.value;
-    const supportsThinking = selectedModel.includes('2.5') || selectedModel.includes('3-pro');
-
-    if (supportsThinking) {
-        thinkingBudgetContainer.style.display = 'block';
-
-        // Reset to dynamic mode when switching models
-        if (dynamicRadio) {
-            dynamicRadio.checked = true;
-        }
-        if (customContainer) {
-            customContainer.style.display = 'none';
-        }
-
-        configureThinkingBudgetForModel(selectedModel);
-    } else {
+    const config = getThinkingModelConfig(selectedModel);
+    if (!config || !config.supportsThinking) {
         thinkingBudgetContainer.style.display = 'none';
+        return;
     }
+
+    thinkingBudgetContainer.style.display = 'block';
+    configureThinkingBudgetForModel(selectedModel, config);
 }
 
 /**
- * Configure thinking budget for specific model
+ * Configure thinking controls for a specific model.
  */
-function configureThinkingBudgetForModel(modelName) {
+function configureThinkingBudgetForModel(modelName, providedConfig = null) {
+    const config = providedConfig || getThinkingModelConfig(modelName);
     const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
     const thinkingBudgetHelp = document.getElementById('thinkingBudgetHelp');
-    const thinkingDisabledOption = document.getElementById('thinkingDisabledOption');
     const thinkingBudgetMin = document.getElementById('thinkingBudgetMin');
     const thinkingBudgetMax = document.getElementById('thinkingBudgetMax');
+    const offOption = document.getElementById('thinkingOffOption');
+    const mediumOption = document.getElementById('thinkingMediumOption');
 
-    if (!thinkingBudgetSlider || !thinkingBudgetHelp || !thinkingDisabledOption) return;
+    const offRadio = document.getElementById('thinkingOff');
+    const lowRadio = document.getElementById('thinkingLow');
+    const mediumRadio = document.getElementById('thinkingMedium');
+    const highRadio = document.getElementById('thinkingHigh');
+    const customRadio = document.getElementById('thinkingCustomBudget');
 
-    // Configuration based on model specifications
-    const configs = {
-        'gemini-2.5-pro': {
-            min: 128,
-            max: 32768,
-            default: 128,  // Minimum possible since can't disable
-            defaultMode: 'custom',  // Use custom mode with minimum value
-            canDisable: false,
-            help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
-        },
-        'gemini-3-pro-preview': {
-            min: 128,
-            max: 32768,
-            default: 128,  // Minimum possible since can't disable
-            defaultMode: 'custom',  // Use custom mode with minimum value
-            canDisable: false,
-            help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
-        },
-        'gemini-2.5-flash': {
-            min: 128,  // Custom range starts at 128
-            max: 24576,
-            default: 0,  // Disabled by default
-            defaultMode: 'disabled',  // Use disabled mode
-            canDisable: true,
-            help: 'Thinking disabled by default (0-24576 tokens available for custom)'
-        },
-        'gemini-2.5-flash-lite': {
-            min: 512,  // Custom range starts at 512
-            max: 24576,
-            default: 0,  // Disabled by default
-            defaultMode: 'disabled',  // Use disabled mode
-            canDisable: true,
-            help: 'Thinking disabled by default (0-24576 tokens available for custom)'
-        }
-    };
+    if (!config || !thinkingBudgetSlider || !thinkingBudgetHelp || !customRadio) return;
 
-    const config = configs[modelName];
-    if (!config) return;
+    // Toggle option availability by model capability.
+    if (offOption) offOption.style.display = config.allowOff ? 'block' : 'none';
+    if (mediumOption) mediumOption.style.display = config.allowMedium ? 'block' : 'none';
 
-    // Show/hide disabled option based on model capability
-    if (config.canDisable) {
-        thinkingDisabledOption.style.display = 'block';
-    } else {
-        thinkingDisabledOption.style.display = 'none';
+    if (offRadio) offRadio.checked = false;
+    if (lowRadio) lowRadio.checked = false;
+    if (mediumRadio) mediumRadio.checked = false;
+    if (highRadio) highRadio.checked = false;
+    customRadio.checked = false;
+
+    let effectiveDefault = config.defaultMode;
+    if (effectiveDefault === 'off' && !config.allowOff) {
+        effectiveDefault = 'low';
+    }
+    if (effectiveDefault === 'medium' && !config.allowMedium) {
+        effectiveDefault = 'low';
     }
 
-    // Set the default mode based on model configuration
-    const dynamicRadio = document.getElementById('thinkingDynamic');
-    const disabledRadio = document.getElementById('thinkingDisabled');
-    const customRadio = document.getElementById('thinkingCustom');
-
-    // Clear all selections first
-    if (dynamicRadio) dynamicRadio.checked = false;
-    if (disabledRadio) disabledRadio.checked = false;
-    if (customRadio) customRadio.checked = false;
-
-    // Set the appropriate default based on config
-    if (config.defaultMode === 'disabled' && config.canDisable) {
-        disabledRadio.checked = true;
-    } else if (config.defaultMode === 'custom') {
+    if (effectiveDefault === 'off' && offRadio) {
+        offRadio.checked = true;
+    } else if (effectiveDefault === 'low' && lowRadio) {
+        lowRadio.checked = true;
+    } else if (effectiveDefault === 'medium' && mediumRadio) {
+        mediumRadio.checked = true;
+    } else if (effectiveDefault === 'high' && highRadio) {
+        highRadio.checked = true;
+    } else {
         customRadio.checked = true;
-    } else {
-        // Fallback to dynamic
-        dynamicRadio.checked = true;
     }
 
-    // Update slider range and default value
-    thinkingBudgetSlider.min = config.min;
-    thinkingBudgetSlider.max = config.max;
+    thinkingBudgetSlider.min = String(config.min);
+    thinkingBudgetSlider.max = String(config.max);
+    thinkingBudgetSlider.step = String(config.step || 128);
+    thinkingBudgetSlider.value = String(config.defaultBudget || config.min || 0);
 
-    // Set slider to model's default value (128 for Pro, doesn't matter for disabled modes)
-    if (config.defaultMode === 'custom') {
-        thinkingBudgetSlider.value = config.default;
-    } else {
-        // Set to a reasonable value for when user switches to custom later
-        thinkingBudgetSlider.value = Math.max(config.min, 512);
-    }
-
-    // Update step size based on range (larger steps for larger ranges)
-    const range = config.max - config.min;
-    if (range > 10000) {
-        thinkingBudgetSlider.step = 256;  // Larger steps for big ranges
-    } else if (range > 5000) {
-        thinkingBudgetSlider.step = 128;
-    } else {
-        thinkingBudgetSlider.step = 64;
-    }
-
-    // Update display elements
+    if (thinkingBudgetMin) thinkingBudgetMin.textContent = Number(config.min || 0).toLocaleString();
+    if (thinkingBudgetMax) thinkingBudgetMax.textContent = Number(config.max || 0).toLocaleString();
     thinkingBudgetHelp.textContent = config.help;
-    if (thinkingBudgetMin) {
-        thinkingBudgetMin.textContent = config.min.toLocaleString();
-    }
-    if (thinkingBudgetMax) {
-        thinkingBudgetMax.textContent = config.max.toLocaleString();
-    }
 
-    // Update the mode display (show/hide custom slider)
     updateThinkingBudgetMode();
-
-    // Update the slider value display
     updateThinkingBudgetDisplay();
 }
 
 /**
- * Update thinking budget display value
+ * Update custom thinking budget display value.
  */
 function updateThinkingBudgetDisplay() {
     const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
     const thinkingBudgetValue = document.getElementById('thinkingBudgetValue');
-
     if (!thinkingBudgetSlider || !thinkingBudgetValue) return;
-
-    const value = parseInt(thinkingBudgetSlider.value);
+    const value = parseInt(thinkingBudgetSlider.value || '0', 10);
     thinkingBudgetValue.textContent = value.toLocaleString();
 }
 
 /**
- * Handle thinking budget mode changes (radio buttons)
+ * Handle thinking mode changes (radio buttons).
  */
 function updateThinkingBudgetMode() {
     const customContainer = document.getElementById('thinkingBudgetCustomContainer');
-    const dynamicRadio = document.getElementById('thinkingDynamic');
-    const disabledRadio = document.getElementById('thinkingDisabled');
-    const customRadio = document.getElementById('thinkingCustom');
-
-    if (!customContainer || !dynamicRadio || !customRadio) return;
+    const customRadio = document.getElementById('thinkingCustomBudget');
+    if (!customContainer || !customRadio) return;
 
     if (customRadio.checked) {
-        // Show custom slider
         customContainer.style.display = 'block';
         updateThinkingBudgetDisplay();
     } else {
-        // Hide custom slider
         customContainer.style.display = 'none';
     }
 }
 
 /**
- * Get thinking budget value for API request
+ * Get thinking settings for API requests.
  */
-function getThinkingBudgetValue() {
+function getThinkingSettings() {
     const modelSelect = document.getElementById('modelType');
-    const dynamicRadio = document.getElementById('thinkingDynamic');
-    const disabledRadio = document.getElementById('thinkingDisabled');
-    const customRadio = document.getElementById('thinkingCustom');
-    const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
-
-    if (!modelSelect) return null;
+    if (!modelSelect) {
+        return { thinkingLevel: null, thinkingBudget: null };
+    }
 
     const selectedModel = modelSelect.value;
-    const supportsThinking = selectedModel.includes('2.5') || selectedModel.includes('3-pro');
-
-    if (!supportsThinking) {
-        return null; // Don't send thinking budget for non-thinking models
+    const config = getThinkingModelConfig(selectedModel);
+    if (!config || !config.supportsThinking) {
+        return { thinkingLevel: null, thinkingBudget: null };
     }
 
-    // Determine value based on selected mode
-    if (dynamicRadio && dynamicRadio.checked) {
-        return -1; // Dynamic thinking
-    } else if (disabledRadio && disabledRadio.checked) {
-        return 0; // Disabled thinking
-    } else if (customRadio && customRadio.checked && thinkingBudgetSlider) {
-        return parseInt(thinkingBudgetSlider.value); // Custom value
+    const offRadio = document.getElementById('thinkingOff');
+    const lowRadio = document.getElementById('thinkingLow');
+    const mediumRadio = document.getElementById('thinkingMedium');
+    const highRadio = document.getElementById('thinkingHigh');
+    const customRadio = document.getElementById('thinkingCustomBudget');
+    const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
+
+    if (customRadio && customRadio.checked && thinkingBudgetSlider) {
+        const budget = parseInt(thinkingBudgetSlider.value || '0', 10);
+        return {
+            thinkingLevel: null,
+            thinkingBudget: Number.isFinite(budget) ? budget : null,
+        };
+    }
+    if (offRadio && offRadio.checked) {
+        return { thinkingLevel: 'off', thinkingBudget: null };
+    }
+    if (lowRadio && lowRadio.checked) {
+        return { thinkingLevel: 'low', thinkingBudget: null };
+    }
+    if (mediumRadio && mediumRadio.checked) {
+        return { thinkingLevel: 'medium', thinkingBudget: null };
+    }
+    if (highRadio && highRadio.checked) {
+        return { thinkingLevel: 'high', thinkingBudget: null };
     }
 
-    // Default to dynamic if nothing selected
-    return -1;
+    if (config.defaultMode === 'custom' && thinkingBudgetSlider) {
+        const budget = parseInt(thinkingBudgetSlider.value || '0', 10);
+        return {
+            thinkingLevel: null,
+            thinkingBudget: Number.isFinite(budget) ? budget : null,
+        };
+    }
+
+    return {
+        thinkingLevel: config.defaultMode === 'off' ? 'off' : 'low',
+        thinkingBudget: null,
+    };
 }
 
 // Sidebar View Navigation

@@ -14,6 +14,7 @@ class EvolutionConfig:
     tournament_count: float
     full_tournament_rounds: int
     thinking_budget: Optional[int]
+    thinking_level: Optional[str]
     max_budget: Optional[float]
     mutation_rate: float
     seed_context_pool_size: Optional[int]

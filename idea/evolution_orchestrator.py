@@ -39,6 +39,48 @@ class EvolutionOrchestrator:
             return 0.0
         return len(a & b) / len(union)
 
+    @staticmethod
+    def _extract_idea_body_text(idea_payload: Any) -> str:
+        if idea_payload is None:
+            return ""
+
+        candidate = idea_payload
+        if isinstance(candidate, dict) and "idea" in candidate:
+            candidate = candidate.get("idea")
+
+        if hasattr(candidate, "content"):
+            return str(getattr(candidate, "content", "") or "")
+
+        if isinstance(candidate, dict):
+            if "content" in candidate:
+                return str(candidate.get("content") or "")
+            if "idea" in candidate:
+                return str(candidate.get("idea") or "")
+            return ""
+
+        return str(candidate or "")
+
+    @classmethod
+    def _is_usable_idea(cls, idea_payload: Any) -> bool:
+        text = cls._extract_idea_body_text(idea_payload).strip()
+        if not text:
+            return False
+        return text.lower() not in {
+            "no response",
+            "no response.",
+            "model response was empty.",
+            "none",
+            "null",
+        }
+
+    def _record_generation_diagnostic(self, key: str, detail: Optional[str] = None) -> None:
+        for agent_name in ("formatter", "critic", "ideator", "breeder", "oracle"):
+            agent = getattr(self.engine, agent_name, None)
+            increment = getattr(agent, "_increment_diagnostic", None)
+            if callable(increment):
+                increment(key, detail=detail)
+                return
+
     async def _generate_single_seed(self) -> tuple[str, Dict[str, Any], str]:
         context_pool = await asyncio.to_thread(
             self.engine.ideator.generate_context, self.engine.idea_type
@@ -380,7 +422,7 @@ class EvolutionOrchestrator:
 
         if self.engine.stop_requested:
             for i, result in enumerate(refined_results):
-                if result is not None:
+                if result is not None and self._is_usable_idea(result):
                     self.engine.population[i] = result
 
             payload = self.progress.base(
@@ -400,7 +442,53 @@ class EvolutionOrchestrator:
             await self.progress.emit(self.progress_callback, payload)
             return
 
-        self.engine.population = refined_results
+        filtered_population: List[Any] = []
+        filtered_contexts: List[str] = []
+        filtered_prompts: List[str] = []
+        for idx, result in enumerate(refined_results):
+            if result is None or not self._is_usable_idea(result):
+                self._record_generation_diagnostic("invalid_formatted_seed_ideas")
+                continue
+            filtered_population.append(result)
+            filtered_contexts.append(self.engine.contexts[idx])
+            filtered_prompts.append(self.engine.specific_prompts[idx])
+
+        self.engine.population = filtered_population
+        self.engine.contexts = filtered_contexts
+        self.engine.specific_prompts = filtered_prompts
+
+        refill_attempts = 0
+        max_refill_attempts = max(3, self.engine.pop_size * 4)
+        while (
+            not self.engine.stop_requested
+            and len(self.engine.population) < self.engine.pop_size
+            and refill_attempts < max_refill_attempts
+        ):
+            refill_attempts += 1
+            try:
+                seed_result = await self._generate_single_seed()
+                context_pool, idea, prompt = await self._ensure_seed_novelty(
+                    seed_result,
+                    existing_context_sets,
+                )
+                formatted_idea = await refine_single(idea)
+            except Exception as exc:
+                self._record_generation_diagnostic("seed_generation_failures", detail=str(exc))
+                continue
+
+            if not self._is_usable_idea(formatted_idea):
+                self._record_generation_diagnostic("invalid_formatted_seed_ideas")
+                continue
+
+            self.engine.contexts.append(context_pool)
+            self.engine.population.append(formatted_idea)
+            self.engine.specific_prompts.append(prompt)
+
+        if len(self.engine.population) < self.engine.pop_size:
+            raise RuntimeError(
+                "Failed to produce a full non-empty initial population "
+                f"({len(self.engine.population)}/{self.engine.pop_size})."
+            )
 
     async def _complete_initial_seeding(self) -> None:
         existing_count = len(self.engine.population)
@@ -469,13 +557,27 @@ class EvolutionOrchestrator:
                 },
             )
 
-            refined_idea = await asyncio.to_thread(
-                self.engine.critic.refine, idea, self.engine.idea_type
-            )
-            formatted_idea = await asyncio.to_thread(
-                self.engine.formatter.format_idea, refined_idea, self.engine.idea_type
-            )
-            refined_population.append(formatted_idea)
+            try:
+                refined_idea = await asyncio.to_thread(
+                    self.engine.critic.refine, idea, self.engine.idea_type
+                )
+                formatted_idea = await asyncio.to_thread(
+                    self.engine.formatter.format_idea, refined_idea, self.engine.idea_type
+                )
+            except Exception as exc:
+                self._record_generation_diagnostic("seed_generation_failures", detail=str(exc))
+                continue
+
+            if self._is_usable_idea(formatted_idea):
+                refined_population.append(formatted_idea)
+            elif self._is_usable_idea(idea):
+                self._record_generation_diagnostic("invalid_formatted_seed_ideas")
+                refined_population.append(idea)
+            else:
+                self._record_generation_diagnostic("invalid_formatted_seed_ideas")
+
+        if not refined_population:
+            raise RuntimeError("Unable to recover any usable ideas during initial seeding resume.")
 
         self.engine.population = refined_population
         self.engine.history = [self.engine.population.copy()]
@@ -747,6 +849,10 @@ class EvolutionOrchestrator:
                         "parent_ids": [],
                         "birth_generation": next_generation_index,
                     }
+
+                if not self._is_usable_idea(formatted_idea):
+                    raise ValueError("Child idea was empty after formatting")
+
                 return formatted_idea, prompt
 
             breeding_tasks = [
@@ -767,6 +873,9 @@ class EvolutionOrchestrator:
             if self.engine.stop_requested:
                 completed_results = [r for r in breeding_results if r is not None]
                 for idea, prompt in completed_results:
+                    if not self._is_usable_idea(idea):
+                        self._record_generation_diagnostic("invalid_formatted_bred_ideas")
+                        continue
                     new_population.append(idea)
                     generation_breeding_prompts.append(prompt)
 
@@ -792,6 +901,9 @@ class EvolutionOrchestrator:
                     continue
 
                 idea, prompt = result
+                if not self._is_usable_idea(idea):
+                    self._record_generation_diagnostic("invalid_formatted_bred_ideas")
+                    continue
                 new_population.append(idea)
                 generation_breeding_prompts.append(prompt)
 
@@ -971,6 +1083,11 @@ class EvolutionOrchestrator:
                     "oracle_analysis", ""
                 )
             formatted_oracle_idea.setdefault("birth_generation", gen + 1)
+
+            if not self._is_usable_idea(formatted_oracle_idea):
+                self._record_generation_diagnostic("invalid_oracle_replacements")
+                print("Oracle replacement discarded because formatted idea content was empty.")
+                return
 
             old_idea = self.engine.population[replace_idx]
             old_idea_id = str(old_idea.get("id", "")) if isinstance(old_idea, dict) else ""

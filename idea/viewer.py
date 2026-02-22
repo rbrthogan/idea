@@ -26,6 +26,7 @@ from idea.config import (
     DEFAULT_MODEL,
     DEFAULT_CREATIVE_TEMP,
     DEFAULT_TOP_P,
+    THINKING_MODEL_CONFIG,
     SMTP_SERVER,
     SMTP_PORT,
     SMTP_USERNAME,
@@ -84,6 +85,19 @@ TRANSIENT_PROGRESS_FLAGS = {"oracle_update", "elite_selection_update", "checkpoi
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _update_autorating_state(state: Optional[UserEvolutionState], updates: Dict[str, Any]) -> None:
+    """Merge updates into per-user autorating progress with monotonic versioning."""
+    if state is None:
+        return
+
+    current = state.autorating_status if isinstance(state.autorating_status, dict) else {}
+    next_payload = current.copy()
+    next_payload.update(updates)
+    next_payload["version"] = int(current.get("version", 0)) + 1
+    next_payload["updated_at"] = _now_ms()
+    state.autorating_status = next_payload
 
 
 def _round_half_up(value: float) -> int:
@@ -625,15 +639,37 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             print(f"Error parsing age decay rate: {e}")
             age_decay_rate = 0.25
 
-        # Get Oracle parameters with defaults
+        # Thinking controls (model-aware): supports explicit level or custom budget.
+        thinking_level = _normalize_thinking_level(data.get("thinkingLevel"))
+        if data.get("thinkingLevel") is not None and thinking_level is None:
+            print(f"Ignoring invalid thinkingLevel value: {data.get('thinkingLevel')!r}")
 
-        # Get thinking budget parameter (only for Gemini 2.5 models)
-        thinking_budget = data.get('thinkingBudget')
-        if thinking_budget is not None:
-            thinking_budget = int(thinking_budget)
-            print(f"Parsed thinking budget: {thinking_budget}")
+        thinking_budget = None
+        raw_thinking_budget = data.get("thinkingBudget")
+        if raw_thinking_budget is not None and raw_thinking_budget != "":
+            try:
+                thinking_budget = int(raw_thinking_budget)
+            except (TypeError, ValueError):
+                print(f"Ignoring invalid thinkingBudget value: {raw_thinking_budget!r}")
+
+        model_thinking_cfg = THINKING_MODEL_CONFIG.get(model_type, {})
+        supports_thinking = bool(model_thinking_cfg.get("supports_thinking", False))
+        if not supports_thinking:
+            thinking_level = None
+            thinking_budget = None
         else:
-            print("No thinking budget specified (non-2.5 model or not set)")
+            if thinking_budget is not None:
+                # Explicit custom budget takes precedence over level presets.
+                thinking_level = None
+            elif thinking_level == "off" and not bool(model_thinking_cfg.get("allow_off", False)):
+                thinking_level = "low"
+
+            if thinking_level is None and thinking_budget is None:
+                thinking_level, thinking_budget = _get_default_thinking_settings(model_type)
+        print(
+            "Resolved thinking settings:",
+            f"model={model_type}, thinking_level={thinking_level}, thinking_budget={thinking_budget}",
+        )
 
         # Get max budget parameter
         max_budget = data.get('maxBudget')
@@ -653,7 +689,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
               f"tournament: count={tournament_count}, full_rounds={full_tournament_rounds}, target_rounds={target_tournament_rounds}, "
               f"mutation_rate={mutation_rate}, seed_context_pool_size={seed_context_pool_size}, replacement_rate={replacement_rate}, "
               f"fitness_alpha={fitness_alpha}, age_decay_rate={age_decay_rate}, "
-              f"thinking_budget={thinking_budget}, max_budget={max_budget}")
+              f"thinking_level={thinking_level}, thinking_budget={thinking_budget}, max_budget={max_budget}")
 
         # Resolve template source. System templates are bundled; custom templates live in Firestore.
         template_data = None
@@ -689,6 +725,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             replacement_rate=replacement_rate,
             fitness_alpha=fitness_alpha,
             age_decay_rate=age_decay_rate,
+            thinking_level=thinking_level,
             thinking_budget=thinking_budget,
             max_budget=max_budget,
             api_key=api_key,
@@ -1442,6 +1479,7 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
             tournament_rounds=config.get('tournament_rounds', 1),
             tournament_count=config.get('tournament_count'),
             full_tournament_rounds=config.get('full_tournament_rounds'),
+            thinking_level=config.get('thinking_level'),
             thinking_budget=config.get('thinking_budget'),
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
@@ -2501,14 +2539,35 @@ def _next_manual_swiss_pair(
     }
 
 
-def _get_default_thinking_budget(model_name: str) -> Optional[int]:
-    """Get default thinking budget aligned with the main app logic."""
-    from idea.config import THINKING_BUDGET_CONFIG
-
-    if "2.5" not in model_name and "3-pro" not in model_name:
+def _normalize_thinking_level(level: Optional[Any]) -> Optional[str]:
+    if level is None:
         return None
-    config = THINKING_BUDGET_CONFIG.get(model_name, {})
-    return config.get("default", 0)
+    normalized = str(level).strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"off", "low", "medium", "high"}:
+        return normalized
+    return None
+
+
+def _get_default_thinking_settings(model_name: str) -> Tuple[Optional[str], Optional[int]]:
+    """Get default thinking settings for a model."""
+    config = THINKING_MODEL_CONFIG.get(model_name, {})
+    if not config.get("supports_thinking", False):
+        return None, None
+
+    default_level = _normalize_thinking_level(config.get("default_level"))
+    default_budget = config.get("default_budget")
+
+    try:
+        parsed_budget = int(default_budget) if default_budget is not None else None
+    except (TypeError, ValueError):
+        parsed_budget = None
+
+    # Prefer explicit level defaults when configured; fallback to budget otherwise.
+    if default_level is not None:
+        return default_level, None
+    return None, parsed_budget
 
 
 def _get_autorating_costs(critic_agent: Critic) -> Dict[str, Any]:
@@ -2662,23 +2721,22 @@ async def auto_rate(
     user: Optional[UserInfo] = Depends(get_current_user),
 ):
     """Automatically rate ideas using Swiss rounds from the Critic tournament flow."""
+    state: Optional[UserEvolutionState] = None
     try:
         data = await request.json()
-        num_rounds = int(data.get("numRounds", data.get("numComparisons", 1)))
         evolution_id = data.get("evolutionId")
         model_id = data.get("modelId", DEFAULT_MODEL)
         skip_save = bool(data.get("skipSave", False))
         idea_type = data.get("ideaType")
 
-        if num_rounds <= 0:
-            raise HTTPException(status_code=400, detail="numRounds must be greater than 0")
+        if user:
+            state = await user_states.get(user.uid)
 
         file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
         if not idea_type:
             idea_type = evolution_data.get("idea_type", get_default_template_id())
 
         all_ideas, _ = _collect_latest_ideas_for_rating(evolution_data)
-        print(f"Starting auto Swiss rating for evolution {evolution_id}: rounds={num_rounds}, ideas={len(all_ideas)}")
 
         if len(all_ideas) < 2:
             return JSONResponse({
@@ -2686,7 +2744,31 @@ async def auto_rate(
                 "message": "Not enough ideas to compare (minimum 2 required)",
             }, status_code=400)
 
+        # Align auto-rating with evolution-loop semantics:
+        # - full_tournament_rounds = pop_size - 1
+        # - tournamentCount controls fractional/multiple Swiss tournaments
+        legacy_rounds_input = data.get("numRounds", data.get("numComparisons"))
+        try:
+            tournament_count, full_tournament_rounds, num_rounds = _resolve_tournament_settings(
+                pop_size=len(all_ideas),
+                tournament_count_input=data.get("tournamentCount"),
+                legacy_rounds_input=legacy_rounds_input,
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid tournament settings: {e}",
+            ) from e
+
+        print(
+            "Starting auto Swiss rating for evolution "
+            f"{evolution_id}: count={tournament_count}, rounds={num_rounds}, "
+            f"full_rounds={full_tournament_rounds}, ideas={len(all_ideas)}"
+        )
+
         existing_total_comparisons = sum(idea.get("match_count", 0) for idea in all_ideas) // 2
+        expected_pairs_per_round = max(1, len(all_ideas) // 2)
+        expected_total_pairs = expected_pairs_per_round * num_rounds
 
         # Use the same API-key resolution strategy as the evolution flow.
         # 1) Prefer the authenticated user's stored key.
@@ -2705,62 +2787,157 @@ async def auto_rate(
                 "message": "No Gemini API key configured. Set it in Settings before auto-rating.",
             }, status_code=400)
 
+        default_thinking_level, default_thinking_budget = _get_default_thinking_settings(model_id)
         critic = Critic(
             provider="google_generative_ai",
             model_name=model_id,
             temperature=DEFAULT_CREATIVE_TEMP,
             top_p=DEFAULT_TOP_P,
-            thinking_budget=_get_default_thinking_budget(model_id),
+            thinking_level=default_thinking_level,
+            thinking_budget=default_thinking_budget,
             api_key=resolved_api_key,
         )
 
-        full_tournament_rounds = max(1, len(all_ideas) - 1)
         rounds_details: List[Dict[str, Any]] = []
-        critic.get_tournament_ranks(
-            all_ideas,
-            idea_type,
-            rounds=num_rounds,
-            details=rounds_details,
-            full_tournament_rounds=full_tournament_rounds,
-        )
 
         replay_ranks = {idx: float(idea["ratings"]["auto"]) for idx, idea in enumerate(all_ideas)}
         results: List[Dict[str, Any]] = []
+        win_counts = {"A": 0, "B": 0, "tie": 0}
+        next_round_to_apply = 0
+        next_pair_to_apply = 0
 
-        for round_record in rounds_details:
-            for pair in round_record.get("pairs", []):
-                idx_a = pair.get("a_idx")
-                idx_b = pair.get("b_idx")
-                winner = pair.get("winner")
-                resolved_winner = winner if winner in {"A", "B", "tie"} else "tie"
-                if idx_a is None or idx_b is None:
-                    continue
+        def _sorted_ideas() -> List[Dict[str, Any]]:
+            return sorted(all_ideas, key=lambda x: x["ratings"]["auto"], reverse=True)
 
-                idea_a = all_ideas[idx_a]
-                idea_b = all_ideas[idx_b]
+        def _count_completed_rounds() -> int:
+            completed = 0
+            for round_record in rounds_details:
+                pairs = round_record.get("pairs", [])
+                if all(pair.get("winner") in {"A", "B", "tie"} for pair in pairs):
+                    completed += 1
+                else:
+                    break
+            return completed
 
-                idea_a["match_count"] += 1
-                idea_b["match_count"] += 1
-                idea_a["auto_match_count"] += 1
-                idea_b["auto_match_count"] += 1
+        def _apply_resolved_pairs() -> None:
+            nonlocal next_round_to_apply, next_pair_to_apply
+            while next_round_to_apply < len(rounds_details):
+                round_record = rounds_details[next_round_to_apply]
+                pairs = round_record.get("pairs", [])
 
-                next_a, next_b = elo_update(replay_ranks[idx_a], replay_ranks[idx_b], resolved_winner)
-                replay_ranks[idx_a] = float(int(round(next_a)))
-                replay_ranks[idx_b] = float(int(round(next_b)))
+                while next_pair_to_apply < len(pairs):
+                    pair = pairs[next_pair_to_apply]
+                    winner = pair.get("winner")
+                    if winner not in {"A", "B", "tie"}:
+                        return
 
-                idea_a["ratings"]["auto"] = int(round(replay_ranks[idx_a]))
-                idea_b["ratings"]["auto"] = int(round(replay_ranks[idx_b]))
-                idea_a["elo"] = idea_a["ratings"]["auto"]
-                idea_b["elo"] = idea_b["ratings"]["auto"]
+                    idx_a = pair.get("a_idx")
+                    idx_b = pair.get("b_idx")
+                    if idx_a is None or idx_b is None:
+                        next_pair_to_apply += 1
+                        continue
+                    if idx_a < 0 or idx_b < 0 or idx_a >= len(all_ideas) or idx_b >= len(all_ideas):
+                        next_pair_to_apply += 1
+                        continue
 
-                results.append({
-                    "idea_a": idea_a.get("id", "unknown"),
-                    "idea_b": idea_b.get("id", "unknown"),
-                    "outcome": resolved_winner,
-                    "new_elo_a": idea_a["ratings"]["auto"],
-                    "new_elo_b": idea_b["ratings"]["auto"],
-                    "round": round_record.get("round"),
-                })
+                    resolved_winner = winner
+                    idea_a = all_ideas[idx_a]
+                    idea_b = all_ideas[idx_b]
+
+                    idea_a["match_count"] += 1
+                    idea_b["match_count"] += 1
+                    idea_a["auto_match_count"] += 1
+                    idea_b["auto_match_count"] += 1
+
+                    next_a, next_b = elo_update(
+                        replay_ranks[idx_a],
+                        replay_ranks[idx_b],
+                        resolved_winner,
+                    )
+                    replay_ranks[idx_a] = float(int(round(next_a)))
+                    replay_ranks[idx_b] = float(int(round(next_b)))
+
+                    idea_a["ratings"]["auto"] = int(round(replay_ranks[idx_a]))
+                    idea_b["ratings"]["auto"] = int(round(replay_ranks[idx_b]))
+                    idea_a["elo"] = idea_a["ratings"]["auto"]
+                    idea_b["elo"] = idea_b["ratings"]["auto"]
+
+                    results.append({
+                        "idea_a": idea_a.get("id", "unknown"),
+                        "idea_b": idea_b.get("id", "unknown"),
+                        "outcome": resolved_winner,
+                        "new_elo_a": idea_a["ratings"]["auto"],
+                        "new_elo_b": idea_b["ratings"]["auto"],
+                        "round": round_record.get("round"),
+                    })
+                    win_counts[resolved_winner] += 1
+                    next_pair_to_apply += 1
+
+                next_round_to_apply += 1
+                next_pair_to_apply = 0
+
+        _update_autorating_state(
+            state,
+            {
+                "is_running": True,
+                "status": "in_progress",
+                "status_message": f"Running Swiss round 1/{num_rounds}...",
+                "progress": 0,
+                "requested_rounds": int(num_rounds),
+                "completed_rounds": 0,
+                "tournament_count": float(tournament_count),
+                "full_tournament_rounds": int(full_tournament_rounds),
+                "target_tournament_rounds": int(num_rounds),
+                "total_matches": int(expected_total_pairs),
+                "completed_matches": 0,
+                "completed_comparisons": int(existing_total_comparisons),
+                "new_comparisons": 0,
+                "win_counts": win_counts.copy(),
+                "ideas": _sorted_ideas(),
+                "token_counts": None,
+                "error": None,
+            },
+        )
+
+        def _progress_callback(completed_pairs: int, total_pairs: int) -> None:
+            _apply_resolved_pairs()
+            total_pairs_safe = max(1, int(total_pairs or expected_total_pairs))
+            completed_pairs_safe = max(0, min(int(completed_pairs), total_pairs_safe))
+            round_num = min(num_rounds, (completed_pairs_safe // expected_pairs_per_round) + 1)
+
+            _update_autorating_state(
+                state,
+                {
+                    "is_running": True,
+                    "status": "in_progress",
+                    "status_message": f"Running Swiss round {round_num}/{num_rounds}...",
+                    "progress": (completed_pairs_safe / total_pairs_safe) * 100,
+                    "requested_rounds": int(num_rounds),
+                    "completed_rounds": _count_completed_rounds(),
+                    "tournament_count": float(tournament_count),
+                    "full_tournament_rounds": int(full_tournament_rounds),
+                    "target_tournament_rounds": int(num_rounds),
+                    "total_matches": int(total_pairs_safe),
+                    "completed_matches": int(completed_pairs_safe),
+                    "completed_comparisons": int(existing_total_comparisons + len(results)),
+                    "new_comparisons": int(len(results)),
+                    "win_counts": win_counts.copy(),
+                    "ideas": _sorted_ideas(),
+                },
+            )
+
+        def _run_tournament() -> None:
+            critic.get_tournament_ranks(
+                all_ideas,
+                idea_type,
+                rounds=num_rounds,
+                progress_callback=_progress_callback,
+                details=rounds_details,
+                full_tournament_rounds=full_tournament_rounds,
+            )
+
+        await asyncio.to_thread(_run_tournament)
+        _apply_resolved_pairs()
 
         if not skip_save:
             await _save_rating_evolution(
@@ -2771,19 +2948,58 @@ async def auto_rate(
                 file_path=file_path,
             )
 
+        final_token_counts = _get_autorating_costs(critic)
+        final_ideas = _sorted_ideas()
         total_comparisons = existing_total_comparisons + len(results)
+        _update_autorating_state(
+            state,
+            {
+                "is_running": False,
+                "status": "complete",
+                "status_message": (
+                    f"Completed {num_rounds} Swiss round{'s' if num_rounds != 1 else ''}."
+                ),
+                "progress": 100,
+                "requested_rounds": int(num_rounds),
+                "completed_rounds": int(num_rounds),
+                "tournament_count": float(tournament_count),
+                "full_tournament_rounds": int(full_tournament_rounds),
+                "target_tournament_rounds": int(num_rounds),
+                "total_matches": int(expected_total_pairs),
+                "completed_matches": int(len(results)),
+                "completed_comparisons": int(total_comparisons),
+                "new_comparisons": int(len(results)),
+                "win_counts": win_counts.copy(),
+                "ideas": final_ideas,
+                "token_counts": final_token_counts,
+                "error": None,
+            },
+        )
+
         return JSONResponse({
             "status": "success",
             "results": results,
-            "ideas": sorted(all_ideas, key=lambda x: x["ratings"]["auto"], reverse=True),
+            "ideas": final_ideas,
             "completed_comparisons": total_comparisons,
             "new_comparisons": len(results),
             "completed_rounds": int(num_rounds),
             "new_rounds": int(num_rounds),
-            "token_counts": _get_autorating_costs(critic),
+            "tournament_count": float(tournament_count),
+            "full_tournament_rounds": int(full_tournament_rounds),
+            "target_tournament_rounds": int(num_rounds),
+            "token_counts": final_token_counts,
         })
 
     except HTTPException as e:
+        _update_autorating_state(
+            state,
+            {
+                "is_running": False,
+                "status": "error",
+                "status_message": "Auto-rating failed.",
+                "error": str(e.detail),
+            },
+        )
         return JSONResponse({
             "status": "error",
             "message": str(e.detail),
@@ -2792,11 +3008,37 @@ async def auto_rate(
         error_details = traceback.format_exc()
         print(f"Error in auto-rate: {e}")
         print(error_details)
+        _update_autorating_state(
+            state,
+            {
+                "is_running": False,
+                "status": "error",
+                "status_message": "Auto-rating failed.",
+                "error": str(e),
+            },
+        )
         return JSONResponse({
             "status": "error",
             "message": str(e),
             "details": error_details,
         }, status_code=500)
+
+
+@app.get("/api/auto-rate/progress")
+async def get_auto_rate_progress(
+    user: Optional[UserInfo] = Depends(get_current_user),
+):
+    """Returns live per-match progress for the active auto-rating request."""
+    if not user:
+        return JSONResponse({
+            "is_running": False,
+            "status": "idle",
+            "status_message": "",
+            "progress": 0,
+        })
+
+    state = await user_states.get(user.uid)
+    return JSONResponse(convert_uuids_to_strings(state.autorating_status))
 
 
 @app.get("/api/models")
@@ -2805,6 +3047,7 @@ async def get_models():
     return JSONResponse({
         "models": LLM_MODELS,
         "default": DEFAULT_MODEL,
+        "thinking": THINKING_MODEL_CONFIG,
     })
 
 

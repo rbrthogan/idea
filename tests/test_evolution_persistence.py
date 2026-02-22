@@ -41,6 +41,7 @@ def test_repository_restore_from_state():
             "tournament_count": 0.5,
             "full_tournament_rounds": 4,
             "thinking_budget": None,
+            "thinking_level": "low",
             "max_budget": None,
             "mutation_rate": 0.2,
             "seed_context_pool_size": 3,
@@ -92,5 +93,6 @@ def test_repository_restore_from_state():
     assert engine.specific_prompts == ["sp"]
     assert engine.breeding_prompts == [["bp"]]
     assert engine.seed_context_pool_size == 3
+    assert engine.thinking_level == "low"
     assert isinstance(engine.population[0]["idea"], Idea)
     assert engine.population[0]["idea"].title == "A"

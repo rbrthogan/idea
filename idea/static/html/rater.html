@@ -211,11 +211,16 @@
                 <div id="autoRatingControls" style="display: none;">
                   <label class="form-label">Automated Swiss Rating</label>
                   <div class="mb-3">
-                    <label for="numSwissRounds" class="form-label">Swiss Rounds</label>
-                    <input type="number" class="form-control form-control-sm" id="numSwissRounds" value="3" min="1"
-                      max="100">
+                    <label for="autoTournamentCount" class="form-label d-flex justify-content-between">
+                      <span>Tournament Count</span>
+                      <span id="autoTournamentCountValue">1.00</span>
+                    </label>
+                    <input type="range" class="form-range" min="0.25" max="3" step="0.25" id="autoTournamentCount" value="1">
+                    <small id="autoTournamentRoundsHint" class="form-text text-muted" style="font-size: 0.75rem;">
+                      1.00 = full Swiss tournament (pop size - 1 rounds).
+                    </small>
                     <small class="form-text text-muted" style="font-size: 0.75rem;">
-                      One round compares roughly half of the current ideas.
+                      Fractions run proportional Swiss rounds, matching the evolution loop.
                     </small>
                   </div>
                   <div class="mb-3">

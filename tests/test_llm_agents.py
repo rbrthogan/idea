@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from idea.llm import Breeder, Critic, Ideator, Oracle
+from idea.llm import Breeder, Critic, Formatter, Ideator, Oracle
 
 
 class DummyPrompts:
@@ -34,6 +34,11 @@ def create_oracle():
 def create_ideator(**kwargs):
     with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
         return Ideator(**kwargs)
+
+
+def create_formatter():
+    with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
+        return Formatter()
 
 
 def test_elo_update_cases():
@@ -303,3 +308,45 @@ def test_diagnostic_events_store_raw_details():
     assert len(events) == 1
     assert events[0]["key"] == "generation_errors"
     assert "timeout" in events[0]["detail"]
+
+
+def test_generate_content_coerces_empty_text_to_no_response():
+    ideator = create_ideator()
+
+    class _FakeResponse:
+        text = ""
+        usage_metadata = None
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**_kwargs):
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "No response."
+    assert ideator.get_diagnostics().get("blocked_or_empty_responses", 0) >= 1
+
+
+def test_formatter_recovers_empty_response_with_source_idea_text():
+    formatter = create_formatter()
+    prompts = SimpleNamespace(FORMAT_PROMPT="FORMAT:{input_text}")
+
+    with patch("idea.llm.get_prompts", return_value=prompts), patch.object(
+        Formatter,
+        "generate_text",
+        return_value="",
+    ):
+        result = formatter.format_idea(
+            {
+                "id": "idea-1",
+                "idea": "Original idea body from upstream generation",
+                "parent_ids": [],
+            },
+            "airesearch",
+        )
+
+    assert result["idea"].title == "Untitled"
+    assert result["idea"].content == "Original idea body from upstream generation"

@@ -18,32 +18,78 @@ DEFAULT_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_CREATIVE_TEMP = 1.5
 DEFAULT_TOP_P = 0.90
 
-# Thinking budget configuration for Gemini 2.5 models
-THINKING_BUDGET_CONFIG = {
-    "gemini-2.5-pro": {
-        "min": 128,
-        "max": 32768,
-        "default": 128,  # Minimum possible (can't disable)
-        "can_disable": False  # Cannot set to 0
+# Thinking controls per model.
+# NOTE: The python SDK currently exposes thinking_budget directly. thinking_level
+# is accepted by the app layer and mapped to budget when needed.
+THINKING_MODEL_CONFIG = {
+    "gemini-2.0-flash-lite": {
+        "supports_thinking": False,
     },
-    "gemini-3-pro-preview": {
-        "min": 128,
-        "max": 32768,
-        "default": 128,  # Minimum possible (can't disable)
-        "can_disable": False  # Cannot set to 0
-    },
-    "gemini-2.5-flash": {
-        "min": 0,
-        "max": 24576,
-        "default": 0,  # Disabled thinking
-        "can_disable": True  # Can set to 0
+    "gemini-2.0-flash": {
+        "supports_thinking": False,
     },
     "gemini-2.5-flash-lite": {
-        "min": 512,
-        "max": 24576,
-        "default": 0,  # Disabled thinking
-        "can_disable": True  # Can set to 0
+        "supports_thinking": True,
+        "supports_thinking_level": False,
+        "supports_thinking_budget": True,
+        "allow_off": True,
+        "default_level": "off",
+        "default_budget": 0,
+        "min_budget": 512,
+        "max_budget": 24576,
+    },
+    "gemini-2.5-flash": {
+        "supports_thinking": True,
+        "supports_thinking_level": False,
+        "supports_thinking_budget": True,
+        "allow_off": True,
+        "default_level": "off",
+        "default_budget": 0,
+        "min_budget": 128,
+        "max_budget": 24576,
+    },
+    "gemini-2.5-pro": {
+        "supports_thinking": True,
+        "supports_thinking_level": False,
+        "supports_thinking_budget": True,
+        "allow_off": False,
+        "default_level": "low",
+        "default_budget": 1024,
+        "min_budget": 128,
+        "max_budget": 32768,
+    },
+    "gemini-3-flash-preview": {
+        "supports_thinking": True,
+        "supports_thinking_level": True,
+        "supports_thinking_budget": True,
+        "allow_off": True,
+        "default_level": "off",
+        "default_budget": 0,
+        "min_budget": 0,
+        "max_budget": 24576,
+    },
+    "gemini-3-pro-preview": {
+        "supports_thinking": True,
+        "supports_thinking_level": True,
+        "supports_thinking_budget": True,
+        "allow_off": False,
+        "default_level": "low",
+        "default_budget": 1024,
+        "min_budget": 128,
+        "max_budget": 32768,
+    },
+}
+
+# Backwards-compatible budget-only view used by some helper flows.
+THINKING_BUDGET_CONFIG = {
+    model_id: {
+        "min": cfg.get("min_budget", 0),
+        "max": cfg.get("max_budget", 0),
+        "default": cfg.get("default_budget", 0),
+        "can_disable": bool(cfg.get("allow_off", False)),
     }
+    for model_id, cfg in THINKING_MODEL_CONFIG.items()
+    if cfg.get("supports_thinking_budget")
 }
 
 model_prices_per_million_tokens = {

@@ -50,6 +50,7 @@ class EvolutionEngine:
         tournament_count: Optional[float] = None,
         full_tournament_rounds: Optional[int] = None,
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
         max_budget: Optional[float] = None,
         mutation_rate: float = 0.2,
         seed_context_pool_size: Optional[int] = None,
@@ -80,6 +81,9 @@ class EvolutionEngine:
         else:
             self.tournament_count = float(tournament_count)
         self.thinking_budget = thinking_budget
+        self.thinking_level = (
+            str(thinking_level).strip().lower() if thinking_level is not None else None
+        )
         self.max_budget = max_budget
         self.mutation_rate = mutation_rate
         try:
@@ -107,7 +111,11 @@ class EvolutionEngine:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
 
         # Initialize LLM components with appropriate temperatures
-        print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}, thinking_budget={thinking_budget}")
+        print(
+            "Initializing agents with "
+            f"creative_temp={creative_temp}, top_p={top_p}, "
+            f"thinking_budget={thinking_budget}, thinking_level={self.thinking_level}"
+        )
 
         self.ideator = Ideator(
             provider="google_generative_ai",
@@ -115,6 +123,7 @@ class EvolutionEngine:
             temperature=creative_temp,
             top_p=top_p,
             thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
             api_key=api_key,
             random_seed=self._random_randbits(64),
             seed_context_pool_size=self.seed_context_pool_size,
@@ -136,6 +145,7 @@ class EvolutionEngine:
             temperature=creative_temp,
             top_p=top_p,
             thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
             api_key=api_key,
             random_seed=self._random_randbits(64),
         )
@@ -145,6 +155,7 @@ class EvolutionEngine:
             temperature=creative_temp,
             top_p=top_p,
             thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
             mutation_rate=mutation_rate,
             seed_context_pool_size=self.seed_context_pool_size,
             api_key=api_key,
@@ -157,6 +168,7 @@ class EvolutionEngine:
             temperature=creative_temp,
             top_p=top_p,
             thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
             api_key=api_key,
             random_seed=self._random_randbits(64),
         )
@@ -369,6 +381,7 @@ class EvolutionEngine:
             tournament_count=self.tournament_count,
             full_tournament_rounds=self.full_tournament_rounds,
             thinking_budget=self.thinking_budget,
+            thinking_level=self.thinking_level,
             max_budget=self.max_budget,
             mutation_rate=self.mutation_rate,
             seed_context_pool_size=self.seed_context_pool_size,

@@ -237,31 +237,45 @@
                 <small class="text-muted">Number of context-generation calls used to build the initial seed concept bank. Each +1 typically adds ~50-60 more candidate concepts before random subsampling.</small>
               </div>
 
-              <!-- Thinking Budget (only for Gemini 2.5 models) -->
+              <!-- Thinking Controls (model-aware) -->
               <div class="mb-3" id="thinkingBudgetContainer" style="display: none;">
-                <label class="form-label">Thinking Budget</label>
+                <label class="form-label">Thinking</label>
 
                 <!-- Radio button options -->
                 <div class="mb-2">
-                  <div class="form-check">
-                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingDynamic"
-                      value="dynamic" checked onchange="updateThinkingBudgetMode()">
-                    <label class="form-check-label" for="thinkingDynamic">
-                      <strong>Dynamic</strong> - Model decides when and how much to think
-                    </label>
-                  </div>
-                  <div class="form-check" id="thinkingDisabledOption" style="display: none;">
-                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingDisabled"
-                      value="disabled" onchange="updateThinkingBudgetMode()">
-                    <label class="form-check-label" for="thinkingDisabled">
-                      <strong>Disabled</strong> - Turn off thinking completely
+                  <div class="form-check" id="thinkingOffOption">
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingOff"
+                      value="off" checked onchange="updateThinkingBudgetMode()">
+                    <label class="form-check-label" for="thinkingOff">
+                      <strong>Off</strong> - Prefer speed and lower cost
                     </label>
                   </div>
                   <div class="form-check">
-                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingCustom"
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingLow"
+                      value="low" onchange="updateThinkingBudgetMode()">
+                    <label class="form-check-label" for="thinkingLow">
+                      <strong>Low</strong> - Lightweight reasoning
+                    </label>
+                  </div>
+                  <div class="form-check" id="thinkingMediumOption">
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingMedium"
+                      value="medium" onchange="updateThinkingBudgetMode()">
+                    <label class="form-check-label" for="thinkingMedium">
+                      <strong>Medium</strong> - Balanced depth and latency
+                    </label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingHigh"
+                      value="high" onchange="updateThinkingBudgetMode()">
+                    <label class="form-check-label" for="thinkingHigh">
+                      <strong>High</strong> - Deeper reasoning
+                    </label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingCustomBudget"
                       value="custom" onchange="updateThinkingBudgetMode()">
-                    <label class="form-check-label" for="thinkingCustom">
-                      <strong>Custom</strong> - Set specific token budget
+                    <label class="form-check-label" for="thinkingCustomBudget">
+                      <strong>Custom Budget</strong> - Set specific token budget
                     </label>
                   </div>
                 </div>
@@ -280,8 +294,8 @@
                   </div>
                 </div>
 
-                <small class="text-muted" id="thinkingBudgetHelp">Dynamic thinking: Model decides when and how much to
-                  think</small>
+                <small class="text-muted" id="thinkingBudgetHelp">Select a thinking preset or set a custom token
+                  budget.</small>
               </div>
 
               <h6 class="mb-3 mt-4">Swiss Tournament Controls</h6>

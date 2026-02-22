@@ -31,6 +31,7 @@ const chartFocusLookup = {
 let currentSortColumn = 'fitness';
 let currentSortDirection = 'desc';
 let originalIdeasOrder = [];
+let autoRatingProgressPollTimer = null;
 
 // Wait for Firebase auth to be ready before loading data
 function waitForAuth(callback, timeout = 5000) {
@@ -306,6 +307,8 @@ async function initializeRating(ideas, shouldRefreshPair = true) {
         }
         ideasDb[idea.id] = normalizeIdeaRecord(idea, idea.id);
     });
+
+    syncAutoTournamentCountUI();
 
     if (shouldRefreshPair) {
         await refreshPair();
@@ -952,6 +955,80 @@ function updateProgressBar(percent) {
     console.log(`After update - width: ${progressBar.style.width}, aria-valuenow: ${progressBar.getAttribute('aria-valuenow')}`);
 }
 
+function stopAutoRatingProgressPolling() {
+    if (autoRatingProgressPollTimer) {
+        clearTimeout(autoRatingProgressPollTimer);
+        autoRatingProgressPollTimer = null;
+    }
+}
+
+function getOutcomeCounts(results) {
+    const counts = { A: 0, B: 0, tie: 0 };
+    (results || []).forEach((result) => {
+        if (!result || typeof result.outcome !== 'string') {
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(counts, result.outcome)) {
+            counts[result.outcome] += 1;
+        }
+    });
+    return counts;
+}
+
+function normalizeTournamentCountValue(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        return 1.0;
+    }
+    return Math.max(0.25, Math.round(parsed * 4) / 4);
+}
+
+function getAutoTournamentEstimate() {
+    const countEl = document.getElementById('autoTournamentCount');
+    const ideaCount = Object.keys(ideasDb).length;
+    const fullTournamentRounds = Math.max(1, ideaCount - 1);
+    const tournamentCount = normalizeTournamentCountValue(countEl ? countEl.value : 1.0);
+    const targetRounds = Math.max(1, Math.round(tournamentCount * fullTournamentRounds));
+    const matchesPerRound = Math.max(1, Math.floor(ideaCount / 2));
+    const estimatedTotalMatches = Math.max(1, targetRounds * matchesPerRound);
+
+    return {
+        ideaCount,
+        tournamentCount,
+        fullTournamentRounds,
+        targetRounds,
+        matchesPerRound,
+        estimatedTotalMatches
+    };
+}
+
+function syncAutoTournamentCountUI() {
+    const countEl = document.getElementById('autoTournamentCount');
+    const valueEl = document.getElementById('autoTournamentCountValue');
+    const hintEl = document.getElementById('autoTournamentRoundsHint');
+    if (!countEl) {
+        return;
+    }
+
+    const normalizedCount = normalizeTournamentCountValue(countEl.value);
+    countEl.value = String(normalizedCount);
+
+    const estimate = getAutoTournamentEstimate();
+    if (valueEl) {
+        valueEl.textContent = estimate.tournamentCount.toFixed(2);
+    }
+    if (hintEl) {
+        const roundsLabel = estimate.targetRounds === 1 ? 'round' : 'rounds';
+        hintEl.textContent = `${estimate.tournamentCount.toFixed(2)}x tournament = ${estimate.targetRounds} Swiss ${roundsLabel} (${estimate.fullTournamentRounds} rounds = 1 full tournament).`;
+    }
+}
+
+const autoTournamentCountInput = document.getElementById('autoTournamentCount');
+if (autoTournamentCountInput) {
+    autoTournamentCountInput.addEventListener('input', syncAutoTournamentCountUI);
+}
+syncAutoTournamentCountUI();
+
 // Start Swiss auto-rating run
 const startAutoRatingBtn = document.getElementById('startAutoRating');
 startAutoRatingBtn.addEventListener('click', async function () {
@@ -959,17 +1036,18 @@ startAutoRatingBtn.addEventListener('click', async function () {
         return; // prevent multiple simultaneous runs
     }
 
-    const numSwissRounds = parseInt(document.getElementById('numSwissRounds').value);
     const evolutionId = document.getElementById('evolutionSelect').value;
     const modelId = document.getElementById('modelSelect').value;
+    const tournamentEstimate = getAutoTournamentEstimate();
+    const tournamentCount = tournamentEstimate.tournamentCount;
 
     if (!evolutionId) {
         alert('Please select an evolution first');
         return;
     }
 
-    if (!Number.isFinite(numSwissRounds) || numSwissRounds < 1) {
-        alert('Please enter at least 1 Swiss round');
+    if (!Number.isFinite(tournamentCount) || tournamentCount < 0.25) {
+        alert('Please select a valid tournament count (minimum 0.25).');
         return;
     }
 
@@ -1009,154 +1087,197 @@ startAutoRatingBtn.addEventListener('click', async function () {
     document.getElementById('rankingsTable').innerHTML = '';
 
     try {
-        const estimatedMatchesPerRound = Math.max(1, Math.floor(Object.keys(ideasDb).length / 2));
-        const estimatedTotalMatches = Math.max(1, numSwissRounds * estimatedMatchesPerRound);
-
-        let completedRounds = 0;
-        let resolvedMatches = 0;
-        let totalCompletedComparisons = 0;
+        const ratingStatsEl = document.getElementById('ratingStats');
+        let expectedRounds = tournamentEstimate.targetRounds;
+        let expectedTotalMatches = tournamentEstimate.estimatedTotalMatches;
         let allResults = [];
         let finalIdeas = [];
         let finalTokenCounts = null;
+        let progressPollingActive = true;
+        let lastProgressVersion = -1;
+        const pollProgress = async () => {
+            if (!progressPollingActive) {
+                return;
+            }
+            try {
+                const progressResponse = await fetch('/api/auto-rate/progress');
+                if (progressResponse.ok) {
+                    const progressData = await progressResponse.json();
+                    if (!progressData || !progressData.is_running) {
+                        return;
+                    }
 
-        let accumulatedTokenCounts = {
-            total: 0,
-            total_input: 0,
-            total_output: 0,
-            cost: {
-                input_cost: 0,
-                output_cost: 0,
-                total_cost: 0,
-                currency: 'USD'
-            },
-            critic: {
-                total: 0,
-                input: 0,
-                output: 0,
-                model: null,
-                cost: 0
-            },
-            models: {},
-            estimates: {}
+                    const progressVersion = Number(progressData.version ?? 0);
+                    if (progressVersion === lastProgressVersion) {
+                        return;
+                    }
+                    lastProgressVersion = progressVersion;
+
+                    const requestedRounds = Math.max(
+                        1,
+                        Math.trunc(Number(progressData.requested_rounds) || expectedRounds)
+                    );
+                    expectedRounds = requestedRounds;
+                    expectedTotalMatches = Math.max(
+                        1,
+                        Math.trunc(Number(progressData.total_matches) || expectedTotalMatches)
+                    );
+
+                    const completedRounds = Math.max(
+                        0,
+                        Math.trunc(Number(progressData.completed_rounds) || 0)
+                    );
+                    const completedMatches = Math.max(
+                        0,
+                        Math.trunc(Number(progressData.completed_matches) || 0)
+                    );
+                    const completedComparisons = Math.max(
+                        0,
+                        Math.trunc(Number(progressData.completed_comparisons) || 0)
+                    );
+                    const progressPercent = Number(progressData.progress);
+                    const computedPercent = (completedMatches / Math.max(1, expectedTotalMatches)) * 100;
+                    const safeProgress = Number.isFinite(progressPercent)
+                        ? Math.min(99, Math.max(0, progressPercent))
+                        : Math.min(99, Math.max(0, computedPercent));
+                    updateProgressBar(safeProgress);
+
+                    const progressIdeas = (progressData.ideas || []).map((idea, ideaIndex) =>
+                        normalizeIdeaRecord(idea, `auto-live-${ideaIndex}`)
+                    );
+                    if (progressIdeas.length > 0) {
+                        finalIdeas = progressIdeas;
+                        progressIdeas.forEach((idea) => {
+                            if (idea.id) {
+                                ideasDb[idea.id] = normalizeIdeaRecord({
+                                    ...(ideasDb[idea.id] || {}),
+                                    ...idea
+                                }, idea.id);
+                            }
+                        });
+                        updateRankingsTable(progressIdeas);
+                    }
+
+                    const winCounts = progressData.win_counts || { A: 0, B: 0, tie: 0 };
+                    const liveTournamentCount = normalizeTournamentCountValue(
+                        progressData.tournament_count ?? tournamentCount
+                    );
+                    const fullRounds = Math.max(
+                        1,
+                        Math.trunc(Number(progressData.full_tournament_rounds) || tournamentEstimate.fullTournamentRounds)
+                    );
+
+                    if (ratingStatsEl) {
+                        ratingStatsEl.innerHTML = `
+                            <p>Tournament count: ${liveTournamentCount.toFixed(2)}</p>
+                            <p>Swiss rounds: ${Math.min(completedRounds, requestedRounds)}/${requestedRounds}</p>
+                            <p>Resolved matches: ${completedMatches}/${expectedTotalMatches}</p>
+                            <p>Total comparisons completed: ${completedComparisons}</p>
+                            <p>A wins: ${Number(winCounts.A) || 0}</p>
+                            <p>B wins: ${Number(winCounts.B) || 0}</p>
+                            <p>Ties: ${Number(winCounts.tie) || 0}</p>
+                            <p class="text-muted mb-0">1 full tournament = ${fullRounds} Swiss rounds</p>
+                        `;
+                    }
+                }
+            } catch (pollError) {
+                console.warn('Error polling auto-rating progress:', pollError);
+            } finally {
+                if (progressPollingActive) {
+                    autoRatingProgressPollTimer = setTimeout(pollProgress, 350);
+                }
+            }
         };
 
-        for (let round = 0; round < numSwissRounds; round++) {
-            const response = await fetch('/api/auto-rate', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    numRounds: 1,
-                    evolutionId: evolutionId,
-                    modelId: modelId,
-                    skipSave: false
-                })
-            });
+        pollProgress();
 
-            if (!response.ok) {
-                let errorMessage = 'Failed to perform automated Swiss rating';
-                try {
-                    const errorPayload = await response.json();
-                    if (errorPayload?.message) {
-                        errorMessage = errorPayload.message;
-                    } else if (errorPayload?.detail) {
-                        errorMessage = errorPayload.detail;
-                    }
-                } catch (_) {
-                    // Keep default message when response isn't JSON
+        const response = await fetch('/api/auto-rate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                tournamentCount: tournamentCount,
+                evolutionId: evolutionId,
+                modelId: modelId,
+                skipSave: false
+            })
+        });
+        progressPollingActive = false;
+        stopAutoRatingProgressPolling();
+
+        if (!response.ok) {
+            let errorMessage = 'Failed to perform automated Swiss rating';
+            try {
+                const errorPayload = await response.json();
+                if (errorPayload?.message) {
+                    errorMessage = errorPayload.message;
+                } else if (errorPayload?.detail) {
+                    errorMessage = errorPayload.detail;
                 }
-                throw new Error(errorMessage);
+            } catch (_) {
+                // Keep default message when response isn't JSON
             }
-
-            const data = await response.json();
-            const roundResults = data.results || [];
-            const roundComparisons = data.new_comparisons || roundResults.length;
-
-            allResults = allResults.concat(roundResults);
-            resolvedMatches += roundComparisons;
-            completedRounds += (data.new_rounds || data.completed_rounds || 1);
-            totalCompletedComparisons = data.completed_comparisons || (totalCompletedComparisons + roundComparisons);
-            finalIdeas = (data.ideas || finalIdeas).map((idea, ideaIndex) =>
-                normalizeIdeaRecord(idea, `auto-${round}-${ideaIndex}`)
-            );
-
-            if (data.token_counts) {
-                const chunkTokens = data.token_counts;
-                accumulatedTokenCounts.total += chunkTokens.total || 0;
-                accumulatedTokenCounts.total_input += chunkTokens.total_input || 0;
-                accumulatedTokenCounts.total_output += chunkTokens.total_output || 0;
-
-                if (chunkTokens.cost) {
-                    accumulatedTokenCounts.cost.input_cost += chunkTokens.cost.input_cost || 0;
-                    accumulatedTokenCounts.cost.output_cost += chunkTokens.cost.output_cost || 0;
-                    accumulatedTokenCounts.cost.total_cost += chunkTokens.cost.total_cost || 0;
-                }
-
-                if (chunkTokens.critic) {
-                    accumulatedTokenCounts.critic.total += chunkTokens.critic.total || 0;
-                    accumulatedTokenCounts.critic.input += chunkTokens.critic.input || 0;
-                    accumulatedTokenCounts.critic.output += chunkTokens.critic.output || 0;
-                    accumulatedTokenCounts.critic.cost += chunkTokens.critic.cost || 0;
-                    if (!accumulatedTokenCounts.critic.model && chunkTokens.critic.model) {
-                        accumulatedTokenCounts.critic.model = chunkTokens.critic.model;
-                    }
-                }
-
-                if (chunkTokens.models && Object.keys(accumulatedTokenCounts.models).length === 0) {
-                    accumulatedTokenCounts.models = chunkTokens.models;
-                }
-
-                if (chunkTokens.estimates) {
-                    for (const [estModelId, estimate] of Object.entries(chunkTokens.estimates)) {
-                        if (!accumulatedTokenCounts.estimates[estModelId]) {
-                            accumulatedTokenCounts.estimates[estModelId] = {
-                                name: estimate.name,
-                                cost: 0
-                            };
-                        }
-                        accumulatedTokenCounts.estimates[estModelId].cost += estimate.cost || 0;
-                    }
-                }
-
-                finalTokenCounts = accumulatedTokenCounts;
-            }
-
-            finalIdeas.forEach(idea => {
-                if (idea.id) {
-                    ideasDb[idea.id] = normalizeIdeaRecord({
-                        ...(ideasDb[idea.id] || {}),
-                        ...idea
-                    }, idea.id);
-                }
-            });
-
-            updateRankingsTable(finalIdeas);
-
-            const roundProgress = (completedRounds / numSwissRounds) * 100;
-            const matchProgress = (resolvedMatches / estimatedTotalMatches) * 100;
-            updateProgressBar(Math.min(99, Math.max(roundProgress, matchProgress)));
-
-            document.getElementById('ratingStats').innerHTML = `
-                <p>Round ${Math.min(completedRounds, numSwissRounds)} of ${numSwissRounds}</p>
-                <p>Resolved matches: ${resolvedMatches}/${estimatedTotalMatches} (estimated)</p>
-                <p>Total comparisons completed: ${totalCompletedComparisons}</p>
-                <p>A wins: ${allResults.filter(r => r.outcome === 'A').length}</p>
-                <p>B wins: ${allResults.filter(r => r.outcome === 'B').length}</p>
-                <p>Ties: ${allResults.filter(r => r.outcome === 'tie').length}</p>
-            `;
+            throw new Error(errorMessage);
         }
+
+        const data = await response.json();
+        allResults = data.results || [];
+        const completedRounds = Math.max(
+            0,
+            Math.trunc(Number(data.completed_rounds) || Number(data.target_tournament_rounds) || expectedRounds)
+        );
+        expectedRounds = Math.max(
+            1,
+            Math.trunc(Number(data.target_tournament_rounds) || Number(data.completed_rounds) || expectedRounds)
+        );
+        const resolvedMatches = Math.max(
+            0,
+            Math.trunc(Number(data.new_comparisons) || allResults.length)
+        );
+        const totalCompletedComparisons = Math.max(
+            0,
+            Math.trunc(Number(data.completed_comparisons) || resolvedMatches)
+        );
+        expectedTotalMatches = Math.max(
+            1,
+            Math.trunc(Number(data.target_tournament_rounds) || expectedRounds)
+            * Math.max(1, Math.floor(Object.keys(ideasDb).length / 2))
+        );
+        finalIdeas = (data.ideas || finalIdeas).map((idea, ideaIndex) =>
+            normalizeIdeaRecord(idea, `auto-${ideaIndex}`)
+        );
+        finalTokenCounts = data.token_counts || null;
+
+        finalIdeas.forEach(idea => {
+            if (idea.id) {
+                ideasDb[idea.id] = normalizeIdeaRecord({
+                    ...(ideasDb[idea.id] || {}),
+                    ...idea
+                }, idea.id);
+            }
+        });
+
+        updateRankingsTable(finalIdeas);
 
         updateProgressBar(100);
 
-        const stats = document.getElementById('ratingStats');
+        const stats = ratingStatsEl || document.getElementById('ratingStats');
+        const finalOutcomeCounts = getOutcomeCounts(allResults);
+        const finalTournamentCount = normalizeTournamentCountValue(data.tournament_count ?? tournamentCount);
+        const finalFullRounds = Math.max(
+            1,
+            Math.trunc(Number(data.full_tournament_rounds) || tournamentEstimate.fullTournamentRounds)
+        );
         let statsHtml = `
-            <p>Completed: ${completedRounds}/${numSwissRounds} Swiss rounds</p>
+            <p>Tournament count: ${finalTournamentCount.toFixed(2)}</p>
+            <p>Completed: ${completedRounds}/${expectedRounds} Swiss rounds</p>
             <p>Resolved matches: ${resolvedMatches}</p>
             <p>Total comparisons completed: ${totalCompletedComparisons}</p>
-            <p>A wins: ${allResults.filter(r => r.outcome === 'A').length}</p>
-            <p>B wins: ${allResults.filter(r => r.outcome === 'B').length}</p>
-            <p>Ties: ${allResults.filter(r => r.outcome === 'tie').length}</p>
+            <p>A wins: ${finalOutcomeCounts.A}</p>
+            <p>B wins: ${finalOutcomeCounts.B}</p>
+            <p>Ties: ${finalOutcomeCounts.tie}</p>
+            <p class="text-muted mb-0">1 full tournament = ${finalFullRounds} Swiss rounds</p>
         `;
 
         if (finalTokenCounts) {
@@ -1184,8 +1305,10 @@ startAutoRatingBtn.addEventListener('click', async function () {
 
     } catch (error) {
         console.error('Error during auto-rating:', error);
+        stopAutoRatingProgressPolling();
         document.getElementById('ratingStats').innerHTML = `<p class="text-danger">Error: ${error.message}</p>`;
     } finally {
+        stopAutoRatingProgressPolling();
         startAutoRatingBtn.textContent = 'Start Auto Swiss Rating';
         startAutoRatingBtn.disabled = false;
         autoRatingInProgress = false;
