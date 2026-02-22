@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from idea.llm import Critic, Oracle, Breeder
+from idea.llm import Breeder, Critic, Formatter, Ideator, Oracle
 
 
 class DummyPrompts:
@@ -16,6 +16,8 @@ class DummyPrompts:
     ORACLE_FORMAT_INSTRUCTIONS = ""
     ORACLE_MAIN_PROMPT = "{mode_instruction}{format_instructions}{example_idea_prompts}"
     IDEA_PROMPT = ""
+    SPECIFIC_PROMPT = "{context_pool}"
+    BREED_PROMPT = "{ideas}"
     EXAMPLE_IDEA_PROMPTS = ""
 
 
@@ -27,6 +29,16 @@ def create_critic():
 def create_oracle():
     with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
         return Oracle()
+
+
+def create_ideator(**kwargs):
+    with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
+        return Ideator(**kwargs)
+
+
+def create_formatter():
+    with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
+        return Formatter()
 
 
 def test_elo_update_cases():
@@ -179,6 +191,27 @@ def test_breeder_keeps_mutation_context_per_child():
     assert calls["count"] == 2
 
 
+def test_context_from_parents_uses_weighted_parent_mix_and_non_overlapping_mutation():
+    ideator = create_ideator()
+    ideator._random_sample = lambda population, k: list(population)[:k]
+    ideator._random_uniform = lambda _a, _b: 0.5
+    ideator._random_shuffle = lambda _seq: None
+
+    context_pool = ideator.generate_context_from_parents(
+        parent_genotypes=[
+            "alpha; beta; gamma; theta",
+            "beta; delta; epsilon; zeta",
+        ],
+        mutation_rate=0.5,
+        mutation_context_pool="beta, omega",
+    )
+    concepts = [c.strip() for c in context_pool.split(",") if c.strip()]
+
+    # target_child_size = 4, primary ratio = 50% => 2 from parent 1, then 2 from parent 2.
+    # secondary overlap on "beta" is filtered and not backfilled, then one mutation is injected.
+    assert concepts == ["alpha", "beta", "delta", "omega"]
+
+
 def test_oracle_response_parsing():
     oracle = create_oracle()
     response_text = """
@@ -194,3 +227,126 @@ This is the new idea prompt.
     assert result["action"] == "replace"
     assert result["oracle_analysis"] == "This is the analysis."
     assert result["idea_prompt"] == "This is the new idea prompt."
+
+
+def test_generate_context_parses_line_based_concepts():
+    ideator = create_ideator()
+    llm_response = """CONCEPTS:
+- Base=Snake | Twist=wrapping + ghost trail | Constraints=grid-only / no sprites
+- Base=Tetris | Twist=rotating board | Constraints=single screen / geometric blocks
+- Base=Pong | Twist=timed gates | Constraints=one ball / deterministic speed
+- Base=Frogger | Twist=lane swap | Constraints=discrete lanes / keyboard only
+"""
+    with patch.object(Ideator, "generate_text", return_value=llm_response):
+        context_pool = ideator.generate_context("game_design")
+
+    concepts = [c.strip() for c in context_pool.split(",") if c.strip()]
+    assert concepts
+    assert all("Base=" in concept for concept in concepts)
+
+
+def test_generate_idea_from_context_appends_template_constraints():
+    ideator = create_ideator()
+    prompts = SimpleNamespace(
+        SPECIFIC_PROMPT="SPEC:{context_pool}",
+        IDEA_PROMPT="UNUSED",
+        BREED_PROMPT="UNUSED",
+        template=SimpleNamespace(special_requirements="must include title and content"),
+    )
+
+    with patch("idea.llm.get_prompts", return_value=prompts), patch.object(
+        Ideator,
+        "generate_text",
+        side_effect=["specific direction", "final idea"],
+    ) as mocked_generate:
+        idea, specific = ideator.generate_idea_from_context("alpha, beta", "drabble")
+
+    assert idea == "final idea"
+    assert specific == "specific direction"
+    generation_prompt = mocked_generate.call_args_list[1].args[0]
+    assert generation_prompt == (
+        "specific direction\n\n"
+        "Constraints:\n"
+        "must include title and content"
+    )
+
+
+def test_generate_idea_from_context_without_requirements_uses_specific_prompt_only():
+    ideator = create_ideator()
+    prompts = SimpleNamespace(
+        SPECIFIC_PROMPT="SPEC:{context_pool}",
+        IDEA_PROMPT="UNUSED",
+        BREED_PROMPT="UNUSED",
+    )
+
+    with patch("idea.llm.get_prompts", return_value=prompts), patch.object(
+        Ideator,
+        "generate_text",
+        side_effect=["specific direction", "bred idea"],
+    ) as mocked_generate:
+        idea, _specific = ideator.generate_idea_from_context("alpha, beta", "drabble")
+
+    assert idea == "bred idea"
+    generation_prompt = mocked_generate.call_args_list[1].args[0]
+    assert generation_prompt == "specific direction"
+
+
+def test_seed_context_pool_size_override_controls_context_call_count():
+    ideator = create_ideator(seed_context_pool_size=4)
+    with patch.object(Ideator, "generate_context", return_value="alpha, beta, gamma") as mocked_context:
+        concept_bank = ideator._build_seed_context_bank(n=5, idea_type="drabble")
+
+    assert mocked_context.call_count == 4
+    assert concept_bank == ["alpha", "beta", "gamma"]
+
+
+def test_diagnostic_events_store_raw_details():
+    ideator = create_ideator()
+    ideator._increment_diagnostic("generation_errors", detail="timeout while generating")
+
+    events = ideator.get_diagnostic_events()
+    assert len(events) == 1
+    assert events[0]["key"] == "generation_errors"
+    assert "timeout" in events[0]["detail"]
+
+
+def test_generate_content_coerces_empty_text_to_no_response():
+    ideator = create_ideator()
+
+    class _FakeResponse:
+        text = ""
+        usage_metadata = None
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**_kwargs):
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "No response."
+    assert ideator.get_diagnostics().get("blocked_or_empty_responses", 0) >= 1
+
+
+def test_formatter_recovers_empty_response_with_source_idea_text():
+    formatter = create_formatter()
+    prompts = SimpleNamespace(FORMAT_PROMPT="FORMAT:{input_text}")
+
+    with patch("idea.llm.get_prompts", return_value=prompts), patch.object(
+        Formatter,
+        "generate_text",
+        return_value="",
+    ):
+        result = formatter.format_idea(
+            {
+                "id": "idea-1",
+                "idea": "Original idea body from upstream generation",
+                "parent_ids": [],
+            },
+            "airesearch",
+        )
+
+    assert result["idea"].title == "Untitled"
+    assert result["idea"].content == "Original idea body from upstream generation"

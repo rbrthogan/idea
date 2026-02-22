@@ -28,11 +28,22 @@ let tournamentCountTouched = false;
 let lastRenderedHistoryVersion = -1;
 let lastStoredHistoryVersion = -1;
 let persistStateTimeout = null;
+let openTournamentPanelGeneration = null;
 const LOCAL_STORAGE_PERSIST_DELAY_MS = 1200;
+let lastDiversityRenderSignature = '';
+let diversityPlotSized = false;
 
 // Track previous status message to detect changes for activity log
 let previousStatusMessage = '';
 let previousProgress = 0;
+let lastProgressBarValue = -1;
+let lastContextSignature = '';
+let lastTournamentHistorySignature = '';
+let lastTokenCountsSignature = '';
+let lastOracleUpdateKey = '';
+let lastEliteUpdateKey = '';
+let lastDiagnosticsSummaryKey = '';
+let latestDiagnosticsTokenCounts = null;
 
 /**
  * Load available templates and populate the idea type dropdown
@@ -47,6 +58,69 @@ function escapeHtml(value) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function safeSignature(value) {
+    try {
+        return JSON.stringify(value ?? null);
+    } catch (error) {
+        return String(value ?? '');
+    }
+}
+
+function prettifyDiagnosticKey(key) {
+    return String(key || '').replace(/_/g, ' ');
+}
+
+function getDiagnosticDescription(key) {
+    const descriptions = {
+        generation_errors: 'LLM generation request failed and was retried or bypassed.',
+        blocked_or_empty_responses: 'Model response was blocked/empty and fallback handling was used.',
+        provider_client_unavailable: 'Provider client was unavailable for at least one request.',
+        context_missing_concepts_marker: 'Expected CONCEPTS marker was missing; fallback parsing was used.',
+        context_empty_after_parse: 'Context response could not be parsed into concepts.',
+        formatter_schema_parse_failures: 'Structured formatter JSON parse failed and fallback parsing was used.',
+        formatter_json_clean_recovery_failures: 'JSON clean-up fallback also failed during formatting.',
+        formatter_fallback_used: 'Formatter fallback path was used instead of strict schema output.',
+        formatter_json_clean_recovery: 'Formatter recovered using JSON clean-up fallback.',
+        formatter_title_content_recovery: 'Formatter recovered via Title/Content extraction fallback.',
+        compare_ideas_errors: 'Pairwise comparison call failed for at least one matchup.',
+        oracle_parse_fallbacks: 'Oracle returned unstructured output and fallback parsing was used.',
+        oracle_parse_errors: 'Oracle parsing raised an error and fallback handling was used.',
+        seed_generation_failures: 'Seed generation attempt failed and was retried.',
+        seed_context_novelty_regenerations: 'Seed context was regenerated to improve novelty.',
+        seed_context_novelty_guardrail_exhausted: 'Novelty retries were exhausted for one or more seeds.',
+    };
+    return descriptions[key] || 'No description available for this diagnostic key.';
+}
+
+function formatDiagnosticTimestamp(value) {
+    if (!value) return '';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    return parsed.toLocaleString();
+}
+
+function getDiagnosticsSummary(tokenCounts) {
+    const totals = tokenCounts?.diagnostics?.totals;
+    if (!totals || typeof totals !== 'object') {
+        return null;
+    }
+
+    const entries = Object.entries(totals)
+        .filter(([, value]) => Number.isFinite(value) && value > 0)
+        .sort((a, b) => b[1] - a[1]);
+
+    const totalCount = entries.reduce((sum, [, value]) => sum + value, 0);
+    const topEntries = entries
+        .slice(0, 3)
+        .map(([key, value]) => `${prettifyDiagnosticKey(key)}: ${value}`);
+
+    return {
+        totalCount,
+        topEntries,
+        signature: safeSignature(entries),
+    };
 }
 
 function getStoredTemplateId() {
@@ -270,6 +344,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     addListener('popSize', 'input', updateTournamentCountFromPopSize);
     updateTournamentCountFromPopSize();
+    setupModelChangeListener();
 
     // --- Evolution Controls ---
 
@@ -301,9 +376,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Get mutation rate
         const mutationRate = parseFloat(document.getElementById('mutationRate').value);
+        const seedContextPoolSizeInput = document.getElementById('seedContextPoolSize');
+        const seedContextPoolSize = seedContextPoolSizeInput ? parseInt(seedContextPoolSizeInput.value) : null;
+        const replacementRate = parseFloat(document.getElementById('replacementRate').value);
+        const fitnessAlpha = parseFloat(document.getElementById('fitnessAlpha').value);
+        const ageDecayRate = parseFloat(document.getElementById('ageDecayRate').value);
 
-        // Get thinking budget value (only for Gemini 2.5 models)
-        const thinkingBudget = getThinkingBudgetValue();
+        // Get model-aware thinking settings.
+        const thinkingSettings = getThinkingSettings();
 
         // Get max budget
         const maxBudgetInput = document.getElementById('maxBudget');
@@ -322,7 +402,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             topP,
             tournamentCount,
             mutationRate,
-            thinkingBudget,
+            seedContextPoolSize: Number.isInteger(seedContextPoolSize) ? seedContextPoolSize : null,
+            replacementRate,
+            fitnessAlpha,
+            ageDecayRate,
+            thinkingBudget: thinkingSettings.thinkingBudget,
+            thinkingLevel: thinkingSettings.thinkingLevel,
             maxBudget,
             evolutionName
         };
@@ -1050,9 +1135,31 @@ function renderGenerations(gens) {
             toggleButton.onclick = () => toggleGeneration(index);
             toggleButton.innerHTML = '<i class="fas fa-chevron-up"></i>';
 
+            const tournamentChip = document.createElement('button');
+            tournamentChip.type = 'button';
+            tournamentChip.className = 'generation-tournament-chip';
+            tournamentChip.id = `generation-tournament-chip-${index}`;
+            tournamentChip.setAttribute('aria-label', `Toggle tournament details for Generation ${index}`);
+            tournamentChip.setAttribute('aria-expanded', 'false');
+            tournamentChip.setAttribute('aria-controls', `generation-tournament-popout-${index}`);
+            tournamentChip.onclick = () => toggleGenerationTournament(index);
+            tournamentChip.innerHTML = '<i class="fas fa-trophy"></i><span>Tournament</span>';
+            tournamentChip.hidden = true;
+
+            const headerControls = document.createElement('div');
+            headerControls.className = 'generation-header-controls';
+            headerControls.appendChild(tournamentChip);
+            headerControls.appendChild(toggleButton);
+
             headerDiv.appendChild(header);
-            headerDiv.appendChild(toggleButton);
+            headerDiv.appendChild(headerControls);
             genDiv.appendChild(headerDiv);
+
+            const tournamentPopout = document.createElement('div');
+            tournamentPopout.className = 'generation-tournament-popout';
+            tournamentPopout.id = `generation-tournament-popout-${index}`;
+            tournamentPopout.hidden = true;
+            genDiv.appendChild(tournamentPopout);
 
             // Add ideas container with proper containment
             const contentDiv = document.createElement('div');
@@ -1074,6 +1181,8 @@ function renderGenerations(gens) {
 
             container.appendChild(genDiv);
         }
+
+        renderGenerationTournamentDetails(index);
 
         // Get the scroll container for this generation
         const scrollContainer = document.getElementById(`scroll-container-${index}`);
@@ -1261,6 +1370,7 @@ function toggleGeneration(generationId) {
         content.style.display = 'none';
         icon.className = 'fas fa-chevron-down';
         button.setAttribute('aria-expanded', 'false');
+        closeGenerationTournament(generationId);
     }
 }
 
@@ -1981,10 +2091,8 @@ async function loadHistoryItemData(item) {
                     document.getElementById('generations-container').innerHTML = '';
                     renderGenerations(data.data.history);
 
-                    if (data.data.tournament_history) {
-                        tournamentHistory = data.data.tournament_history;
-                        renderTournamentDetails(tournamentHistory);
-                    }
+                    tournamentHistory = data.data.tournament_history || [];
+                    renderTournamentDetails(tournamentHistory);
 
                     if (data.data.diversity_history && data.data.diversity_history.length > 0) {
                         updateDiversityChart(data.data.diversity_history);
@@ -2021,10 +2129,8 @@ async function loadHistoryItemData(item) {
                     document.getElementById('generations-container').innerHTML = '';
                     renderGenerations(data.history);
 
-                    if (data.tournament_history) {
-                        tournamentHistory = data.tournament_history;
-                        renderTournamentDetails(tournamentHistory);
-                    }
+                    tournamentHistory = data.tournament_history || [];
+                    renderTournamentDetails(tournamentHistory);
 
                     if (data.diversity_history && data.diversity_history.length > 0) {
                         updateDiversityChart(data.diversity_history);
@@ -2448,8 +2554,11 @@ async function pollProgress() {
             }
         }
 
-        // Check if this is a new evolution (history is empty but is_running is true)
-        if (data.is_running && (!data.history || data.history.length === 0)) {
+        // Reset the display only for truly new runs (no history available yet).
+        const noInlineHistory = !data.history || data.history.length === 0;
+        const noHistoryAvailable = !data.history_available;
+        const nothingRenderedYet = lastRenderedHistoryVersion < 0;
+        if (data.is_running && noInlineHistory && noHistoryAvailable && nothingRenderedYet) {
             console.log("New evolution detected, resetting UI");
             // Reset generations display but keep progress bar
             const container = document.getElementById('generations-container');
@@ -2475,16 +2584,23 @@ async function pollProgress() {
         if (progressBar) {
             // Cap progress at 100% to handle edge cases in calculation
             const progress = Math.min(data.progress || 0, 100);
-            progressBar.style.width = `${progress}%`;
-            progressBar.setAttribute('aria-valuenow', progress);
+            const roundedProgress = Math.round(progress * 10) / 10;
+            if (roundedProgress !== lastProgressBarValue) {
+                progressBar.style.width = `${progress}%`;
+                progressBar.setAttribute('aria-valuenow', progress);
+                lastProgressBarValue = roundedProgress;
+            }
 
             // Update prominent percentage display
             if (progressPercentage) {
-                progressPercentage.textContent = `${Math.round(progress)}%`;
+                const progressLabel = `${Math.round(progress)}%`;
+                if (progressPercentage.textContent !== progressLabel) {
+                    progressPercentage.textContent = progressLabel;
+                }
             }
 
             // Cap the display at 100%
-            if (progress >= 100) {
+            if (progress >= 100 && progressBar.style.width !== '100%') {
                 progressBar.style.width = '100%';
             }
 
@@ -2547,8 +2663,12 @@ async function pollProgress() {
         }
 
         if (data.tournament_history) {
-            tournamentHistory = data.tournament_history;
-            renderTournamentDetails(tournamentHistory);
+            const nextTournamentSignature = safeSignature(data.tournament_history);
+            if (nextTournamentSignature !== lastTournamentHistorySignature) {
+                tournamentHistory = data.tournament_history;
+                renderTournamentDetails(tournamentHistory);
+                lastTournamentHistorySignature = nextTournamentSignature;
+            }
         }
 
         // Handle diversity updates with activity logging
@@ -2571,12 +2691,20 @@ async function pollProgress() {
 
         // Handle oracle updates with activity logging
         if (data.oracle_update) {
-            addActivityLogItem('🔮 Oracle injected diverse idea into population', 'info');
+            const oracleKey = `${currentEvolutionId || 'na'}:${Number.isInteger(data.history_version) ? data.history_version : 'na'}:${data.current_generation || 'na'}:${Math.round((data.progress || 0) * 10) / 10}`;
+            if (oracleKey !== lastOracleUpdateKey) {
+                addActivityLogItem('🔮 Oracle injected diverse idea into population', 'info');
+                lastOracleUpdateKey = oracleKey;
+            }
         }
 
         // Handle elite selection updates
         if (data.elite_selection_update) {
-            addActivityLogItem('⭐ Elite idea selected for next generation', 'info');
+            const eliteKey = `${currentEvolutionId || 'na'}:${Number.isInteger(data.history_version) ? data.history_version : 'na'}:${data.current_generation || 'na'}:${Math.round((data.progress || 0) * 10) / 10}`;
+            if (eliteKey !== lastEliteUpdateKey) {
+                addActivityLogItem('⭐ Elite idea selected for next generation', 'info');
+                lastEliteUpdateKey = eliteKey;
+            }
         }
 
         // Display token counts if available (Live updates)
@@ -2585,12 +2713,23 @@ async function pollProgress() {
         }
 
         if (data.contexts && data.contexts.length > 0) {
-            contexts = data.contexts;
-            specificPrompts = data.specific_prompts || [];
-            breedingPrompts = data.breeding_prompts || [];
-            currentContextIndex = 0;
-            updateContextDisplay();
-            document.querySelector('.context-navigation').style.display = 'block';
+            const nextContextSignature = safeSignature({
+                contexts: data.contexts,
+                specific_prompts: data.specific_prompts || [],
+                breeding_prompts: data.breeding_prompts || [],
+            });
+            if (nextContextSignature !== lastContextSignature) {
+                contexts = data.contexts;
+                specificPrompts = data.specific_prompts || [];
+                breedingPrompts = data.breeding_prompts || [];
+                currentContextIndex = 0;
+                updateContextDisplay();
+                const contextNav = document.querySelector('.context-navigation');
+                if (contextNav) {
+                    contextNav.style.display = 'block';
+                }
+                lastContextSignature = nextContextSignature;
+            }
         }
 
         // Continue polling if evolution is still running
@@ -2647,6 +2786,26 @@ async function pollProgress() {
                 // Display token counts if available
                 if (data.token_counts) {
                     displayTokenCounts(data.token_counts);
+                    const diagnosticsSummary = getDiagnosticsSummary(data.token_counts);
+                    if (diagnosticsSummary) {
+                        latestDiagnosticsTokenCounts = data.token_counts;
+                        const diagnosticsKey = `${currentEvolutionId || 'na'}:${diagnosticsSummary.signature}`;
+                        if (diagnosticsKey !== lastDiagnosticsSummaryKey) {
+                            if (diagnosticsSummary.totalCount > 0) {
+                                const detailText = diagnosticsSummary.topEntries.length > 0
+                                    ? ` (${diagnosticsSummary.topEntries.join(', ')})`
+                                    : '';
+                                addActivityLogItem(
+                                    `🧪 Diagnostics recorded ${diagnosticsSummary.totalCount} recoverable issue(s)${detailText}`,
+                                    'warning',
+                                    { action: 'show-diagnostics', actionLabel: 'View details' }
+                                );
+                            } else {
+                                addActivityLogItem('🧪 Diagnostics clean: no recoverable parsing/generation issues', 'success');
+                            }
+                            lastDiagnosticsSummaryKey = diagnosticsKey;
+                        }
+                    }
                 }
 
                 // Final diversity update
@@ -3291,6 +3450,12 @@ function resetUIState() {
     activityLog = [];
     previousStatusMessage = '';
     previousProgress = 0;
+    lastProgressBarValue = -1;
+    lastContextSignature = '';
+    lastTournamentHistorySignature = '';
+    lastTokenCountsSignature = '';
+    lastOracleUpdateKey = '';
+    lastEliteUpdateKey = '';
 
     // Reset diversity tracking
     window._loggedDiversityGens = new Set();
@@ -3299,6 +3464,7 @@ function resetUIState() {
     isEvolutionRunning = false;
     currentEvolutionData = null;
     tournamentHistory = [];
+    openTournamentPanelGeneration = null;
     tournamentCountTouched = false;
     lastRenderedHistoryVersion = -1;
     lastStoredHistoryVersion = -1;
@@ -3308,10 +3474,6 @@ function resetUIState() {
     if (existingProgressContainer) {
         // Remove the old progress container
         existingProgressContainer.remove();
-    }
-    const tournamentContainer = document.getElementById('tournament-details-container');
-    if (tournamentContainer) {
-        tournamentContainer.remove();
     }
     // Create fresh progress bar with activity log (this starts the timer)
     createProgressBar(currentEvolutionName);
@@ -3397,8 +3559,6 @@ function createProgressBar(evolutionName = null) {
     // Start elapsed time updater immediately
     startElapsedTimeUpdater();
 
-    // Ensure tournament details container is present
-    ensureTournamentDetailsContainer();
 }
 
 function escapeHtml(str) {
@@ -3411,98 +3571,144 @@ function escapeHtml(str) {
         .replace(/'/g, '&#039;');
 }
 
-function ensureTournamentDetailsContainer() {
-    let container = document.getElementById('tournament-details-container');
-    if (container) {
-        return container;
-    }
-
-    container = document.createElement('div');
-    container.id = 'tournament-details-container';
-    container.className = 'tournament-details-card mb-4';
-    container.innerHTML = `
-        <div class="tournament-details-header">
-            <h5 class="mb-0">Swiss Tournament Details</h5>
-            <button type="button" class="btn btn-sm btn-outline-secondary" id="tournament-details-toggle">Hide</button>
-        </div>
-        <div class="tournament-details-body" id="tournament-details-body" style="display: block;">
-            <div class="text-muted">No tournament data yet.</div>
-        </div>
-    `;
-
-    const generationsContainer = document.getElementById('generations-container');
-    generationsContainer.parentNode.insertBefore(container, generationsContainer);
-
-    const toggleBtn = container.querySelector('#tournament-details-toggle');
-    const body = container.querySelector('#tournament-details-body');
-    if (toggleBtn && body) {
-        toggleBtn.addEventListener('click', () => {
-            const isHidden = body.style.display === 'none';
-            body.style.display = isHidden ? 'block' : 'none';
-            toggleBtn.textContent = isHidden ? 'Hide' : 'Show';
-        });
-    }
-
-    return container;
+function getTournamentEntryForGeneration(generationIndex) {
+    return tournamentHistory.find((entry) => Number(entry.generation) === Number(generationIndex)) || null;
 }
 
-function renderTournamentDetails(history) {
-    const container = ensureTournamentDetailsContainer();
-    const body = container.querySelector('#tournament-details-body');
-    if (!body) return;
-
-    if (!history || history.length === 0) {
-        body.innerHTML = '<div class="text-muted">No tournament data yet.</div>';
-        return;
-    }
-
-    const html = history.map((entry, idx) => {
-        const genLabel = `Gen ${entry.generation}`;
-        const rounds = (entry.rounds || []).map((round) => {
-            const bye = round.bye
-                ? `<div class="tournament-bye">Bye: ${escapeHtml(round.bye.title || `Idea ${round.bye.idx}`)}</div>`
-                : '';
-            const pairs = (round.pairs || []).map((pair) => {
-                const aTitle = escapeHtml(pair.a_title || `Idea ${pair.a_idx}`);
-                const bTitle = escapeHtml(pair.b_title || `Idea ${pair.b_idx}`);
-                const aWinner = pair.winner === 'A';
-                const bWinner = pair.winner === 'B';
-                const tie = pair.winner === 'tie';
-                return `
-                    <div class="tournament-match-card">
-                        <div class="match-row ${aWinner ? 'winner' : ''}">
-                            <span class="match-name">${aTitle}</span>
-                            ${aWinner ? '<span class="match-badge">Winner</span>' : ''}
-                        </div>
-                        <div class="match-row ${bWinner ? 'winner' : ''}">
-                            <span class="match-name">${bTitle}</span>
-                            ${bWinner ? '<span class="match-badge">Winner</span>' : ''}
-                        </div>
-                        ${tie ? '<div class="match-tie">Tie</div>' : ''}
-                    </div>
-                `;
-            }).join('');
+function buildTournamentRoundsHtml(rounds) {
+    return (rounds || []).map((round) => {
+        const bye = round.bye
+            ? `<div class="tournament-bye">Bye: ${escapeHtml(round.bye.title || `Idea ${round.bye.idx}`)}</div>`
+            : '';
+        const pairs = (round.pairs || []).map((pair) => {
+            const aTitle = escapeHtml(pair.a_title || `Idea ${pair.a_idx}`);
+            const bTitle = escapeHtml(pair.b_title || `Idea ${pair.b_idx}`);
+            const aWinner = pair.winner === 'A';
+            const bWinner = pair.winner === 'B';
+            const tie = pair.winner === 'tie';
             return `
-                <div class="tournament-round-column">
-                    <div class="tournament-round-title">Round ${round.round || ''}</div>
-                    ${bye}
-                    ${pairs || '<div class="text-muted">No matches recorded.</div>'}
+                <div class="tournament-match-card">
+                    <div class="match-row ${aWinner ? 'winner' : ''}">
+                        <span class="match-name">${aTitle}</span>
+                        ${aWinner ? '<span class="match-badge">Winner</span>' : ''}
+                    </div>
+                    <div class="match-row ${bWinner ? 'winner' : ''}">
+                        <span class="match-name">${bTitle}</span>
+                        ${bWinner ? '<span class="match-badge">Winner</span>' : ''}
+                    </div>
+                    ${tie ? '<div class="match-tie">Tie</div>' : ''}
                 </div>
             `;
         }).join('');
 
-        const openAttr = idx === history.length - 1 ? 'open' : '';
         return `
-            <details class="tournament-gen" ${openAttr}>
-                <summary>${genLabel}</summary>
-                <div class="tournament-grid">
-                    ${rounds || '<div class="text-muted">No rounds recorded.</div>'}
-                </div>
-            </details>
+            <div class="tournament-round-column">
+                <div class="tournament-round-title">Round ${round.round || ''}</div>
+                ${bye}
+                ${pairs || '<div class="text-muted">No matches recorded.</div>'}
+            </div>
         `;
     }).join('');
+}
 
-    body.innerHTML = html;
+function closeGenerationTournament(generationIndex) {
+    const chip = document.getElementById(`generation-tournament-chip-${generationIndex}`);
+    const panel = document.getElementById(`generation-tournament-popout-${generationIndex}`);
+    if (chip) {
+        chip.classList.remove('is-open');
+        chip.setAttribute('aria-expanded', 'false');
+    }
+    if (panel) {
+        panel.hidden = true;
+    }
+    if (openTournamentPanelGeneration === generationIndex) {
+        openTournamentPanelGeneration = null;
+    }
+}
+
+function openGenerationTournament(generationIndex) {
+    if (openTournamentPanelGeneration !== null && openTournamentPanelGeneration !== generationIndex) {
+        closeGenerationTournament(openTournamentPanelGeneration);
+    }
+    const chip = document.getElementById(`generation-tournament-chip-${generationIndex}`);
+    const panel = document.getElementById(`generation-tournament-popout-${generationIndex}`);
+    if (!chip || !panel || chip.hidden) {
+        return;
+    }
+    chip.classList.add('is-open');
+    chip.setAttribute('aria-expanded', 'true');
+    panel.hidden = false;
+    openTournamentPanelGeneration = generationIndex;
+}
+
+function toggleGenerationTournament(generationIndex) {
+    if (openTournamentPanelGeneration === generationIndex) {
+        closeGenerationTournament(generationIndex);
+        return;
+    }
+    openGenerationTournament(generationIndex);
+}
+
+function renderGenerationTournamentDetails(generationIndex) {
+    const chip = document.getElementById(`generation-tournament-chip-${generationIndex}`);
+    const panel = document.getElementById(`generation-tournament-popout-${generationIndex}`);
+    if (!chip || !panel) {
+        return;
+    }
+
+    const entry = getTournamentEntryForGeneration(generationIndex);
+    if (!entry) {
+        chip.hidden = true;
+        panel.hidden = true;
+        panel.innerHTML = '';
+        if (openTournamentPanelGeneration === generationIndex) {
+            openTournamentPanelGeneration = null;
+        }
+        return;
+    }
+
+    chip.hidden = false;
+
+    const roundsHtml = buildTournamentRoundsHtml(entry.rounds || []);
+    panel.innerHTML = `
+        <div class="generation-tournament-popout-header">
+            <h6 class="mb-0">Swiss Tournament Details · Gen ${escapeHtml(entry.generation)}</h6>
+            <button type="button" class="generation-tournament-close">Close</button>
+        </div>
+        <div class="tournament-grid">
+            ${roundsHtml || '<div class="text-muted">No rounds recorded.</div>'}
+        </div>
+    `;
+
+    const closeButton = panel.querySelector('.generation-tournament-close');
+    if (closeButton) {
+        closeButton.addEventListener('click', () => closeGenerationTournament(generationIndex));
+    }
+
+    if (openTournamentPanelGeneration === generationIndex) {
+        openGenerationTournament(generationIndex);
+    } else {
+        closeGenerationTournament(generationIndex);
+    }
+}
+
+function renderTournamentDetails(history) {
+    tournamentHistory = Array.isArray(history) ? history : [];
+
+    if (
+        openTournamentPanelGeneration !== null &&
+        !getTournamentEntryForGeneration(openTournamentPanelGeneration)
+    ) {
+        openTournamentPanelGeneration = null;
+    }
+
+    const generationSections = document.querySelectorAll('.generation-section');
+    generationSections.forEach((section) => {
+        const match = section.id.match(/^generation-(\d+)$/);
+        if (!match) return;
+        const generationIndex = Number(match[1]);
+        renderGenerationTournamentDetails(generationIndex);
+    });
 }
 
 // Function to start the elapsed time updater
@@ -3615,13 +3821,31 @@ function enhanceStatusMessage(rawMessage, data) {
 }
 
 // Function to add an activity to the log
-function addActivityLogItem(message, type = 'info') {
+function handleActivityAction(action) {
+    if (action === 'show-diagnostics') {
+        if (latestDiagnosticsTokenCounts) {
+            showTokenDetailsModal(latestDiagnosticsTokenCounts, { focus: 'diagnostics' });
+            return;
+        }
+        addActivityLogItem('Diagnostics details are not available for this run yet.', 'warning');
+    }
+}
+
+function addActivityLogItem(message, type = 'info', options = {}) {
     lastActivityTime = Date.now();
 
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const itemId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Add to activity log array
-    activityLog.unshift({ message, type, timestamp });
+    activityLog.unshift({
+        id: itemId,
+        message,
+        type,
+        timestamp,
+        action: options.action || null,
+        actionLabel: options.actionLabel || 'View details',
+    });
 
     // Keep only the most recent items
     if (activityLog.length > MAX_ACTIVITY_LOG_ITEMS) {
@@ -3631,10 +3855,23 @@ function addActivityLogItem(message, type = 'info') {
     // Update the UI
     const logContainer = document.getElementById('activity-log-items');
     if (logContainer) {
+        if (!logContainer.dataset.boundActions) {
+            logContainer.addEventListener('click', (event) => {
+                const button = event.target.closest('.activity-action-btn');
+                if (!button) return;
+                const action = button.dataset.action;
+                if (action) {
+                    handleActivityAction(action);
+                }
+            });
+            logContainer.dataset.boundActions = 'true';
+        }
+
         logContainer.innerHTML = activityLog.map(item => `
             <div class="activity-item activity-${item.type}">
                 <span class="activity-time">${item.timestamp}</span>
                 <span class="activity-message">${item.message}</span>
+                ${item.action ? `<button type="button" class="btn btn-link btn-sm activity-action-btn ms-2 p-0 align-baseline" data-action="${escapeHtml(item.action)}">${escapeHtml(item.actionLabel)}</button>` : ''}
             </div>
         `).join('');
     }
@@ -3655,7 +3892,7 @@ function updateEvolutionStatusIndicator(isRunning, statusText = '') {
         }
     }
 
-    if (statusTextEl && statusText) {
+    if (statusTextEl && statusText && statusTextEl.textContent !== statusText) {
         statusTextEl.textContent = statusText;
     }
 
@@ -4299,6 +4536,17 @@ function createAncestorCard(ancestor, index, ancestorType) {
 // Function to display token counts
 function displayTokenCounts(tokenCounts) {
     console.log("Displaying token counts:", tokenCounts);
+    latestDiagnosticsTokenCounts = tokenCounts;
+    const nextSignature = safeSignature({
+        total: tokenCounts.total,
+        total_input: tokenCounts.total_input,
+        total_output: tokenCounts.total_output,
+        cost: tokenCounts.cost,
+    });
+    if (nextSignature === lastTokenCountsSignature) {
+        return;
+    }
+    lastTokenCountsSignature = nextSignature;
 
     // Create or get the token counts container
     let tokenCountsContainer = document.getElementById('token-counts-container');
@@ -4320,49 +4568,80 @@ function displayTokenCounts(tokenCounts) {
                 generationsContainer.parentNode.insertBefore(tokenCountsContainer, generationsContainer);
             }
         }
-    }
 
-    // Get cost information
-    const totalCost = tokenCounts.cost.total_cost.toFixed(4);
-    const totalTokens = tokenCounts.total.toLocaleString();
+        tokenCountsContainer.innerHTML = `
+            <div class="card-body d-flex justify-content-between align-items-center p-3">
+                <div class="d-flex">
+                    <div>
+                        <h6 class="mb-0">Cost: <strong id="token-cost-value">$0.0000</strong></h6>
+                        <small class="text-muted" id="token-total-value">0 tokens</small>
+                        <small class="text-muted d-block" id="token-diagnostics-value" style="display:none;"></small>
+                    </div>
+                    <div id="token-estimated-total-wrap" class="ms-3 border-start ps-3" style="display:none;">
+                        <h6 class="mb-0">Est. Total: <strong id="token-estimated-value">$0.0000</strong></h6>
+                        <small class="text-muted">Projected</small>
+                    </div>
+                </div>
+                <button id="token-details-btn" class="btn btn-sm btn-outline-primary">
+                    <i class="fas fa-info-circle"></i> Details
+                </button>
+            </div>
+        `;
 
-    // Get estimated total cost if available
-    let estimatedCostHtml = '';
-    if (tokenCounts.cost.estimated_total_cost !== undefined) {
-        const estimatedCost = tokenCounts.cost.estimated_total_cost.toFixed(4);
-        estimatedCostHtml = `<div class="ms-3 border-start ps-3">
-            <h6 class="mb-0">Est. Total: <strong>$${estimatedCost}</strong></h6>
-            <small class="text-muted">Projected</small>
-        </div>`;
+        const detailsButton = tokenCountsContainer.querySelector('#token-details-btn');
+        if (detailsButton) {
+            detailsButton.addEventListener('click', function () {
+                try {
+                    const latest = JSON.parse(tokenCountsContainer.dataset.tokenCounts || '{}');
+                    showTokenDetailsModal(latest);
+                } catch (error) {
+                    console.error('Failed to parse token counts for details modal:', error);
+                }
+            });
+        }
     }
 
     // Store the token data for the modal
     tokenCountsContainer.dataset.tokenCounts = JSON.stringify(tokenCounts);
 
-    // Update the container content with a simple cost display
-    tokenCountsContainer.innerHTML = `
-        <div class="card-body d-flex justify-content-between align-items-center p-3">
-            <div class="d-flex">
-                <div>
-                    <h6 class="mb-0">Cost: <strong>$${totalCost}</strong></h6>
-                    <small class="text-muted">${totalTokens} tokens</small>
-                </div>
-                ${estimatedCostHtml}
-            </div>
-            <button id="token-details-btn" class="btn btn-sm btn-outline-primary">
-                <i class="fas fa-info-circle"></i> Details
-            </button>
-        </div>
-    `;
+    // Update in place to avoid replacing DOM every poll.
+    const costEl = tokenCountsContainer.querySelector('#token-cost-value');
+    if (costEl) {
+        costEl.textContent = `$${tokenCounts.cost.total_cost.toFixed(4)}`;
+    }
 
-    // Add event listener to the details button
-    document.getElementById('token-details-btn').addEventListener('click', function () {
-        showTokenDetailsModal(tokenCounts);
-    });
+    const totalEl = tokenCountsContainer.querySelector('#token-total-value');
+    if (totalEl) {
+        totalEl.textContent = `${tokenCounts.total.toLocaleString()} tokens`;
+    }
+
+    const diagnosticsEl = tokenCountsContainer.querySelector('#token-diagnostics-value');
+    if (diagnosticsEl) {
+        const diagnosticsSummary = getDiagnosticsSummary(tokenCounts);
+        if (diagnosticsSummary && diagnosticsSummary.totalCount > 0) {
+            diagnosticsEl.style.display = '';
+            diagnosticsEl.textContent = `Diagnostics: ${diagnosticsSummary.totalCount} events`;
+        } else {
+            diagnosticsEl.style.display = 'none';
+            diagnosticsEl.textContent = '';
+        }
+    }
+
+    const estWrapEl = tokenCountsContainer.querySelector('#token-estimated-total-wrap');
+    const estValueEl = tokenCountsContainer.querySelector('#token-estimated-value');
+    if (estWrapEl && estValueEl) {
+        if (tokenCounts.cost.estimated_total_cost !== undefined) {
+            estWrapEl.style.display = '';
+            estValueEl.textContent = `$${tokenCounts.cost.estimated_total_cost.toFixed(4)}`;
+        } else {
+            estWrapEl.style.display = 'none';
+        }
+    }
 }
 
 // Function to show the token details modal
-function showTokenDetailsModal(tokenCounts) {
+function showTokenDetailsModal(tokenCounts, options = {}) {
+    const focusDiagnostics = options.focus === 'diagnostics';
     // Format the token counts
     const totalTokens = tokenCounts.total.toLocaleString();
     const totalInputTokens = tokenCounts.total_input.toLocaleString();
@@ -4380,6 +4659,33 @@ function showTokenDetailsModal(tokenCounts) {
         estimatesList = Object.values(tokenCounts.estimates).map(e => {
             return `<li class="list-group-item d-flex justify-content-between align-items-center">${e.name}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
         }).join('');
+    }
+
+    const diagnosticsTotals = tokenCounts?.diagnostics?.totals || {};
+    const diagnosticsEntries = Object.entries(diagnosticsTotals)
+        .filter(([, value]) => Number.isFinite(value) && value > 0)
+        .sort((a, b) => b[1] - a[1]);
+    const diagnosticsCount = diagnosticsEntries.reduce((sum, [, value]) => sum + value, 0);
+    let diagnosticsSectionHtml = `
+        <hr>
+        <h6 id="diagnostics-section">Diagnostics</h6>
+        <p class="small text-muted mb-0">No recoverable parsing/generation issues were recorded.</p>
+    `;
+    if (diagnosticsEntries.length > 0) {
+        const diagnosticsItems = diagnosticsEntries.map(([key, value]) => (
+            `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center small diagnostic-item-btn" data-diagnostic-key="${escapeHtml(key)}" data-diagnostic-total="${value}">${escapeHtml(prettifyDiagnosticKey(key))}<span class="badge bg-warning text-dark rounded-pill">${value}</span></button>`
+        )).join('');
+        diagnosticsSectionHtml = `
+            <hr>
+            <h6 id="diagnostics-section">Diagnostics</h6>
+            <p class="small text-muted mb-2">${diagnosticsCount} recoverable issue(s) captured across agents.</p>
+            <ul class="list-group mb-3">
+                ${diagnosticsItems}
+            </ul>
+            <div id="diagnostics-detail-panel" class="small text-muted border rounded p-2 bg-light">
+                Click a diagnostic item to view details.
+            </div>
+        `;
     }
 
     // Dynamically build component data for all available components
@@ -4487,6 +4793,7 @@ function showTokenDetailsModal(tokenCounts) {
                                     <ul class="list-group mb-3 small">
                                         ${estimatesList}
                                     </ul>
+                                    ${diagnosticsSectionHtml}
                                 </div>
                             </div>
 
@@ -4521,6 +4828,89 @@ function showTokenDetailsModal(tokenCounts) {
 
     // Create charts after the modal is shown
     modalContainer.addEventListener('shown.bs.modal', function () {
+        const diagnosticsPanel = modalContainer.querySelector('#diagnostics-detail-panel');
+        const diagnosticsButtons = Array.from(
+            modalContainer.querySelectorAll('.diagnostic-item-btn')
+        );
+        if (diagnosticsPanel && diagnosticsButtons.length > 0) {
+            diagnosticsButtons.forEach((button) => {
+                button.addEventListener('click', () => {
+                    if (button.classList.contains('active')) {
+                        button.classList.remove('active');
+                        diagnosticsPanel.innerHTML = 'Click a diagnostic item to view details.';
+                        return;
+                    }
+
+                    diagnosticsButtons.forEach((candidate) => candidate.classList.remove('active'));
+                    button.classList.add('active');
+
+                    const key = button.dataset.diagnosticKey || '';
+                    const total = Number(button.dataset.diagnosticTotal || 0);
+                    const description = getDiagnosticDescription(key);
+                    const perAgent = Object.entries(tokenCounts?.diagnostics?.agents || {})
+                        .map(([agent, stats]) => {
+                            const count = Number((stats && stats[key]) || 0);
+                            return { agent, count };
+                        })
+                        .filter(({ count }) => count > 0)
+                        .sort((a, b) => b.count - a.count);
+
+                    const rawEvents = Object.entries(tokenCounts?.diagnostics?.events || {})
+                        .flatMap(([agentName, events]) => {
+                            if (!Array.isArray(events)) return [];
+                            return events.map((event) => ({
+                                ...event,
+                                agent: event?.agent || agentName,
+                            }));
+                        })
+                        .filter((event) => event && event.key === key)
+                        .sort((a, b) => {
+                            const at = new Date(a.timestamp || 0).getTime();
+                            const bt = new Date(b.timestamp || 0).getTime();
+                            return bt - at;
+                        });
+
+                    let agentBreakdown = '<li class="text-muted">No per-agent breakdown available.</li>';
+                    if (perAgent.length > 0) {
+                        agentBreakdown = perAgent
+                            .map(({ agent, count }) => `<li>${escapeHtml(agent)}: <strong>${count}</strong></li>`)
+                            .join('');
+                    }
+
+                    let rawErrorHtml = '<li class="text-muted">No raw diagnostic events captured for this key.</li>';
+                    if (rawEvents.length > 0) {
+                        rawErrorHtml = rawEvents
+                            .slice(0, 15)
+                            .map((event) => {
+                                const metadata = event.metadata && typeof event.metadata === 'object'
+                                    ? ` | meta: ${escapeHtml(JSON.stringify(event.metadata))}`
+                                    : '';
+                                const detail = event.detail ? escapeHtml(event.detail) : '(no detail)';
+                                const timestamp = formatDiagnosticTimestamp(event.timestamp);
+                                return `<li><span class="text-muted">${escapeHtml(timestamp)} | ${escapeHtml(event.agent || 'unknown')}</span><br><code class="small">${detail}${metadata}</code></li>`;
+                            })
+                            .join('');
+                    }
+
+                    diagnosticsPanel.innerHTML = `
+                        <div class="fw-semibold mb-1">${escapeHtml(prettifyDiagnosticKey(key))} (${total})</div>
+                        <div class="mb-2">${escapeHtml(description)}</div>
+                        <div class="fw-semibold">By agent</div>
+                        <ul class="mb-2 ps-3">${agentBreakdown}</ul>
+                        <div class="fw-semibold">Recent raw events</div>
+                        <ul class="mb-0 ps-3">${rawErrorHtml}</ul>
+                    `;
+                });
+            });
+        }
+
+        if (focusDiagnostics) {
+            const diagnosticsEl = modalContainer.querySelector('#diagnostics-section');
+            if (diagnosticsEl) {
+                diagnosticsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+
         // Create a pie chart for token distribution by component
         const pieCtx = document.getElementById('tokenPieChart').getContext('2d');
         new Chart(pieCtx, {
@@ -4932,6 +5322,8 @@ function initializeDiversityChart() {
 
         // Create the chart
         diversityChart = new Chart(ctx, config);
+        lastDiversityRenderSignature = '';
+        diversityPlotSized = false;
 
         // Hide loading state
         const loadingElement = document.querySelector('.diversity-loading');
@@ -5020,6 +5412,19 @@ function processDiversityData(diversityHistory) {
     };
 }
 
+function buildDiversitySignature(processedData) {
+    if (!processedData || !processedData.labels) {
+        return '';
+    }
+
+    return [
+        processedData.labels.join(','),
+        processedData.overall.join(','),
+        processedData.perGeneration.join(','),
+        processedData.interGeneration.join(','),
+    ].join('|');
+}
+
 /**
  * Update the diversity chart with new data
  * @param {Array} diversityHistory - Updated diversity history
@@ -5062,15 +5467,23 @@ function updateDiversityChart(diversityHistory) {
     try {
         // Process the data
         const processedData = processDiversityData(diversityHistory);
+        const nextSignature = buildDiversitySignature(processedData);
+
+        // Skip redraws when data has not changed.
+        if (nextSignature === lastDiversityRenderSignature) {
+            return false;
+        }
 
         // Update chart data
         diversityChart.data.labels = processedData.labels;
         diversityChart.data.datasets[0].data = processedData.overall;
         diversityChart.data.datasets[1].data = processedData.perGeneration;
         diversityChart.data.datasets[2].data = processedData.interGeneration;
+        diversityData = processedData;
+        lastDiversityRenderSignature = nextSignature;
 
-        // Update the chart with animation
-        diversityChart.update('default');
+        // Update without animation to avoid visible flicker during polling.
+        diversityChart.update('none');
 
         // Show the diversity plot section if there's data
         const plotSection = document.getElementById('diversity-plot-section');
@@ -5107,16 +5520,21 @@ function updateDiversityChart(diversityHistory) {
                 canvas.style.height = '400px';
                 canvas.style.maxWidth = '100%';
 
-                // Force chart to resize to container
-                setTimeout(() => {
-                    if (diversityChart) {
-                        diversityChart.resize();
-                    }
-                }, 100);
+                if (!diversityPlotSized) {
+                    // Only force a resize when first displayed.
+                    setTimeout(() => {
+                        if (diversityChart) {
+                            diversityChart.resize();
+                        }
+                        diversityPlotSized = true;
+                    }, 100);
+                }
             }
         }
+        return true;
     } catch (error) {
         console.error('❌ Error updating diversity chart:', error);
+        return false;
     }
 }
 
@@ -5176,8 +5594,11 @@ function resetDiversityPlot() {
     // Reset global diversity data
     diversityData = {
         overall: [],
-        perGeneration: []
+        perGeneration: [],
+        interGeneration: []
     };
+    lastDiversityRenderSignature = '';
+    diversityPlotSized = false;
 }
 
 /**
@@ -5225,8 +5646,6 @@ function ensureDiversityChartSizing() {
 function handleDiversityUpdate(progressData) {
     if (progressData && progressData.diversity_history) {
         updateDiversityChart(progressData.diversity_history);
-        // Ensure proper sizing after update
-        setTimeout(ensureDiversityChartSizing, 100);
     }
 }
 
@@ -5449,234 +5868,245 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
     }
 }
 
+const THINKING_UI_CONFIGS = {
+    'gemini-2.5-flash-lite': {
+        supportsThinking: true,
+        allowOff: true,
+        allowMedium: true,
+        defaultMode: 'off',
+        min: 512,
+        max: 24576,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+    },
+    'gemini-2.5-flash': {
+        supportsThinking: true,
+        allowOff: true,
+        allowMedium: true,
+        defaultMode: 'off',
+        min: 128,
+        max: 24576,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+    },
+    'gemini-2.5-pro': {
+        supportsThinking: true,
+        allowOff: false,
+        allowMedium: true,
+        defaultMode: 'low',
+        min: 128,
+        max: 32768,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Low on Pro models. Increase to Medium/High or set a custom budget for deeper reasoning.'
+    },
+    'gemini-3-flash-preview': {
+        supportsThinking: true,
+        allowOff: true,
+        allowMedium: true,
+        defaultMode: 'off',
+        min: 0,
+        max: 24576,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+    },
+    'gemini-3-pro-preview': {
+        supportsThinking: true,
+        allowOff: false,
+        allowMedium: true,
+        defaultMode: 'low',
+        min: 128,
+        max: 32768,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Low on Pro models. Increase to Medium/High or set a custom budget for deeper reasoning.'
+    }
+};
+
+function getThinkingModelConfig(modelName) {
+    return THINKING_UI_CONFIGS[modelName] || null;
+}
+
 /**
- * Set up model change listener to show/hide thinking budget control
+ * Set up model change listener to show/hide thinking control
  */
 function setupModelChangeListener() {
     const modelSelect = document.getElementById('modelType');
     const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
+    if (!modelSelect || !thinkingBudgetContainer) return;
 
-    if (modelSelect && thinkingBudgetContainer) {
-        modelSelect.addEventListener('change', function () {
-            updateThinkingBudgetVisibility();
-        });
-
-        // Initialize visibility on page load
+    modelSelect.addEventListener('change', function () {
         updateThinkingBudgetVisibility();
-    }
+    });
+    updateThinkingBudgetVisibility();
 }
 
 /**
- * Update thinking budget control visibility based on selected model
+ * Update thinking control visibility based on selected model
  */
 function updateThinkingBudgetVisibility() {
     const modelSelect = document.getElementById('modelType');
     const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
-    const dynamicRadio = document.getElementById('thinkingDynamic');
-    const customContainer = document.getElementById('thinkingBudgetCustomContainer');
-
     if (!modelSelect || !thinkingBudgetContainer) return;
 
     const selectedModel = modelSelect.value;
-    const supportsThinking = selectedModel.includes('2.5') || selectedModel.includes('3-pro');
-
-    if (supportsThinking) {
-        thinkingBudgetContainer.style.display = 'block';
-
-        // Reset to dynamic mode when switching models
-        if (dynamicRadio) {
-            dynamicRadio.checked = true;
-        }
-        if (customContainer) {
-            customContainer.style.display = 'none';
-        }
-
-        configureThinkingBudgetForModel(selectedModel);
-    } else {
+    const config = getThinkingModelConfig(selectedModel);
+    if (!config || !config.supportsThinking) {
         thinkingBudgetContainer.style.display = 'none';
+        return;
     }
+
+    thinkingBudgetContainer.style.display = 'block';
+    configureThinkingBudgetForModel(selectedModel, config);
 }
 
 /**
- * Configure thinking budget for specific model
+ * Configure thinking controls for a specific model.
  */
-function configureThinkingBudgetForModel(modelName) {
+function configureThinkingBudgetForModel(modelName, providedConfig = null) {
+    const config = providedConfig || getThinkingModelConfig(modelName);
     const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
     const thinkingBudgetHelp = document.getElementById('thinkingBudgetHelp');
-    const thinkingDisabledOption = document.getElementById('thinkingDisabledOption');
     const thinkingBudgetMin = document.getElementById('thinkingBudgetMin');
     const thinkingBudgetMax = document.getElementById('thinkingBudgetMax');
+    const offOption = document.getElementById('thinkingOffOption');
+    const mediumOption = document.getElementById('thinkingMediumOption');
 
-    if (!thinkingBudgetSlider || !thinkingBudgetHelp || !thinkingDisabledOption) return;
+    const offRadio = document.getElementById('thinkingOff');
+    const lowRadio = document.getElementById('thinkingLow');
+    const mediumRadio = document.getElementById('thinkingMedium');
+    const highRadio = document.getElementById('thinkingHigh');
+    const customRadio = document.getElementById('thinkingCustomBudget');
 
-    // Configuration based on model specifications
-    const configs = {
-        'gemini-2.5-pro': {
-            min: 128,
-            max: 32768,
-            default: 128,  // Minimum possible since can't disable
-            defaultMode: 'custom',  // Use custom mode with minimum value
-            canDisable: false,
-            help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
-        },
-        'gemini-3-pro-preview': {
-            min: 128,
-            max: 32768,
-            default: 128,  // Minimum possible since can't disable
-            defaultMode: 'custom',  // Use custom mode with minimum value
-            canDisable: false,
-            help: 'Minimum thinking budget: 128 tokens (cannot be disabled for Pro model)'
-        },
-        'gemini-2.5-flash': {
-            min: 128,  // Custom range starts at 128
-            max: 24576,
-            default: 0,  // Disabled by default
-            defaultMode: 'disabled',  // Use disabled mode
-            canDisable: true,
-            help: 'Thinking disabled by default (0-24576 tokens available for custom)'
-        },
-        'gemini-2.5-flash-lite': {
-            min: 512,  // Custom range starts at 512
-            max: 24576,
-            default: 0,  // Disabled by default
-            defaultMode: 'disabled',  // Use disabled mode
-            canDisable: true,
-            help: 'Thinking disabled by default (0-24576 tokens available for custom)'
-        }
-    };
+    if (!config || !thinkingBudgetSlider || !thinkingBudgetHelp || !customRadio) return;
 
-    const config = configs[modelName];
-    if (!config) return;
+    // Toggle option availability by model capability.
+    if (offOption) offOption.style.display = config.allowOff ? 'block' : 'none';
+    if (mediumOption) mediumOption.style.display = config.allowMedium ? 'block' : 'none';
 
-    // Show/hide disabled option based on model capability
-    if (config.canDisable) {
-        thinkingDisabledOption.style.display = 'block';
-    } else {
-        thinkingDisabledOption.style.display = 'none';
+    if (offRadio) offRadio.checked = false;
+    if (lowRadio) lowRadio.checked = false;
+    if (mediumRadio) mediumRadio.checked = false;
+    if (highRadio) highRadio.checked = false;
+    customRadio.checked = false;
+
+    let effectiveDefault = config.defaultMode;
+    if (effectiveDefault === 'off' && !config.allowOff) {
+        effectiveDefault = 'low';
+    }
+    if (effectiveDefault === 'medium' && !config.allowMedium) {
+        effectiveDefault = 'low';
     }
 
-    // Set the default mode based on model configuration
-    const dynamicRadio = document.getElementById('thinkingDynamic');
-    const disabledRadio = document.getElementById('thinkingDisabled');
-    const customRadio = document.getElementById('thinkingCustom');
-
-    // Clear all selections first
-    if (dynamicRadio) dynamicRadio.checked = false;
-    if (disabledRadio) disabledRadio.checked = false;
-    if (customRadio) customRadio.checked = false;
-
-    // Set the appropriate default based on config
-    if (config.defaultMode === 'disabled' && config.canDisable) {
-        disabledRadio.checked = true;
-    } else if (config.defaultMode === 'custom') {
+    if (effectiveDefault === 'off' && offRadio) {
+        offRadio.checked = true;
+    } else if (effectiveDefault === 'low' && lowRadio) {
+        lowRadio.checked = true;
+    } else if (effectiveDefault === 'medium' && mediumRadio) {
+        mediumRadio.checked = true;
+    } else if (effectiveDefault === 'high' && highRadio) {
+        highRadio.checked = true;
+    } else {
         customRadio.checked = true;
-    } else {
-        // Fallback to dynamic
-        dynamicRadio.checked = true;
     }
 
-    // Update slider range and default value
-    thinkingBudgetSlider.min = config.min;
-    thinkingBudgetSlider.max = config.max;
+    thinkingBudgetSlider.min = String(config.min);
+    thinkingBudgetSlider.max = String(config.max);
+    thinkingBudgetSlider.step = String(config.step || 128);
+    thinkingBudgetSlider.value = String(config.defaultBudget || config.min || 0);
 
-    // Set slider to model's default value (128 for Pro, doesn't matter for disabled modes)
-    if (config.defaultMode === 'custom') {
-        thinkingBudgetSlider.value = config.default;
-    } else {
-        // Set to a reasonable value for when user switches to custom later
-        thinkingBudgetSlider.value = Math.max(config.min, 512);
-    }
-
-    // Update step size based on range (larger steps for larger ranges)
-    const range = config.max - config.min;
-    if (range > 10000) {
-        thinkingBudgetSlider.step = 256;  // Larger steps for big ranges
-    } else if (range > 5000) {
-        thinkingBudgetSlider.step = 128;
-    } else {
-        thinkingBudgetSlider.step = 64;
-    }
-
-    // Update display elements
+    if (thinkingBudgetMin) thinkingBudgetMin.textContent = Number(config.min || 0).toLocaleString();
+    if (thinkingBudgetMax) thinkingBudgetMax.textContent = Number(config.max || 0).toLocaleString();
     thinkingBudgetHelp.textContent = config.help;
-    if (thinkingBudgetMin) {
-        thinkingBudgetMin.textContent = config.min.toLocaleString();
-    }
-    if (thinkingBudgetMax) {
-        thinkingBudgetMax.textContent = config.max.toLocaleString();
-    }
 
-    // Update the mode display (show/hide custom slider)
     updateThinkingBudgetMode();
-
-    // Update the slider value display
     updateThinkingBudgetDisplay();
 }
 
 /**
- * Update thinking budget display value
+ * Update custom thinking budget display value.
  */
 function updateThinkingBudgetDisplay() {
     const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
     const thinkingBudgetValue = document.getElementById('thinkingBudgetValue');
-
     if (!thinkingBudgetSlider || !thinkingBudgetValue) return;
-
-    const value = parseInt(thinkingBudgetSlider.value);
+    const value = parseInt(thinkingBudgetSlider.value || '0', 10);
     thinkingBudgetValue.textContent = value.toLocaleString();
 }
 
 /**
- * Handle thinking budget mode changes (radio buttons)
+ * Handle thinking mode changes (radio buttons).
  */
 function updateThinkingBudgetMode() {
     const customContainer = document.getElementById('thinkingBudgetCustomContainer');
-    const dynamicRadio = document.getElementById('thinkingDynamic');
-    const disabledRadio = document.getElementById('thinkingDisabled');
-    const customRadio = document.getElementById('thinkingCustom');
-
-    if (!customContainer || !dynamicRadio || !customRadio) return;
+    const customRadio = document.getElementById('thinkingCustomBudget');
+    if (!customContainer || !customRadio) return;
 
     if (customRadio.checked) {
-        // Show custom slider
         customContainer.style.display = 'block';
         updateThinkingBudgetDisplay();
     } else {
-        // Hide custom slider
         customContainer.style.display = 'none';
     }
 }
 
 /**
- * Get thinking budget value for API request
+ * Get thinking settings for API requests.
  */
-function getThinkingBudgetValue() {
+function getThinkingSettings() {
     const modelSelect = document.getElementById('modelType');
-    const dynamicRadio = document.getElementById('thinkingDynamic');
-    const disabledRadio = document.getElementById('thinkingDisabled');
-    const customRadio = document.getElementById('thinkingCustom');
-    const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
-
-    if (!modelSelect) return null;
+    if (!modelSelect) {
+        return { thinkingLevel: null, thinkingBudget: null };
+    }
 
     const selectedModel = modelSelect.value;
-    const supportsThinking = selectedModel.includes('2.5') || selectedModel.includes('3-pro');
-
-    if (!supportsThinking) {
-        return null; // Don't send thinking budget for non-thinking models
+    const config = getThinkingModelConfig(selectedModel);
+    if (!config || !config.supportsThinking) {
+        return { thinkingLevel: null, thinkingBudget: null };
     }
 
-    // Determine value based on selected mode
-    if (dynamicRadio && dynamicRadio.checked) {
-        return -1; // Dynamic thinking
-    } else if (disabledRadio && disabledRadio.checked) {
-        return 0; // Disabled thinking
-    } else if (customRadio && customRadio.checked && thinkingBudgetSlider) {
-        return parseInt(thinkingBudgetSlider.value); // Custom value
+    const offRadio = document.getElementById('thinkingOff');
+    const lowRadio = document.getElementById('thinkingLow');
+    const mediumRadio = document.getElementById('thinkingMedium');
+    const highRadio = document.getElementById('thinkingHigh');
+    const customRadio = document.getElementById('thinkingCustomBudget');
+    const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
+
+    if (customRadio && customRadio.checked && thinkingBudgetSlider) {
+        const budget = parseInt(thinkingBudgetSlider.value || '0', 10);
+        return {
+            thinkingLevel: null,
+            thinkingBudget: Number.isFinite(budget) ? budget : null,
+        };
+    }
+    if (offRadio && offRadio.checked) {
+        return { thinkingLevel: 'off', thinkingBudget: null };
+    }
+    if (lowRadio && lowRadio.checked) {
+        return { thinkingLevel: 'low', thinkingBudget: null };
+    }
+    if (mediumRadio && mediumRadio.checked) {
+        return { thinkingLevel: 'medium', thinkingBudget: null };
+    }
+    if (highRadio && highRadio.checked) {
+        return { thinkingLevel: 'high', thinkingBudget: null };
     }
 
-    // Default to dynamic if nothing selected
-    return -1;
+    if (config.defaultMode === 'custom' && thinkingBudgetSlider) {
+        const budget = parseInt(thinkingBudgetSlider.value || '0', 10);
+        return {
+            thinkingLevel: null,
+            thinkingBudget: Number.isFinite(budget) ? budget : null,
+        };
+    }
+
+    return {
+        thinkingLevel: config.defaultMode === 'off' ? 'off' : 'low',
+        thinkingBudget: null,
+    };
 }
 
 // Sidebar View Navigation

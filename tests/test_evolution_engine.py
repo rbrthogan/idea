@@ -59,3 +59,9 @@ def test_get_total_token_count():
             + pricing["output"] * total_out / 1_000_000
         )
         assert abs(result["estimates"][model_id]["cost"] - expected) < 1e-9
+
+    # Diagnostics payload should include event buckets even when agents do not expose events.
+    assert "diagnostics" in result
+    assert "events" in result["diagnostics"]
+    for agent in ["ideator", "formatter", "critic", "breeder", "oracle"]:
+        assert agent in result["diagnostics"]["events"]

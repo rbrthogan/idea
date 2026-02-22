@@ -1,5 +1,7 @@
 from typing import List, Dict, Any, Callable, Awaitable, Optional
 import random
+import secrets
+import threading
 import numpy as np
 import asyncio
 import uuid
@@ -43,12 +45,21 @@ class EvolutionEngine:
         model_type: str = "gemini-2.0-flash",
         creative_temp: float = DEFAULT_CREATIVE_TEMP,
         top_p: float = DEFAULT_TOP_P,
+        random_seed: Optional[int] = None,
         tournament_rounds: int = 1,
         tournament_count: Optional[float] = None,
         full_tournament_rounds: Optional[int] = None,
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
         max_budget: Optional[float] = None,
         mutation_rate: float = 0.2,
+        seed_context_pool_size: Optional[int] = None,
+        replacement_rate: float = 0.5,
+        fitness_alpha: float = 0.7,
+        age_decay_rate: float = 0.25,
+        age_decay_floor: float = 0.35,
+        context_novelty_threshold: float = 0.8,
+        context_novelty_max_attempts: int = 2,
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,  # Required for Firestore storage
         template_data: Optional[Dict[str, Any]] = None,  # Custom template data from Firestore
@@ -70,27 +81,97 @@ class EvolutionEngine:
         else:
             self.tournament_count = float(tournament_count)
         self.thinking_budget = thinking_budget
+        self.thinking_level = (
+            str(thinking_level).strip().lower() if thinking_level is not None else None
+        )
         self.max_budget = max_budget
         self.mutation_rate = mutation_rate
+        try:
+            self.seed_context_pool_size = (
+                max(1, int(seed_context_pool_size))
+                if seed_context_pool_size is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            self.seed_context_pool_size = None
+        self.replacement_rate = max(0.0, min(1.0, float(replacement_rate)))
+        self.fitness_alpha = max(0.0, min(1.0, float(fitness_alpha)))
+        self.age_decay_rate = max(0.0, float(age_decay_rate))
+        self.age_decay_floor = max(0.0, min(1.0, float(age_decay_floor)))
+        self.context_novelty_threshold = max(0.0, min(1.0, float(context_novelty_threshold)))
+        self.context_novelty_max_attempts = max(0, int(context_novelty_max_attempts))
         self.api_key = api_key
+        self.random_seed = int(random_seed) if random_seed is not None else int(secrets.randbits(64))
+        self._py_rng = random.Random(self.random_seed)
+        self._np_rng = np.random.default_rng(self.random_seed)
+        self._py_rng_lock = threading.Lock()
+        self._np_rng_lock = threading.Lock()
         self.population: List[Idea] = []
         # TODO: make this configurable with a dropdown list for each LLM type using the following models:
         # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
 
         # Initialize LLM components with appropriate temperatures
-        print(f"Initializing agents with creative_temp={creative_temp}, top_p={top_p}, thinking_budget={thinking_budget}")
+        print(
+            "Initializing agents with "
+            f"creative_temp={creative_temp}, top_p={top_p}, "
+            f"thinking_budget={thinking_budget}, thinking_level={self.thinking_level}"
+        )
 
-        self.ideator = Ideator(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
+        self.ideator = Ideator(
+            provider="google_generative_ai",
+            model_name=model_type,
+            temperature=creative_temp,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+            seed_context_pool_size=self.seed_context_pool_size,
+        )
 
         # Always use 2.5 Flash for formatting as it has better instruction following for structured output
         # than 2.0 Flash or older models
-        self.formatter = Formatter(provider="google_generative_ai", model_name="gemini-2.5-flash", api_key=api_key)
+        self.formatter = Formatter(
+            provider="google_generative_ai",
+            model_name="gemini-2.5-flash",
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+        )
 
         critic_model_name = "gemini-2.5-flash" if model_type == "gemini-2.5-pro" else model_type
-        self.critic = Critic(provider="google_generative_ai", model_name=critic_model_name, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
-        self.breeder = Breeder(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, mutation_rate=mutation_rate, api_key=api_key)
+        self.critic = Critic(
+            provider="google_generative_ai",
+            model_name=critic_model_name,
+            temperature=creative_temp,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+        )
+        self.breeder = Breeder(
+            provider="google_generative_ai",
+            model_name=model_type,
+            temperature=creative_temp,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
+            mutation_rate=mutation_rate,
+            seed_context_pool_size=self.seed_context_pool_size,
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+        )
 
-        self.oracle = Oracle(provider="google_generative_ai", model_name=model_type, temperature=creative_temp, top_p=top_p, thinking_budget=thinking_budget, api_key=api_key)
+        self.oracle = Oracle(
+            provider="google_generative_ai",
+            model_name=model_type,
+            temperature=creative_temp,
+            top_p=top_p,
+            thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
+            api_key=api_key,
+            random_seed=self._random_randbits(64),
+        )
 
         # Keep custom template data scoped to this engine instance (no global cross-user cache coupling).
         if self.template_data:
@@ -135,6 +216,14 @@ class EvolutionEngine:
         self.creative_temp = creative_temp
         self.top_p = top_p
         self.mutation_rate = mutation_rate
+        self.replacement_rate = max(0.0, min(1.0, float(replacement_rate)))
+        self.fitness_alpha = max(0.0, min(1.0, float(fitness_alpha)))
+        self.age_decay_rate = max(0.0, float(age_decay_rate))
+        self.age_decay_floor = max(0.0, min(1.0, float(age_decay_floor)))
+
+        # Running normalization state (persisted) to keep fitness scores comparable across generations.
+        self.fitness_elo_stats = {"count": 0, "mean": 0.0, "m2": 0.0}
+        self.fitness_diversity_stats = {"count": 0, "mean": 0.0, "m2": 0.0}
 
         # Evolution identity and tracking
         self.evolution_id = None  # Unique ID for this evolution (UUID)
@@ -146,6 +235,30 @@ class EvolutionEngine:
         self.checkpoint_id = None  # Set when evolution starts
         self.current_generation = 0  # Tracks which generation we're on
         self.checkpoint_callback = None  # Callback for saving checkpoints
+        self._sync_typed_state_from_attrs()
+
+    def _random_randbits(self, bits: int) -> int:
+        with self._py_rng_lock:
+            return self._py_rng.getrandbits(bits)
+
+    def random_uniform(self, a: float, b: float) -> float:
+        with self._py_rng_lock:
+            return self._py_rng.uniform(a, b)
+
+    def random_shuffle(self, values: List[Any]) -> None:
+        with self._py_rng_lock:
+            self._py_rng.shuffle(values)
+
+    def random_choice(
+        self,
+        a: Any,
+        *,
+        size: Optional[int] = None,
+        replace: bool = True,
+        p: Optional[Any] = None,
+    ) -> Any:
+        with self._np_rng_lock:
+            return self._np_rng.choice(a, size=size, replace=replace, p=p)
 
     async def _run_batch_with_progress(
         self,
@@ -184,7 +297,7 @@ class EvolutionEngine:
                     # finish at the exact same millisecond, causing the UI to jump from 0% to 100% instantly.
                     # This makes the progress bar feel smoother.
                     if len(tasks) > 1 and PROGRESS_JITTER_MAX_SECONDS > 0:
-                        await asyncio.sleep(random.uniform(0, PROGRESS_JITTER_MAX_SECONDS))
+                        await asyncio.sleep(self.random_uniform(0, PROGRESS_JITTER_MAX_SECONDS))
 
                     result = await task_func()
                     return index, result
@@ -236,11 +349,13 @@ class EvolutionEngine:
         """Request the evolution to stop gracefully"""
         print("Stop requested - evolution will halt at the next safe point")
         self.stop_requested = True
+        self._sync_typed_state_from_attrs()
 
     def reset_stop_state(self):
         """Reset the stop state for a new evolution"""
         self.stop_requested = False
         self.is_stopped = False
+        self._sync_typed_state_from_attrs()
 
     def _get_template_prompts(self):
         """Resolve prompt wrapper for current template, preferring the engine-scoped custom template snapshot."""
@@ -250,81 +365,76 @@ class EvolutionEngine:
             return self._template_prompt_wrapper
         return get_prompts(self.idea_type)
 
+
+    def _sync_typed_state_from_attrs(self):
+        """Keep typed internal snapshots aligned while preserving legacy attribute access."""
+        from idea.evolution_types import EvolutionConfig, EvolutionIdentity, EvolutionRuntimeState
+
+        self.config_state = EvolutionConfig(
+            idea_type=self.idea_type,
+            pop_size=self.pop_size,
+            generations=self.generations,
+            model_type=self.model_type,
+            creative_temp=self.creative_temp,
+            top_p=self.top_p,
+            tournament_rounds=self.tournament_rounds,
+            tournament_count=self.tournament_count,
+            full_tournament_rounds=self.full_tournament_rounds,
+            thinking_budget=self.thinking_budget,
+            thinking_level=self.thinking_level,
+            max_budget=self.max_budget,
+            mutation_rate=self.mutation_rate,
+            seed_context_pool_size=self.seed_context_pool_size,
+            replacement_rate=self.replacement_rate,
+            fitness_alpha=self.fitness_alpha,
+            age_decay_rate=self.age_decay_rate,
+            age_decay_floor=self.age_decay_floor,
+        )
+        self.identity_state = EvolutionIdentity(
+            evolution_id=self.evolution_id,
+            evolution_name=self.evolution_name,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            checkpoint_id=self.checkpoint_id,
+        )
+        self.runtime_state = EvolutionRuntimeState(
+            current_generation=self.current_generation,
+            population=self.population,
+            history=self.history,
+            contexts=self.contexts,
+            specific_prompts=self.specific_prompts,
+            breeding_prompts=self.breeding_prompts,
+            tournament_history=self.tournament_history,
+            diversity_history=self.diversity_history,
+            avg_idea_cost=self.avg_idea_cost,
+            avg_tournament_cost=self.avg_tournament_cost,
+            stop_requested=self.stop_requested,
+            is_stopped=self.is_stopped,
+        )
+
+    def _new_orchestrator(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
+        from idea.evolution_orchestrator import EvolutionOrchestrator
+
+        return EvolutionOrchestrator(self, progress_callback)
+
     def get_checkpoint_state(self) -> Dict[str, Any]:
-        """
-        Serialize the current evolution state for checkpointing.
-        Returns a dictionary that can be saved to JSON and later restored.
-        """
-        def serialize_idea(idea):
-            """Convert an idea dict to a serializable format"""
-            if not isinstance(idea, dict):
-                return idea
-            result = {}
-            for key, value in idea.items():
-                if isinstance(value, uuid.UUID):
-                    result[key] = str(value)
-                elif isinstance(value, list):
-                    result[key] = [str(v) if isinstance(v, uuid.UUID) else v for v in value]
-                elif hasattr(value, '__dict__'):
-                    # Handle Idea objects
-                    result[key] = {'title': getattr(value, 'title', None), 'content': getattr(value, 'content', '')}
-                else:
-                    result[key] = value
-            return result
+        """Serialize current evolution state for checkpointing."""
+        from idea.evolution_persistence import EvolutionSerializer
 
-        state = {
-            'checkpoint_id': self.checkpoint_id,
-            'checkpoint_time': datetime.now().isoformat(),
-            'status': 'paused' if self.stop_requested else 'in_progress',
-
-            # Configuration
-            'config': {
-                'idea_type': self.idea_type,
-                'pop_size': self.pop_size,
-                'generations': self.generations,
-                'model_type': self.model_type,
-                'creative_temp': self.creative_temp,
-                'top_p': self.top_p,
-                'tournament_rounds': self.tournament_rounds,
-                'tournament_count': self.tournament_count,
-                'full_tournament_rounds': self.full_tournament_rounds,
-                'thinking_budget': self.thinking_budget,
-                'max_budget': self.max_budget,
-                'mutation_rate': self.mutation_rate,
-            },
-
-            # Evolution state
-            'current_generation': self.current_generation,
-            'population': [serialize_idea(idea) for idea in self.population],
-            'history': [[serialize_idea(idea) for idea in gen] for gen in self.history],
-            'contexts': self.contexts,
-            'specific_prompts': self.specific_prompts,
-            'breeding_prompts': self.breeding_prompts,
-            'tournament_history': self.tournament_history,
-            'diversity_history': self.diversity_history,
-
-            # Cost tracking
-            'avg_idea_cost': self.avg_idea_cost,
-            'avg_tournament_cost': self.avg_tournament_cost,
-
-            # Token counts from agents
-            'token_counts': self.get_total_token_count(),
-        }
-        if self.template_data:
-            state['template_data'] = self.template_data
-        return state
+        self._sync_typed_state_from_attrs()
+        return EvolutionSerializer.to_checkpoint_state(self)
 
     def set_name(self, name: str):
         """Set the human-readable name for this evolution."""
         self.evolution_name = name
         self.updated_at = datetime.now().isoformat()
+        self._sync_typed_state_from_attrs()
 
     def generate_default_name(self) -> str:
         """Generate a default name based on template and date."""
         if self.template_data and self.template_data.get("name"):
             template_name = self.template_data.get("name")
         else:
-            # Get template display name
             try:
                 templates = list_available_templates()
                 template_info = templates.get(self.idea_type, {})
@@ -332,7 +442,6 @@ class EvolutionEngine:
             except Exception:
                 template_name = self.idea_type or 'Evolution'
 
-        # Get template display name
         date_str = datetime.now().strftime('%b %d, %Y')
         return f"{template_name} - {date_str}"
 
@@ -342,662 +451,110 @@ class EvolutionEngine:
         self.evolution_name = name or self.generate_default_name()
         self.created_at = datetime.now().isoformat()
         self.updated_at = self.created_at
-        # Also set legacy checkpoint_id for compatibility
         self.checkpoint_id = self.evolution_id[:18].replace('-', '')
+        self._sync_typed_state_from_attrs()
 
     async def save_checkpoint(self, status: str = 'in_progress') -> Optional[str]:
-        """
-        Save the current state to Firestore.
-        Returns the evolution_id on success, None on failure.
-        """
-        try:
-            if not self.user_id:
-                print("❌ Cannot save evolution: user_id not set")
-                return None
+        from idea.evolution_persistence import EvolutionRepository
 
-            # Initialize if this is a legacy evolution without an ID
-            if not self.evolution_id:
-                self.initialize_evolution()
-
-            self.updated_at = datetime.now().isoformat()
-
-            state = self.get_checkpoint_state()
-            state['evolution_id'] = self.evolution_id
-            state['name'] = self.evolution_name
-            state['status'] = status
-            state['created_at'] = self.created_at
-            state['updated_at'] = self.updated_at
-
-            # Save to Firestore
-            await db.save_evolution(self.user_id, self.evolution_id, state)
-
-            print(f"💾 Evolution saved to Firestore: {self.evolution_name} ({self.evolution_id})")
-            return self.evolution_id
-
-        except Exception as e:
-            print(f"❌ Failed to save evolution: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+        self._sync_typed_state_from_attrs()
+        checkpoint_id = await EvolutionRepository.save_checkpoint(self, status=status)
+        self._sync_typed_state_from_attrs()
+        return checkpoint_id
 
     @classmethod
     async def list_evolutions_for_user(cls, user_id: str) -> List[Dict[str, Any]]:
-        """
-        List all evolutions for a user from Firestore.
-        Returns a list of evolution metadata.
-        """
-        try:
-            evolutions = await db.list_evolutions(user_id)
-            # Transform the data to match expected format
-            result = []
-            for data in evolutions:
-                config = data.get('config', {})
-                history = data.get('history', [])
-                result.append({
-                    'id': data.get('evolution_id') or data.get('id'),
-                    'name': data.get('name', 'Unnamed'),
-                    'status': data.get('status', 'unknown'),
-                    'created_at': data.get('created_at'),
-                    'updated_at': data.get('updated_at'),
-                    'generation': data.get('current_generation', len(history)),
-                    'total_generations': config.get('generations', len(history)),
-                    'idea_type': config.get('idea_type', 'unknown'),
-                    'model_type': config.get('model_type', 'unknown'),
-                    'pop_size': config.get('pop_size', len(history[0]) if history else 0),
-                    'total_ideas': sum(len(gen) for gen in history),
-                })
-            return result
-        except Exception as e:
-            print(f"Error listing evolutions: {e}")
-            return []
+        from idea.evolution_persistence import EvolutionRepository
+
+        return await EvolutionRepository.list_evolutions_for_user(user_id)
 
     @classmethod
     async def list_checkpoints_for_user(cls, user_id: str) -> List[Dict[str, Any]]:
-        """
-        List all checkpoints for a user from Firestore.
-        Returns a list of checkpoint metadata.
-        """
-        try:
-            checkpoints = await db.list_checkpoints(user_id)
-            result = []
-            for data in checkpoints:
-                config = data.get('config', {})
-                result.append({
-                    'id': data.get('checkpoint_id') or data.get('id'),
-                    'time': data.get('checkpoint_time') or data.get('updated_at'),
-                    'status': data.get('status', 'unknown'),
-                    'generation': data.get('current_generation', 0),
-                    'total_generations': config.get('generations', 0),
-                    'idea_type': config.get('idea_type', 'unknown'),
-                    'model_type': config.get('model_type', 'unknown'),
-                    'pop_size': config.get('pop_size', 0),
-                })
-            return result
-        except Exception as e:
-            print(f"Error listing checkpoints: {e}")
-            return []
+        from idea.evolution_persistence import EvolutionRepository
+
+        return await EvolutionRepository.list_checkpoints_for_user(user_id)
 
     @classmethod
-    async def load_evolution_for_user(cls, user_id: str, evolution_id: str, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
-        """
-        Load an evolution engine from Firestore.
-        Returns a configured EvolutionEngine instance, or None on failure.
-        """
-        try:
-            state = await db.get_evolution(user_id, evolution_id)
-            if not state:
-                print(f"❌ Evolution not found: {evolution_id}")
-                return None
+    async def load_evolution_for_user(
+        cls,
+        user_id: str,
+        evolution_id: str,
+        api_key: Optional[str] = None,
+    ) -> Optional['EvolutionEngine']:
+        from idea.evolution_persistence import EvolutionRepository
 
-            config = state.get("config", {})
-            idea_type = config.get("idea_type")
-            if idea_type and not state.get("template_data"):
-                templates = list_available_templates()
-                is_valid_system_template = (
-                    idea_type in templates and "error" not in templates.get(idea_type, {})
-                )
-                if not is_valid_system_template:
-                    user_template = await db.get_user_template(user_id, idea_type)
-                    if user_template:
-                        state["template_data"] = user_template
-
-            engine = cls._restore_from_state(state, api_key=api_key, user_id=user_id)
-            return engine
-        except Exception as e:
-            print(f"❌ Failed to load evolution: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+        return await EvolutionRepository.load_evolution_for_user(
+            cls,
+            user_id,
+            evolution_id,
+            api_key=api_key,
+        )
 
     @classmethod
     async def rename_evolution_for_user(cls, user_id: str, evolution_id: str, new_name: str) -> bool:
-        """Rename an evolution in Firestore."""
-        try:
-            result = await db.rename_evolution(user_id, evolution_id, new_name)
-            if result:
-                print(f"✅ Evolution renamed to: {new_name}")
-            return result
-        except Exception as e:
-            print(f"❌ Failed to rename evolution: {e}")
-            return False
+        from idea.evolution_persistence import EvolutionRepository
+
+        return await EvolutionRepository.rename_evolution_for_user(user_id, evolution_id, new_name)
 
     @classmethod
     async def delete_evolution_for_user(cls, user_id: str, evolution_id: str) -> bool:
-        """Delete an evolution from Firestore."""
-        try:
-            result = await db.delete_evolution(user_id, evolution_id)
-            if result:
-                print(f"🗑️ Evolution deleted: {evolution_id}")
-            return result
-        except Exception as e:
-            print(f"❌ Failed to delete evolution: {e}")
-            return False
+        from idea.evolution_persistence import EvolutionRepository
+
+        return await EvolutionRepository.delete_evolution_for_user(user_id, evolution_id)
 
     @classmethod
     def _load_from_file(cls, file_path: Path, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
-        """Load evolution engine from a file path."""
-        try:
-            with open(file_path) as f:
-                state = json.load(f)
+        from idea.evolution_persistence import EvolutionRepository
 
-            return cls._restore_from_state(state, api_key=api_key)
-        except Exception as e:
-            print(f"❌ Failed to load from {file_path}: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+        return EvolutionRepository.load_from_file(cls, file_path, api_key=api_key)
 
     @classmethod
-    def _restore_from_state(cls, state: Dict[str, Any], api_key: Optional[str] = None, user_id: Optional[str] = None) -> 'EvolutionEngine':
-        """Restore an EvolutionEngine from a state dictionary."""
-        config = state.get('config', {})
-        tournament_rounds = config.get('tournament_rounds', 1)
-        full_tournament_rounds = config.get('full_tournament_rounds')
-        tournament_count = config.get('tournament_count')
+    def _restore_from_state(
+        cls,
+        state: Dict[str, Any],
+        api_key: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> 'EvolutionEngine':
+        from idea.evolution_persistence import EvolutionRepository
 
-        # Create a new engine with the saved configuration
-        engine = cls(
-            idea_type=config.get('idea_type'),
-            pop_size=config.get('pop_size', 5),
-            generations=config.get('generations', 3),
-            model_type=config.get('model_type', 'gemini-2.0-flash'),
-            creative_temp=config.get('creative_temp', DEFAULT_CREATIVE_TEMP),
-            top_p=config.get('top_p', DEFAULT_TOP_P),
-            tournament_rounds=tournament_rounds,
-            tournament_count=tournament_count,
-            full_tournament_rounds=full_tournament_rounds,
-            thinking_budget=config.get('thinking_budget'),
-            max_budget=config.get('max_budget'),
-            mutation_rate=config.get('mutation_rate', 0.2),
+        return EvolutionRepository.restore_from_state(
+            cls,
+            state,
             api_key=api_key,
-            user_id=user_id or state.get('user_id'),
-            template_data=state.get('template_data'),
+            user_id=user_id,
         )
-
-        # Restore evolution identity
-        engine.evolution_id = state.get('evolution_id')
-        engine.evolution_name = state.get('name')
-        engine.created_at = state.get('created_at')
-        engine.updated_at = state.get('updated_at')
-
-        # Restore legacy checkpoint ID for compatibility
-        engine.checkpoint_id = state.get('checkpoint_id') or (engine.evolution_id[:18].replace('-', '') if engine.evolution_id else None)
-        engine.current_generation = state.get('current_generation', 0)
-        engine.contexts = state.get('contexts', [])
-        engine.specific_prompts = state.get('specific_prompts', [])
-        engine.breeding_prompts = state.get('breeding_prompts', [])
-        engine.tournament_history = state.get('tournament_history', [])
-        engine.diversity_history = state.get('diversity_history', [])
-        engine.avg_idea_cost = state.get('avg_idea_cost', 0.0)
-        engine.avg_tournament_cost = state.get('avg_tournament_cost', 0.0)
-
-        # Restore population and history
-        def deserialize_idea(idea_data):
-            """Convert serialized idea back to proper format"""
-            if not isinstance(idea_data, dict):
-                return idea_data
-
-            result = dict(idea_data)
-            # Ensure ID is a UUID
-            if 'id' in result and isinstance(result['id'], str):
-                try:
-                    result['id'] = uuid.UUID(result['id'])
-                except ValueError:
-                    result['id'] = uuid.uuid4()
-
-            # Convert parent_ids back to UUIDs
-            if 'parent_ids' in result:
-                result['parent_ids'] = [
-                    uuid.UUID(pid) if isinstance(pid, str) else pid
-                    for pid in result['parent_ids']
-                ]
-
-            # Restore Idea object if present
-            if 'idea' in result and isinstance(result['idea'], dict):
-                result['idea'] = Idea(
-                    title=result['idea'].get('title'),
-                    content=result['idea'].get('content', '')
-                )
-
-            return result
-
-        engine.population = [deserialize_idea(idea) for idea in state.get('population', [])]
-        engine.history = [[deserialize_idea(idea) for idea in gen] for gen in state.get('history', [])]
-
-        print(f"✅ Evolution loaded: {engine.evolution_name or 'unnamed'} (gen {engine.current_generation}/{engine.generations})")
-        return engine
 
     @classmethod
     def load_checkpoint(cls, checkpoint_id: str, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
-        """
-        Load an evolution engine from a checkpoint (legacy or new format).
-        Tries unified evolutions first, then legacy checkpoints.
-        Returns a configured EvolutionEngine instance, or None on failure.
-        """
-        # First try unified evolutions directory
-        evolution_path = EVOLUTIONS_DIR / f"{checkpoint_id}.json"
-        if evolution_path.exists():
-            return cls._load_from_file(evolution_path, api_key=api_key)
+        from idea.evolution_persistence import EvolutionRepository
 
-        # Fall back to legacy checkpoint directory
-        checkpoint_path = CHECKPOINT_DIR / f"checkpoint_{checkpoint_id}.json"
-        if not checkpoint_path.exists():
-            print(f"❌ Checkpoint not found: {checkpoint_path}")
-            return None
-
-        # Use shared loading logic
-        return cls._load_from_file(checkpoint_path, api_key=api_key)
+        return EvolutionRepository.load_checkpoint(cls, checkpoint_id, api_key=api_key)
 
     @classmethod
     def delete_checkpoint(cls, checkpoint_id: str) -> bool:
-        """Delete a checkpoint file."""
-        checkpoint_path = CHECKPOINT_DIR / f"checkpoint_{checkpoint_id}.json"
-        try:
-            if checkpoint_path.exists():
-                checkpoint_path.unlink()
-                print(f"🗑️ Checkpoint deleted: {checkpoint_path}")
-                return True
-            return False
-        except Exception as e:
-            print(f"❌ Failed to delete checkpoint: {e}")
-            return False
+        from idea.evolution_persistence import EvolutionRepository
 
-    async def _complete_initial_seeding(
-        self,
-        progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]
-    ):
-        """
-        Complete the initial seeding phase (Generation 0) if it was interrupted.
-        This handles the case where evolution was stopped during initial population creation.
-        """
-        existing_count = len(self.population)
-        needed_count = self.pop_size - existing_count
-        print(f"🌱 Completing initial seeding: {existing_count} existing, need {needed_count} more")
+        return EvolutionRepository.delete_checkpoint(checkpoint_id)
 
-        # Generate remaining seed ideas
-        async def generate_single_seed():
-            context_pool = await asyncio.to_thread(self.ideator.generate_context, self.idea_type)
-            idea_text, specific_prompt = await asyncio.to_thread(
-                self.ideator.generate_idea_from_context, context_pool, self.idea_type
-            )
-            return context_pool, {"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []}, specific_prompt
-
-        for i in range(needed_count):
-            if self.stop_requested:
-                print("Stop requested during seeding completion")
-                return
-
-            await progress_callback({
-                "current_generation": 0,
-                "total_generations": self.generations,
-                "is_running": True,
-                "status_message": f"Creating seed idea {existing_count + i + 1}/{self.pop_size}...",
-                "progress": ((existing_count + i) / self.pop_size) * 50  # First half of gen 0
-            })
-
-            context_pool, idea, prompt = await generate_single_seed()
-            self.contexts.append(context_pool)
-            self.population.append(idea)
-            self.specific_prompts.append(prompt)
-
-        # Refine all ideas
-        print("Refining initial population...")
-        refined_population = []
-        for i, idea in enumerate(self.population):
-            if self.stop_requested:
-                print("Stop requested during refinement")
-                return
-
-            await progress_callback({
-                "current_generation": 0,
-                "total_generations": self.generations,
-                "is_running": True,
-                "status_message": f"Refining idea {i + 1}/{len(self.population)}...",
-                "progress": 50 + ((i + 1) / len(self.population)) * 50  # Second half of gen 0
-            })
-
-            refined_idea = await asyncio.to_thread(self.critic.refine, idea, self.idea_type)
-            formatted_idea = await asyncio.to_thread(self.formatter.format_idea, refined_idea, self.idea_type)
-            refined_population.append(formatted_idea)
-
-        self.population = refined_population
-        self.history = [self.population.copy()]
-
-        # Calculate initial diversity
-        await self._calculate_and_store_diversity()
-
-        # Save checkpoint for completed generation 0
-        self.current_generation = 1
-        await self.save_checkpoint(status='in_progress')
-
-        # Send update
-        token_counts = self.get_total_token_count()
-        await progress_callback({
-            "current_generation": 0,
-            "total_generations": self.generations,
-            "is_running": True,
-            "history": self.history,
-            "contexts": self.contexts,
-            "specific_prompts": self.specific_prompts,
-            "progress": 100 / (self.generations + 1),
-            "status_message": "Generation 0 complete!",
-            "token_counts": token_counts,
-            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-        })
-
-        print(f"✅ Initial seeding complete. Population size: {len(self.population)}")
+    async def run_evolution_with_updates(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
+        """Run a new evolution using the canonical orchestrator loop."""
+        orchestrator = self._new_orchestrator(progress_callback)
+        await orchestrator.run(start_generation=0, mode="new")
+        self._sync_typed_state_from_attrs()
 
     async def resume_evolution_with_updates(
         self,
         progress_callback: Callable[[Dict[str, Any]], Awaitable[None]],
-        additional_generations: int = 0
+        additional_generations: int = 0,
     ):
-        """
-        Resume evolution from the current state.
-        Can also be used to continue a completed evolution for more generations.
-
-        Args:
-            progress_callback: Async function that will be called with progress updates
-            additional_generations: If > 0, add this many generations to the existing target
-        """
-        try:
-            # Reset stop state
-            self.reset_stop_state()
-
-            # Optionally extend the number of generations
-            if additional_generations > 0:
-                self.generations += additional_generations
-                print(f"📈 Extended evolution by {additional_generations} generations. New total: {self.generations}")
-
-            start_gen = self.current_generation
-            print(f"🔄 Resuming evolution from generation {start_gen}/{self.generations}")
-
-            # Handle incomplete Generation 0 (initial seeding not complete)
-            if start_gen == 0 and len(self.population) < self.pop_size:
-                print(f"⚠️ Generation 0 incomplete ({len(self.population)}/{self.pop_size} ideas). Restarting seeding...")
-                await self._complete_initial_seeding(progress_callback)
-                # After seeding, we've completed generation 0
-                start_gen = 1
-                self.current_generation = 1
-
-            # Send initial progress update with restored state
-            token_counts = self.get_total_token_count()
-            await progress_callback({
-                "current_generation": start_gen,
-                "total_generations": self.generations,
-                "is_running": True,
-                "is_resuming": True,
-                "history": self.history,
-                "contexts": self.contexts,
-                "specific_prompts": self.specific_prompts,
-                "breeding_prompts": self.breeding_prompts,
-                "progress": (start_gen / self.generations) * 100 if self.generations > 0 else 0,
-                "status_message": f"Resuming from generation {start_gen}...",
-                "token_counts": token_counts,
-                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-            })
-
-            # Calculate steps for progress tracking
-            est_tournament_rounds = max(1, self.tournament_rounds)
-            steps_per_gen = self.pop_size + est_tournament_rounds + 1
-            remaining_gens = self.generations - start_gen
-            total_steps = remaining_gens * steps_per_gen
-            current_step = 0
-
-            # Elite idea tracking for continuity
-            elite_idea = None
-            elite_breeding_prompt = None
-
-            for gen in range(start_gen, self.generations):
-                # Check for stop request
-                if self.stop_requested:
-                    self.is_stopped = True
-                    self.current_generation = gen
-                    print(f"Stop requested - evolution halted at generation {gen}")
-                    checkpoint_path = await self.save_checkpoint(status='paused')
-                    token_counts = self.get_total_token_count()
-                    await progress_callback({
-                        "current_generation": gen,
-                        "total_generations": self.generations,
-                        "is_running": False,
-                        "is_stopped": True,
-                        "is_resumable": True,
-                        "checkpoint_id": self.checkpoint_id,
-                        "history": self.history,
-                        "contexts": self.contexts,
-                        "specific_prompts": self.specific_prompts,
-                        "breeding_prompts": self.breeding_prompts,
-                        "progress": (gen / self.generations) * 100,
-                        "stop_message": f"Evolution paused at generation {gen}. You can resume.",
-                        "token_counts": token_counts,
-                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                    })
-                    return
-
-                print(f"Starting generation {gen + 1}...")
-
-                new_population = []
-                generation_breeding_prompts = []
-                random.shuffle(self.population)
-
-                # Handle elite idea from previous generation
-                elite_processed = False
-                if elite_idea is not None:
-                    print(f"🌟 Processing elite idea for generation {gen + 1}...")
-                    refined_elite = await asyncio.to_thread(self.critic.refine, elite_idea, self.idea_type)
-                    formatted_elite = await asyncio.to_thread(self.formatter.format_idea, refined_elite, self.idea_type)
-
-                    if isinstance(formatted_elite, dict):
-                        formatted_elite["elite_selected"] = True
-                        formatted_elite["elite_source_id"] = elite_idea.get("id")
-                        formatted_elite["elite_source_generation"] = gen
-                    else:
-                        formatted_elite = {
-                            "id": uuid.uuid4(),
-                            "idea": formatted_elite,
-                            "parent_ids": [],
-                            "elite_selected": True,
-                            "elite_source_id": elite_idea.get("id"),
-                            "elite_source_generation": gen
-                        }
-
-                    new_population.append(formatted_elite)
-                    generation_breeding_prompts.append(elite_breeding_prompt)
-                    elite_processed = True
-
-                current_pop_size = len(self.population)
-                ideas_to_breed = current_pop_size - (1 if elite_processed else 0)
-
-                elite_idea = None
-                elite_breeding_prompt = None
-
-                # Run global Swiss tournament
-                print(f"Running Swiss tournament across {len(self.population)} ideas for {self.tournament_rounds} rounds...")
-                tournament_rounds_details: List[Dict[str, Any]] = []
-                global_ranks = await asyncio.to_thread(
-                    self.critic.get_tournament_ranks,
-                    self.population,
-                    self.idea_type,
-                    self.tournament_rounds,
-                    None,
-                    tournament_rounds_details,
-                    self.full_tournament_rounds,
-                )
-                self._set_tournament_history(gen + 1, tournament_rounds_details)
-
-                if self.stop_requested:
-                    continue  # Will be caught at top of next iteration
-
-                # Allocate parent slots and breed
-                global_parent_slots = self._allocate_parent_slots(global_ranks, ideas_to_breed)
-
-                breeding_tasks_data = []
-                for _ in range(ideas_to_breed):
-                    if global_parent_slots:
-                        parent_indices = self._select_parents_from_slots(global_parent_slots, list(global_ranks.keys()))
-                        parent_ideas = [self.population[idx] for idx in parent_indices]
-                    else:
-                        parent_indices = np.random.choice(list(global_ranks.keys()), size=self.breeder.parent_count, replace=False)
-                        parent_ideas = [self.population[idx] for idx in parent_indices]
-                    breeding_tasks_data.append(parent_ideas)
-
-                for parent_ideas in breeding_tasks_data:
-                    if self.stop_requested:
-                        break
-                    new_idea = await asyncio.to_thread(self.breeder.breed, parent_ideas, self.idea_type)
-                    prompt = new_idea.get("specific_prompt") if isinstance(new_idea, dict) else None
-                    refined_idea = await asyncio.to_thread(self.critic.refine, new_idea, self.idea_type)
-                    formatted_idea = await asyncio.to_thread(self.formatter.format_idea, refined_idea, self.idea_type)
-                    new_population.append(formatted_idea)
-                    generation_breeding_prompts.append(prompt)
-
-                    # Update progress
-                    current_step += 1
-                    progress_pct = ((gen - start_gen) * steps_per_gen + current_step) / total_steps * 100
-                    await progress_callback({
-                        "current_generation": gen + 1,
-                        "total_generations": self.generations,
-                        "is_running": True,
-                        "progress": progress_pct,
-                        "status_message": f"Breeding idea {len(new_population)}/{ideas_to_breed + (1 if elite_processed else 0)}..."
-                    })
-
-                if self.stop_requested:
-                    continue
-
-                # Update population
-                self.population = new_population
-                self.history.append(self.population.copy())
-                self.breeding_prompts.append(generation_breeding_prompts)
-
-                print(f"Generation {gen + 1} complete. Population size: {len(self.population)}")
-
-                # Calculate diversity
-                await self._calculate_and_store_diversity()
-
-                # Apply Oracle
-                if self.oracle:
-                    try:
-                        oracle_result = self.oracle.analyze_and_diversify(self.history, self.idea_type)
-                        replace_idx = await self._find_least_interesting_idea_idx(self.population)
-                        idea_prompt = oracle_result["idea_prompt"]
-                        prompts = self._get_template_prompts()
-                        extended_prompt = idea_prompt
-                        if hasattr(prompts, 'template') and prompts.template.special_requirements:
-                            extended_prompt = f"{idea_prompt}\n\nConstraints:\n{prompts.template.special_requirements}"
-
-                        new_idea = self.ideator.generate_text(extended_prompt)
-                        oracle_idea = {
-                            "id": uuid.uuid4(),
-                            "idea": new_idea,
-                            "parent_ids": [],
-                            "oracle_generated": True,
-                            "oracle_analysis": oracle_result["oracle_analysis"]
-                        }
-                        refined_oracle_idea = self.critic.refine(oracle_idea, self.idea_type)
-                        formatted_oracle_idea = self.formatter.format_idea(refined_oracle_idea, self.idea_type)
-                        if not formatted_oracle_idea.get("oracle_generated", False):
-                            formatted_oracle_idea["oracle_generated"] = True
-                            formatted_oracle_idea["oracle_analysis"] = oracle_idea.get("oracle_analysis", "")
-
-                        old_idea = self.population[replace_idx]
-                        old_idea_id = str(old_idea.get("id", "")) if isinstance(old_idea, dict) else ""
-                        if old_idea_id:
-                            await self._remove_embedding(old_idea_id)
-
-                        self.population[replace_idx] = formatted_oracle_idea
-                        if self.breeding_prompts:
-                            self.breeding_prompts[-1][replace_idx] = idea_prompt
-                        self.history[-1] = self.population.copy()
-                    except Exception as e:
-                        print(f"Oracle failed: {e}")
-
-                # Elite selection
-                if gen < self.generations - 1:
-                    try:
-                        most_diverse_idx = await self._find_most_diverse_idea_idx(self.population)
-                        elite_idea = self.population[most_diverse_idx].copy() if isinstance(self.population[most_diverse_idx], dict) else self.population[most_diverse_idx]
-                        if isinstance(self.population[most_diverse_idx], dict):
-                            self.population[most_diverse_idx]["elite_selected_source"] = True
-                            self.population[most_diverse_idx]["elite_target_generation"] = gen + 1
-                            self.history[-1] = self.population.copy()
-                        if self.breeding_prompts and self.breeding_prompts[-1] and most_diverse_idx < len(self.breeding_prompts[-1]):
-                            elite_breeding_prompt = self.breeding_prompts[-1][most_diverse_idx]
-                    except Exception as e:
-                        print(f"Elite selection failed: {e}")
-                        elite_idea = None
-
-                # Update generation tracking and save checkpoint
-                self.current_generation = gen + 1
-                checkpoint_status = 'in_progress' if gen < self.generations - 1 else 'complete'
-                await self.save_checkpoint(status=checkpoint_status)
-
-                # Send progress update
-                token_counts = self.get_total_token_count()
-                await progress_callback({
-                    "current_generation": gen + 1,
-                    "total_generations": self.generations,
-                    "is_running": True,
-                    "history": self.history,
-                    "contexts": self.contexts,
-                    "specific_prompts": self.specific_prompts,
-                    "breeding_prompts": self.breeding_prompts,
-                    "progress": ((gen + 1) / self.generations) * 100,
-                    "checkpoint_saved": True,
-                    "checkpoint_id": self.checkpoint_id,
-                    "token_counts": token_counts,
-                    "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                })
-
-            # Evolution complete
-            print("Evolution complete!")
-            await self.save_checkpoint(status='complete')
-            token_counts = self.get_total_token_count()
-            await progress_callback({
-                "current_generation": self.generations,
-                "total_generations": self.generations,
-                "is_running": False,
-                "history": self.history,
-                "contexts": self.contexts,
-                "specific_prompts": self.specific_prompts,
-                "breeding_prompts": self.breeding_prompts,
-                "progress": 100,
-                "token_counts": token_counts,
-                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-            })
-
-        except Exception as e:
-            import traceback
-            print(f"Error in resume evolution: {e}")
-            print(traceback.format_exc())
-            await self.save_checkpoint(status='error')
-            await progress_callback({
-                "is_running": False,
-                "error": str(e),
-                "is_resumable": True,
-                "checkpoint_id": self.checkpoint_id,
-                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-            })
+        """Resume/continue evolution using the canonical orchestrator loop."""
+        orchestrator = self._new_orchestrator(progress_callback)
+        await orchestrator.run(
+            start_generation=self.current_generation,
+            mode="resume",
+            additional_generations=additional_generations,
+        )
+        self._sync_typed_state_from_attrs()
 
     async def _calculate_and_store_diversity(self) -> Dict[str, Any]:
         """
@@ -1228,765 +785,6 @@ class EvolutionEngine:
 
         return current_cost >= self.max_budget
 
-    async def run_evolution_with_updates(self, progress_callback: Callable[[Dict[str, Any]], Awaitable[None]]):
-        """
-        Runs the evolution process with progress updates
-
-        Args:
-            progress_callback: Async function that will be called with progress updates
-        """
-        try:
-            # Reset stop state at the beginning
-            self.reset_stop_state()
-
-            # Initialize checkpoint ID for this evolution run
-            if not self.checkpoint_id:
-                self.checkpoint_id = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
-            self.current_generation = 0
-
-            # Seed the initial population
-            print("Generating initial population (Generation 0)...")
-            self.population = []
-            self.specific_prompts = []
-            self.contexts = []
-
-            # Calculate total steps: Gen 0 (Seed + Refine) + Gen 1..N (Swiss Rounds + Breed+Refine + Elite)
-            est_tournament_rounds = max(1, self.tournament_rounds)
-            # Each breeding generation: tournament_rounds + pop_size breeding + 1 for elite processing
-            steps_per_gen = self.pop_size + est_tournament_rounds + 1
-            total_steps = (2 * self.pop_size) + (self.generations * steps_per_gen)
-
-            # --- Parallel Seeding ---
-            async def generate_single_seed():
-                context_pool = await asyncio.to_thread(self.ideator.generate_context, self.idea_type)
-                idea_text, specific_prompt = await asyncio.to_thread(self.ideator.generate_idea_from_context, context_pool, self.idea_type)
-                return context_pool, {"id": uuid.uuid4(), "idea": idea_text, "parent_ids": []}, specific_prompt
-
-            seed_tasks = [generate_single_seed for _ in range(self.pop_size)]
-
-            base_info = {
-                "current_generation": 0,
-                "total_generations": self.generations,
-                "is_running": True,
-            }
-
-            seed_results = await self._run_batch_with_progress(
-                tasks=seed_tasks,
-                progress_callback=progress_callback,
-                base_progress_info=base_info,
-                start_step=0,
-                total_steps=total_steps,
-                description_template="Seeding idea {completed}/{total}..."
-            )
-
-            if self.stop_requested:
-                # Handle stop during seeding
-                completed_results = [r for r in seed_results if r is not None]
-                for context_pool, idea, prompt in completed_results:
-                    self.contexts.append(context_pool)
-                    self.population.append(idea)
-                    self.specific_prompts.append(prompt)
-
-                await progress_callback({
-                    **base_info,
-                    "is_running": False,
-                    "is_stopped": True,
-                    "history": [self.population] if self.population else [],
-                    "contexts": self.contexts,
-                    "specific_prompts": self.specific_prompts,
-                    "stop_message": f"Evolution stopped during initial generation",
-                    "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                })
-                return
-
-            # Unpack results
-            for context_pool, idea, prompt in seed_results:
-                self.contexts.append(context_pool)
-                self.population.append(idea)
-                self.specific_prompts.append(prompt)
-
-            # --- Parallel Refinement ---
-            print("Refining initial population...")
-
-            async def refine_single(idea):
-                refined_idea = await asyncio.to_thread(self.critic.refine, idea, self.idea_type)
-                formatted_idea = await asyncio.to_thread(self.formatter.format_idea, refined_idea, self.idea_type)
-                return formatted_idea
-
-            # Create tasks capturing the specific idea for each iteration
-            refine_tasks = [lambda i=idea: refine_single(i) for idea in self.population]
-
-            refined_results = await self._run_batch_with_progress(
-                tasks=refine_tasks,
-                progress_callback=progress_callback,
-                base_progress_info=base_info,
-                start_step=self.pop_size,
-                total_steps=total_steps,
-                description_template="Refining idea {completed}/{total}..."
-            )
-
-            if self.stop_requested:
-                # Handle stop during refinement
-                # Update population with whatever finished
-                for i, result in enumerate(refined_results):
-                    if result is not None:
-                        self.population[i] = result
-
-                await progress_callback({
-                    **base_info,
-                    "is_running": False,
-                    "is_stopped": True,
-                    "history": [self.population],
-                    "contexts": self.contexts,
-                    "specific_prompts": self.specific_prompts,
-                    "stop_message": f"Evolution stopped during refinement",
-                    "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                })
-                return
-
-            # Update population with refined ideas
-            self.population = refined_results
-
-            # Update costs after refinement batch
-            token_counts = self.get_total_token_count()
-            current_cost = token_counts['cost']['total_cost']
-            self.avg_idea_cost = current_cost / self.pop_size
-
-            # Calculate estimated total cost
-            total_ideas_to_generate = self.pop_size * (self.generations + 1)
-            remaining_ideas = total_ideas_to_generate - self.pop_size
-            remaining_tournaments = self.generations
-            estimated_total_cost = current_cost + (remaining_ideas * self.avg_idea_cost) + (remaining_tournaments * self.avg_tournament_cost)
-            token_counts['cost']['estimated_total_cost'] = estimated_total_cost
-
-            # Check budget
-            if self.check_budget():
-                print(f"Budget limit reached: ${current_cost:.4f} >= ${self.max_budget:.4f}")
-                self.stop_requested = True
-                self.is_stopped = True
-                await progress_callback({
-                    **base_info,
-                    "is_running": False,
-                    "is_stopped": True,
-                    "history": [self.population],
-                    "contexts": self.contexts,
-                    "specific_prompts": self.specific_prompts,
-                    "stop_message": f"Evolution stopped: Budget limit reached (${current_cost:.2f} / ${self.max_budget:.2f})",
-                    "token_counts": token_counts,
-                    "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                })
-                return
-
-            # Send final update for this phase
-            await progress_callback({
-                **base_info,
-                "history": [self.population],
-                "contexts": self.contexts,
-                "specific_prompts": self.specific_prompts,
-                "progress": (2 * self.pop_size / total_steps) * 100,
-                "token_counts": token_counts,
-                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-            })
-
-            # Small delay
-            await asyncio.sleep(0.1)
-
-            self.history = [self.population.copy()]
-
-            # Calculate initial diversity for generation 0
-            initial_diversity = await self._calculate_and_store_diversity()
-
-            # Run evolution for specified number of generations
-            elite_idea = None
-            elite_breeding_prompt = None
-
-            for gen in range(self.generations):
-                # Check for stop request at the beginning of each generation
-                if self.stop_requested:
-                    self.is_stopped = True
-                    self.current_generation = gen
-                    print(f"Stop requested - evolution halted after generation {gen}")
-
-                    # Save checkpoint so evolution can be resumed
-                    checkpoint_path = await self.save_checkpoint(status='paused')
-
-                    # Calculate token counts for the final update
-                    token_counts = self.get_total_token_count()
-                    await progress_callback({
-                        "current_generation": gen,
-                        "total_generations": self.generations,
-                        "is_running": False,
-                        "is_stopped": True,
-                        "is_resumable": True,
-                        "checkpoint_id": self.checkpoint_id,
-                        "history": self.history,
-                        "contexts": self.contexts,
-                        "specific_prompts": self.specific_prompts,
-                        "breeding_prompts": self.breeding_prompts,
-                        "progress": ((self.pop_size + gen * self.pop_size) / (self.pop_size * (self.generations + 1))) * 100,
-                        "stop_message": f"Evolution paused after generation {gen}. You can resume this evolution.",
-                        "token_counts": token_counts,
-                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                    })
-                    return
-
-                print(f"Starting generation {gen + 1}...")
-
-                new_population = []
-                generation_breeding_prompts = []  # Collect breeding prompts for this generation
-                random.shuffle(self.population)
-
-                # Handle elite idea from previous generation (if available)
-                elite_processed = False
-                if elite_idea is not None:
-                    print(f"🌟 Processing elite idea for generation {gen + 1}...")
-
-                    # Refine and format the elite idea
-                    refined_elite = await asyncio.to_thread(self.critic.refine, elite_idea, self.idea_type)
-                    formatted_elite = await asyncio.to_thread(self.formatter.format_idea, refined_elite, self.idea_type)
-
-                    # Mark this idea as elite (most creative/original) and preserve source
-                    # Ensure formatted_elite is a dictionary (format_idea should return dict for dict input)
-                    print(f"🌟 DEBUG: Elite idea before metadata: {type(formatted_elite)}, keys: {list(formatted_elite.keys()) if isinstance(formatted_elite, dict) else 'N/A'}")
-
-                    if isinstance(formatted_elite, dict):
-                        formatted_elite["elite_selected"] = True
-                        formatted_elite["elite_source_id"] = elite_idea.get("id")
-                        formatted_elite["elite_source_generation"] = gen
-                        print(f"🌟 DEBUG: Elite metadata added, keys now: {list(formatted_elite.keys())}")
-                    else:
-                        # Fallback: convert to dict if needed
-                        formatted_elite = {
-                            "id": uuid.uuid4(),
-                            "idea": formatted_elite,
-                            "parent_ids": [],
-                            "elite_selected": True,
-                            "elite_source_id": elite_idea.get("id"),
-                            "elite_source_generation": gen
-                        }
-                        print(f"🌟 DEBUG: Elite idea converted to dict with keys: {list(formatted_elite.keys())}")
-
-                    print(f"🌟 DEBUG: Final elite idea has elite_selected: {formatted_elite.get('elite_selected')}")
-
-                    # Add to new population
-                    new_population.append(formatted_elite)
-                    generation_breeding_prompts.append(elite_breeding_prompt)  # Use the original breeding prompt if available
-
-                    # Extract title for logging
-                    elite_title = "Unknown"
-                    if isinstance(formatted_elite, dict) and "idea" in formatted_elite:
-                        idea_obj = formatted_elite["idea"]
-                        if hasattr(idea_obj, 'title'):
-                            elite_title = idea_obj.title
-
-                    print(f"🌟 Most creative idea '{elite_title}' added to generation {gen + 1}")
-                    elite_processed = True
-
-                # Calculate how many ideas we need to breed (total minus elite if processed)
-                current_pop_size = len(self.population)
-                ideas_to_breed = current_pop_size - (1 if elite_processed else 0)
-                print(f"Generating {ideas_to_breed} new ideas via breeding for generation {gen + 1} (plus {1 if elite_processed else 0} creative)")
-
-                # Reset elite for next iteration
-                elite_idea = None
-                elite_breeding_prompt = None
-
-                # Step 1: Run global Swiss tournament to create global ranking
-                print(f"Running Swiss tournament across {len(self.population)} ideas for {self.tournament_rounds} rounds...")
-
-                # Measure tournament cost
-                tournament_start_cost = self.get_total_token_count()['cost']['total_cost']
-
-                global_ranks = {}
-
-                # Calculate base steps for this generation (needed for progress calculation)
-                # Gen 0 (2*pop) + Previous Gens (gen * steps_per_gen)
-                current_gen_start_step = (2 * self.pop_size) + (gen * steps_per_gen)
-
-                # Define base progress info for this generation (for use in callbacks)
-                gen_base_progress_info = {
-                    "current_generation": gen + 1,
-                    "total_generations": self.generations,
-                    "is_running": True,
-                }
-
-                # Capture the loop from the outer async scope for thread-safe callbacks
-                loop = asyncio.get_running_loop()
-
-                pairs_per_round = max(1, len(self.population) // 2)
-                total_pairs = pairs_per_round * max(1, self.tournament_rounds)
-
-                def thread_safe_callback(completed, total):
-                    round_num = min(self.tournament_rounds, (completed // pairs_per_round) + 1)
-                    tournament_fraction = (completed / total_pairs) if total_pairs else 1.0
-                    async def send_update():
-                        await progress_callback({
-                            **gen_base_progress_info,
-                            "progress": ((current_gen_start_step + (tournament_fraction * max(1, self.tournament_rounds))) / total_steps) * 100,
-                            "status_message": f"Running Swiss round {round_num}/{self.tournament_rounds}...",
-                        })
-
-                    asyncio.run_coroutine_threadsafe(send_update(), loop)
-
-                tournament_rounds_details: List[Dict[str, Any]] = []
-                global_ranks = await asyncio.to_thread(
-                    self.critic.get_tournament_ranks,
-                    self.population,
-                    self.idea_type,
-                    self.tournament_rounds,
-                    thread_safe_callback,
-                    tournament_rounds_details,
-                    self.full_tournament_rounds,
-                )
-                self._set_tournament_history(gen + 1, tournament_rounds_details)
-
-                if self.stop_requested:
-                     # Handle stop during tournaments
-                     await progress_callback({
-                        "current_generation": gen + 1,
-                        "total_generations": self.generations,
-                        "is_running": False,
-                        "is_stopped": True,
-                        "history": self.history,
-                        "contexts": self.contexts,
-                        "specific_prompts": self.specific_prompts,
-                        "breeding_prompts": self.breeding_prompts,
-                        "stop_message": f"Evolution stopped during tournaments",
-                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                    })
-                     return
-
-                # Log top ranks for transparency
-                print("Swiss tournament rankings:")
-                for idea_idx, rank in sorted(global_ranks.items(), key=lambda x: x[1], reverse=True):
-                    idea_obj = self.population[idea_idx]["idea"]
-                    title = idea_obj.title if hasattr(idea_obj, 'title') else "Untitled"
-                    print(f"  {title} - ELO {rank}")
-
-                # Update average tournament cost
-                tournament_end_cost = self.get_total_token_count()['cost']['total_cost']
-                current_tournament_cost = tournament_end_cost - tournament_start_cost
-
-                # Update moving average (or just set it if it's the first one)
-                if self.avg_tournament_cost == 0:
-                    self.avg_tournament_cost = current_tournament_cost
-                else:
-                    # Simple moving average
-                    self.avg_tournament_cost = (self.avg_tournament_cost + current_tournament_cost) / 2
-
-                # Step 2: Allocate parent slots globally across entire population
-                print("\nAllocating parent slots across entire population...")
-                global_parent_slots = self._allocate_parent_slots(global_ranks, ideas_to_breed)
-
-                # Step 3: Generate children using global parent selection
-                print(f"Generating {ideas_to_breed} children using global parent pool...")
-
-                # Pre-select parents for all children to be generated
-                breeding_tasks_data = []
-                for _ in range(ideas_to_breed):
-                    if global_parent_slots:
-                        parent_indices = self._select_parents_from_slots(global_parent_slots, list(global_ranks.keys()))
-                        parent_ideas = [self.population[idx] for idx in parent_indices]
-                    else:
-                        # Fallback to random selection if allocation fails
-                        parent_indices = np.random.choice(list(global_ranks.keys()), size=self.breeder.parent_count, replace=False)
-                        parent_ideas = [self.population[idx] for idx in parent_indices]
-                    breeding_tasks_data.append(parent_ideas)
-
-                async def breed_single_child(parent_ideas):
-                    new_idea = await asyncio.to_thread(self.breeder.breed, parent_ideas, self.idea_type)
-
-                    # Extract breeding prompt
-                    prompt = None
-                    if isinstance(new_idea, dict) and "specific_prompt" in new_idea:
-                        prompt = new_idea["specific_prompt"]
-
-                    # Refine
-                    refined_idea = await asyncio.to_thread(self.critic.refine, new_idea, self.idea_type)
-
-                    # Format
-                    formatted_idea = await asyncio.to_thread(self.formatter.format_idea, refined_idea, self.idea_type)
-
-                    return formatted_idea, prompt
-
-                breeding_tasks = [lambda p=p: breed_single_child(p) for p in breeding_tasks_data]
-
-                # Base steps calculation
-                # Start of breeding is after tournaments
-                breeding_start_step = current_gen_start_step + max(1, self.tournament_rounds)
-
-                # Add elite progress if any
-                current_gen_base = 1 if elite_processed else 0
-
-                breeding_results = await self._run_batch_with_progress(
-                    tasks=breeding_tasks,
-                    progress_callback=progress_callback,
-                    base_progress_info={
-                        "current_generation": gen + 1,
-                        "total_generations": self.generations,
-                        "is_running": True,
-                    },
-                    start_step=breeding_start_step + current_gen_base,
-                    total_steps=total_steps,
-                    description_template="Breeding and refining idea {completed}/{total}..."
-                )
-
-                if self.stop_requested:
-                    # Handle stop during breeding
-                    completed_results = [r for r in breeding_results if r is not None]
-                    for idea, prompt in completed_results:
-                        new_population.append(idea)
-                        generation_breeding_prompts.append(prompt)
-
-                    if new_population:
-                        self.history.append(new_population)
-
-                    await progress_callback({
-                        "current_generation": gen + 1,
-                        "total_generations": self.generations,
-                        "is_running": False,
-                        "is_stopped": True,
-                        "history": self.history,
-                        "contexts": self.contexts,
-                        "specific_prompts": self.specific_prompts,
-                        "breeding_prompts": self.breeding_prompts,
-                        "stop_message": f"Evolution stopped during breeding",
-                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                    })
-                    return
-
-                # Process results
-                for result in breeding_results:
-                    if result is None:
-                        generation_breeding_prompts.append(None)
-                        continue
-
-                    idea, prompt = result
-                    new_population.append(idea)
-                    generation_breeding_prompts.append(prompt)
-
-                # Update costs after breeding batch
-                token_counts = self.get_total_token_count()
-                current_cost = token_counts['cost']['total_cost']
-
-                total_ideas = self.pop_size * (self.generations + 1)
-                completed_ideas = self.pop_size + (gen * self.pop_size) + len(new_population)
-                remaining_ideas_in_run = total_ideas - completed_ideas
-                remaining_tournaments = self.generations - 1 - gen
-
-                estimated_total_cost = current_cost + (remaining_ideas_in_run * self.avg_idea_cost) + (remaining_tournaments * self.avg_tournament_cost)
-                token_counts['cost']['estimated_total_cost'] = estimated_total_cost
-
-                # Check budget
-                if self.check_budget():
-                    print(f"Budget limit reached: ${current_cost:.4f} >= ${self.max_budget:.4f}")
-                    self.stop_requested = True
-                    self.is_stopped = True
-                    if new_population:
-                        self.history.append(new_population)
-                    await progress_callback({
-                        "current_generation": gen + 1,
-                        "total_generations": self.generations,
-                        "is_running": False,
-                        "is_stopped": True,
-                        "history": self.history,
-                        "contexts": self.contexts,
-                        "specific_prompts": self.specific_prompts,
-                        "breeding_prompts": self.breeding_prompts,
-                        "stop_message": f"Evolution stopped: Budget limit reached (${current_cost:.2f} / ${self.max_budget:.2f})",
-                        "token_counts": token_counts,
-                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                    })
-                    return
-
-                # Send final update for this generation
-                # Create a copy of the history with the current generation's progress
-                history_copy = self.history.copy()
-                history_copy.append(new_population.copy())
-
-                # Include the current generation's breeding prompts
-                breeding_prompts_with_current = self.breeding_prompts.copy()
-                breeding_prompts_with_current.append(generation_breeding_prompts.copy())
-
-                await progress_callback({
-                    "current_generation": gen + 1,
-                    "total_generations": self.generations,
-                    "is_running": True,
-                    "history": history_copy,
-                    "contexts": self.contexts,
-                    "specific_prompts": self.specific_prompts,
-                    "breeding_prompts": breeding_prompts_with_current,
-                    "progress": ((breeding_start_step + current_gen_base + len(new_population)) / total_steps) * 100,
-                    "token_counts": token_counts,
-                    "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                })
-
-                # Small delay
-                await asyncio.sleep(0.1)
-
-                # Update population with new ideas
-                self.population = new_population
-                self.history.append(self.population)
-
-                # Store the breeding prompts for this generation
-                self.breeding_prompts.append(generation_breeding_prompts)
-
-                print(f"Generation {gen + 1} complete. Population size: {len(self.population)}")
-                print(f"Collected {len(generation_breeding_prompts)} breeding prompts for generation {gen + 1}")
-
-                # Calculate diversity for this generation
-                generation_diversity = await self._calculate_and_store_diversity()
-
-                # Apply Oracle for diversity enhancement (if enabled)
-                if self.oracle:
-                    try:
-                        print("Oracle analyzing population for diversity enhancement...")
-                        print(f"Population size before Oracle: {len(self.population)}")
-                        print(f"History generations: {len(self.history)}")
-
-                        oracle_result = self.oracle.analyze_and_diversify(
-                            self.history, self.idea_type
-                        )
-
-                        print(f"Oracle result: {oracle_result}")
-
-                        # Replace existing idea with more diverse one using embedding-based selection
-                        replace_idx = await self._find_least_interesting_idea_idx(self.population)
-
-                        # Generate a new idea using the oracle's prompt, extended with special requirements
-                        idea_prompt = oracle_result["idea_prompt"]
-
-                        # Get the special requirements and extend the Oracle prompt with them
-                        prompts = self._get_template_prompts()
-                        extended_prompt = idea_prompt
-
-                        # If there are special requirements, append them to the Oracle prompt
-                        if hasattr(prompts, 'template') and prompts.template.special_requirements:
-                            extended_prompt = f"{idea_prompt}\n\nConstraints:\n{prompts.template.special_requirements}"
-
-                        new_idea = self.ideator.generate_text(extended_prompt)
-
-                        # Create the new idea structure
-                        oracle_idea = {
-                            "id": uuid.uuid4(),
-                            "idea": new_idea,
-                            "parent_ids": [],
-                            "oracle_generated": True,
-                            "oracle_analysis": oracle_result["oracle_analysis"]
-                        }
-                        # refine the idea
-                        refined_oracle_idea = self.critic.refine(oracle_idea, self.idea_type)
-                        formatted_oracle_idea = self.formatter.format_idea(refined_oracle_idea, self.idea_type)
-
-                        # Ensure Oracle metadata is preserved after formatting
-                        if not formatted_oracle_idea.get("oracle_generated", False):
-                            print("WARNING: Oracle metadata lost during formatting! Restoring...")
-                            formatted_oracle_idea["oracle_generated"] = True
-                            formatted_oracle_idea["oracle_analysis"] = oracle_idea.get("oracle_analysis", "Oracle analysis was lost during formatting")
-
-                        old_idea = self.population[replace_idx]
-                        old_title = "Unknown"
-                        if isinstance(old_idea, dict) and "idea" in old_idea:
-                            idea_obj = old_idea["idea"]
-                            if hasattr(idea_obj, 'title'):
-                                old_title = idea_obj.title
-
-                        # Update embedding storage: remove old idea's embedding
-                        old_idea_id = str(old_idea.get("id", "")) if isinstance(old_idea, dict) else ""
-                        if old_idea_id:
-                            await self._remove_embedding(old_idea_id)
-                            print(f"🗑️ Removed embedding for replaced idea: '{old_title}'")
-
-                        self.population[replace_idx] = formatted_oracle_idea
-
-                        # Also update the corresponding prompt so the UI is consistent
-                        if self.breeding_prompts:
-                            self.breeding_prompts[-1][replace_idx] = idea_prompt
-
-                        print(f"Oracle replaced idea '{old_title}' at index {replace_idx} (least interesting by embedding distance) with more diverse alternative")
-                        print(f"Final Oracle idea has metadata: oracle_generated={formatted_oracle_idea.get('oracle_generated')}, has_analysis={'oracle_analysis' in formatted_oracle_idea}")
-
-                        # Store embedding for new Oracle idea
-                        # Note: The embedding will be computed and stored when _get_or_compute_embeddings_for_ideas is called next time
-                        # This is efficient because it avoids computing the embedding immediately
-
-                        # Update the history with Oracle's changes
-                        self.history[-1] = self.population.copy()
-                        print(f"Updated history with Oracle changes. Final population size: {len(self.population)}")
-
-                        # Calculate token counts for the update
-                        token_counts = self.get_total_token_count()
-                        # Immediately update the UI with Oracle changes
-                        await progress_callback({
-                            "current_generation": gen + 1,
-                            "total_generations": self.generations,
-                            "is_running": True,
-                            "history": self.history,
-                            "contexts": self.contexts,
-                            "specific_prompts": self.specific_prompts,
-                            "breeding_prompts": self.breeding_prompts,
-                            "progress": ((gen + 1) / self.generations) * 100,
-                            "oracle_update": True,  # Flag to indicate this is an Oracle update
-                            "token_counts": token_counts,
-                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                        })
-                    except Exception as e:
-                        print(f"Oracle failed with error: {e}. Continuing without Oracle enhancement.")
-                        import traceback
-                        traceback.print_exc()
-
-                # Elite selection: Pass the most diverse idea directly to the next generation (if not the last generation)
-                if gen < self.generations - 1:  # Only do elite selection if there's a next generation
-                    try:
-                        print("🌟 Performing elite selection for next generation...")
-                        most_diverse_idx = await self._find_most_diverse_idea_idx(self.population)
-                        elite_idea = self.population[most_diverse_idx].copy() if isinstance(self.population[most_diverse_idx], dict) else self.population[most_diverse_idx]
-
-                        # Mark the SOURCE idea in the current generation as selected for elite
-                        # This is what the frontend will see
-                        if isinstance(self.population[most_diverse_idx], dict):
-                            self.population[most_diverse_idx]["elite_selected_source"] = True
-                            self.population[most_diverse_idx]["elite_target_generation"] = gen + 1
-                            # Update history to reflect this change
-                            self.history[-1] = self.population.copy()
-                            print(f"🌟 DEBUG: Marked source idea at index {most_diverse_idx} as elite_selected_source")
-
-                        # Get the corresponding breeding prompt if available
-                        if self.breeding_prompts and self.breeding_prompts[-1] and most_diverse_idx < len(self.breeding_prompts[-1]):
-                            elite_breeding_prompt = self.breeding_prompts[-1][most_diverse_idx]
-
-                        # Extract title for logging
-                        elite_title = "Unknown"
-                        if isinstance(elite_idea, dict) and "idea" in elite_idea:
-                            idea_obj = elite_idea["idea"]
-                            if hasattr(idea_obj, 'title'):
-                                elite_title = idea_obj.title
-
-                        print(f"🌟 Most creative idea selected for next generation: '{elite_title}' (will be refined and formatted)")
-
-                        # Calculate token counts for the update
-                        token_counts = self.get_total_token_count()
-                        # Send an update to notify frontend about elite selection
-                        await progress_callback({
-                            "current_generation": gen + 1,
-                            "total_generations": self.generations,
-                            "is_running": True,
-                            "history": self.history,
-                            "contexts": self.contexts,
-                            "specific_prompts": self.specific_prompts,
-                            "breeding_prompts": self.breeding_prompts,
-                            "progress": ((gen + 1) / self.generations) * 100,
-                            "elite_selection_update": True,  # Flag to indicate elite selection update
-                            "token_counts": token_counts,
-                            "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                        })
-                    except Exception as e:
-                        print(f"Creative selection failed with error: {e}. Continuing without creative selection.")
-                        elite_idea = None
-
-                # Update current generation tracking
-                self.current_generation = gen + 1
-
-                # Auto-save checkpoint after each generation completes
-                checkpoint_status = 'in_progress' if gen < self.generations - 1 else 'complete'
-                checkpoint_path = await self.save_checkpoint(status=checkpoint_status)
-                if checkpoint_path:
-                    # Notify frontend about checkpoint
-                    await progress_callback({
-                        "current_generation": gen + 1,
-                        "total_generations": self.generations,
-                        "is_running": True,
-                        "checkpoint_saved": True,
-                        "checkpoint_id": self.checkpoint_id,
-                    })
-
-            # Mark evolution as complete (only if not stopped)
-            if not self.stop_requested:
-                # Calculate progress
-                progress_percent = ((self.pop_size + (gen + 1) * self.pop_size) / (self.pop_size * (self.generations + 1))) * 100
-
-                # Calculate estimated total cost
-                token_counts = self.get_total_token_count()
-                current_cost = token_counts['cost']['total_cost']
-                estimated_total_cost = 0
-                if progress_percent > 0:
-                    estimated_total_cost = current_cost / (progress_percent / 100)
-
-                token_counts['cost']['estimated_total_cost'] = estimated_total_cost
-
-                # Check budget
-                if self.check_budget():
-                    print(f"Budget limit reached: ${current_cost:.4f} >= ${self.max_budget:.4f}")
-                    self.stop_requested = True
-                    self.is_stopped = True
-                    await progress_callback({
-                        "current_generation": gen + 1,
-                        "total_generations": self.generations,
-                        "is_running": False,
-                        "is_stopped": True,
-                        "history": self.history,
-                        "contexts": self.contexts,
-                        "specific_prompts": self.specific_prompts,
-                        "breeding_prompts": self.breeding_prompts,
-                        "progress": progress_percent,
-                        "stop_message": f"Evolution stopped: Budget limit reached (${current_cost:.2f} / ${self.max_budget:.2f})",
-                        "token_counts": token_counts,
-                        "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                    })
-                    return
-
-                await progress_callback({
-                    "current_generation": gen + 1,
-                    "total_generations": self.generations,
-                    "is_running": True,
-                    "history": self.history,
-                    "contexts": self.contexts,
-                    "specific_prompts": self.specific_prompts,
-                    "breeding_prompts": self.breeding_prompts,
-                    "progress": progress_percent,
-                    "token_counts": token_counts,
-                    "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-                })
-
-            print("Evolution complete!")
-
-            # Final update with complete stats
-            token_counts = self.get_total_token_count()
-            token_counts['cost']['estimated_total_cost'] = token_counts['cost']['total_cost'] # Final cost is actual cost
-
-            await progress_callback({
-                "current_generation": self.generations,
-                "total_generations": self.generations,
-                "is_running": False,
-                "history": self.history,
-                "contexts": self.contexts,
-                "specific_prompts": self.specific_prompts,
-                "breeding_prompts": self.breeding_prompts,
-                "progress": 100,
-                "token_counts": token_counts,
-                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-            })
-            # Print final diversity summary
-            if self.diversity_history:
-                print("\n🎯 FINAL DIVERSITY SUMMARY 🎯")
-                print("Evolution complete! Here's how diversity evolved:")
-                for i, div_data in enumerate(self.diversity_history):
-                    if div_data.get("enabled", False) and "error" not in div_data:
-                        gen_label = "Initial" if i == 0 else f"Gen {i}"
-                        score = div_data.get("diversity_score", 0.0)
-                        print(f"  {gen_label}: Diversity = {score:.4f}")
-                print("=" * 50)
-
-        except Exception as e:
-            import traceback
-            print(f"Error in evolution: {e}")
-            print(traceback.format_exc())
-            await progress_callback({
-                "is_running": False,
-                "error": str(e),
-                "diversity_history": self.diversity_history.copy() if self.diversity_history else []
-            })
-
     def get_ideas_by_generation(self, generation_index: int) -> List[Dict]:
         """
         Get all ideas from a specific generation
@@ -2112,6 +910,30 @@ class EvolutionEngine:
             }
         }
 
+        diagnostics_by_agent = {
+            "ideator": getattr(self.ideator, "get_diagnostics", lambda: {})(),
+            "formatter": getattr(self.formatter, "get_diagnostics", lambda: {})(),
+            "critic": getattr(self.critic, "get_diagnostics", lambda: {})(),
+            "breeder": getattr(self.breeder, "get_diagnostics", lambda: {})(),
+            "oracle": getattr(self.oracle, "get_diagnostics", lambda: {})(),
+        }
+        diagnostic_events_by_agent = {
+            "ideator": getattr(self.ideator, "get_diagnostic_events", lambda: [])(),
+            "formatter": getattr(self.formatter, "get_diagnostic_events", lambda: [])(),
+            "critic": getattr(self.critic, "get_diagnostic_events", lambda: [])(),
+            "breeder": getattr(self.breeder, "get_diagnostic_events", lambda: [])(),
+            "oracle": getattr(self.oracle, "get_diagnostic_events", lambda: [])(),
+        }
+        diagnostic_totals: Dict[str, int] = {}
+        for stats in diagnostics_by_agent.values():
+            for key, value in stats.items():
+                diagnostic_totals[key] = diagnostic_totals.get(key, 0) + int(value)
+        token_data["diagnostics"] = {
+            "agents": diagnostics_by_agent,
+            "totals": diagnostic_totals,
+            "events": diagnostic_events_by_agent,
+        }
+
         # Calculate estimated total cost for each available model using the
         # overall token counts. This gives users a rough idea of what the
         # evolution would have cost if a different model had been selected.
@@ -2230,12 +1052,203 @@ class EvolutionEngine:
 
         return embeddings
 
+    @staticmethod
+    def _update_running_stats(stats: Dict[str, float], values: List[float]) -> None:
+        """Update Welford running stats for cross-generation metric normalization."""
+        for value in values:
+            count = stats["count"] + 1
+            delta = value - stats["mean"]
+            mean = stats["mean"] + (delta / count)
+            delta2 = value - mean
+            m2 = stats["m2"] + (delta * delta2)
+            stats["count"] = count
+            stats["mean"] = mean
+            stats["m2"] = m2
+
+    @staticmethod
+    def _normalize_with_running_stats(value: float, stats: Dict[str, float]) -> float:
+        """
+        Normalize a value into [0, 1] using running z-score statistics.
+
+        We clamp z-scores to [-3, 3] to prevent outliers from dominating.
+        """
+        count = int(stats.get("count", 0))
+        m2 = float(stats.get("m2", 0.0))
+        mean = float(stats.get("mean", 0.0))
+        if count < 2 or m2 <= 0:
+            return 0.5
+
+        variance = m2 / max(1, count - 1)
+        std = math.sqrt(max(variance, 1e-12))
+        z = (value - mean) / std
+        z = max(-3.0, min(3.0, z))
+        return (z + 3.0) / 6.0
+
+    def _get_birth_generation(self, idea: Any) -> int:
+        """Read persisted birth generation metadata (defaults to 0 for legacy ideas)."""
+        if not isinstance(idea, dict):
+            return 0
+        raw = idea.get("birth_generation", 0)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+
+    def _compute_replacement_count(self, population_size: int) -> int:
+        """Compute how many child slots to create for the next generation."""
+        if population_size <= 0:
+            return 0
+
+        replace_count = int(round(population_size * self.replacement_rate))
+        if self.replacement_rate > 0 and replace_count == 0:
+            replace_count = 1
+
+        if self.replacement_rate < 1.0 and replace_count >= population_size:
+            replace_count = population_size - 1
+
+        return max(0, min(population_size, replace_count))
+
+    async def _calculate_population_diversity_scores(
+        self, population: List[Any]
+    ) -> Dict[int, float]:
+        """
+        Compute per-idea diversity as distance from the current population centroid.
+
+        Returns:
+            Dict mapping population index -> raw diversity distance.
+        """
+        if not population:
+            return {}
+
+        default_scores = {idx: 0.0 for idx in range(len(population))}
+        if not self.diversity_calculator.is_enabled() or len(population) < 2:
+            return default_scores
+
+        embeddings = await self._get_or_compute_embeddings_for_ideas(population)
+
+        valid_embeddings = []
+        valid_indices = []
+        for idx, embedding in enumerate(embeddings):
+            if embedding is not None:
+                valid_embeddings.append(embedding)
+                valid_indices.append(idx)
+
+        if len(valid_embeddings) < 2:
+            return default_scores
+
+        centroid = np.mean(valid_embeddings, axis=0)
+        diversity_scores = default_scores.copy()
+        for emb_idx, pop_idx in enumerate(valid_indices):
+            embedding = valid_embeddings[emb_idx]
+            distance = float(np.sqrt(np.sum((embedding - centroid) ** 2)))
+            diversity_scores[pop_idx] = distance
+
+        return diversity_scores
+
+    async def _score_population_fitness(
+        self, population: List[Any], ranks: Dict[int, float]
+    ) -> Dict[int, Dict[str, float]]:
+        """
+        Compute normalized hybrid fitness for the current population.
+
+        fitness = alpha * elo_norm + (1 - alpha) * diversity_norm
+        """
+        if not population or not ranks:
+            return {}
+
+        valid_indices = [idx for idx in ranks.keys() if 0 <= idx < len(population)]
+        if not valid_indices:
+            return {}
+
+        diversity_scores = await self._calculate_population_diversity_scores(population)
+        elo_values = [float(ranks[idx]) for idx in valid_indices]
+        diversity_values = [float(diversity_scores.get(idx, 0.0)) for idx in valid_indices]
+
+        self._update_running_stats(self.fitness_elo_stats, elo_values)
+        self._update_running_stats(self.fitness_diversity_stats, diversity_values)
+
+        fitness_map: Dict[int, Dict[str, float]] = {}
+        for idx in valid_indices:
+            elo = float(ranks[idx])
+            diversity = float(diversity_scores.get(idx, 0.0))
+            elo_norm = self._normalize_with_running_stats(elo, self.fitness_elo_stats)
+            diversity_norm = self._normalize_with_running_stats(
+                diversity, self.fitness_diversity_stats
+            )
+            fitness = (self.fitness_alpha * elo_norm) + (
+                (1.0 - self.fitness_alpha) * diversity_norm
+            )
+            fitness_map[idx] = {
+                "elo": elo,
+                "diversity": diversity,
+                "elo_norm": elo_norm,
+                "diversity_norm": diversity_norm,
+                "fitness": fitness,
+            }
+
+        return fitness_map
+
+    def _score_survival_with_age_decay(
+        self, population: List[Any], fitness_map: Dict[int, Dict[str, float]], target_generation: int
+    ) -> Dict[int, Dict[str, float]]:
+        """
+        Combine hybrid fitness with age decay to produce survivor selection weights.
+        """
+        survival_scores: Dict[int, Dict[str, float]] = {}
+        for idx, data in fitness_map.items():
+            if idx >= len(population):
+                continue
+
+            birth_generation = self._get_birth_generation(population[idx])
+            age = max(0, int(target_generation) - birth_generation)
+            decay = self.age_decay_floor + (
+                (1.0 - self.age_decay_floor) * math.exp(-self.age_decay_rate * age)
+            )
+            score = float(data.get("fitness", 0.0)) * decay
+            survival_scores[idx] = {
+                **data,
+                "age": float(age),
+                "age_decay": decay,
+                "survival_score": score,
+            }
+        return survival_scores
+
+    def _select_survivor_indices(
+        self, survival_scores: Dict[int, Dict[str, float]], survivor_count: int
+    ) -> List[int]:
+        """Weighted sampling without replacement for survivor selection."""
+        if survivor_count <= 0 or not survival_scores:
+            return []
+
+        available = sorted(survival_scores.keys())
+        if not available:
+            return []
+
+        weights = np.array(
+            [max(0.0, float(survival_scores[idx].get("survival_score", 0.0))) for idx in available],
+            dtype=float,
+        )
+        if float(weights.sum()) <= 0:
+            weights = np.ones_like(weights, dtype=float)
+
+        selected: List[int] = []
+        draw_count = min(survivor_count, len(available))
+        for _ in range(draw_count):
+            probabilities = weights / float(weights.sum())
+            chosen_pos = int(self.random_choice(len(available), p=probabilities))
+            selected.append(available.pop(chosen_pos))
+            weights = np.delete(weights, chosen_pos)
+            if weights.size > 0 and float(weights.sum()) <= 0:
+                weights = np.ones_like(weights, dtype=float)
+
+        return selected
+
     def _allocate_parent_slots(self, ranks, ideas_to_breed):
         """
-        Allocate parent slots based on tournament ranks with caps to prevent convergence.
+        Allocate parent slots based on hybrid fitness scores with caps to prevent convergence.
 
         Args:
-            ranks: Dict mapping idea indices to ELO ratings
+            ranks: Dict mapping idea indices to fitness score
             ideas_to_breed: Number of children to produce (determines total parent slots needed)
 
         Returns:
@@ -2244,7 +1257,7 @@ class EvolutionEngine:
         if not ranks or ideas_to_breed <= 0:
             return {}
 
-        # Sort ideas by rank (higher ELO = better rank)
+        # Sort ideas by score (higher fitness = better rank)
         sorted_ideas = sorted(ranks.items(), key=lambda x: x[1], reverse=True)
         num_ideas = len(sorted_ideas)
 
@@ -2309,9 +1322,9 @@ class EvolutionEngine:
 
         # Log allocation for transparency
         print(f"Parent slot allocation for {ideas_to_breed} children ({total_slots} slots):")
-        for i, (idea_idx, elo) in enumerate(sorted_ideas):
+        for i, (idea_idx, score) in enumerate(sorted_ideas):
             slots = allocation.get(idea_idx, 0)
-            print(f"  Rank {i+1} (ELO {elo:.0f}): {slots} slots")
+            print(f"  Rank {i+1} (fitness {score:.3f}): {slots} slots")
 
         return allocation
 
@@ -2338,7 +1351,11 @@ class EvolutionEngine:
         if len(parent_pool) < self.breeder.parent_count:
             # Fallback: if not enough parents in pool, use available indices
             print(f"Warning: Only {len(parent_pool)} parents in pool, need {self.breeder.parent_count}")
-            return np.random.choice(available_indices, size=min(self.breeder.parent_count, len(available_indices)), replace=False).tolist()
+            return self.random_choice(
+                available_indices,
+                size=min(self.breeder.parent_count, len(available_indices)),
+                replace=False,
+            ).tolist()
 
         # Simple random selection without replacement
         selected_parents = []
@@ -2349,7 +1366,7 @@ class EvolutionEngine:
                 break
 
             # Select random parent from pool
-            selected_idx = np.random.choice(len(pool_copy))
+            selected_idx = self.random_choice(len(pool_copy))
             parent_idx = pool_copy.pop(selected_idx)
 
             # Avoid selecting the same parent twice for this breeding
@@ -2359,7 +1376,7 @@ class EvolutionEngine:
                 # If we selected a duplicate, try to find a different one
                 available_alternatives = [p for p in set(pool_copy) if p not in selected_parents]
                 if available_alternatives:
-                    alternative = np.random.choice(available_alternatives)
+                    alternative = self.random_choice(available_alternatives)
                     selected_parents.append(alternative)
                     # Remove the alternative from pool
                     pool_copy = [p for p in pool_copy if p != alternative]

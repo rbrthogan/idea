@@ -75,6 +75,59 @@
     .sort-arrow.inactive::after {
       content: "⇅";
     }
+
+    .charts-grid {
+      margin-top: 1.25rem;
+    }
+
+    .chart-tile {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 0.75rem;
+      padding: 0.75rem 0.75rem 0.25rem;
+      height: 100%;
+    }
+
+    .chart-tile-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .chart-tile-title {
+      margin: 0;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .chart-focus-trigger {
+      cursor: zoom-in;
+    }
+
+    .ratings-chart-canvas {
+      width: 100% !important;
+      height: 240px !important;
+      display: block;
+    }
+
+    .chart-focus-modal-canvas {
+      width: 100% !important;
+      height: 65vh !important;
+      max-height: 720px;
+      display: block;
+    }
+
+    @media (max-width: 991.98px) {
+      .ratings-chart-canvas {
+        height: 220px !important;
+      }
+
+      .chart-focus-modal-canvas {
+        height: 55vh !important;
+      }
+    }
   </style>
 </head>
 
@@ -134,21 +187,19 @@
               </div>
 
               <div class="controls-buttons">
-                <button onclick="refreshPair()" class="btn btn-sm btn-outline-primary w-100">Next Pair</button>
+                <button onclick="refreshPair()" class="btn btn-sm btn-outline-primary w-100">Next Swiss Pair</button>
                 <button onclick="showRanking()" class="btn btn-sm btn-outline-primary w-100">Show Ranking</button>
 
                 <hr>
 
                 <!-- Manual Rating Controls -->
                 <div id="manualRatingControls">
-                  <label class="form-label">Manual Rating</label>
+                  <label class="form-label">Manual Swiss Rating</label>
                   <div class="mb-3">
-                    <label for="manualEloRange" class="form-label">ELO Matching Range (±)</label>
-                    <input type="number" class="form-control form-control-sm" id="manualEloRange" value="100" min="0"
-                      max="500">
-                    <small class="form-text text-muted" style="font-size: 0.75rem;">Ideas will be matched with others
-                      within this ELO range for more
-                      efficient comparisons</small>
+                    <small class="form-text text-muted" style="font-size: 0.75rem;">
+                      Pairs are generated using Swiss rounds based on current manual ratings and prior manual matches.
+                    </small>
+                    <div id="manualSwissStatus" class="small text-muted mt-2">Round 0 · Waiting for pair</div>
                   </div>
                   <label class="form-label">Vote</label>
                   <button onclick="vote('A')" class="btn btn-sm btn-primary w-100 mb-2 vote-btn">Vote for A</button>
@@ -158,19 +209,19 @@
 
                 <!-- Automated Rating Controls -->
                 <div id="autoRatingControls" style="display: none;">
-                  <label class="form-label">Automated Rating</label>
+                  <label class="form-label">Automated Swiss Rating</label>
                   <div class="mb-3">
-                    <label for="numComparisons" class="form-label">Number of Comparisons</label>
-                    <input type="number" class="form-control form-control-sm" id="numComparisons" value="10" min="1"
-                      max="100">
-                  </div>
-                  <div class="mb-3">
-                    <label for="eloRange" class="form-label">ELO Matching Range (±)</label>
-                    <input type="number" class="form-control form-control-sm" id="eloRange" value="100" min="0"
-                      max="500">
-                    <small class="form-text text-muted" style="font-size: 0.75rem;">Ideas will be matched with others
-                      within this ELO range for more
-                      efficient comparisons</small>
+                    <label for="autoTournamentCount" class="form-label d-flex justify-content-between">
+                      <span>Tournament Count</span>
+                      <span id="autoTournamentCountValue">1.00</span>
+                    </label>
+                    <input type="range" class="form-range" min="0.25" max="3" step="0.25" id="autoTournamentCount" value="1">
+                    <small id="autoTournamentRoundsHint" class="form-text text-muted" style="font-size: 0.75rem;">
+                      1.00 = full Swiss tournament (pop size - 1 rounds).
+                    </small>
+                    <small class="form-text text-muted" style="font-size: 0.75rem;">
+                      Fractions run proportional Swiss rounds, matching the evolution loop.
+                    </small>
                   </div>
                   <div class="mb-3">
                     <label for="modelSelect" class="form-label">Model</label>
@@ -178,7 +229,7 @@
                       <!-- Models will be populated here -->
                     </select>
                   </div>
-                  <button id="startAutoRating" class="btn btn-sm btn-primary w-100">Start Auto Rating</button>
+                  <button id="startAutoRating" class="btn btn-sm btn-primary w-100">Start Auto Swiss Rating</button>
                 </div>
               </div>
             </div>
@@ -234,6 +285,16 @@
                 </div>
               </div>
 
+              <div class="mb-3">
+                <label class="form-label">Generation View</label>
+                <div class="btn-group w-100" role="group">
+                  <button id="deathGenerationViewBtn" type="button" class="btn btn-outline-primary active"
+                    onclick="toggleGenerationView('death')">Death</button>
+                  <button id="birthGenerationViewBtn" type="button" class="btn btn-outline-primary"
+                    onclick="toggleGenerationView('birth')">Birth</button>
+                </div>
+              </div>
+
               <!-- Reset Controls -->
               <div class="mb-3">
                 <label class="form-label">Reset Ratings & Match Counts</label>
@@ -273,8 +334,20 @@
                       Matches
                       <span class="sort-arrow inactive"></span>
                     </th>
-                    <th class="sortable-header" data-sort="generation">
-                      Generation
+                    <th class="sortable-header" data-sort="diversity">
+                      Diversity
+                      <span class="sort-arrow inactive"></span>
+                    </th>
+                    <th class="sortable-header" data-sort="fitness">
+                      Overall Fitness
+                      <span class="sort-arrow inactive"></span>
+                    </th>
+                    <th class="sortable-header" data-sort="birth_generation">
+                      Birth Gen
+                      <span class="sort-arrow inactive"></span>
+                    </th>
+                    <th class="sortable-header" data-sort="death_generation">
+                      Death/Final Gen
                       <span class="sort-arrow inactive"></span>
                     </th>
                   </tr>
@@ -283,10 +356,56 @@
                 </tbody>
               </table>
 
-              <!-- Add this after the rankings table in the results card -->
-              <div class="mt-4">
-                <h6>ELO Ratings by Generation:</h6>
-                <canvas id="eloChart" width="400" height="200"></canvas>
+              <div class="row g-3 charts-grid">
+                <div class="col-12 col-xl-4">
+                  <div class="chart-tile">
+                    <div class="chart-tile-header">
+                      <h6 class="chart-tile-title">ELO Ratings by Generation</h6>
+                      <button type="button" class="btn btn-sm btn-outline-primary chart-focus-trigger"
+                        data-focus-chart="eloChart" data-chart-title="ELO Ratings by Generation"
+                        aria-label="Expand ELO ratings chart">
+                        <i class="fas fa-expand"></i>
+                      </button>
+                    </div>
+                    <canvas id="eloChart" width="400" height="220" class="ratings-chart-canvas chart-focus-trigger"
+                      data-focus-chart="eloChart" data-chart-title="ELO Ratings by Generation" role="button"
+                      tabindex="0" aria-label="Expand ELO ratings chart"></canvas>
+                  </div>
+                </div>
+
+                <div class="col-12 col-xl-4">
+                  <div class="chart-tile">
+                    <div class="chart-tile-header">
+                      <h6 class="chart-tile-title">Diversity by Generation</h6>
+                      <button type="button" class="btn btn-sm btn-outline-primary chart-focus-trigger"
+                        data-focus-chart="diversityChart" data-chart-title="Diversity by Generation"
+                        aria-label="Expand diversity chart">
+                        <i class="fas fa-expand"></i>
+                      </button>
+                    </div>
+                    <canvas id="diversityChart" width="400" height="220"
+                      class="ratings-chart-canvas chart-focus-trigger" data-focus-chart="diversityChart"
+                      data-chart-title="Diversity by Generation" role="button" tabindex="0"
+                      aria-label="Expand diversity chart"></canvas>
+                  </div>
+                </div>
+
+                <div class="col-12 col-xl-4">
+                  <div class="chart-tile">
+                    <div class="chart-tile-header">
+                      <h6 class="chart-tile-title">Combined Fitness by Generation</h6>
+                      <button type="button" class="btn btn-sm btn-outline-primary chart-focus-trigger"
+                        data-focus-chart="fitnessChart" data-chart-title="Combined Fitness by Generation"
+                        aria-label="Expand combined fitness chart">
+                        <i class="fas fa-expand"></i>
+                      </button>
+                    </div>
+                    <div id="fitnessFormula" class="small text-muted mb-2"></div>
+                    <canvas id="fitnessChart" width="400" height="220" class="ratings-chart-canvas chart-focus-trigger"
+                      data-focus-chart="fitnessChart" data-chart-title="Combined Fitness by Generation" role="button"
+                      tabindex="0" aria-label="Expand combined fitness chart"></canvas>
+                  </div>
+                </div>
               </div>
 
               <button id="returnToComparison" class="btn btn-primary mt-3 w-100">Return to Comparison View</button>
@@ -345,6 +464,21 @@
       window.addEventListener('resize', updateIcon);
     });
   </script>
+
+  <div class="modal fade" id="chartFocusModal" tabindex="-1" aria-labelledby="chartFocusModalLabel"
+    aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="chartFocusModalLabel">Chart Focus</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <canvas id="chartFocusCanvas" class="chart-focus-modal-canvas"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Add this modal at the end of the body, before the closing </body> tag -->
   <div class="modal fade" id="ideaModal" tabindex="-1" aria-labelledby="ideaModalLabel" aria-hidden="true">

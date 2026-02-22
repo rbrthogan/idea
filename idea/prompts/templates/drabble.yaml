@@ -1,192 +1,136 @@
 name: Drabble (100-word story)
 description: Generate creative 100-word stories with complete narrative arcs
-version: 1.0.0
+version: 1.2.0
 author: Original Idea App
 created_date: '2024-01-15'
+
 metadata:
   item_type: stories
-special_requirements: "A drabble is a short work of fiction exactly 100 words in length\
-  \ (not including the title).\nDespite its brevity, a drabble should tell a complete\
-  \ story with a beginning, middle, and end.\n\nYour story will be judge on creativity,\
-  \ originality, and the ability to tell a complete story in 100 words.\n\nTry to\
-  \ avoid common clich\xE9 \"creative\" words like \"Echo\", \"Crimson\", \"Bloom\"\
-  , \"Shadow\", \"Whisper\", \"Ember\", \"Ash\", \"Veil\", \"Legacy\" etc.\nThis smacks\
-  \ of beginning writers who are trying to be creative but are actually just imitating\
-  \ more seasoned writers.\n\nTry to be original and creative with your choice of\
-  \ words.\n\nFormat your response as:\nTitle: [Your creative title]\nContent: [Your\
-  \ 100-word story]"
+
+special_requirements: |
+  Output constraints:
+  - A drabble is a short work of fiction with exactly 100 words in the story body (title excluded).
+  - Return exactly two labeled lines:
+    Title: [short evocative title]
+    Content: [exactly 100-word drabble]
+  - The Content field must be a complete narrative arc (beginning, middle, end).
+  - Prioritize originality and avoid cliches, stock twists, and generic trope combinations.
+  - No analysis, commentary, or extra text beyond the two required fields.
+
 prompts:
-  context: 'Generate a diverse list of 50 specific English words/concepts for creative
-    writing inspiration. Mix concrete and abstract elements:
+  context: |
+    Generate a diverse list of 50 specific English words/concepts for creative writing inspiration. Mix concrete and abstract elements:
 
-    - SPECIFIC genres (noir, cosmic horror, slice-of-life, magical realism, western,
-    historical, pastoral, comedy, etc.)
+    - SPECIFIC genres (noir, cosmic horror, slice-of-life, magical realism, western, historical, pastoral, comedy, etc.)
+    - CONCRETE settings (lighthouse, subway car, boarding school, space station, monastery, cafeteria, etc.)
+    - CHARACTER TYPES (single mother, desperate thief, rising sports star, firefighter, pensioner, house cat, pack mule, ancient redwood tree, talking dog, etc.)
+    - CONCRETE objects (music box, stethoscope, origami crane, broken bicycle, gas mask, etc.)
+    - THEMES (loneliness, triumph, changing of the guard, betrayal, coming of age, revenge, personal growth, etc.)
+    - SPECIFIC emotions (nostalgia, schadenfreude, saudade, jealousy, embarrassment, etc.)
 
-    - CONCRETE settings (lighthouse, subway car, boarding school, space station, monastery,
-    cafetaria, etc.)
+    Do not regurgitate this list; it is illustrative only.
 
-    - CHARACTER TYPES (single mother, desperate thief, up and coming sports star,
-    firefighter, pensioner, a house cat, a pack mule, an ancient redwood tree, a talking
-    dog, etc.)
+    Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ...
 
-    - CONCRETE objects (music box, stethoscope, origami crane, a broken bicycle, a
-    gas mask etc.)
-
-    - THEMES (loneliness, triumph, changing of the guard, betrayal, coming of age,
-    revenge, personal growth, etc.)
-
-    - SPECIFIC emotions (nostalgia, schadenfreude, saudade, jealousy, embarrassment,
-    etc.)
-
-
-    Don''t just regurgitate this list, it is for illustration purposes only.
-
-    Return the list as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>,
-    ....'
-  specific_prompt: 'From the following concepts, randomly select 2 or 3 that would
-    create an interesting combination and create 1 simple, concise prompt:
-
+  specific_prompt: |
+    From the following concepts, randomly select 2 or 3 that create an interesting combination and produce one simple, concise story direction:
 
     {context_pool}
 
+    SELECTION STRATEGY: Pick concepts that work well together. Avoid combining so many elements that the story becomes muddy.
 
-    SELECTION STRATEGY: Pick concepts that might make an interesting story together.
-    Don''t include too many concepts that would make the story too complex.
+    Create a brief request like:
+    - "Write a [genre/style] drabble about a [character type] dealing with [concept]."
+    - "Write a drabble set in a [setting] centered on [theme]."
 
+    Your concise story prompt:
 
-    Create a brief request like: "Write a [genre/style] drabble about a [character
-    type] dealing with [concept]." Or "Write a drabble set in a [setting] about a
-    exploring this [theme]."
-
-
-    Your concise story prompt:'
-  example_idea_prompts: '- "Write a 100-word story about a sentient teapot that is
-    afraid of the dark."
-
+  example_idea_prompts: |
+    - "Write a 100-word story about a sentient teapot that is afraid of the dark."
     - "In exactly 100 words, describe the last moments of a star."
-
     - "A 100-word story about a detective who solves crimes by talking to ghosts."
-
     - "Write a drabble about a child who finds a door to another world in their closet."
-
     - "A 100-word story about a robot who learns to love."
 
-    '
-  idea: 'Your story must be exactly 100 words long.
+  idea: |
+    Generate one drabble from the selected direction.
+    Apply all constraints below:
+    {requirements}
 
-    It must incorporate the following elements from the context pool:
+  format: |
+    You are a formatting assistant. Your task is to take the input text and structure it into a JSON object with "title" and "content" fields.
 
-    {context_pool}
-
-    The story should be a complete narrative with a beginning, middle, and end.
-
-    It should be well-written and engaging.
-
-    No additional text, just the story.
-
-    {requirements}'
-  format: 'You are a formatting assistant. Your task is to take the input text and
-    structure it into a JSON object with "title" and "content" fields.
-
-
-    If the input has a clear title (e.g. "Title: X"), use it. If not, generate a suitable
-    title based on the content.
+    If the input has a clear title (e.g. "Title: X"), use it. If not, generate a suitable title based on the content.
 
     The "content" field should contain the body of the story.
 
-
     Input to format:
+    {input_text}
 
-    {input_text}'
-  critique: 'You are a professor of creative writing that reviewing drabble assignments.
+  critique: |
+    You are a creative-writing professor reviewing drabble assignments.
 
     Drabble from a promising student:
-
     {idea}
 
+    Provide critical feedback on strengths and weaknesses.
+    If the story fails the drabble form, lacks a clear narrative arc, or feels derivative/banal, explain what to improve.
 
-    Please consider the above story and offer critical feedback.
+    No additional text, just the critique.
 
-    Pointing out weaknesses as well as strengths. If the story doesn''t fit the drabble
-    format or have a clear narrative arc,
+  refine: |
+    You are a professional creative writer refining a drabble based on critique.
 
-    or is too derivative or banal, please suggest how to improve it.
-
-    No additional text, just the critique.'
-  refine: 'You are a professional creative writer refining a drabble based on critique.
-
-
-    Original Drabble:
-
+    Original drabble:
     {idea}
 
+    Critique:
+    {critique}
 
-    Critique: {critique}
+    Create a refined version that addresses the critique while preserving the core creative elements and unusual concepts that make the story distinctive.
+    Write exactly 100 words: a complete story, not a description.
 
+    {requirements}
 
-    Create your refined version that addresses the critique while preserving the core
-    creative elements and unusual concepts that make the story distinctive. The refined
-    drabble should maintain whatever unique setting, character types, or themes made
-    the original interesting.
+  breed: |
+    {ideas}
+    Generate one new drabble while following all constraints below:
+    {requirements}
 
+  genotype_encode: |
+    You are an expert literary analyst skilled at deconstructing stories into their fundamental narrative DNA.
+    Convert a complete drabble into its basic genetic elements (genotype).
 
-    Write exactly 100 words - a complete story, not a description.
+    Capture:
+    - Genre/style
+    - Central conflict
+    - Character archetype
+    - Setting/atmosphere
+    - Narrative technique
+    - Emotional core
+    - Thematic element
 
+    Preserve hard constraints as tags when relevant:
+    {requirements_digest}
 
-    {requirements}'
-  breed: '{ideas}
+    Extract only fundamental elements. Strip away plot specifics, names, and incidental details.
 
-    You are a professional creative writer. Based on the above drabbles, create a
-    new drabble that either:
+    Format as a condensed semicolon-separated list.
 
-    - Takes the LEAST represented elements from the stories above, OR
+    Example:
+    Input: "Sarah's fingers trembled as she opened the letter. Twenty years later, and Mom's handwriting still made her heart race. 'I forgive you,' it read. But Mom had been dead for five years. Sarah laughed through tears, finally understanding. The letter was in her own handwriting - a message from her younger self, hidden and forgotten until now. Sometimes forgiveness comes from the most unexpected places."
+    Output: "psychological realism; guilt and redemption; mother-daughter relationship; domestic setting; twist ending; self-forgiveness; time/memory; epistolary element"
 
-    - Combines elements that haven''t been combined before, OR
+    Drabble to encode:
+    {idea_content}
 
-    - Shifts to a completely different genre/tone/setting than what dominates above
+    Genotype:
 
-
-    Prioritize novelty and avoiding repetitive patterns while maintaining story quality.
-
-
-    IMPORTANT: Do NOT include any analysis, commentary, or meta-discussion in your
-    response.
-
-    Return ONLY the new creative drabble story - no analysis of the parent stories.
-
-
-    {requirements}'
-  genotype_encode: "You are an expert literary analyst skilled at deconstructing stories\
-    \ into their fundamental narrative DNA. Your task is to convert a complete drabble\
-    \ (100-word story) into its basic genetic elements (genotype).\n\nFor drabbles,\
-    \ the genotype should capture the essential storytelling components:\n- Genre/style\
-    \ (e.g., \"science fiction\", \"horror\", \"slice of life\", \"magical realism\"\
-    , \"noir\")\n- Central conflict (e.g., \"internal struggle\", \"person vs nature\"\
-    , \"moral dilemma\", \"time pressure\")\n- Character archetype (e.g., \"reluctant\
-    \ hero\", \"wise elder\", \"lost child\", \"conflicted professional\")\n- Setting/atmosphere\
-    \ (e.g., \"urban decay\", \"isolated wilderness\", \"domestic space\", \"dystopian\
-    \ future\")\n- Narrative technique (e.g., \"twist ending\", \"stream of consciousness\"\
-    , \"dialogue-driven\", \"unreliable narrator\")\n- Emotional core (e.g., \"loss\
-    \ and acceptance\", \"fear and courage\", \"love and sacrifice\", \"guilt and\
-    \ redemption\")\n- Thematic element (e.g., \"identity\", \"mortality\", \"connection\"\
-    , \"transformation\", \"memory\")\n\nExtract only the most fundamental narrative\
-    \ elements - strip away specific plot details, character names, and setting specifics.\
-    \ Think of it as the \"story DNA\" of the drabble.\n\nFormat the genotype as a\
-    \ condensed list of these basic elements, separated by semicolons.\n\nExample:\n\
-    Input: \"Sarah's fingers trembled as she opened the letter. Twenty years later,\
-    \ and Mom's handwriting still made her heart race. 'I forgive you,' it read. But\
-    \ Mom had been dead for five years. Sarah laughed through tears, finally understanding.\
-    \ The letter was in her own handwriting\u2014a message from her younger self,\
-    \ hidden and forgotten until now. Sometimes forgiveness comes from the most unexpected\
-    \ places.\"\nOutput: \"psychological realism; guilt and redemption; mother-daughter\
-    \ relationship; domestic setting; twist ending; self-forgiveness; time/memory;\
-    \ epistolary element\"\n\nDrabble to encode:\n{idea_content}\n\nGenotype:"
 comparison_criteria:
-- creativity / originality
-- completeness
-- narrative arc
-- entertaining
-- leaves a lasting impression
-- adherence to the drabble format (an actual 100 word story - not a description of
-  a story or a review of a story)
-- "avoiding clich\xE9, tropes, or overused words, characters, phrases, concepts, etc."
+  - creativity / originality
+  - completeness
+  - narrative arc
+  - entertaining
+  - leaves a lasting impression
+  - adherence to the drabble format (an actual 100-word story, not a description or review)
+  - avoiding cliches, tropes, overused words, or stock concepts

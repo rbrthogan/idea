@@ -138,36 +138,10 @@
                   placeholder="Optional">
               </div>
 
-              <!-- Support Section -->
-              <h6 class="text-uppercase text-muted mb-3 mt-4" style="font-size: 0.75rem; letter-spacing: 0.05em;">
-                Support</h6>
-              <div class="list-group list-group-flush mb-3">
-                <a href="https://github.com/rbrthogan/idea/issues/new" target="_blank"
-                  class="list-group-item list-group-item-action d-flex align-items-center py-2 px-0 border-0 bg-transparent">
-                  <i class="fab fa-github me-2 text-muted" style="width: 20px; text-align: center;"></i>
-                  <span>Report a Bug</span>
-                  <i class="fas fa-external-link-alt ms-auto text-muted small"></i>
-                </a>
-                <button
-                  class="list-group-item list-group-item-action d-flex align-items-center py-2 px-0 border-0 bg-transparent"
-                  data-bs-toggle="modal" data-bs-target="#contactModal">
-                  <i class="fas fa-envelope me-2 text-muted" style="width: 20px; text-align: center;"></i>
-                  <span>Contact Us</span>
-                </button>
-              </div>
-
-              <!-- Navigation Links -->
-              <div class="list-group list-group-flush mt-4 border-top border-bottom">
-                <button
-                  class="list-group-item list-group-item-action d-flex justify-content-between align-items-center py-3 border-0"
+              <div class="mb-1">
+                <button class="btn btn-outline-secondary w-100 d-flex justify-content-between align-items-center"
                   onclick="showSidebarView('advanced')">
                   <span><i class="fas fa-sliders-h me-2 text-muted"></i>Advanced Config</span>
-                  <i class="fas fa-chevron-right text-muted small"></i>
-                </button>
-                <button
-                  class="list-group-item list-group-item-action d-flex justify-content-between align-items-center py-3 border-0"
-                  onclick="showSidebarView('settings')">
-                  <span><i class="fas fa-cog me-2 text-muted"></i>Settings</span>
                   <i class="fas fa-chevron-right text-muted small"></i>
                 </button>
               </div>
@@ -191,6 +165,30 @@
               <button class="btn btn-warning w-100 mb-2" id="forceStopButton" style="display: none;">
                 <i class="fas fa-bolt me-1"></i>Force Stop
               </button>
+            </div>
+
+            <!-- Lower-priority utilities -->
+            <div class="sidebar-utility-section">
+              <div class="list-group list-group-flush border-top border-bottom utility-links">
+                <a href="https://github.com/rbrthogan/idea/issues/new" target="_blank"
+                  class="list-group-item list-group-item-action d-flex align-items-center py-2 px-0 border-0 bg-transparent">
+                  <i class="fab fa-github me-2 text-muted" style="width: 20px; text-align: center;"></i>
+                  <span>Report a Bug</span>
+                  <i class="fas fa-external-link-alt ms-auto text-muted small"></i>
+                </a>
+                <button
+                  class="list-group-item list-group-item-action d-flex align-items-center py-2 px-0 border-0 bg-transparent"
+                  data-bs-toggle="modal" data-bs-target="#contactModal">
+                  <i class="fas fa-envelope me-2 text-muted" style="width: 20px; text-align: center;"></i>
+                  <span>Contact Us</span>
+                </button>
+                <button
+                  class="list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2 px-0 border-0 bg-transparent"
+                  onclick="showSidebarView('settings')">
+                  <span><i class="fas fa-cog me-2 text-muted"></i>Settings</span>
+                  <i class="fas fa-chevron-right text-muted small"></i>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -228,31 +226,56 @@
                 <small class="text-muted">Controls the diversity of the LLM's responses.</small>
               </div>
 
-              <!-- Thinking Budget (only for Gemini 2.5 models) -->
+              <!-- Seed Context Pool Size -->
+              <div class="mb-3">
+                <label for="seedContextPoolSize" class="form-label d-flex justify-content-between">
+                  <span>Seed Context Pool Size</span>
+                  <span id="seedContextPoolSizeValue">2</span>
+                </label>
+                <input type="range" class="form-range" min="1" max="8" step="1" id="seedContextPoolSize" value="2"
+                  oninput="document.getElementById('seedContextPoolSizeValue').textContent = this.value">
+                <small class="text-muted">Number of context-generation calls used to build the initial seed concept bank. Each +1 typically adds ~50-60 more candidate concepts before random subsampling.</small>
+              </div>
+
+              <!-- Thinking Controls (model-aware) -->
               <div class="mb-3" id="thinkingBudgetContainer" style="display: none;">
-                <label class="form-label">Thinking Budget</label>
+                <label class="form-label">Thinking</label>
 
                 <!-- Radio button options -->
                 <div class="mb-2">
-                  <div class="form-check">
-                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingDynamic"
-                      value="dynamic" checked onchange="updateThinkingBudgetMode()">
-                    <label class="form-check-label" for="thinkingDynamic">
-                      <strong>Dynamic</strong> - Model decides when and how much to think
-                    </label>
-                  </div>
-                  <div class="form-check" id="thinkingDisabledOption" style="display: none;">
-                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingDisabled"
-                      value="disabled" onchange="updateThinkingBudgetMode()">
-                    <label class="form-check-label" for="thinkingDisabled">
-                      <strong>Disabled</strong> - Turn off thinking completely
+                  <div class="form-check" id="thinkingOffOption">
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingOff"
+                      value="off" checked onchange="updateThinkingBudgetMode()">
+                    <label class="form-check-label" for="thinkingOff">
+                      <strong>Off</strong> - Prefer speed and lower cost
                     </label>
                   </div>
                   <div class="form-check">
-                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingCustom"
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingLow"
+                      value="low" onchange="updateThinkingBudgetMode()">
+                    <label class="form-check-label" for="thinkingLow">
+                      <strong>Low</strong> - Lightweight reasoning
+                    </label>
+                  </div>
+                  <div class="form-check" id="thinkingMediumOption">
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingMedium"
+                      value="medium" onchange="updateThinkingBudgetMode()">
+                    <label class="form-check-label" for="thinkingMedium">
+                      <strong>Medium</strong> - Balanced depth and latency
+                    </label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingHigh"
+                      value="high" onchange="updateThinkingBudgetMode()">
+                    <label class="form-check-label" for="thinkingHigh">
+                      <strong>High</strong> - Deeper reasoning
+                    </label>
+                  </div>
+                  <div class="form-check">
+                    <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingCustomBudget"
                       value="custom" onchange="updateThinkingBudgetMode()">
-                    <label class="form-check-label" for="thinkingCustom">
-                      <strong>Custom</strong> - Set specific token budget
+                    <label class="form-check-label" for="thinkingCustomBudget">
+                      <strong>Custom Budget</strong> - Set specific token budget
                     </label>
                   </div>
                 </div>
@@ -271,8 +294,8 @@
                   </div>
                 </div>
 
-                <small class="text-muted" id="thinkingBudgetHelp">Dynamic thinking: Model decides when and how much to
-                  think</small>
+                <small class="text-muted" id="thinkingBudgetHelp">Select a thinking preset or set a custom token
+                  budget.</small>
               </div>
 
               <h6 class="mb-3 mt-4">Swiss Tournament Controls</h6>
@@ -300,6 +323,36 @@
                   oninput="document.getElementById('mutationRateValue').textContent = parseFloat(this.value).toFixed(2)">
                 <small class="text-muted">Probability of injecting fresh concepts during breeding (0 = no
                   mutation)</small>
+              </div>
+
+              <div class="mb-3">
+                <label for="replacementRate" class="form-label d-flex justify-content-between">
+                  <span>Replacement Rate</span>
+                  <span id="replacementRateValue">0.50</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1" step="0.05" id="replacementRate" value="0.5"
+                  oninput="document.getElementById('replacementRateValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Fraction of population replaced with new children each generation.</small>
+              </div>
+
+              <div class="mb-3">
+                <label for="fitnessAlpha" class="form-label d-flex justify-content-between">
+                  <span>Fitness Alpha (Elo Weight)</span>
+                  <span id="fitnessAlphaValue">0.70</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1" step="0.05" id="fitnessAlpha" value="0.7"
+                  oninput="document.getElementById('fitnessAlphaValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Hybrid fitness = alpha*Elo + (1-alpha)*diversity (normalized).</small>
+              </div>
+
+              <div class="mb-3">
+                <label for="ageDecayRate" class="form-label d-flex justify-content-between">
+                  <span>Age Decay Rate</span>
+                  <span id="ageDecayRateValue">0.25</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1.5" step="0.05" id="ageDecayRate" value="0.25"
+                  oninput="document.getElementById('ageDecayRateValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Higher values retire old ideas faster during survivor selection.</small>
               </div>
             </div>
           </div>
@@ -533,38 +586,40 @@
 
         <!-- Existing Templates Section -->
         <div id="existingTemplates" class="mt-4" style="display: none;">
-          <div class="entry-card">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-              <h5 class="mb-0">
-                <i class="fas fa-folder-open me-2"></i>
-                Template Library
-              </h5>
-              <div class="d-flex gap-2">
+          <div class="entry-card template-library-card">
+            <div class="template-library-header">
+              <div>
+                <h5 class="mb-1">
+                  <i class="fas fa-folder-open me-2"></i>
+                  Template Library
+                </h5>
+                <p class="template-library-subtitle mb-0">
+                  Click any row to select a template and view full details, then use sidebar settings and click <strong>Start Evolution</strong>.
+                </p>
+              </div>
+              <div class="template-library-header-actions">
+                <span class="template-count-pill" id="templateLibraryCount">0 templates</span>
                 <button class="btn btn-outline-secondary btn-sm" onclick="openTemplateGenerator({ focusInput: true })">
                   <i class="fas fa-magic me-1"></i>Create with AI
                 </button>
-                <button class="btn btn-outline-primary btn-sm" id="createTemplateBtn">
+                <button class="btn btn-primary btn-sm" id="createTemplateBtn">
                   <i class="fas fa-plus me-1"></i>Create Manually
                 </button>
               </div>
             </div>
-            <p class="text-muted text-start mb-3">
-              Select one template, then configure settings in the sidebar and click <strong>Start Evolution</strong>.
-            </p>
 
-            <!-- Search and filter controls -->
-            <div class="row mb-3">
-              <div class="col-md-8">
+            <div class="template-library-controls">
+              <div class="template-library-search">
                 <div class="input-group">
                   <span class="input-group-text">
                     <i class="fas fa-search"></i>
                   </span>
                   <input type="text" class="form-control" id="templateSearchInput"
-                    placeholder="Search templates by name, description, or author..."
+                    placeholder="Search by template name, description, or author..."
                     onkeyup="searchTemplatesMainPage()">
                 </div>
               </div>
-              <div class="col-md-4">
+              <div class="template-library-filter">
                 <select class="form-select" id="templateFilterSelect" onchange="filterTemplatesMainPage()">
                   <option value="all">All Templates</option>
                   <option value="core">Core Templates</option>
@@ -573,19 +628,15 @@
               </div>
             </div>
 
-            <div class="table-responsive">
-              <table class="table table-hover">
-                <thead class="table-light">
-                  <tr>
-                    <th>Template Name</th>
-                    <th>Description</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="templatesTableBody">
-                  <!-- Templates will be loaded here -->
-                </tbody>
-              </table>
+            <div class="template-library-table-wrap">
+              <div class="template-library-grid-head">
+                <span>Template</span>
+                <span>What It Does</span>
+                <span class="template-actions-head">Manage</span>
+              </div>
+              <div id="templatesTableBody" class="template-library-list">
+                <!-- Templates will be loaded here -->
+              </div>
             </div>
           </div>
         </div>
@@ -839,7 +890,7 @@
     let currentGeneratedTemplate = null;
     let currentGeneratedTemplateId = null;  // Track if the generated template has been saved
     let currentMode = 'new'; // 'new' or 'evolution'
-    let currentTemplateFlowMode = 'browse'; // 'browse' or 'generate'
+    let currentTemplateFlowMode = 'idle'; // 'idle', 'browse', or 'generate'
 
     function setDisplayById(id, displayValue) {
       const el = document.getElementById(id);
@@ -850,7 +901,13 @@
 
     function setTemplateFlowMode(mode, options = {}) {
       const { focusSearch = false, focusInput = false, scroll = false } = options;
-      currentTemplateFlowMode = mode === 'generate' ? 'generate' : 'browse';
+      if (mode === 'generate') {
+        currentTemplateFlowMode = 'generate';
+      } else if (mode === 'browse') {
+        currentTemplateFlowMode = 'browse';
+      } else {
+        currentTemplateFlowMode = 'idle';
+      }
 
       const browseBtn = document.getElementById('modeUseExistingBtn');
       const generateBtn = document.getElementById('modeGenerateBtn');
@@ -860,21 +917,22 @@
       const templatePreview = document.getElementById('templatePreview');
 
       const isBrowse = currentTemplateFlowMode === 'browse';
+      const isGenerate = currentTemplateFlowMode === 'generate';
       if (browseBtn) {
         browseBtn.classList.toggle('active', isBrowse);
         browseBtn.setAttribute('aria-pressed', isBrowse ? 'true' : 'false');
       }
       if (generateBtn) {
-        generateBtn.classList.toggle('active', !isBrowse);
-        generateBtn.setAttribute('aria-pressed', !isBrowse ? 'true' : 'false');
+        generateBtn.classList.toggle('active', isGenerate);
+        generateBtn.setAttribute('aria-pressed', isGenerate ? 'true' : 'false');
       }
       if (generatePanel) {
-        generatePanel.style.display = isBrowse ? 'none' : 'block';
+        generatePanel.style.display = isGenerate ? 'block' : 'none';
       }
       if (existingTemplates) {
         existingTemplates.style.display = isBrowse ? 'block' : 'none';
       }
-      if (isBrowse) {
+      if (!isGenerate) {
         if (generationStatus) generationStatus.style.display = 'none';
         if (templatePreview) templatePreview.style.display = 'none';
       } else if (currentGeneratedTemplate) {
@@ -993,8 +1051,8 @@
         await window.refreshTemplateCatalog({ preserveSelection: true, suppressDefaultSelection: false });
       }
 
-      // Keep one clear starting path: choose from library first.
-      setTemplateFlowMode('browse');
+      // Start in neutral mode and show details only after user picks a path.
+      setTemplateFlowMode('idle');
     }
 
     async function showEvolutionMode(evolutionId = null) {
@@ -1174,58 +1232,75 @@
     }
 
     function renderFilteredTemplates() {
-      const tbody = document.getElementById('templatesTableBody');
-      tbody.innerHTML = '';
+      const listContainer = document.getElementById('templatesTableBody');
+      listContainer.innerHTML = '';
 
       const filteredTemplates = filterAndSearchMainPageTemplates();
+      const totalTemplates = Object.values(allMainPageTemplates).filter(template => !template.error).length;
+      const visibleTemplates = Object.keys(filteredTemplates).length;
+      const countPill = document.getElementById('templateLibraryCount');
+      if (countPill) {
+        countPill.textContent = visibleTemplates === totalTemplates
+          ? `${totalTemplates} templates`
+          : `${visibleTemplates} of ${totalTemplates}`;
+      }
 
       Object.entries(filteredTemplates).forEach(([id, template]) => {
         if (!template.error) {
           const isCore = isCoreTemplate(id, template);
           const templateName = template.name || id;
           const escapedTemplateName = escapeHtmlMainPage(templateName);
-          const safeTemplateNameForJs = templateName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
           const description = template.description || '';
-          const truncatedDescription = description.substring(0, 100);
+          const truncatedDescription = description.substring(0, 180);
+          const escapedDescription = escapeHtmlMainPage(description);
           const isSelected = document.getElementById('ideaType')?.value === id;
-          const row = document.createElement('tr');
-          row.className = isSelected ? 'template-row-selected' : '';
+          const descriptionForDisplay = isSelected ? escapedDescription : `${escapeHtmlMainPage(truncatedDescription)}${description.length > 180 ? '...' : ''}`;
+          const row = document.createElement('div');
+          row.className = `template-library-row ${isSelected ? 'template-row-selected' : ''}`;
+          row.setAttribute('role', 'button');
+          row.setAttribute('tabindex', '0');
+          row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+          row.setAttribute('aria-label', `Select template ${templateName}`);
           row.innerHTML = `
-            <td>
-              <div class="d-flex align-items-center">
-                <strong>${escapedTemplateName}</strong>
-                ${isCore ? '<span class="badge bg-success ms-2">Core</span>' : '<span class="badge bg-primary ms-2">Custom</span>'}
-                ${isSelected ? '<span class="badge bg-dark ms-2">Selected</span>' : ''}
+            <div class="template-library-col template-library-col-name">
+              <div class="template-name-cell">
+                <div class="template-name-line">
+                  <span class="template-name">${escapedTemplateName}</span>
+                  ${isCore ? '<span class="template-type-badge template-type-core">Core</span>' : '<span class="template-type-badge template-type-custom">Custom</span>'}
+                </div>
               </div>
-            </td>
-            <td>
-              <span class="text-muted">${escapeHtmlMainPage(truncatedDescription)}${description.length > 100 ? '...' : ''}</span>
-            </td>
-            <td>
-              <div class="btn-group" role="group" aria-label="Template actions">
-                <button class="btn btn-sm btn-primary" onclick="selectExistingTemplate('${id}', '${safeTemplateNameForJs}')">
-                  <i class="fas fa-arrow-right me-1"></i>${isSelected ? 'Using' : 'Use'}
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" onclick="editTemplateMainPage('${id}')">
+            </div>
+            <div class="template-library-col template-library-col-description">
+              <p class="template-description mb-0" title="${escapedDescription}">${descriptionForDisplay}</p>
+            </div>
+            <div class="template-library-col template-library-col-actions">
+              <div class="template-action-group" role="group" aria-label="Template actions">
+                <button class="btn btn-sm template-manage-btn" onclick="event.stopPropagation(); editTemplateMainPage('${id}')">
                   <i class="fas fa-edit me-1"></i>${isCore ? 'Customize' : 'Edit'}
                 </button>
               </div>
-            </td>
+            </div>
           `;
-          tbody.appendChild(row);
+          row.addEventListener('click', () => selectExistingTemplate(id, templateName));
+          row.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              selectExistingTemplate(id, templateName);
+            }
+          });
+          listContainer.appendChild(row);
         }
       });
 
       // Show empty state if no templates match filter
       if (Object.keys(filteredTemplates).length === 0) {
-        const row = document.createElement('tr');
+        const row = document.createElement('div');
+        row.className = 'text-center text-muted py-5 template-empty-state';
         row.innerHTML = `
-          <td colspan="3" class="text-center text-muted py-4">
             <i class="fas fa-search fa-2x mb-2"></i><br>
-            No templates found matching your search criteria.
-          </td>
+            No templates match your current search or filter.
         `;
-        tbody.appendChild(row);
+        listContainer.appendChild(row);
       }
     }
 

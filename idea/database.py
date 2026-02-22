@@ -96,6 +96,8 @@ async def claim_active_run(user_id: str, run_data: Dict[str, Any], lease_seconds
             "status": data.get("status") or "in_progress",
             "is_running": True,
             "active": True,
+            # Always reset stale stop flags when claiming a fresh run slot.
+            "stop_requested": False,
             "heartbeat_at_ms": now_ms,
             "lease_expires_at_ms": lease_expires_at_ms,
             "updated_at_ms": now_ms,

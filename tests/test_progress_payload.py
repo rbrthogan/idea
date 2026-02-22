@@ -81,3 +81,38 @@ def test_progress_includes_history_when_changed_or_requested():
         assert data2["history"] == mock_state.latest_data
 
     app.dependency_overrides.clear()
+
+
+def test_progress_clears_stale_running_state_when_no_engine_and_no_active_run():
+    client = TestClient(app)
+    mock_user = UserInfo(uid="progress_user_3", email="p3@example.com", is_admin=False)
+    mock_state = UserEvolutionState()
+    mock_state.engine = None
+    mock_state.status = {
+        "current_generation": 1,
+        "total_generations": 2,
+        "is_running": True,
+        "progress": 67,
+    }
+
+    async def mock_require_auth():
+        return mock_user
+
+    async def mock_get_state(_user_id):
+        return mock_state
+
+    async def mock_get_active_run(_uid):
+        return None
+
+    app.dependency_overrides[require_auth] = mock_require_auth
+    with patch.object(real_user_states, "get", mock_get_state), patch(
+        "idea.viewer.db.get_active_run", side_effect=mock_get_active_run
+    ):
+        resp = client.get("/api/progress")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["is_running"] is False
+        assert data["is_stopped"] is True
+        assert mock_state.status["is_running"] is False
+
+    app.dependency_overrides.clear()

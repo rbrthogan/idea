@@ -28,8 +28,21 @@ class DiversityCalculator:
             logger.warning("GEMINI_API_KEY not found. Diversity calculation will be disabled.")
             self.client = None
         else:
+            timeout_raw = os.environ.get("GENAI_HTTP_TIMEOUT_MS", "60000")
             try:
-                self.client = genai.Client(api_key=self.api_key)
+                http_timeout_ms = max(1000, int(timeout_raw))
+            except ValueError:
+                http_timeout_ms = 60000
+                logger.warning(
+                    "Invalid GENAI_HTTP_TIMEOUT_MS=%r. Falling back to %d ms.",
+                    timeout_raw,
+                    http_timeout_ms,
+                )
+            try:
+                self.client = genai.Client(
+                    api_key=self.api_key,
+                    http_options=types.HttpOptions(timeout=http_timeout_ms),
+                )
                 logger.debug("DiversityCalculator initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize Gemini client: {e}")

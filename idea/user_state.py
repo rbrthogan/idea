@@ -11,6 +11,28 @@ if TYPE_CHECKING:
     from idea.evolution import EvolutionEngine
 
 
+def _default_autorating_status() -> Dict[str, Any]:
+    """Default autorating progress payload used by /api/auto-rate/progress."""
+    return {
+        "is_running": False,
+        "status": "idle",
+        "status_message": "",
+        "progress": 0,
+        "requested_rounds": 0,
+        "completed_rounds": 0,
+        "total_matches": 0,
+        "completed_matches": 0,
+        "completed_comparisons": 0,
+        "new_comparisons": 0,
+        "win_counts": {"A": 0, "B": 0, "tie": 0},
+        "ideas": [],
+        "token_counts": None,
+        "error": None,
+        "version": 0,
+        "updated_at": 0,
+    }
+
+
 @dataclass
 class UserEvolutionState:
     """Encapsulates all evolution state for a single user."""
@@ -30,6 +52,7 @@ class UserEvolutionState:
     run_last_write: float = 0.0
     run_last_heartbeat: float = 0.0
     heartbeat_task: Optional[asyncio.Task] = None
+    autorating_status: Dict[str, Any] = field(default_factory=_default_autorating_status)
 
     def reset_queue(self):
         """Clear the queue to avoid stale updates."""
@@ -50,6 +73,10 @@ class UserEvolutionState:
         self.history_version = 0
         self.last_sent_history_version = -1
         self.reset_queue()
+
+    def reset_autorating_status(self):
+        """Reset autorating progress payload."""
+        self.autorating_status = _default_autorating_status()
 
     def reset_run_tracking(self):
         """Reset run coordination metadata."""

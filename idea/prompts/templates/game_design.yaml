@@ -1,93 +1,101 @@
 name: "Game Design"
 description: "Generate implementable browser game concepts with fresh twists on classic archetypes"
-version: "1.1.0"
+version: "1.3.0"
 author: "Original Idea App"
 created_date: "2024-01-15"
 
 metadata:
   item_type: "game designs"
 
-# Special requirements for this template type
 special_requirements: |
-  The game should be simple enough that it can be implemented as a browser game without relying on lots of external assets.
-  Anchor each concept in one recognizable classic browser/arcade archetype and add 1-2 focused twists. Keep scope tight and implementation-friendly.
+  Game design constraints:
+  - The game should be simple enough to implement as a browser game with minimal external assets.
+  - Anchor in one recognizable classic browser/arcade base with 1-2 focused twists.
 
   Implementation guardrails:
   - Technology: HTML5 Canvas + vanilla JavaScript (or minimal DOM). No heavy engines, no networking, no server state.
-  - Scope: Prototype should be feasible in <1000 LOC. Avoid content-heavy assets; use geometric shapes and simple sounds.
+  - Scope: Prototype should be feasible in <=1000 LOC. Avoid content-heavy assets; prefer geometric shapes and simple sounds.
   - Input: Keyboard arrows/WASD and/or mouse only. No multi-touch, no complex gestures.
-  - Systems: Prefer grid-based logic or simple AABB collisions. No complex physics, pathfinding, or ML. Minimal randomness.
-  - UX: Single-screen or simple level progression. Pause/reset/undo optional but simple.
+  - Systems: Prefer grid-based logic or simple AABB collisions. No complex physics, pathfinding, or ML.
+  - UX: Single-screen or simple level progression. Pause/reset/undo may exist but must be minimal.
 
-  Required sections (use markdown headings):
-  - Base Game & Twists: Name the classic base (e.g., "Base: Snake" or "Base: Tetris", etc) and list 1-2 specific twists.
+  Required sections (markdown headings):
+  - Base Game & Twists: Name the classic base and list 1-2 specific twists.
   - Overview: One short paragraph.
-  - Core Loop: 3-5 bullets describing repeatable player actions and feedback.
+  - Core Loop: 3-5 bullets describing repeatable actions and feedback.
   - Mechanics: Entities, rules, collisions, state changes.
   - Controls: Precise key/mouse mapping.
   - Level/Progression: How difficulty increases without new complex systems.
   - Scoring/Win/Lose: Clear conditions.
   - Visuals & Audio: Low-asset approach.
-  - Minimum Prototype: The absolute smallest slice to implement first.
-  - Stretch Ideas (optional): 1-2 sensible extensions that do not explode scope.
+  - Technical Notes: Minimal implementation notes (state model, collision model, timing).
+  - Minimum Prototype: The smallest playable slice.
+  - Stretch Ideas (optional): 1-2 extensions that do not explode scope.
 
-  Format your response as:
-  Title: [Your creative title]
-  Content: [Your game design]
+  Output format:
+  - Return exactly two labeled fields:
+    Title: [game title]
+    Content: [full markdown design document]
+  - No extra analysis or commentary outside these fields.
 
 prompts:
   context: |
-    Generate a diverse list of 60 specific concepts framed as "classic base + focused twist(s)" suitable for quick browser implementation.
+    Generate a diverse list of 60 concepts framed as "classic base + focused twist(s)" suitable for quick browser implementation.
 
     Choose from these classic bases (non-exhaustive):
-    - Breakout/Arkanoid, Snake, Tetris, Pong, Pac-Man, Space Invaders/Asteroids, Frogger, Minesweeper, Sokoban, Pipe Mania, 2048/Threes, Wordle, Simon/Memory, 15-Puzzle/Sliding, Lunar Lander, Flappy Bird, Endless Runner, Match-3 (minimal), Single-screen platformer, Tower Defense (very simple lanes), Connect Four/Reversi (no advanced AI), Columns/Dr. Mario.
+    - Breakout/Arkanoid, Snake, Tetris, Pong, Pac-Man, Space Invaders/Asteroids, Frogger, Minesweeper, Sokoban, Pipe Mania, 2048/Threes, Wordle, Simon/Memory, 15-Puzzle/Sliding, Lunar Lander, Flappy Bird, Endless Runner, Match-3 (minimal), single-screen platformer, very-simple-lane tower defense, Connect Four/Reversi (no advanced AI), Columns/Dr. Mario.
 
     Example twist axes (pick 1-2 per concept):
-    - Wrapping edges; gravity flip; limited rewind/undo; push/pull; single special tile type; rotating board; shrink/expand playfield; dual-control with mirrored input; line-of-sight fog; timed gates; one enemy type with deterministic pattern; resource as timer; combo chains with caps.
+    - Wrapping edges; gravity flip; limited rewind/undo; push/pull; one special tile type; rotating board; shrink/expand playfield; mirrored input; line-of-sight fog; timed gates; one deterministic enemy pattern; timer-as-resource; capped combo chains.
 
-    Light-weight themes to vary flavor only (no heavy asset burden):
+    Light themes for flavor only (no asset burden):
     - Neon circuits, paper cutouts, monochrome LCD, underwater, cave chalk, starfield, emoji tiles.
 
-    Output each concept as a short phrase using this schema:
-    - Base: <classic>; Twist: <twist 1>[, <twist 2>]; Constraints: <1-2 concrete implementation constraints>
+    Output format rules:
+    - One concept per line.
+    - Use this schema exactly: Base=<classic> | Twist=<twist 1>[ + <twist 2>] | Constraints=<constraint 1> / <constraint 2>
+    - Do not separate concepts with commas.
 
-    Return as: CONCEPTS:<concept1>, <concept2>, <concept3>, <concept4>, <concept5>, ....
+    Return as:
+    CONCEPTS:
+    - <concept 1>
+    - <concept 2>
+    - ...
 
   specific_prompt: |
-    From the following concepts, select exactly ONE classic base and ONE (optionally TWO) focused twist(s) that combine cleanly without adding new systems. Produce a concise design request:
+    From the following concepts, select exactly ONE classic base and ONE (optionally TWO) focused twists that combine cleanly without adding new systems.
+    Produce one concise design request.
 
     {context_pool}
 
     SELECTION STRATEGY:
-    - Prefer bases that map directly to canvas and simple collisions/grids.
-    - Prefer twists that modify constraints (inputs, space, timing) over adding complexsystems (inventory, crafting, dialogue, multi-agent AI).
-    - Avoid scope creep combinations (e.g., platformer + tower defense + crafting).
-    - Ensure the result is prototypeable in <1000 LOC.
+    - Prefer bases that map directly to Canvas and simple collisions/grids.
+    - Prefer twists that modify constraints (inputs, space, timing) over adding complex systems (inventory, crafting, dialogue, multi-agent AI).
+    - Avoid scope-creep combinations.
+    - Ensure the result is prototypeable within the stated implementation guardrails.
 
-    Create a brief design direction, e.g.:
-    - "Design a fresh take on Snake with wrap-around edges and one 'ghost' segment that must be avoided as it replays the previous path."
+    Example directions:
+    - "Design a fresh take on Snake with wrap-around edges and one ghost segment that replays the previous path."
     - "Design a Breakout variant where bricks slide horizontally each volley, creating shifting lanes."
-    - "Design a Sokoban inspired games on a hex grid with one-time ice tiles."
+    - "Design a Sokoban-inspired game on a hex grid with one-time ice tiles."
 
     Your concise game design prompt:
 
   example_idea_prompts: |
     - "Design a fresh take on Tetris where cleared lines drop as obstacles into the next round (single-screen loop)."
-    - "Design a Pong inspired game with triangular paddles that deflect at angle-dependent speeds."
+    - "Design a Pong-inspired game with triangular paddles that deflect at angle-dependent speeds."
     - "Design a game like Frogger with lane swapping and a limited-use freeze."
     - "Design a Minesweeper variant where flagged tiles slowly spread if not confirmed."
     - "Design a 2048 variant on a hex grid with a once-per-level rotate action."
     - "Design a twist on Sokoban where boxes are magnets with simple attract/repel rules."
 
   idea: |
-    Your game design document must incorporate the selected classic base and twist(s) from the context pool and follow the required sections. Keep the scope small and implementation-focused.
-    {context_pool}
-    The document should be well-structured and provide: Base & Twists, Overview, Core Loop, Mechanics, Controls, Level/Progression, Scoring/Win/Lose, Visuals & Audio, Technical Notes, Minimum Prototype, Stretch Ideas.
-    No additional text, just the game design document.
+    Generate one browser-game design document from the selected direction.
+    Apply all constraints below:
     {requirements}
 
   format: |
-    You are a formatting assistant. Your task is to take the input game design and structure it into a JSON object with "title" and "content" fields.
+    You are a formatting assistant. Convert the input game design into a JSON object with "title" and "content" fields.
 
     The "content" field should contain the full design document.
     If the input has a clear title, use it. Otherwise, generate a suitable title.
@@ -96,73 +104,72 @@ prompts:
     {input_text}
 
   critique: |
-    You are a helpful AI that refines ideas.
-    Current Idea:
+    You are a rigorous game-design reviewer.
+
+    Current idea:
     {idea}
 
-    Please consider the above proposal. Offer critical feedback.
-    Focus on: unclear core loop, unnecessary systems, ambiguous controls, and implementation feasibility on Canvas in 300-600 LOC. If structure or detail is lacking, request specifics.
+    Provide critical feedback on:
+    - Core loop clarity
+    - Scope discipline (no unnecessary systems)
+    - Control clarity
+    - Implementation feasibility against the template guardrails
+    - Novelty of base+twist combination
+
+    Constraints baseline:
+    {requirements_digest}
+
     No additional text, just the critique.
 
   refine: |
-    Current Idea:
+    Current idea:
     {idea}
 
-    Critique: {critique}
+    Critique:
+    {critique}
 
-    Please review both, consider your own opinion and create your own proposal.
-    Prefer tightening scope, clarifying the core loop, simplifying systems.
-    This could be a refinement of the original proposal or a fresh take on it.
-    No additional text, just the refined idea on its own.
+    Produce an improved design that tightens scope, clarifies the loop, and keeps the twist meaningful.
+    It may be a refinement or a fresh take, but it must satisfy the template requirements.
 
     {requirements}
 
   breed: |
     {ideas}
-    Analyze the above game designs to identify patterns:
-    1. Which classic bases are overused vs underused
-    2. Which twists are overused
-    3. Which possibilities are not being explored
-
-    Create a new game design that either:
-    - Uses a classic base that is underrepresented above, OR
-    - Applies a fresh twist to a common base while keeping systems minimal, OR
-    - Combines a known base with a single constraint-changing twist
-
-    Focus on designs that maximize originality while maintaining strict browser-game feasibility and tight scope.
-
+    Generate one new game design while following all constraints below:
     {requirements}
 
   genotype_encode: |
-    You are an expert game designer skilled at analyzing game concepts and extracting their fundamental design DNA. Your task is to convert a full game design into its basic genetic elements (genotype).
+    You are an expert game designer extracting the fundamental design DNA from browser game concepts.
 
-    For browser game designs, the genotype should capture the essential components:
-    - Core gameplay mechanic (e.g., "matching", "physics-based", "tile placement", "real-time control")
-    - Game genre/style (e.g., "puzzle", "arcade", "strategy", "action", "simulation")
-    - Player interaction (e.g., "mouse clicking", "keyboard arrows", "drag-and-drop", "timing-based")
-    - Game objective (e.g., "score maximization", "survival", "completion", "collection")
-    - Visual elements (e.g., "grid-based", "sprite animation", "geometric shapes", "particle effects")
-    - Difficulty progression (e.g., "increasing speed", "more obstacles", "complex patterns")
-    - Game world/theme (e.g., "space", "abstract", "retro", "nature", "geometric")
+    Capture:
+    - Base archetype (classic game lineage)
+    - Twist model (how the base is altered)
+    - Core gameplay mechanic
+    - Genre/style
+    - Player interaction model
+    - Objective/win condition
+    - Progression pattern
+    - Constraint profile (implementation envelope)
 
-    Extract only the most fundamental design elements - strip away story details, specific art descriptions, and implementation specifics. Think of it as the "gameplay DNA" of the design.
+    Preserve hard constraints as explicit genotype tags:
+    {requirements_digest}
 
-    Format the genotype as a condensed list of these basic elements, separated by semicolons.
+    Extract only fundamental elements. Strip away incidental art/story detail.
+    Format as a condensed semicolon-separated list.
 
     Example:
-    Input: "A space-themed puzzle game where players rotate asteroid fragments to create complete circles while avoiding collision with moving space debris, with increasing rotation speed each level"
-    Output: "rotation mechanic; puzzle genre; space theme; geometric completion; collision avoidance; increasing speed; circular patterns; mouse control"
+    Input: "A space-themed puzzle game where players rotate asteroid fragments to create complete circles while avoiding collision with moving debris, with increasing rotation speed each level"
+    Output: "rotation puzzle; classic-arcade derivative; constrained movement twist; space theme; geometric completion objective; collision avoidance; increasing speed progression; mouse control"
 
     Game design to encode:
     {idea_content}
 
     Genotype:
 
-
 comparison_criteria:
-  - "clarity and strength of the core loop"
-  - "originality of the twist(s)"
-  - "fun factor added by the twist(s)"
-  - "implementability on HTML5 Canvas in ~300-600 LOC"
-  - "simplicity and readability of mechanics"
-  - "feasibility for standard browser implementation (no heavy assets/engines)"
+  - clarity and strength of the core loop
+  - originality of the twist(s)
+  - fun factor added by the twist(s)
+  - implementability within the stated browser-game constraints
+  - simplicity and readability of mechanics
+  - feasibility for standard browser implementation (no heavy assets/engines)

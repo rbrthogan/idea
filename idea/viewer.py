@@ -9,22 +9,24 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from asyncio import Queue
 import time
-import random
 import math
+import traceback
 from pathlib import Path
 import json
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Set
 
 from idea.evolution import EvolutionEngine
 from idea.llm import Critic
+from idea.swiss_tournament import elo_update, generate_swiss_round_pairs
 from idea.config import (
     LLM_MODELS,
     DEFAULT_MODEL,
     DEFAULT_CREATIVE_TEMP,
     DEFAULT_TOP_P,
+    THINKING_MODEL_CONFIG,
     SMTP_SERVER,
     SMTP_PORT,
     SMTP_USERNAME,
@@ -38,7 +40,7 @@ from idea.config import (
 from idea.template_manager import router as template_router
 from idea.prompts.loader import list_available_templates
 from idea.admin import router as admin_router
-from idea.auth import require_auth, UserInfo
+from idea.auth import require_auth, UserInfo, get_current_user
 from fastapi import Depends
 from idea import database as db
 from idea.user_state import user_states, UserEvolutionState
@@ -78,10 +80,24 @@ EVOLUTIONS_DIR.mkdir(exist_ok=True)
 # Instance identity (used for run leasing/coordination)
 INSTANCE_ID = os.getenv("HOSTNAME") or f"local-{uuid.uuid4()}"
 ACTIVE_RUN_STATUSES = {"starting", "in_progress", "resuming", "continuing", "stopping"}
+TRANSIENT_PROGRESS_FLAGS = {"oracle_update", "elite_selection_update", "checkpoint_saved"}
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _update_autorating_state(state: Optional[UserEvolutionState], updates: Dict[str, Any]) -> None:
+    """Merge updates into per-user autorating progress with monotonic versioning."""
+    if state is None:
+        return
+
+    current = state.autorating_status if isinstance(state.autorating_status, dict) else {}
+    next_payload = current.copy()
+    next_payload.update(updates)
+    next_payload["version"] = int(current.get("version", 0)) + 1
+    next_payload["updated_at"] = _now_ms()
+    state.autorating_status = next_payload
 
 
 def _round_half_up(value: float) -> int:
@@ -136,6 +152,20 @@ def _is_run_stale(run_data: Dict[str, Any], now_ms: int) -> bool:
     return run_data.get("lease_expires_at_ms", 0) <= now_ms
 
 
+def _should_honor_remote_stop(run_state: Optional[Dict[str, Any]]) -> bool:
+    """
+    Determine whether a run-state stop flag should stop the in-memory engine.
+
+    We only honor explicit active stop requests (`status == \"stopping\"`) to avoid
+    stale stop flags from previous runs immediately stopping newly started runs.
+    """
+    if not run_state:
+        return False
+    if not run_state.get("stop_requested"):
+        return False
+    return run_state.get("status") == "stopping"
+
+
 async def _claim_run_slot(user_id: str, evolution_id: str, evolution_name: str,
                           total_generations: int, start_time: str,
                           tournament_count: Optional[float] = None,
@@ -154,6 +184,7 @@ async def _claim_run_slot(user_id: str, evolution_id: str, evolution_name: str,
         "tournament_count": tournament_count,
         "full_tournament_rounds": full_tournament_rounds,
         "target_tournament_rounds": target_tournament_rounds,
+        "stop_requested": False,
     }
 
     if GLOBAL_MAX_ACTIVE_RUNS == 1:
@@ -236,6 +267,19 @@ async def _refresh_run_state(user_id: str, state: UserEvolutionState, update_dat
         print(f"Warning: failed to persist run state: {e}")
 
 
+def _merge_status_update(state: UserEvolutionState, update_data: Dict[str, Any]) -> None:
+    """
+    Merge a progress update into state.status while keeping event-like flags transient.
+
+    Flags such as oracle/elite/checkpoint updates should only be true on the update
+    that emits them; they must not remain sticky across subsequent polls.
+    """
+    for flag in TRANSIENT_PROGRESS_FLAGS:
+        if flag not in update_data:
+            state.status.pop(flag, None)
+    state.status.update(update_data)
+
+
 async def _heartbeat_loop(user_id: str, state: UserEvolutionState) -> None:
     """Background heartbeat to keep leases alive during long steps."""
     try:
@@ -247,7 +291,7 @@ async def _heartbeat_loop(user_id: str, state: UserEvolutionState) -> None:
                 continue
             # Check for stop request from another instance
             run_state = await db.get_active_run(user_id)
-            if run_state and run_state.get("stop_requested") and not state.engine.stop_requested:
+            if _should_honor_remote_stop(run_state) and not state.engine.stop_requested:
                 state.engine.stop_evolution()
                 await db.update_active_run(
                     user_id=user_id,
@@ -273,7 +317,7 @@ async def _finalize_run_state(user_id: str, state: UserEvolutionState, update_da
         await _refresh_run_state(user_id, state, update_data, force=True)
         await db.update_active_run(
             user_id=user_id,
-            updates={"is_running": False, "active": False},
+            updates={"is_running": False, "active": False, "stop_requested": False},
             lease_seconds=0,
             owner_id=state.run_owner_id,
         )
@@ -563,15 +607,69 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             print(f"Error parsing mutation rate: {e}")
             mutation_rate = 0.2
 
-        # Get Oracle parameters with defaults
-
-        # Get thinking budget parameter (only for Gemini 2.5 models)
-        thinking_budget = data.get('thinkingBudget')
-        if thinking_budget is not None:
-            thinking_budget = int(thinking_budget)
-            print(f"Parsed thinking budget: {thinking_budget}")
+        seed_context_pool_size = data.get('seedContextPoolSize')
+        if seed_context_pool_size is not None:
+            try:
+                seed_context_pool_size = max(1, int(seed_context_pool_size))
+                print(f"Parsed seed context pool size: {seed_context_pool_size}")
+            except (TypeError, ValueError):
+                print(f"Error parsing seed context pool size: {seed_context_pool_size}")
+                seed_context_pool_size = None
         else:
-            print("No thinking budget specified (non-2.5 model or not set)")
+            print("No seed context pool size specified (using default auto behavior)")
+
+        try:
+            replacement_rate = float(data.get('replacementRate', 0.5))
+            print(f"Parsed replacement rate: {replacement_rate}")
+        except ValueError as e:
+            print(f"Error parsing replacement rate: {e}")
+            replacement_rate = 0.5
+
+        try:
+            fitness_alpha = float(data.get('fitnessAlpha', 0.7))
+            print(f"Parsed fitness alpha: {fitness_alpha}")
+        except ValueError as e:
+            print(f"Error parsing fitness alpha: {e}")
+            fitness_alpha = 0.7
+
+        try:
+            age_decay_rate = float(data.get('ageDecayRate', 0.25))
+            print(f"Parsed age decay rate: {age_decay_rate}")
+        except ValueError as e:
+            print(f"Error parsing age decay rate: {e}")
+            age_decay_rate = 0.25
+
+        # Thinking controls (model-aware): supports explicit level or custom budget.
+        thinking_level = _normalize_thinking_level(data.get("thinkingLevel"))
+        if data.get("thinkingLevel") is not None and thinking_level is None:
+            print(f"Ignoring invalid thinkingLevel value: {data.get('thinkingLevel')!r}")
+
+        thinking_budget = None
+        raw_thinking_budget = data.get("thinkingBudget")
+        if raw_thinking_budget is not None and raw_thinking_budget != "":
+            try:
+                thinking_budget = int(raw_thinking_budget)
+            except (TypeError, ValueError):
+                print(f"Ignoring invalid thinkingBudget value: {raw_thinking_budget!r}")
+
+        model_thinking_cfg = THINKING_MODEL_CONFIG.get(model_type, {})
+        supports_thinking = bool(model_thinking_cfg.get("supports_thinking", False))
+        if not supports_thinking:
+            thinking_level = None
+            thinking_budget = None
+        else:
+            if thinking_budget is not None:
+                # Explicit custom budget takes precedence over level presets.
+                thinking_level = None
+            elif thinking_level == "off" and not bool(model_thinking_cfg.get("allow_off", False)):
+                thinking_level = "low"
+
+            if thinking_level is None and thinking_budget is None:
+                thinking_level, thinking_budget = _get_default_thinking_settings(model_type)
+        print(
+            "Resolved thinking settings:",
+            f"model={model_type}, thinking_level={thinking_level}, thinking_budget={thinking_budget}",
+        )
 
         # Get max budget parameter
         max_budget = data.get('maxBudget')
@@ -589,7 +687,9 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
               f"idea_type={idea_type}, model_type={model_type}, "
               f"creative_temp={creative_temp}, top_p={top_p}, "
               f"tournament: count={tournament_count}, full_rounds={full_tournament_rounds}, target_rounds={target_tournament_rounds}, "
-              f"mutation_rate={mutation_rate}, thinking_budget={thinking_budget}, max_budget={max_budget}")
+              f"mutation_rate={mutation_rate}, seed_context_pool_size={seed_context_pool_size}, replacement_rate={replacement_rate}, "
+              f"fitness_alpha={fitness_alpha}, age_decay_rate={age_decay_rate}, "
+              f"thinking_level={thinking_level}, thinking_budget={thinking_budget}, max_budget={max_budget}")
 
         # Resolve template source. System templates are bundled; custom templates live in Firestore.
         template_data = None
@@ -621,6 +721,11 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             tournament_count=tournament_count,
             full_tournament_rounds=full_tournament_rounds,
             mutation_rate=mutation_rate,
+            seed_context_pool_size=seed_context_pool_size,
+            replacement_rate=replacement_rate,
+            fitness_alpha=fitness_alpha,
+            age_decay_rate=age_decay_rate,
+            thinking_level=thinking_level,
             thinking_budget=thinking_budget,
             max_budget=max_budget,
             api_key=api_key,
@@ -723,15 +828,22 @@ async def stop_evolution(user: UserInfo = Depends(require_auth)):
     if state.engine is None:
         # Allow stop requests from non-owner instances via Firestore
         active_run = await db.get_active_run(user.uid)
-        if not active_run or active_run.get("status") not in ACTIVE_RUN_STATUSES:
+        run_appears_active = bool(
+            active_run and (
+                active_run.get("status") in ACTIVE_RUN_STATUSES
+                or active_run.get("is_running")
+                or active_run.get("active")
+            )
+        )
+        if not run_appears_active:
             return JSONResponse(
                 {"status": "error", "message": "No evolution is currently running"},
                 status_code=400,
             )
+        # Do not refresh lease here; that can keep stale runs alive after worker crashes.
         await db.update_active_run(
             user_id=user.uid,
             updates={"status": "stopping", "status_message": "Stop requested", "stop_requested": True},
-            lease_seconds=RUN_LEASE_SECONDS,
             owner_id=active_run.get("owner_id"),
         )
         return JSONResponse({
@@ -764,9 +876,60 @@ async def force_stop_evolution(user: UserInfo = Depends(require_auth)):
     state = await user_states.get(user.uid)
 
     if state.engine is None:
+        # Handle stale/cross-instance runs where this process doesn't own an in-memory engine.
+        active_run = await db.get_active_run(user.uid)
+        run_appears_active = bool(
+            active_run and (
+                active_run.get("status") in ACTIVE_RUN_STATUSES
+                or active_run.get("is_running")
+                or active_run.get("active")
+            )
+        )
+        if not run_appears_active:
+            return JSONResponse(
+                {"status": "error", "message": "No evolution is currently running"},
+                status_code=400,
+            )
+
+        checkpoint_id = active_run.get("checkpoint_id")
+        await db.update_active_run(
+            user_id=user.uid,
+            updates={
+                "status": "force_stopped",
+                "status_message": "Evolution force stopped",
+                "is_running": False,
+                "active": False,
+                "is_stopped": True,
+                "is_resumable": True,
+                "stop_requested": False,
+                "checkpoint_id": checkpoint_id,
+            },
+            lease_seconds=0,
+            owner_id=active_run.get("owner_id"),
+        )
+
+        # Best-effort release in single-run mode.
+        if GLOBAL_MAX_ACTIVE_RUNS == 1 and active_run.get("owner_id"):
+            await db.release_global_run_lock(active_run.get("owner_id"))
+
+        state.reset_run_tracking()
+        state.status.update(
+            {
+                "is_running": False,
+                "is_stopped": True,
+                "is_resumable": True,
+                "checkpoint_id": checkpoint_id,
+                "status_message": "Evolution force stopped",
+            }
+        )
+
         return JSONResponse(
-            {"status": "error", "message": "No evolution is currently running"},
-            status_code=400,
+            {
+                "status": "success",
+                "message": "Stale run state force stopped.",
+                "checkpoint_id": checkpoint_id,
+                "is_resumable": True,
+            }
         )
 
     # Save checkpoint before forcing stop
@@ -1316,9 +1479,15 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
             tournament_rounds=config.get('tournament_rounds', 1),
             tournament_count=config.get('tournament_count'),
             full_tournament_rounds=config.get('full_tournament_rounds'),
+            thinking_level=config.get('thinking_level'),
             thinking_budget=config.get('thinking_budget'),
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
+            seed_context_pool_size=config.get('seed_context_pool_size'),
+            replacement_rate=config.get('replacement_rate', 0.5),
+            fitness_alpha=config.get('fitness_alpha', 0.7),
+            age_decay_rate=config.get('age_decay_rate', 0.25),
+            age_decay_floor=config.get('age_decay_floor', 0.35),
             api_key=api_key,
         )
 
@@ -1329,6 +1498,10 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
         engine.tournament_history = data.get('tournament_history', [])
         engine.diversity_history = data.get('diversity_history', [])
         engine.current_generation = len(history)
+        engine.fitness_elo_stats = data.get("fitness_elo_stats", {"count": 0, "mean": 0.0, "m2": 0.0})
+        engine.fitness_diversity_stats = data.get(
+            "fitness_diversity_stats", {"count": 0, "mean": 0.0, "m2": 0.0}
+        )
 
         # Restore history and population
         def deserialize_idea(idea_data):
@@ -1399,7 +1572,7 @@ async def run_resume_evolution_task(state: UserEvolutionState):
             if hasattr(engine, 'get_total_token_count'):
                 update_data['token_counts'] = engine.get_total_token_count()
 
-        state.status.update(update_data)
+        _merge_status_update(state, update_data)
 
         # Clear queue and add update
         state.reset_queue()
@@ -1447,7 +1620,7 @@ async def run_continue_evolution_task(state: UserEvolutionState, additional_gene
             if hasattr(engine, 'get_total_token_count'):
                 update_data['token_counts'] = engine.get_total_token_count()
 
-        state.status.update(update_data)
+        _merge_status_update(state, update_data)
 
         # Clear queue and add update
         state.reset_queue()
@@ -1504,7 +1677,7 @@ async def run_evolution_task(state: UserEvolutionState):
                 print(f"Evolution complete. Total tokens: {update_data['token_counts']['total']}")
 
         # Update the evolution status by merging the new data
-        state.status.update(update_data)
+        _merge_status_update(state, update_data)
 
         # Clear the queue before adding new update to avoid backlog
         state.reset_queue()
@@ -1754,6 +1927,11 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
         else:
             response.pop("history", None)
 
+        # One-shot event flags should be emitted once, then cleared.
+        for flag in TRANSIENT_PROGRESS_FLAGS:
+            if response.get(flag):
+                state.status.pop(flag, None)
+
         return JSONResponse(convert_uuids_to_strings(response))
 
     # Fallback to Firestore-backed run state for reconnects or cross-instance requests
@@ -1829,6 +2007,15 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
 
         state.status = response
         return JSONResponse(convert_uuids_to_strings(response))
+
+    # No active run in Firestore and no in-memory engine. Ensure stale local running flags
+    # do not keep the UI in a phantom "running" state.
+    if state.status.get("is_running"):
+        state.status["is_running"] = False
+        state.status["is_stopped"] = True
+        state.status["is_resumable"] = bool(state.status.get("checkpoint_id"))
+        if not state.status.get("status_message"):
+            state.status["status_message"] = "No active evolution run found."
 
     return JSONResponse(convert_uuids_to_strings(state.status))
 
@@ -2077,854 +2264,897 @@ async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/submit-rating")
-async def submit_rating(request: Request):
-    """Submit a manual rating for a pair of ideas"""
-    try:
-        data = await request.json()
-        idea_a_id = data.get('idea_a_id')
-        idea_b_id = data.get('idea_b_id')
-        outcome = data.get('outcome')
-        evolution_id = data.get('evolution_id')
+async def _load_rating_evolution(
+    evolution_id: str,
+    user: Optional[UserInfo] = None,
+) -> Tuple[Optional[Path], Dict[str, Any], str]:
+    """Load rating evolution from Firestore (preferred) or local file fallback."""
+    if user:
+        firestore_data = await db.get_evolution(user.uid, evolution_id)
+        if firestore_data:
+            return None, firestore_data, "firestore"
 
-        print(f"Submitting rating for {idea_a_id} vs {idea_b_id}, outcome: {outcome}")
-
-        # Load the evolution data
-        file_path = DATA_DIR / f"{evolution_id}.json"
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="Evolution not found")
-
+    file_path = DATA_DIR / f"{evolution_id}.json"
+    if file_path.exists():
         with open(file_path) as f:
             evolution_data = json.load(f)
+        return file_path, evolution_data, "file"
 
-        # Find the ideas
-        idea_a = None
-        idea_b = None
+    raise HTTPException(status_code=404, detail="Evolution not found")
 
-        for generation in evolution_data.get('history', []):
-            for idea in generation:
-                if idea.get('id') == idea_a_id:
-                    idea_a = idea
-                elif idea.get('id') == idea_b_id:
-                    idea_b = idea
 
+async def _save_rating_evolution(
+    evolution_id: str,
+    evolution_data: Dict[str, Any],
+    source: str,
+    user: Optional[UserInfo] = None,
+    file_path: Optional[Path] = None,
+) -> None:
+    """Persist rating evolution back to its source."""
+    if source == "firestore":
+        if not user:
+            raise HTTPException(status_code=401, detail="Authentication required to save this evolution")
+        await db.save_evolution(user.uid, evolution_id, evolution_data)
+        return
+
+    target_path = file_path or (DATA_DIR / f"{evolution_id}.json")
+    with open(target_path, "w") as f:
+        json.dump(evolution_data, f, indent=2)
+
+
+def _resolve_rating_title_content(idea: Dict[str, Any]) -> Tuple[str, str]:
+    title = idea.get("title")
+    content = idea.get("content")
+
+    nested = idea.get("idea")
+    if isinstance(nested, dict):
+        title = nested.get("title", title)
+        content = nested.get("content", content)
+    elif hasattr(nested, "title") or hasattr(nested, "content"):
+        title = getattr(nested, "title", title)
+        content = getattr(nested, "content", content)
+
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped.startswith("{") and "\"title\"" in stripped:
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                title = parsed.get("title", title)
+                content = parsed.get("content", content)
+
+    if title is None or str(title).strip() == "":
+        title = "Untitled"
+    else:
+        title = str(title)
+
+    if content is None:
+        content = ""
+    elif not isinstance(content, str):
+        content = str(content)
+
+    return title, content
+
+
+def _normalize_rating_fields(idea: Dict[str, Any], fallback_id: str) -> None:
+    if not idea.get("id"):
+        idea["id"] = fallback_id
+    idea["id"] = str(idea["id"])
+
+    title, content = _resolve_rating_title_content(idea)
+    idea["title"] = title
+    idea["content"] = content
+
+    ratings = idea.get("ratings")
+    if isinstance(ratings, (int, float)):
+        ratings = {"auto": ratings, "manual": ratings}
+    elif not isinstance(ratings, dict):
+        ratings = {}
+
+    auto_rating = ratings.get("auto", idea.get("elo", 1500))
+    manual_rating = ratings.get("manual", 1500)
+
+    try:
+        auto_rating = float(auto_rating)
+    except Exception:
+        auto_rating = 1500.0
+    try:
+        manual_rating = float(manual_rating)
+    except Exception:
+        manual_rating = 1500.0
+
+    ratings["auto"] = int(round(auto_rating))
+    ratings["manual"] = int(round(manual_rating))
+    idea["ratings"] = ratings
+    idea["elo"] = ratings["auto"]
+
+    for field in ("match_count", "auto_match_count", "manual_match_count"):
+        try:
+            idea[field] = int(idea.get(field, 0) or 0)
+        except Exception:
+            idea[field] = 0
+
+
+def _collect_latest_ideas_for_rating(evolution_data: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Tuple[int, int]]]:
+    latest_by_id: Dict[str, Dict[str, Any]] = {}
+    latest_index_by_id: Dict[str, Tuple[int, int]] = {}
+    seq = 0
+
+    for gen_index, generation in enumerate(evolution_data.get("history", [])):
+        for idea_index, idea in enumerate(generation):
+            _normalize_rating_fields(idea, f"idea_{seq}")
+            seq += 1
+            idea["generation"] = gen_index + 1
+            idea_id = idea["id"]
+            latest_by_id[idea_id] = idea
+            latest_index_by_id[idea_id] = (gen_index, idea_index)
+
+    return list(latest_by_id.values()), latest_index_by_id
+
+
+def _parse_pair_entry(entry: Any) -> Optional[Tuple[str, str]]:
+    if isinstance(entry, dict):
+        a_id = entry.get("a_id")
+        b_id = entry.get("b_id")
+    elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+        a_id = entry[0]
+        b_id = entry[1]
+    else:
+        return None
+
+    if a_id is None or b_id is None:
+        return None
+
+    a_id = str(a_id)
+    b_id = str(b_id)
+    if a_id == b_id:
+        return None
+
+    return tuple(sorted((a_id, b_id)))
+
+
+def _get_rating_swiss_state(evolution_data: Dict[str, Any], rating_type: str) -> Dict[str, Any]:
+    root = evolution_data.setdefault("rating_swiss_state", {})
+    state = root.get(rating_type)
+    if not isinstance(state, dict):
+        state = {}
+        root[rating_type] = state
+
+    if not isinstance(state.get("match_history"), list):
+        state["match_history"] = []
+    if not isinstance(state.get("bye_counts"), dict):
+        state["bye_counts"] = {}
+    if not isinstance(state.get("pending_pairs"), list):
+        state["pending_pairs"] = []
+    try:
+        state["round_number"] = int(state.get("round_number", 0) or 0)
+    except Exception:
+        state["round_number"] = 0
+
+    return state
+
+
+def _normalize_pair_history_entries(entries: List[Any]) -> Tuple[List[Dict[str, str]], Set[Tuple[str, str]]]:
+    normalized: List[Dict[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for entry in entries:
+        parsed = _parse_pair_entry(entry)
+        if not parsed or parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append({"a_id": parsed[0], "b_id": parsed[1]})
+    return normalized, seen
+
+
+def _pop_pending_pair(state: Dict[str, Any], ideas_by_id: Dict[str, Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    normalized_pending: List[Dict[str, str]] = []
+    for pair in state.get("pending_pairs", []):
+        parsed = _parse_pair_entry(pair)
+        if not parsed:
+            continue
+        a_id, b_id = parsed
+        if a_id in ideas_by_id and b_id in ideas_by_id:
+            normalized_pending.append({"a_id": a_id, "b_id": b_id})
+
+    state["pending_pairs"] = normalized_pending
+    if not normalized_pending:
+        return None, None
+
+    pair = normalized_pending.pop(0)
+    state["pending_pairs"] = normalized_pending
+    return ideas_by_id[pair["a_id"]], ideas_by_id[pair["b_id"]]
+
+
+def _next_manual_swiss_pair(
+    evolution_data: Dict[str, Any],
+    all_ideas: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Dict[str, Any]]:
+    if len(all_ideas) < 2:
+        return None, None, {}
+
+    state = _get_rating_swiss_state(evolution_data, "manual")
+    ideas_by_id = {idea["id"]: idea for idea in all_ideas}
+
+    idea_a, idea_b = _pop_pending_pair(state, ideas_by_id)
+    if idea_a and idea_b:
+        return idea_a, idea_b, {
+            "round_number": state.get("round_number", 0),
+            "remaining_pairs_in_round": len(state.get("pending_pairs", [])),
+            "bye_idea_id": state.get("last_bye_id"),
+        }
+
+    id_to_index = {idea["id"]: idx for idx, idea in enumerate(all_ideas)}
+    index_to_id = {idx: idea_id for idea_id, idx in id_to_index.items()}
+    ranks = {idx: float(all_ideas[idx]["ratings"]["manual"]) for idx in range(len(all_ideas))}
+
+    history_entries, _ = _normalize_pair_history_entries(state.get("match_history", []))
+    committed_history: Set[Tuple[int, int]] = set()
+    for entry in history_entries:
+        a_id = entry["a_id"]
+        b_id = entry["b_id"]
+        if a_id in id_to_index and b_id in id_to_index:
+            idx_a = id_to_index[a_id]
+            idx_b = id_to_index[b_id]
+            committed_history.add((min(idx_a, idx_b), max(idx_a, idx_b)))
+    state["match_history"] = history_entries
+
+    bye_counts_raw = state.get("bye_counts", {})
+    bye_counts: Dict[int, int] = {}
+    if isinstance(bye_counts_raw, dict):
+        for idea_id, count in bye_counts_raw.items():
+            idea_id = str(idea_id)
+            if idea_id not in id_to_index:
+                continue
+            try:
+                bye_counts[id_to_index[idea_id]] = int(count)
+            except Exception:
+                continue
+
+    temp_history = set(committed_history)
+    pairs, bye_idx = generate_swiss_round_pairs(ranks, temp_history, bye_counts)
+
+    state["round_number"] = int(state.get("round_number", 0)) + 1
+    state["bye_counts"] = {
+        index_to_id[idx]: int(count)
+        for idx, count in bye_counts.items()
+        if count > 0 and idx in index_to_id
+    }
+    state["pending_pairs"] = [
+        {"a_id": index_to_id[idx_a], "b_id": index_to_id[idx_b]}
+        for idx_a, idx_b in pairs
+        if idx_a in index_to_id and idx_b in index_to_id
+    ]
+    if bye_idx is not None and bye_idx in index_to_id:
+        state["last_bye_id"] = index_to_id[bye_idx]
+    else:
+        state["last_bye_id"] = None
+
+    idea_a, idea_b = _pop_pending_pair(state, ideas_by_id)
+    return idea_a, idea_b, {
+        "round_number": state.get("round_number", 0),
+        "remaining_pairs_in_round": len(state.get("pending_pairs", [])),
+        "bye_idea_id": state.get("last_bye_id"),
+    }
+
+
+def _normalize_thinking_level(level: Optional[Any]) -> Optional[str]:
+    if level is None:
+        return None
+    normalized = str(level).strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"off", "low", "medium", "high"}:
+        return normalized
+    return None
+
+
+def _get_default_thinking_settings(model_name: str) -> Tuple[Optional[str], Optional[int]]:
+    """Get default thinking settings for a model."""
+    config = THINKING_MODEL_CONFIG.get(model_name, {})
+    if not config.get("supports_thinking", False):
+        return None, None
+
+    default_level = _normalize_thinking_level(config.get("default_level"))
+    default_budget = config.get("default_budget")
+
+    try:
+        parsed_budget = int(default_budget) if default_budget is not None else None
+    except (TypeError, ValueError):
+        parsed_budget = None
+
+    # Prefer explicit level defaults when configured; fallback to budget otherwise.
+    if default_level is not None:
+        return default_level, None
+    return None, parsed_budget
+
+
+def _get_autorating_costs(critic_agent: Critic) -> Dict[str, Any]:
+    """Build autorating token/cost payload for the frontend."""
+    critic_input = getattr(critic_agent, "input_token_count", 0)
+    critic_output = getattr(critic_agent, "output_token_count", 0)
+    critic_total = getattr(critic_agent, "total_token_count", 0)
+
+    from idea.config import model_prices_per_million_tokens
+
+    critic_model = getattr(critic_agent, "model_name", "gemini-2.0-flash")
+    default_price = {"input": 0.1, "output": 0.4}
+    critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
+
+    critic_input_cost = (critic_pricing["input"] * critic_input) / 1_000_000
+    critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
+    total_cost = critic_input_cost + critic_output_cost
+
+    estimates = {}
+    for model in LLM_MODELS:
+        model_id = model["id"]
+        model_name = model.get("name", model_id)
+        pricing = model_prices_per_million_tokens.get(model_id, default_price)
+        est_cost = (
+            pricing["input"] * critic_input / 1_000_000
+            + pricing["output"] * critic_output / 1_000_000
+        )
+        estimates[model_id] = {"name": model_name, "cost": est_cost}
+
+    return {
+        "critic": {
+            "total": critic_total,
+            "input": critic_input,
+            "output": critic_output,
+            "model": critic_model,
+            "cost": total_cost,
+        },
+        "total": critic_total,
+        "total_input": critic_input,
+        "total_output": critic_output,
+        "cost": {
+            "input_cost": critic_input_cost,
+            "output_cost": critic_output_cost,
+            "total_cost": total_cost,
+            "currency": "USD",
+        },
+        "models": {"critic": critic_model},
+        "estimates": estimates,
+    }
+
+
+@app.post("/api/submit-rating")
+async def submit_rating(
+    request: Request,
+    user: Optional[UserInfo] = Depends(get_current_user),
+):
+    """Submit a manual Swiss comparison result."""
+    try:
+        data = await request.json()
+        idea_a_id = str(data.get("idea_a_id") or "")
+        idea_b_id = str(data.get("idea_b_id") or "")
+        outcome = data.get("outcome")
+        evolution_id = data.get("evolution_id")
+
+        if outcome not in {"A", "B", "tie"}:
+            raise HTTPException(status_code=400, detail="Outcome must be one of: A, B, tie")
+
+        print(f"Submitting manual Swiss rating for {idea_a_id} vs {idea_b_id}, outcome: {outcome}")
+
+        file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
+        all_ideas, _ = _collect_latest_ideas_for_rating(evolution_data)
+        ideas_by_id = {idea["id"]: idea for idea in all_ideas}
+
+        idea_a = ideas_by_id.get(idea_a_id)
+        idea_b = ideas_by_id.get(idea_b_id)
         if not idea_a or not idea_b:
             raise HTTPException(status_code=404, detail="Ideas not found")
 
-        # Log current state before update
-        print(f"Before update - Idea A ({idea_a_id}): manual_match_count={idea_a.get('manual_match_count', 0)}, manual_elo={idea_a.get('ratings', {}).get('manual', 1500)}")
-        print(f"Before update - Idea B ({idea_b_id}): manual_match_count={idea_b.get('manual_match_count', 0)}, manual_elo={idea_b.get('ratings', {}).get('manual', 1500)}")
+        idea_a["match_count"] += 1
+        idea_b["match_count"] += 1
+        idea_a["manual_match_count"] += 1
+        idea_b["manual_match_count"] += 1
 
-        # Initialize ratings if not present
-        if 'ratings' not in idea_a:
-            idea_a['ratings'] = {'auto': 1500, 'manual': 1500}
-        elif isinstance(idea_a['ratings'], (int, float)):
-            old_elo = idea_a['ratings']
-            idea_a['ratings'] = {'auto': old_elo, 'manual': old_elo}
+        new_elo_a, new_elo_b = elo_update(
+            float(idea_a["ratings"]["manual"]),
+            float(idea_b["ratings"]["manual"]),
+            outcome,
+        )
+        idea_a["ratings"]["manual"] = int(round(new_elo_a))
+        idea_b["ratings"]["manual"] = int(round(new_elo_b))
 
-        if 'ratings' not in idea_b:
-            idea_b['ratings'] = {'auto': 1500, 'manual': 1500}
-        elif isinstance(idea_b['ratings'], (int, float)):
-            old_elo = idea_b['ratings']
-            idea_b['ratings'] = {'auto': old_elo, 'manual': old_elo}
+        manual_state = _get_rating_swiss_state(evolution_data, "manual")
+        normalized_history, seen_history = _normalize_pair_history_entries(manual_state.get("match_history", []))
+        pair_key = tuple(sorted((idea_a_id, idea_b_id)))
+        if pair_key not in seen_history:
+            normalized_history.append({"a_id": pair_key[0], "b_id": pair_key[1]})
+        manual_state["match_history"] = normalized_history
 
-        # Initialize match counts if not present
-        if 'match_count' not in idea_a:
-            idea_a['match_count'] = 0
-        if 'match_count' not in idea_b:
-            idea_b['match_count'] = 0
+        pending = []
+        for pair in manual_state.get("pending_pairs", []):
+            parsed = _parse_pair_entry(pair)
+            if not parsed or parsed == pair_key:
+                continue
+            pending.append({"a_id": parsed[0], "b_id": parsed[1]})
+        manual_state["pending_pairs"] = pending
 
-        # Initialize manual match counts if not present
-        if 'manual_match_count' not in idea_a:
-            idea_a['manual_match_count'] = 0
-        if 'manual_match_count' not in idea_b:
-            idea_b['manual_match_count'] = 0
+        await _save_rating_evolution(
+            evolution_id=evolution_id,
+            evolution_data=evolution_data,
+            source=source,
+            user=user,
+            file_path=file_path,
+        )
 
-        # Initialize auto match counts if not present
-        if 'auto_match_count' not in idea_a:
-            idea_a['auto_match_count'] = 0
-        if 'auto_match_count' not in idea_b:
-            idea_b['auto_match_count'] = 0
-
-        # Increment match counts
-        idea_a['match_count'] += 1
-        idea_b['match_count'] += 1
-
-        # Increment manual match counts specifically
-        idea_a['manual_match_count'] += 1
-        idea_b['manual_match_count'] += 1
-
-        # Convert outcome to numeric value
-        if outcome == "A":
-            outcome_value = 1
-        elif outcome == "B":
-            outcome_value = 0
-        else:  # Tie
-            outcome_value = 0.5
-
-        # Calculate new Elos for manual ratings
-        k_factor = 32
-        expected_a = 1 / (1 + 10 ** ((idea_b['ratings']['manual'] - idea_a['ratings']['manual']) / 400))
-        expected_b = 1 / (1 + 10 ** ((idea_a['ratings']['manual'] - idea_b['ratings']['manual']) / 400))
-
-        idea_a['ratings']['manual'] = round(idea_a['ratings']['manual'] + k_factor * (outcome_value - expected_a))
-        idea_b['ratings']['manual'] = round(idea_b['ratings']['manual'] + k_factor * (1 - outcome_value - expected_b))
-
-        # Log state after update
-        print(f"After update - Idea A ({idea_a_id}): manual_match_count={idea_a['manual_match_count']}, manual_elo={idea_a['ratings']['manual']}")
-        print(f"After update - Idea B ({idea_b_id}): manual_match_count={idea_b['manual_match_count']}, manual_elo={idea_b['ratings']['manual']}")
-
-        # Save the updated data
-        with open(file_path, 'w') as f:
-            json.dump(evolution_data, f, indent=2)
-
-        print(f"Successfully saved rating data to {file_path}")
-
-        # Return the updated ELO ratings
         return JSONResponse({
-            'status': 'success',
-            'updated_elos': {
-                idea_a_id: idea_a['ratings']['manual'],
-                idea_b_id: idea_b['ratings']['manual']
+            "status": "success",
+            "updated_elos": {
+                idea_a_id: idea_a["ratings"]["manual"],
+                idea_b_id: idea_b["ratings"]["manual"],
             },
-            'updated_match_counts': {
+            "updated_match_counts": {
                 idea_a_id: {
-                    'total': idea_a['match_count'],
-                    'manual': idea_a['manual_match_count'],
-                    'auto': idea_a['auto_match_count']
+                    "total": idea_a["match_count"],
+                    "manual": idea_a["manual_match_count"],
+                    "auto": idea_a["auto_match_count"],
                 },
                 idea_b_id: {
-                    'total': idea_b['match_count'],
-                    'manual': idea_b['manual_match_count'],
-                    'auto': idea_b['auto_match_count']
-                }
-            }
+                    "total": idea_b["match_count"],
+                    "manual": idea_b["manual_match_count"],
+                    "auto": idea_b["auto_match_count"],
+                },
+            },
         })
 
+    except HTTPException as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e.detail),
+        }, status_code=e.status_code)
     except Exception as e:
         print(f"Error submitting rating: {e}")
         return JSONResponse({
-            'status': 'error',
-            'message': str(e)
+            "status": "error",
+            "message": str(e),
         }, status_code=500)
 
+
 @app.post("/api/auto-rate")
-async def auto_rate(request: Request):
-    """Automatically rate ideas using the Critic agent from llm.py"""
+async def auto_rate(
+    request: Request,
+    user: Optional[UserInfo] = Depends(get_current_user),
+):
+    """Automatically rate ideas using Swiss rounds from the Critic tournament flow."""
+    state: Optional[UserEvolutionState] = None
     try:
         data = await request.json()
-        num_comparisons = int(data.get('numComparisons', 10))
-        evolution_id = data.get('evolutionId')
-        model_id = data.get('modelId', DEFAULT_MODEL)
-        skip_save = data.get('skipSave', False)
-        elo_range = int(data.get('eloRange', 100))  # Get ELO range from request, default to 100
+        evolution_id = data.get("evolutionId")
+        model_id = data.get("modelId", DEFAULT_MODEL)
+        skip_save = bool(data.get("skipSave", False))
+        idea_type = data.get("ideaType")
 
-        # Get idea_type from the request or use a default
-        idea_type = data.get('ideaType', get_default_template_id())
+        if user:
+            state = await user_states.get(user.uid)
 
-        print(f"Starting auto-rating for evolution {evolution_id} with {num_comparisons} comparisons using model {model_id}")
-        print(f"Using ELO range of ±{elo_range} for matching ideas")
+        file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
+        if not idea_type:
+            idea_type = evolution_data.get("idea_type", get_default_template_id())
 
-        # Load the evolution data
-        file_path = DATA_DIR / f"{evolution_id}.json"
-        if not file_path.exists():
-            print(f"Evolution file not found: {file_path}")
-            raise HTTPException(status_code=404, detail="Evolution not found")
-
-        with open(file_path) as f:
-            evolution_data = json.load(f)
-
-        # Try to extract idea_type from the evolution data if not provided in request
-        if 'idea_type' in evolution_data and not idea_type:
-            idea_type = evolution_data.get('idea_type', get_default_template_id())
-
-        # Create a mapping from idea ID to its location in the evolution_data structure
-        idea_map = {}
-
-        # Extract all ideas from all generations with generation info
-        all_ideas = []
-        for gen_index, generation in enumerate(evolution_data.get('history', [])):
-            for idea_index, idea in enumerate(generation):
-                # Add an ID if not present
-                if 'id' not in idea:
-                    idea['id'] = f"idea_{len(all_ideas)}"
-
-                # Store the location of this idea in the evolution_data structure
-                idea_map[idea['id']] = (gen_index, idea_index)
-
-                # Initialize ratings if not present
-                if 'ratings' not in idea:
-                    idea['ratings'] = {
-                        'auto': 1500,
-                        'manual': 1500
-                    }
-                elif isinstance(idea['ratings'], (int, float)):
-                    # Convert old format to new format
-                    old_elo = idea['ratings']
-                    idea['ratings'] = {
-                        'auto': old_elo,
-                        'manual': old_elo
-                    }
-                elif 'auto' not in idea['ratings']:
-                    idea['ratings']['auto'] = 1500
-                elif 'manual' not in idea['ratings']:
-                    idea['ratings']['manual'] = 1500
-
-                # Initialize match count if not present
-                if 'match_count' not in idea:
-                    idea['match_count'] = 0
-
-                # Initialize auto_match_count if not present
-                if 'auto_match_count' not in idea:
-                    idea['auto_match_count'] = 0
-
-                # Initialize manual_match_count if not present
-                if 'manual_match_count' not in idea:
-                    idea['manual_match_count'] = 0
-
-                # For backward compatibility
-                idea['elo'] = idea['ratings']['auto']
-
-                # Add generation info
-                idea['generation'] = gen_index + 1
-                all_ideas.append(idea)
-
-        print(f"Found {len(all_ideas)} ideas to rate")
+        all_ideas, _ = _collect_latest_ideas_for_rating(evolution_data)
 
         if len(all_ideas) < 2:
             return JSONResponse({
-                'status': 'error',
-                'message': 'Not enough ideas to compare (minimum 2 required)'
+                "status": "error",
+                "message": "Not enough ideas to compare (minimum 2 required)",
             }, status_code=400)
 
-        # Determine the appropriate thinking budget for the model
-        def get_default_thinking_budget(model_name):
-            """Get the default thinking budget for a model, same as main app logic"""
-            from idea.config import THINKING_BUDGET_CONFIG
+        # Align auto-rating with evolution-loop semantics:
+        # - full_tournament_rounds = pop_size - 1
+        # - tournamentCount controls fractional/multiple Swiss tournaments
+        legacy_rounds_input = data.get("numRounds", data.get("numComparisons"))
+        try:
+            tournament_count, full_tournament_rounds, num_rounds = _resolve_tournament_settings(
+                pop_size=len(all_ideas),
+                tournament_count_input=data.get("tournamentCount"),
+                legacy_rounds_input=legacy_rounds_input,
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid tournament settings: {e}",
+            ) from e
 
-            # Only 2.5 and 3.0 models support thinking budget
-            if "2.5" not in model_name and "3-pro" not in model_name:
-                return None
+        print(
+            "Starting auto Swiss rating for evolution "
+            f"{evolution_id}: count={tournament_count}, rounds={num_rounds}, "
+            f"full_rounds={full_tournament_rounds}, ideas={len(all_ideas)}"
+        )
 
-            # Get the config for this model and use its default value
-            # This matches the main app logic:
-            # - gemini-2.5-pro: default = 128 (minimum, can't disable)
-            # - gemini-2.5-flash: default = 0 (disabled)
-            # - gemini-2.5-flash-lite: default = 0 (disabled)
-            config = THINKING_BUDGET_CONFIG.get(model_name, {})
-            return config.get('default', 0)  # Default to 0 (disabled) if not found
+        existing_total_comparisons = sum(idea.get("match_count", 0) for idea in all_ideas) // 2
+        expected_pairs_per_round = max(1, len(all_ideas) // 2)
+        expected_total_pairs = expected_pairs_per_round * num_rounds
 
-        thinking_budget = get_default_thinking_budget(model_id)
+        # Use the same API-key resolution strategy as the evolution flow.
+        # 1) Prefer the authenticated user's stored key.
+        # 2) Fallback to GEMINI_API_KEY env var.
+        user_api_key = None
+        if user:
+            try:
+                user_api_key = await db.get_user_api_key(user.uid)
+            except Exception as e:
+                print(f"Warning: failed to fetch user API key for auto-rate: {e}")
 
-        # Create a critic agent from llm.py with the specified model and app defaults
-        # Use the same defaults as the evolution engine to ensure consistency
+        resolved_api_key = user_api_key or os.getenv("GEMINI_API_KEY")
+        if not resolved_api_key:
+            return JSONResponse({
+                "status": "error",
+                "message": "No Gemini API key configured. Set it in Settings before auto-rating.",
+            }, status_code=400)
+
+        default_thinking_level, default_thinking_budget = _get_default_thinking_settings(model_id)
         critic = Critic(
             provider="google_generative_ai",
             model_name=model_id,
             temperature=DEFAULT_CREATIVE_TEMP,
             top_p=DEFAULT_TOP_P,
-            thinking_budget=thinking_budget
+            thinking_level=default_thinking_level,
+            thinking_budget=default_thinking_budget,
+            api_key=resolved_api_key,
         )
 
-        # Perform the requested number of comparisons
-        results = []
-        total_comparisons_completed = 0
+        rounds_details: List[Dict[str, Any]] = []
 
-        # First, count existing match counts to track total comparisons
-        for idea in all_ideas:
-            total_comparisons_completed += idea.get('match_count', 0)
+        replay_ranks = {idx: float(idea["ratings"]["auto"]) for idx, idea in enumerate(all_ideas)}
+        results: List[Dict[str, Any]] = []
+        win_counts = {"A": 0, "B": 0, "tie": 0}
+        next_round_to_apply = 0
+        next_pair_to_apply = 0
 
-        # Divide by 2 since each comparison involves 2 ideas
-        total_comparisons_completed = total_comparisons_completed // 2
+        def _sorted_ideas() -> List[Dict[str, Any]]:
+            return sorted(all_ideas, key=lambda x: x["ratings"]["auto"], reverse=True)
 
-        print(f"Starting with {total_comparisons_completed} existing comparisons")
+        def _count_completed_rounds() -> int:
+            completed = 0
+            for round_record in rounds_details:
+                pairs = round_record.get("pairs", [])
+                if all(pair.get("winner") in {"A", "B", "tie"} for pair in pairs):
+                    completed += 1
+                else:
+                    break
+            return completed
 
-        # Maximum ELO difference for matching ideas - use the value from the request
-        max_elo_diff = elo_range
+        def _apply_resolved_pairs() -> None:
+            nonlocal next_round_to_apply, next_pair_to_apply
+            while next_round_to_apply < len(rounds_details):
+                round_record = rounds_details[next_round_to_apply]
+                pairs = round_record.get("pairs", [])
 
-        enable_parallel_autorate = os.environ.get("ENABLE_PARALLEL_AUTORATE", "1") != "0"
+                while next_pair_to_apply < len(pairs):
+                    pair = pairs[next_pair_to_apply]
+                    winner = pair.get("winner")
+                    if winner not in {"A", "B", "tie"}:
+                        return
 
-        if enable_parallel_autorate and num_comparisons > 1 and len(all_ideas) >= 4:
-            # Build pairs using the existing selection strategy on a snapshot
-            pairs = []
-            for _ in range(num_comparisons):
-                idea_a, idea_b = select_efficient_pair(all_ideas, rating_type='auto', max_elo_diff=max_elo_diff)
-                if idea_a is None or idea_b is None:
-                    continue
-                idx_a = all_ideas.index(idea_a)
-                idx_b = all_ideas.index(idea_b)
-                pairs.append((idx_a, idx_b))
+                    idx_a = pair.get("a_idx")
+                    idx_b = pair.get("b_idx")
+                    if idx_a is None or idx_b is None:
+                        next_pair_to_apply += 1
+                        continue
+                    if idx_a < 0 or idx_b < 0 or idx_a >= len(all_ideas) or idx_b >= len(all_ideas):
+                        next_pair_to_apply += 1
+                        continue
 
-            from idea.ratings import parallel_evaluate_pairs
-            concurrency = int(os.environ.get("AUTORATE_CONCURRENCY", "8"))
-            results_parallel = parallel_evaluate_pairs(
-                pairs=pairs,
-                items=all_ideas,
-                compare_fn=lambda a, b, _: critic.compare_ideas(a, b, idea_type),
-                idea_type=idea_type,
-                concurrency=concurrency,
-                randomize_presentation=True,
+                    resolved_winner = winner
+                    idea_a = all_ideas[idx_a]
+                    idea_b = all_ideas[idx_b]
+
+                    idea_a["match_count"] += 1
+                    idea_b["match_count"] += 1
+                    idea_a["auto_match_count"] += 1
+                    idea_b["auto_match_count"] += 1
+
+                    next_a, next_b = elo_update(
+                        replay_ranks[idx_a],
+                        replay_ranks[idx_b],
+                        resolved_winner,
+                    )
+                    replay_ranks[idx_a] = float(int(round(next_a)))
+                    replay_ranks[idx_b] = float(int(round(next_b)))
+
+                    idea_a["ratings"]["auto"] = int(round(replay_ranks[idx_a]))
+                    idea_b["ratings"]["auto"] = int(round(replay_ranks[idx_b]))
+                    idea_a["elo"] = idea_a["ratings"]["auto"]
+                    idea_b["elo"] = idea_b["ratings"]["auto"]
+
+                    results.append({
+                        "idea_a": idea_a.get("id", "unknown"),
+                        "idea_b": idea_b.get("id", "unknown"),
+                        "outcome": resolved_winner,
+                        "new_elo_a": idea_a["ratings"]["auto"],
+                        "new_elo_b": idea_b["ratings"]["auto"],
+                        "round": round_record.get("round"),
+                    })
+                    win_counts[resolved_winner] += 1
+                    next_pair_to_apply += 1
+
+                next_round_to_apply += 1
+                next_pair_to_apply = 0
+
+        _update_autorating_state(
+            state,
+            {
+                "is_running": True,
+                "status": "in_progress",
+                "status_message": f"Running Swiss round 1/{num_rounds}...",
+                "progress": 0,
+                "requested_rounds": int(num_rounds),
+                "completed_rounds": 0,
+                "tournament_count": float(tournament_count),
+                "full_tournament_rounds": int(full_tournament_rounds),
+                "target_tournament_rounds": int(num_rounds),
+                "total_matches": int(expected_total_pairs),
+                "completed_matches": 0,
+                "completed_comparisons": int(existing_total_comparisons),
+                "new_comparisons": 0,
+                "win_counts": win_counts.copy(),
+                "ideas": _sorted_ideas(),
+                "token_counts": None,
+                "error": None,
+            },
+        )
+
+        def _progress_callback(completed_pairs: int, total_pairs: int) -> None:
+            _apply_resolved_pairs()
+            total_pairs_safe = max(1, int(total_pairs or expected_total_pairs))
+            completed_pairs_safe = max(0, min(int(completed_pairs), total_pairs_safe))
+            round_num = min(num_rounds, (completed_pairs_safe // expected_pairs_per_round) + 1)
+
+            _update_autorating_state(
+                state,
+                {
+                    "is_running": True,
+                    "status": "in_progress",
+                    "status_message": f"Running Swiss round {round_num}/{num_rounds}...",
+                    "progress": (completed_pairs_safe / total_pairs_safe) * 100,
+                    "requested_rounds": int(num_rounds),
+                    "completed_rounds": _count_completed_rounds(),
+                    "tournament_count": float(tournament_count),
+                    "full_tournament_rounds": int(full_tournament_rounds),
+                    "target_tournament_rounds": int(num_rounds),
+                    "total_matches": int(total_pairs_safe),
+                    "completed_matches": int(completed_pairs_safe),
+                    "completed_comparisons": int(existing_total_comparisons + len(results)),
+                    "new_comparisons": int(len(results)),
+                    "win_counts": win_counts.copy(),
+                    "ideas": _sorted_ideas(),
+                },
             )
 
-            for idx_a, idx_b, winner in results_parallel:
-                idea_a = all_ideas[idx_a]
-                idea_b = all_ideas[idx_b]
-                if winner is None:
-                    continue
-                idea_a['match_count'] += 1
-                idea_b['match_count'] += 1
-                idea_a['auto_match_count'] += 1
-                idea_b['auto_match_count'] += 1
+        def _run_tournament() -> None:
+            critic.get_tournament_ranks(
+                all_ideas,
+                idea_type,
+                rounds=num_rounds,
+                progress_callback=_progress_callback,
+                details=rounds_details,
+                full_tournament_rounds=full_tournament_rounds,
+            )
 
-                # ELO update identical to sequential path below
-                k_factor = 32
-                expected_a = 1 / (1 + 10 ** ((idea_b['ratings']['auto'] - idea_a['ratings']['auto']) / 400))
-                expected_b = 1 / (1 + 10 ** ((idea_a['ratings']['auto'] - idea_b['ratings']['auto']) / 400))
-                if winner == "A":
-                    idea_a['ratings']['auto'] = round(idea_a['ratings']['auto'] + k_factor * (1 - expected_a))
-                    idea_b['ratings']['auto'] = round(idea_b['ratings']['auto'] + k_factor * (0 - expected_b))
-                elif winner == "B":
-                    idea_a['ratings']['auto'] = round(idea_a['ratings']['auto'] + k_factor * (0 - expected_a))
-                    idea_b['ratings']['auto'] = round(idea_b['ratings']['auto'] + k_factor * (1 - expected_b))
-                else:
-                    idea_a['ratings']['auto'] = round(idea_a['ratings']['auto'] + k_factor * (0.5 - expected_a))
-                    idea_b['ratings']['auto'] = round(idea_b['ratings']['auto'] + k_factor * (0.5 - expected_b))
+        await asyncio.to_thread(_run_tournament)
+        _apply_resolved_pairs()
 
-                # Back-compat field
-                idea_a['elo'] = idea_a['ratings']['auto']
-                idea_b['elo'] = idea_b['ratings']['auto']
-
-                # Update original evolution data structure
-                if idea_a['id'] in idea_map:
-                    gen_idx, idea_idx = idea_map[idea_a['id']]
-                    evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_a['ratings']
-                    evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_a['elo']
-                    evolution_data['history'][gen_idx][idea_idx]['match_count'] = idea_a['match_count']
-                    evolution_data['history'][gen_idx][idea_idx]['auto_match_count'] = idea_a['auto_match_count']
-                if idea_b['id'] in idea_map:
-                    gen_idx, idea_idx = idea_map[idea_b['id']]
-                    evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_b['ratings']
-                    evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_b['elo']
-                    evolution_data['history'][gen_idx][idea_idx]['match_count'] = idea_b['match_count']
-                    evolution_data['history'][gen_idx][idea_idx]['auto_match_count'] = idea_b['auto_match_count']
-
-                # Record the result for API response accounting
-                results.append({
-                    'idea_a': idea_a.get('id', 'unknown'),
-                    'idea_b': idea_b.get('id', 'unknown'),
-                    'outcome': winner,
-                    'new_elo_a': idea_a['ratings']['auto'],
-                    'new_elo_b': idea_b['ratings']['auto']
-                })
-        else:
-            for i in range(num_comparisons):
-                print(f"Comparison {i+1}/{num_comparisons}")
-
-                # Use the shared efficient pair selection function
-                idea_a, idea_b = select_efficient_pair(all_ideas, rating_type='auto', max_elo_diff=max_elo_diff)
-
-                if idea_a is None or idea_b is None:
-                    print("Failed to select suitable pair, skipping this comparison")
-                    continue
-
-                # Get ELO ratings (kept for potential logging/future use)
-                # elo_a = idea_a['ratings']['auto']
-                # elo_b = idea_b['ratings']['auto']
-
-                # Randomize presentation order to eliminate positional bias
-                if random.random() < 0.5:
-                    # Present ideas in original order (A first, B second)
-                    winner = critic.compare_ideas(idea_a, idea_b, idea_type)
-                    order_swapped = False
-                else:
-                    # Present ideas in swapped order (B first, A second)
-                    winner = critic.compare_ideas(idea_b, idea_a, idea_type)
-                    order_swapped = True
-                    # Adjust winner interpretation for swapped order
-                    if winner == "A":
-                        winner = "B"  # Model chose first position, but that was actually idea_b
-                    elif winner == "B":
-                        winner = "A"  # Model chose second position, but that was actually idea_a
-                    # "tie" remains "tie"
-
-                print(f"Winner: {winner} (order_swapped: {order_swapped})")
-
-                # Skip this comparison if there was an error (winner is None)
-                if winner is None:
-                    print("Skipping this comparison due to an error")
-                    continue
-
-                # Increment match counts
-                idea_a['match_count'] += 1
-                idea_b['match_count'] += 1
-
-                # Increment auto match counts specifically
-                idea_a['auto_match_count'] += 1
-                idea_b['auto_match_count'] += 1
-
-            # Convert to outcome format (1 = A wins, 0 = B wins, 0.5 = tie)
-            if winner == "A":
-                outcome = 1
-            elif winner == "B":
-                outcome = 0
-            else:  # Tie
-                outcome = 0.5
-
-            # Calculate new Elos for auto ratings
-            k_factor = 32
-            expected_a = 1 / (1 + 10 ** ((idea_b['ratings']['auto'] - idea_a['ratings']['auto']) / 400))
-            expected_b = 1 / (1 + 10 ** ((idea_a['ratings']['auto'] - idea_b['ratings']['auto']) / 400))
-
-            idea_a['ratings']['auto'] = round(idea_a['ratings']['auto'] + k_factor * (outcome - expected_a))
-            idea_b['ratings']['auto'] = round(idea_b['ratings']['auto'] + k_factor * (1 - outcome - expected_b))
-
-            # Update the elo field for backward compatibility
-            idea_a['elo'] = idea_a['ratings']['auto']
-            idea_b['elo'] = idea_b['ratings']['auto']
-
-            # Update the original ideas in the evolution_data structure
-            if idea_a['id'] in idea_map:
-                gen_idx, idea_idx = idea_map[idea_a['id']]
-                evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_a['ratings']
-                evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_a['elo']
-                evolution_data['history'][gen_idx][idea_idx]['match_count'] = idea_a['match_count']
-                evolution_data['history'][gen_idx][idea_idx]['auto_match_count'] = idea_a['auto_match_count']
-
-            if idea_b['id'] in idea_map:
-                gen_idx, idea_idx = idea_map[idea_b['id']]
-                evolution_data['history'][gen_idx][idea_idx]['ratings'] = idea_b['ratings']
-                evolution_data['history'][gen_idx][idea_idx]['elo'] = idea_b['elo']
-                evolution_data['history'][gen_idx][idea_idx]['match_count'] = idea_b['match_count']
-                evolution_data['history'][gen_idx][idea_idx]['auto_match_count'] = idea_b['auto_match_count']
-
-            # Record the result
-            results.append({
-                'idea_a': idea_a.get('id', 'unknown'),
-                'idea_b': idea_b.get('id', 'unknown'),
-                'outcome': winner,
-                'new_elo_a': idea_a['ratings']['auto'],
-                'new_elo_b': idea_b['ratings']['auto']
-            })
-
-            # Save after every comparison to ensure match counts are properly tracked
-            if not skip_save:
-                with open(file_path, 'w') as f:
-                    json.dump(evolution_data, f, indent=2)
-
-                # Only log every 5 comparisons to reduce console output
-                if (i + 1) % 5 == 0:
-                    print(f"Saved progress after {i + 1} comparisons")
-
-        print(f"Completed {len(results)} comparisons")
-
-        # Save the final updated Elo scores back to the file (unless skipSave is True)
         if not skip_save:
-            with open(file_path, 'w') as f:
-                json.dump(evolution_data, f, indent=2)
+            await _save_rating_evolution(
+                evolution_id=evolution_id,
+                evolution_data=evolution_data,
+                source=source,
+                user=user,
+                file_path=file_path,
+            )
 
-        # Calculate costs similar to evolution module
-        def get_autorating_costs(critic_agent):
-            """Get the cost information for autorating"""
-            # Get token counts from the critic agent
-            critic_input = getattr(critic_agent, 'input_token_count', 0)
-            critic_output = getattr(critic_agent, 'output_token_count', 0)
-            critic_total = getattr(critic_agent, 'total_token_count', 0)
-
-            # Get pricing information from config
-            from idea.config import model_prices_per_million_tokens
-
-            # Get model name for the critic
-            critic_model = getattr(critic_agent, 'model_name', 'gemini-2.0-flash')
-
-            # Default pricing if model not found in config
-            default_price = {"input": 0.1, "output": 0.4}
-
-            # Get pricing for the model
-            critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
-
-            # Calculate cost for critic
-            critic_input_cost = (critic_pricing["input"] * critic_input) / 1_000_000
-            critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
-            total_cost = critic_input_cost + critic_output_cost
-
-            # Also estimate total cost for each available model using the critic
-            # token counts so users can compare pricing.
-            from idea.config import LLM_MODELS
-
-            estimates = {}
-            for model in LLM_MODELS:
-                model_id = model['id']
-                model_name = model.get('name', model_id)
-                pricing = model_prices_per_million_tokens.get(model_id, default_price)
-                est_cost = (
-                    pricing['input'] * critic_input / 1_000_000
-                    + pricing['output'] * critic_output / 1_000_000
-                )
-                estimates[model_id] = {'name': model_name, 'cost': est_cost}
-
-            return {
-                'critic': {
-                    'total': critic_total,
-                    'input': critic_input,
-                    'output': critic_output,
-                    'model': critic_model,
-                    'cost': total_cost
-                },
-                'total': critic_total,
-                'total_input': critic_input,
-                'total_output': critic_output,
-                'cost': {
-                    'input_cost': critic_input_cost,
-                    'output_cost': critic_output_cost,
-                    'total_cost': total_cost,
-                    'currency': 'USD'
-                },
-                'models': {
-                    'critic': critic_model
-                },
-                'estimates': estimates
-            }
-
-        # Get cost information
-        cost_info = get_autorating_costs(critic)
-
-        # Return the results with sorted ideas including generation info
-        # Calculate total comparisons (existing + new)
-        total_comparisons = total_comparisons_completed + len(results)
+        final_token_counts = _get_autorating_costs(critic)
+        final_ideas = _sorted_ideas()
+        total_comparisons = existing_total_comparisons + len(results)
+        _update_autorating_state(
+            state,
+            {
+                "is_running": False,
+                "status": "complete",
+                "status_message": (
+                    f"Completed {num_rounds} Swiss round{'s' if num_rounds != 1 else ''}."
+                ),
+                "progress": 100,
+                "requested_rounds": int(num_rounds),
+                "completed_rounds": int(num_rounds),
+                "tournament_count": float(tournament_count),
+                "full_tournament_rounds": int(full_tournament_rounds),
+                "target_tournament_rounds": int(num_rounds),
+                "total_matches": int(expected_total_pairs),
+                "completed_matches": int(len(results)),
+                "completed_comparisons": int(total_comparisons),
+                "new_comparisons": int(len(results)),
+                "win_counts": win_counts.copy(),
+                "ideas": final_ideas,
+                "token_counts": final_token_counts,
+                "error": None,
+            },
+        )
 
         return JSONResponse({
-            'status': 'success',
-            'results': results,
-            'ideas': sorted(all_ideas, key=lambda x: x['ratings']['auto'], reverse=True),
-            'completed_comparisons': total_comparisons,
-            'new_comparisons': len(results),
-            'token_counts': cost_info
+            "status": "success",
+            "results": results,
+            "ideas": final_ideas,
+            "completed_comparisons": total_comparisons,
+            "new_comparisons": len(results),
+            "completed_rounds": int(num_rounds),
+            "new_rounds": int(num_rounds),
+            "tournament_count": float(tournament_count),
+            "full_tournament_rounds": int(full_tournament_rounds),
+            "target_tournament_rounds": int(num_rounds),
+            "token_counts": final_token_counts,
         })
 
+    except HTTPException as e:
+        _update_autorating_state(
+            state,
+            {
+                "is_running": False,
+                "status": "error",
+                "status_message": "Auto-rating failed.",
+                "error": str(e.detail),
+            },
+        )
+        return JSONResponse({
+            "status": "error",
+            "message": str(e.detail),
+        }, status_code=e.status_code)
     except Exception as e:
-        import traceback
         error_details = traceback.format_exc()
         print(f"Error in auto-rate: {e}")
         print(error_details)
+        _update_autorating_state(
+            state,
+            {
+                "is_running": False,
+                "status": "error",
+                "status_message": "Auto-rating failed.",
+                "error": str(e),
+            },
+        )
         return JSONResponse({
-            'status': 'error',
-            'message': str(e),
-            'details': error_details
+            "status": "error",
+            "message": str(e),
+            "details": error_details,
         }, status_code=500)
+
+
+@app.get("/api/auto-rate/progress")
+async def get_auto_rate_progress(
+    user: Optional[UserInfo] = Depends(get_current_user),
+):
+    """Returns live per-match progress for the active auto-rating request."""
+    if not user:
+        return JSONResponse({
+            "is_running": False,
+            "status": "idle",
+            "status_message": "",
+            "progress": 0,
+        })
+
+    state = await user_states.get(user.uid)
+    return JSONResponse(convert_uuids_to_strings(state.autorating_status))
+
 
 @app.get("/api/models")
 async def get_models():
-    """Return the list of available LLM models"""
+    """Return the list of available LLM models."""
     return JSONResponse({
         "models": LLM_MODELS,
-        "default": DEFAULT_MODEL
+        "default": DEFAULT_MODEL,
+        "thinking": THINKING_MODEL_CONFIG,
     })
 
+
 @app.post("/api/reset-ratings")
-async def reset_ratings(request: Request):
-    """Reset ratings for an evolution"""
+async def reset_ratings(
+    request: Request,
+    user: Optional[UserInfo] = Depends(get_current_user),
+):
+    """Reset ratings for an evolution."""
     try:
         data = await request.json()
-        evolution_id = data.get('evolutionId')
-        rating_type = data.get('ratingType', 'all')  # 'all', 'auto', or 'manual'
+        evolution_id = data.get("evolutionId")
+        rating_type = data.get("ratingType", "all")
 
-        # Load the evolution data
-        file_path = DATA_DIR / f"{evolution_id}.json"
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="Evolution not found")
+        file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
 
-        with open(file_path) as f:
-            evolution_data = json.load(f)
-
-        # Reset ratings based on type
-        for generation in evolution_data.get('history', []):
+        for generation in evolution_data.get("history", []):
             for idea in generation:
-                # Initialize ratings object if needed
-                if 'ratings' not in idea:
-                    idea['ratings'] = {'auto': 1500, 'manual': 1500}
-                elif isinstance(idea['ratings'], (int, float)):
-                    old_elo = idea['ratings']
-                    idea['ratings'] = {'auto': old_elo, 'manual': old_elo}
+                _normalize_rating_fields(idea, f"idea_{uuid.uuid4()}")
 
-                # Reset the specified rating type(s)
-                if rating_type == 'all' or rating_type == 'auto':
-                    idea['ratings']['auto'] = 1500
-                    idea['elo'] = 1500  # For backward compatibility
-                    # Reset auto match count
-                    idea['auto_match_count'] = 0
+                if rating_type in {"all", "auto"}:
+                    idea["ratings"]["auto"] = 1500
+                    idea["elo"] = 1500
+                    idea["auto_match_count"] = 0
 
-                if rating_type == 'all' or rating_type == 'manual':
-                    idea['ratings']['manual'] = 1500
-                    # Reset manual match count
-                    idea['manual_match_count'] = 0
+                if rating_type in {"all", "manual"}:
+                    idea["ratings"]["manual"] = 1500
+                    idea["manual_match_count"] = 0
 
-                # Reset total match count if resetting all
-                if rating_type == 'all':
-                    idea['match_count'] = 0
-                # Update total match count if resetting one type
-                elif rating_type == 'auto' and 'manual_match_count' in idea:
-                    idea['match_count'] = idea.get('manual_match_count', 0)
-                elif rating_type == 'manual' and 'auto_match_count' in idea:
-                    idea['match_count'] = idea.get('auto_match_count', 0)
+                if rating_type == "all":
+                    idea["match_count"] = 0
+                elif rating_type == "auto":
+                    idea["match_count"] = idea.get("manual_match_count", 0)
+                elif rating_type == "manual":
+                    idea["match_count"] = idea.get("auto_match_count", 0)
 
-        # Save the updated data
-        with open(file_path, 'w') as f:
-            json.dump(evolution_data, f, indent=2)
+        swiss_root = evolution_data.get("rating_swiss_state")
+        if isinstance(swiss_root, dict):
+            if rating_type == "all":
+                evolution_data["rating_swiss_state"] = {}
+            elif rating_type in {"auto", "manual"}:
+                swiss_root.pop(rating_type, None)
+
+        await _save_rating_evolution(
+            evolution_id=evolution_id,
+            evolution_data=evolution_data,
+            source=source,
+            user=user,
+            file_path=file_path,
+        )
 
         return JSONResponse({
-            'status': 'success',
-            'message': f'{rating_type.capitalize()} ratings and match counts reset successfully'
+            "status": "success",
+            "message": f"{rating_type.capitalize()} ratings and match counts reset successfully",
         })
 
+    except HTTPException as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e.detail),
+        }, status_code=e.status_code)
     except Exception as e:
         print(f"Error resetting ratings: {e}")
         return JSONResponse({
-            'status': 'error',
-            'message': str(e)
+            "status": "error",
+            "message": str(e),
         }, status_code=500)
 
-def select_efficient_pair(all_ideas: List[Dict], rating_type: str = 'auto', max_elo_diff: int = 100) -> Tuple[Optional[Dict], Optional[Dict]]:
-    """
-    Select a pair of ideas efficiently, prioritizing those with fewer matches and similar ELO ratings.
-
-    Args:
-        all_ideas: List of all ideas to choose from
-        rating_type: 'auto' for auto ratings, 'manual' for manual ratings
-        max_elo_diff: Maximum ELO difference for matching ideas
-
-    Returns:
-        Tuple of (idea_a, idea_b) or (None, None) if no suitable pair found
-    """
-    if len(all_ideas) < 2:
-        return None, None
-
-    # Track failed attempts to find suitable pairs
-    failed_attempts = 0
-    max_failed_attempts = 50
-    current_max_elo_diff = max_elo_diff
-
-    # Choose the appropriate match count field based on rating type
-    match_count_field = 'auto_match_count' if rating_type == 'auto' else 'manual_match_count'
-    rating_field = 'auto' if rating_type == 'auto' else 'manual'
-
-    # Sort ideas by match count (ascending) to prioritize less-rated ideas
-    sorted_ideas = sorted(all_ideas, key=lambda x: x.get(match_count_field, 0))
-
-    # Take the bottom 50% of ideas (those with fewer matches)
-    candidate_pool_size = max(2, len(sorted_ideas) // 2)
-    candidate_pool = sorted_ideas[:candidate_pool_size]
-
-    # Find the minimum match count to identify truly underrated ideas
-    min_match_count = min(idea.get(match_count_field, 0) for idea in candidate_pool)
-
-    # Create a priority pool of ideas with the minimum match count
-    priority_pool = [idea for idea in candidate_pool if idea.get(match_count_field, 0) == min_match_count]
-
-    print(f"Selected candidate pool of {len(candidate_pool)} ideas with fewest {rating_type} matches")
-    print(f"Priority pool has {len(priority_pool)} ideas with {min_match_count} matches")
-
-    while True:
-        # If we've tried too many times, gradually relax the ELO difference constraint
-        if failed_attempts >= max_failed_attempts:
-            current_max_elo_diff = current_max_elo_diff * 1.5  # Increase by 50%
-            print(f"Relaxing ELO difference constraint to ±{current_max_elo_diff} after {failed_attempts} failed attempts")
-
-            # Also expand the candidate pool if we're still struggling
-            candidate_pool_size = min(len(sorted_ideas), candidate_pool_size + len(sorted_ideas) // 4)
-            candidate_pool = sorted_ideas[:candidate_pool_size]
-            # Update priority pool as well
-            min_match_count = min(idea.get(match_count_field, 0) for idea in candidate_pool)
-            priority_pool = [idea for idea in candidate_pool if idea.get(match_count_field, 0) == min_match_count]
-            print(f"Expanded candidate pool to {len(candidate_pool)} ideas")
-
-            failed_attempts = 0  # Reset counter after relaxing
-
-        # Try to select from the priority pool first (ideas with fewest matches)
-        if len(priority_pool) >= 2:
-            try:
-                # Randomly select from the priority pool instead of always picking the first
-                idea_a = random.choice(priority_pool)
-
-                # Find ideas within ELO range
-                elo_a = idea_a['ratings'][rating_field]
-                compatible_ideas = [
-                    idea for idea in all_ideas
-                    if idea['id'] != idea_a['id'] and
-                    abs(idea['ratings'][rating_field] - elo_a) <= current_max_elo_diff
-                ]
-
-                if compatible_ideas:
-                    # Select a random compatible idea
-                    idea_b = random.choice(compatible_ideas)
-                    elo_b = idea_b['ratings'][rating_field]
-
-                    # Log match counts for transparency
-                    match_count_a = idea_a.get(match_count_field, 0)
-                    match_count_b = idea_b.get(match_count_field, 0)
-                    print(f"Selected efficient pair: {idea_a.get('id')} (ELO: {elo_a}, Matches: {match_count_a}) vs {idea_b.get('id')} (ELO: {elo_b}, Matches: {match_count_b})")
-
-                    return idea_a, idea_b
-                else:
-                    # If no compatible ideas, remove idea_a from priority pool and try again
-                    priority_pool.remove(idea_a)
-                    failed_attempts += 1
-            except Exception as e:
-                print(f"Error selecting from priority pool: {e}")
-                # Fallback to random selection
-                if len(all_ideas) >= 2:
-                    idea_a, idea_b = random.sample(all_ideas, 2)
-                    return idea_a, idea_b
-                failed_attempts += 1
-        elif len(candidate_pool) >= 2:
-            try:
-                # Fallback to random selection from candidate pool
-                idea_a = random.choice(candidate_pool)
-
-                # Find ideas within ELO range
-                elo_a = idea_a['ratings'][rating_field]
-                compatible_ideas = [
-                    idea for idea in all_ideas
-                    if idea['id'] != idea_a['id'] and
-                    abs(idea['ratings'][rating_field] - elo_a) <= current_max_elo_diff
-                ]
-
-                if compatible_ideas:
-                    # Select a random compatible idea
-                    idea_b = random.choice(compatible_ideas)
-                    elo_b = idea_b['ratings'][rating_field]
-
-                    # Log match counts for transparency
-                    match_count_a = idea_a.get(match_count_field, 0)
-                    match_count_b = idea_b.get(match_count_field, 0)
-                    print(f"Selected efficient pair from candidate pool: {idea_a.get('id')} (ELO: {elo_a}, Matches: {match_count_a}) vs {idea_b.get('id')} (ELO: {elo_b}, Matches: {match_count_b})")
-
-                    return idea_a, idea_b
-                else:
-                    # If no compatible ideas, remove idea_a from candidate pool and try again
-                    candidate_pool.remove(idea_a)
-                    failed_attempts += 1
-            except Exception as e:
-                print(f"Error selecting from candidate pool: {e}")
-                # Fallback to random selection
-                if len(all_ideas) >= 2:
-                    idea_a, idea_b = random.sample(all_ideas, 2)
-                    return idea_a, idea_b
-                failed_attempts += 1
-        else:
-            try:
-                # Fallback to random selection if candidate pool is depleted
-                idea_a, idea_b = random.sample(all_ideas, 2)
-
-                # Get their ELO ratings
-                elo_a = idea_a['ratings'][rating_field]
-                elo_b = idea_b['ratings'][rating_field]
-
-                # Check if they're within the allowed ELO difference
-                if abs(elo_a - elo_b) <= current_max_elo_diff:
-                    print(f"Found suitable pair with ELO difference: {abs(elo_a - elo_b)}")
-                    return idea_a, idea_b
-                else:
-                    failed_attempts += 1
-            except Exception as e:
-                print(f"Error in random selection: {e}")
-                # Just pick any two ideas as a last resort
-                if len(all_ideas) >= 2:
-                    idea_a, idea_b = random.sample(all_ideas, 2)
-                    return idea_a, idea_b
-                failed_attempts += 1
-
-        # If we've tried too many times, just use any random pair
-        if failed_attempts >= max_failed_attempts * 2:
-            try:
-                idea_a, idea_b = random.sample(all_ideas, 2)
-                elo_a = idea_a['ratings'][rating_field]
-                elo_b = idea_b['ratings'][rating_field]
-                print(f"Using random pair with ELO difference {abs(elo_a - elo_b)} after {failed_attempts} failed attempts")
-                return idea_a, idea_b
-            except Exception as e:
-                print(f"Error in last resort selection: {e}")
-                # Absolute last resort - just pick the first two ideas
-                if len(all_ideas) >= 2:
-                    return all_ideas[0], all_ideas[1] if len(all_ideas) > 1 else all_ideas[0]
-                return None, None
 
 @app.post("/api/get-efficient-pair")
-async def get_efficient_pair(request: Request):
-    """Get an efficiently selected pair of ideas for manual rating"""
+async def get_efficient_pair(
+    request: Request,
+    user: Optional[UserInfo] = Depends(get_current_user),
+):
+    """Get the next Swiss pair for manual rating."""
     try:
         data = await request.json()
-        evolution_id = data.get('evolution_id')
-        elo_range = data.get('elo_range', 100)
-
-        print(f"Getting efficient pair for evolution {evolution_id} with ELO range ±{elo_range}")
-
+        evolution_id = data.get("evolution_id")
         if not evolution_id:
             raise HTTPException(status_code=400, detail="Evolution ID is required")
 
-        # Load the evolution data
-        file_path = DATA_DIR / f"{evolution_id}.json"
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="Evolution not found")
-
-        with open(file_path) as f:
-            evolution_data = json.load(f)
-
-        # Collect all ideas from all generations, but only keep the latest version of each idea
-        all_ideas = []
-        idea_versions = {}  # Track the latest version of each idea
-
-        for generation in evolution_data.get('history', []):
-            for idea in generation:
-                # Initialize ratings and match counts if not present
-                if 'ratings' not in idea:
-                    idea['ratings'] = {'auto': 1500, 'manual': 1500}
-                elif isinstance(idea['ratings'], (int, float)):
-                    old_elo = idea['ratings']
-                    idea['ratings'] = {'auto': old_elo, 'manual': old_elo}
-                elif 'manual' not in idea['ratings']:
-                    idea['ratings']['manual'] = 1500
-
-                # Initialize match counts if not present
-                if 'match_count' not in idea:
-                    idea['match_count'] = 0
-                if 'manual_match_count' not in idea:
-                    idea['manual_match_count'] = 0
-                if 'auto_match_count' not in idea:
-                    idea['auto_match_count'] = 0
-
-                # Add ID if not present
-                if 'id' not in idea:
-                    idea['id'] = f"idea_{len(all_ideas)}"
-
-                # Always keep the latest version of each idea (overwrites previous versions)
-                idea_versions[idea['id']] = idea
-
-        # Convert to list of latest versions only
-        all_ideas = list(idea_versions.values())
-
-        # Log some sample match counts for debugging
-        print(f"Loaded {len(all_ideas)} ideas from file")
-        sample_ideas = all_ideas[:5]  # Show first 5 ideas
-        for i, idea in enumerate(sample_ideas):
-            print(f"  Sample idea {i+1} ({idea.get('id', 'no-id')}): manual_match_count={idea.get('manual_match_count', 0)}, manual_elo={idea.get('ratings', {}).get('manual', 1500)}")
-
+        file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
+        all_ideas, _ = _collect_latest_ideas_for_rating(evolution_data)
         if len(all_ideas) < 2:
             raise HTTPException(status_code=400, detail="Not enough ideas for comparison")
 
-        # Select an efficient pair for manual rating
-        idea_a, idea_b = select_efficient_pair(all_ideas, rating_type='manual', max_elo_diff=elo_range)
-
+        idea_a, idea_b, swiss_status = _next_manual_swiss_pair(evolution_data, all_ideas)
         if idea_a is None or idea_b is None:
-            raise HTTPException(status_code=500, detail="Failed to select suitable pair")
+            raise HTTPException(status_code=500, detail="Failed to select Swiss pair")
 
-        print(f"Selected pair: {idea_a.get('id')} (manual_match_count={idea_a.get('manual_match_count', 0)}) vs {idea_b.get('id')} (manual_match_count={idea_b.get('manual_match_count', 0)})")
+        await _save_rating_evolution(
+            evolution_id=evolution_id,
+            evolution_data=evolution_data,
+            source=source,
+            user=user,
+            file_path=file_path,
+        )
 
         return {
             "idea_a": idea_a,
             "idea_b": idea_b,
-            "status": "success"
+            "status": "success",
+            "swiss_status": swiss_status,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error in get_efficient_pair: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,13 +1,17 @@
 from abc import ABC
 import random
+import secrets
 import os
+import re
+import socket
 from google import genai
 from google.genai import types
 import json
+from datetime import datetime, timezone
 from pydantic import BaseModel
 from typing import Type, Optional, Dict, List, Callable, Tuple, Set, Any
 from tqdm import tqdm
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception
 import numpy as np
 from idea.models import Idea
 from idea.prompts.loader import get_prompts, get_prompts_from_dict
@@ -16,10 +20,125 @@ from collections import OrderedDict
 from hashlib import sha256
 import threading
 from idea.ratings import parallel_evaluate_pairs
+from idea.swiss_tournament import (
+    elo_update,
+    generate_swiss_round_pairs,
+    pair_players_swiss,
+    select_swiss_bye,
+)
+
+try:
+    from google.api_core import exceptions as gapi_exceptions
+except Exception:  # pragma: no cover - optional dependency guard
+    gapi_exceptions = None
+
+TRANSIENT_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+NON_RETRYABLE_HTTP_STATUS_CODES = {400, 401, 403, 404, 405, 410, 411, 412, 413, 414, 415, 422}
+NON_RETRYABLE_MARKERS = (
+    "invalid argument",
+    "permission denied",
+    "forbidden",
+    "unauthorized",
+    "not found",
+    "failed precondition",
+)
+TRANSIENT_MARKERS = (
+    "rate limit",
+    "too many requests",
+    "resource exhausted",
+    "temporarily unavailable",
+    "deadline exceeded",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "service unavailable",
+    "internal error",
+    "bad gateway",
+    "gateway timeout",
+)
+
+THINKING_LEVEL_TO_BUDGET_FALLBACK = {
+    "off": 0,
+    "low": 1024,
+    "medium": 8192,
+    "high": -1,  # Dynamic/high-think fallback
+}
+
+
+def _extract_http_status(exc: BaseException) -> Optional[int]:
+    """Best-effort extraction of HTTP status from provider exceptions."""
+    status_candidates: List[Any] = []
+
+    for attr_name in ("status_code", "status", "code", "http_status"):
+        value = getattr(exc, attr_name, None)
+        if value is not None:
+            status_candidates.append(value)
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status_candidates.append(getattr(response, "status_code", None))
+        status_obj = getattr(response, "status", None)
+        if status_obj is not None:
+            status_candidates.append(getattr(status_obj, "code", None))
+
+    for candidate in status_candidates:
+        if candidate is None:
+            continue
+        try:
+            parsed = int(candidate)
+        except Exception:
+            continue
+        if 100 <= parsed <= 599:
+            return parsed
+
+    return None
+
+
+def _is_transient_generation_error(exc: BaseException) -> bool:
+    """Only retry provider/network failures that are likely to succeed on retry."""
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+        return True
+
+    if gapi_exceptions is not None:
+        transient_types = (
+            gapi_exceptions.TooManyRequests,
+            gapi_exceptions.ResourceExhausted,
+            gapi_exceptions.InternalServerError,
+            gapi_exceptions.ServiceUnavailable,
+            gapi_exceptions.GatewayTimeout,
+            gapi_exceptions.DeadlineExceeded,
+            gapi_exceptions.Aborted,
+        )
+        non_retryable_types = (
+            gapi_exceptions.InvalidArgument,
+            gapi_exceptions.PermissionDenied,
+            gapi_exceptions.Unauthenticated,
+            gapi_exceptions.NotFound,
+            gapi_exceptions.FailedPrecondition,
+        )
+        if isinstance(exc, transient_types):
+            return True
+        if isinstance(exc, non_retryable_types):
+            return False
+
+    status_code = _extract_http_status(exc)
+    if status_code in TRANSIENT_HTTP_STATUS_CODES:
+        return True
+    if status_code in NON_RETRYABLE_HTTP_STATUS_CODES:
+        return False
+
+    message = str(exc).lower()
+    if any(marker in message for marker in NON_RETRYABLE_MARKERS):
+        return False
+    if any(marker in message for marker in TRANSIENT_MARKERS):
+        return True
+
+    return False
 
 class LLMWrapper(ABC):
     """Base class for LLM interactions"""
     MAX_TOKENS = 8192
+    MAX_DIAGNOSTIC_EVENTS = 200
 
     def __init__(self,
                  provider: str = "google_generative_ai",
@@ -29,25 +148,53 @@ class LLMWrapper(ABC):
                  top_p: float = 0.95,
                  agent_name: str = "",
                  thinking_budget: Optional[int] = None,
-                 api_key: Optional[str] = None):
+                 thinking_level: Optional[str] = None,
+                 api_key: Optional[str] = None,
+                 random_seed: Optional[int] = None):
         self.provider = provider
         self.model_name = model_name
         self.prompt_template = prompt_template
         self.temperature = temperature
         self.top_p = top_p
         self.thinking_budget = thinking_budget
+        self.thinking_level = (
+            str(thinking_level).strip().lower() if thinking_level is not None else None
+        )
         self.api_key = api_key
         self.total_token_count = 0
         self.input_token_count = 0
         self.output_token_count = 0
         self.agent_name = agent_name
-        print(f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, thinking_budget: {thinking_budget}")
+        print(
+            f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, "
+            f"thinking_budget: {thinking_budget}, thinking_level: {self.thinking_level}"
+        )
         self._custom_templates: Dict[str, Dict[str, Any]] = {}
         self._custom_prompt_wrappers: Dict[str, Any] = {}
         self._custom_template_lock = threading.Lock()
+        self._token_lock = threading.Lock()
+        self._diagnostics_lock = threading.Lock()
+        self._rng_lock = threading.Lock()
+        self._diagnostics: Dict[str, int] = {}
+        self._diagnostic_events: List[Dict[str, Any]] = []
+
+        self.random_seed = int(random_seed) if random_seed is not None else int(secrets.randbits(64))
+        self._rng = random.Random(self.random_seed)
 
         self.client = None
+        self._resolved_api_key: Optional[str] = None
+        self._thread_local_client = threading.local()
         self._client_lock = threading.Lock()
+        timeout_raw = os.environ.get("GENAI_HTTP_TIMEOUT_MS", "60000")
+        try:
+            self._http_timeout_ms = max(1000, int(timeout_raw))
+        except ValueError:
+            self._http_timeout_ms = 60000
+            self._increment_diagnostic(
+                "invalid_http_timeout_ms",
+                detail=f"GENAI_HTTP_TIMEOUT_MS={timeout_raw!r}",
+            )
+        self._http_options = types.HttpOptions(timeout=self._http_timeout_ms)
         self._setup_provider()
 
     def register_custom_template(self, template_id: str, template_data: Dict[str, Any]) -> None:
@@ -76,21 +223,86 @@ class LLMWrapper(ABC):
             self._custom_prompt_wrappers[idea_type] = wrapper
         return wrapper
 
+    def _increment_diagnostic(
+        self,
+        key: str,
+        delta: int = 1,
+        *,
+        detail: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self._diagnostics_lock:
+            self._diagnostics[key] = self._diagnostics.get(key, 0) + int(delta)
+            if detail is not None or metadata is not None:
+                event = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "key": key,
+                    "detail": str(detail) if detail is not None else "",
+                    "agent": self.agent_name or self.__class__.__name__,
+                }
+                if metadata:
+                    event["metadata"] = dict(metadata)
+                self._diagnostic_events.append(event)
+                if len(self._diagnostic_events) > self.MAX_DIAGNOSTIC_EVENTS:
+                    self._diagnostic_events = self._diagnostic_events[-self.MAX_DIAGNOSTIC_EVENTS :]
+
+    def get_diagnostics(self) -> Dict[str, int]:
+        with self._diagnostics_lock:
+            return dict(self._diagnostics)
+
+    def get_diagnostic_events(self) -> List[Dict[str, Any]]:
+        with self._diagnostics_lock:
+            return [dict(event) for event in self._diagnostic_events]
+
+    def _random_sample(self, population: List[Any], k: int) -> List[Any]:
+        with self._rng_lock:
+            return self._rng.sample(population, k)
+
+    def _random_shuffle(self, seq: List[Any]) -> None:
+        with self._rng_lock:
+            self._rng.shuffle(seq)
+
+    def _random_uniform(self, a: float, b: float) -> float:
+        with self._rng_lock:
+            return self._rng.uniform(a, b)
+
+    def _random_randbits(self, bits: int) -> int:
+        with self._rng_lock:
+            return self._rng.getrandbits(bits)
+
+    def _get_client(self):
+        if self.provider != "google_generative_ai":
+            return self.client
+
+        thread_client = getattr(self._thread_local_client, "client", None)
+        if thread_client is not None:
+            return thread_client
+
+        api_key = self._resolved_api_key
+        if not api_key:
+            return self.client
+
+        thread_client = genai.Client(api_key=api_key, http_options=self._http_options)
+        self._thread_local_client.client = thread_client
+        return thread_client
+
     def _setup_provider(self):
         if self.provider == "google_generative_ai":
             api_key = self.api_key or os.environ.get("GEMINI_API_KEY")
+            self._resolved_api_key = api_key
             if not api_key:
                 print("Warning: GEMINI_API_KEY not set and no api_key provided")
 
             # Initialize client once
             with self._client_lock:
                 if self.client is None and api_key:
-                    self.client = genai.Client(api_key=api_key)
+                    self.client = genai.Client(api_key=api_key, http_options=self._http_options)
         # Add other providers here
 
     @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=30, max=300),
+        stop=stop_after_attempt(4),
+        wait=wait_exponential_jitter(initial=1, max=20, jitter=1),
+        retry=retry_if_exception(_is_transient_generation_error),
         reraise=True
     )
     def generate_text(self,
@@ -106,6 +318,14 @@ class LLMWrapper(ABC):
     def _generate_content(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
         """Generate using google.genai client"""
         try:
+            client = self._get_client()
+            if client is None:
+                self._increment_diagnostic(
+                    "provider_client_unavailable",
+                    detail="Gemini client was not initialized when generate_content was called.",
+                )
+                raise RuntimeError("Gemini client is not initialized")
+
             # Prepare generation config
             actual_temp = temperature if temperature is not None else self.temperature
             actual_top_p = top_p if top_p is not None else self.top_p
@@ -116,17 +336,53 @@ class LLMWrapper(ABC):
                 "max_output_tokens": self.MAX_TOKENS,
             }
 
-            # Add thinking config if applicable
-            if self.thinking_budget is not None:
-                if self.thinking_budget == -1:
-                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=-1) # Dynamic
-                    # print(f"{self.agent_name} using dynamic thinking budget")
-                elif self.thinking_budget == 0:
-                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=0) # Disabled
-                    # print(f"{self.agent_name} thinking disabled")
+            # Add thinking config when requested.
+            thinking_fields = getattr(types.ThinkingConfig, "model_fields", {}) or {}
+            supports_thinking_level = "thinking_level" in thinking_fields
+            supports_thinking_budget = "thinking_budget" in thinking_fields
+            thinking_kwargs: Dict[str, Any] = {}
+
+            normalized_level = self.thinking_level
+            if normalized_level is not None and normalized_level not in THINKING_LEVEL_TO_BUDGET_FALLBACK:
+                self._increment_diagnostic(
+                    "invalid_thinking_level",
+                    detail=f"thinking_level={self.thinking_level!r}",
+                )
+                normalized_level = None
+
+            if normalized_level is not None:
+                if supports_thinking_level:
+                    thinking_kwargs["thinking_level"] = normalized_level
+                elif supports_thinking_budget:
+                    mapped_budget = THINKING_LEVEL_TO_BUDGET_FALLBACK[normalized_level]
+                    thinking_kwargs["thinking_budget"] = mapped_budget
+                    self._increment_diagnostic(
+                        "thinking_level_budget_fallbacks",
+                        detail=f"SDK lacks thinking_level; mapped {normalized_level} -> {mapped_budget}",
+                    )
                 else:
-                    config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=self.thinking_budget)
-                    # print(f"{self.agent_name} using thinking budget: {self.thinking_budget}")
+                    self._increment_diagnostic(
+                        "thinking_config_unsupported",
+                        detail="SDK exposes neither thinking_level nor thinking_budget.",
+                    )
+
+            if self.thinking_budget is not None and "thinking_budget" not in thinking_kwargs:
+                if supports_thinking_budget:
+                    try:
+                        thinking_kwargs["thinking_budget"] = int(self.thinking_budget)
+                    except (TypeError, ValueError):
+                        self._increment_diagnostic(
+                            "invalid_thinking_budget",
+                            detail=f"thinking_budget={self.thinking_budget!r}",
+                        )
+                else:
+                    self._increment_diagnostic(
+                        "thinking_budget_unsupported",
+                        detail="SDK does not expose thinking_budget.",
+                    )
+
+            if thinking_kwargs:
+                config_dict["thinking_config"] = types.ThinkingConfig(**thinking_kwargs)
 
             if response_schema:
                 config_dict["response_schema"] = response_schema
@@ -137,7 +393,7 @@ class LLMWrapper(ABC):
             print(f"{self.agent_name} using client with temperature: {actual_temp}, top_p: {actual_top_p}")
 
             # Generate content
-            response = self.client.models.generate_content(
+            response = client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
                 config=config
@@ -145,11 +401,12 @@ class LLMWrapper(ABC):
 
             # Track tokens
             if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                self.total_token_count += response.usage_metadata.total_token_count
-                if hasattr(response.usage_metadata, 'prompt_token_count'):
-                    self.input_token_count += response.usage_metadata.prompt_token_count
-                if hasattr(response.usage_metadata, 'candidates_token_count'):
-                    self.output_token_count += response.usage_metadata.candidates_token_count
+                with self._token_lock:
+                    self.total_token_count += response.usage_metadata.total_token_count
+                    if hasattr(response.usage_metadata, 'prompt_token_count'):
+                        self.input_token_count += response.usage_metadata.prompt_token_count
+                    if hasattr(response.usage_metadata, 'candidates_token_count'):
+                        self.output_token_count += response.usage_metadata.candidates_token_count
 
             print(
                 "Total tokens",
@@ -164,21 +421,130 @@ class LLMWrapper(ABC):
             )
 
             try:
-                return response.text
+                text = response.text
             except ValueError:
+                self._increment_diagnostic(
+                    "blocked_or_empty_responses",
+                    detail="Provider returned response object without usable text payload.",
+                )
                 print("Warning: Client response blocked or empty.")
                 return "No response."
+            if text is None or str(text).strip() == "":
+                self._increment_diagnostic(
+                    "blocked_or_empty_responses",
+                    detail="Provider returned an empty text payload.",
+                )
+                print("Warning: Client response text was empty.")
+                return "No response."
+            return str(text)
 
         except Exception as e:
+            self._increment_diagnostic("generation_errors", detail=str(e))
             print(f"ERROR: Client generation failed: {e}")
             raise e
 
 class Ideator(LLMWrapper):
     """Generates and manages ideas"""
     agent_name = "Ideator"
+    MAX_PARENT_CONTEXT_CONCEPTS = 40
+    AUTO_MAX_SEED_CONTEXT_CALLS = 3
+    MAX_SEED_CONTEXT_CALLS = 12
 
-    def __init__(self, **kwargs):
+    def __init__(self, seed_context_pool_size: Optional[int] = None, **kwargs):
         super().__init__(agent_name=self.agent_name, **kwargs)
+        self.seed_context_pool_size: Optional[int] = None
+        if seed_context_pool_size is not None:
+            try:
+                parsed = int(seed_context_pool_size)
+                if parsed > 0:
+                    self.seed_context_pool_size = parsed
+            except (TypeError, ValueError):
+                self._increment_diagnostic(
+                    "invalid_seed_context_pool_size",
+                    detail=f"seed_context_pool_size={seed_context_pool_size!r}",
+                )
+
+    def _extract_context_text(self, text: str) -> str:
+        """Extract raw concept payload, preferring text after CONCEPTS: marker."""
+        if "CONCEPTS:" in text:
+            return text.split("CONCEPTS:", 1)[1].strip()
+        self._increment_diagnostic(
+            "context_missing_concepts_marker",
+            detail=(text or "")[:400],
+        )
+        return text.strip()
+
+    def _parse_context_items(self, context_text: str) -> List[str]:
+        """Parse concept payload supporting bullet lists, || separators, and comma fallback."""
+        cleaned_text = (context_text or "").strip()
+        if not cleaned_text:
+            return []
+
+        lines = [line.strip() for line in cleaned_text.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            parsed_lines: List[str] = []
+            for line in lines:
+                item = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip().rstrip(",")
+                if item:
+                    parsed_lines.append(item)
+            parsed_lines = list(dict.fromkeys(parsed_lines))
+            if len(parsed_lines) >= 3:
+                return parsed_lines
+
+        if "||" in cleaned_text:
+            pipe_items = [item.strip() for item in cleaned_text.split("||") if item.strip()]
+            pipe_items = list(dict.fromkeys(pipe_items))
+            if pipe_items:
+                return pipe_items
+
+        comma_items = [item.strip() for item in cleaned_text.split(",") if item.strip()]
+        return list(dict.fromkeys(comma_items))
+
+    def _build_seed_context_bank(self, n: int, idea_type: str) -> List[str]:
+        """Build a reusable concept bank with 1-3 context calls for efficiency."""
+        env_override = os.getenv("IDEA_CONTEXT_POOL_CALLS")
+        if self.seed_context_pool_size is not None:
+            context_calls = self.seed_context_pool_size
+        elif env_override is not None:
+            try:
+                context_calls = int(env_override)
+            except ValueError:
+                self._increment_diagnostic(
+                    "invalid_context_pool_call_override",
+                    detail=f"IDEA_CONTEXT_POOL_CALLS={env_override!r}",
+                )
+                context_calls = 1
+        else:
+            # Scale up context calls for larger populations while staying within 1-3 calls.
+            # 1 call for <=10 ideas, 2 for 11-20, 3 for 21+.
+            context_calls = ((max(n, 1) - 1) // 10) + 1
+            context_calls = min(context_calls, self.AUTO_MAX_SEED_CONTEXT_CALLS)
+
+        context_calls = max(1, min(context_calls, self.MAX_SEED_CONTEXT_CALLS))
+        self._increment_diagnostic("seed_context_calls", context_calls)
+
+        concept_bank: List[str] = []
+        for _ in range(context_calls):
+            sampled_context = self.generate_context(idea_type)
+            concept_bank.extend(self._parse_context_items(sampled_context))
+
+        concept_bank = list(dict.fromkeys(concept_bank))
+        if not concept_bank:
+            self._increment_diagnostic(
+                "seed_context_bank_empty",
+                detail=f"n={n}, context_calls={context_calls}",
+            )
+        return concept_bank
+
+    def _sample_context_pool(self, concept_bank: List[str]) -> str:
+        """Sample a context pool string from a concept bank."""
+        if not concept_bank:
+            return "general concepts"
+
+        target_size = max(3, min(int(len(concept_bank) * 0.4), 15))
+        sample_size = min(len(concept_bank), target_size)
+        sampled = self._random_sample(concept_bank, sample_size)
+        return ", ".join(sampled)
 
     def generate_context(self, idea_type: str) -> str:
         """Generate initial context for ideation"""
@@ -188,25 +554,22 @@ class Ideator(LLMWrapper):
         text = self.generate_text(prompts.CONTEXT_PROMPT)
         print(f"Text: {text}")
 
-        # Extract concepts from the response
-        if "CONCEPTS:" in text:
-            context_text = text.split("CONCEPTS:")[1].strip()
-        else:
-            # Fallback if the expected format is not found
-            context_text = text.strip()
+        context_text = self._extract_context_text(text)
+        concepts = self._parse_context_items(context_text)
 
-        # Use more of the context - sample 30-50% instead of 10%
-        words = [word.strip() for word in context_text.split(',') if word.strip()]
-
-        if not words:
+        if not concepts:
+            self._increment_diagnostic(
+                "context_empty_after_parse",
+                detail=(text or "")[:400],
+            )
             print(f"Warning: No valid concepts found in text: '{text}'")
             return text.strip() or "general concepts"
 
         # Use between 30-50% of the words to maintain diversity while avoiding overwhelming context
-        target_size = max(3, min(int(len(words) * 0.4), 15))  # 40% but cap at 15 words
-        sample_size = min(len(words), target_size)
+        target_size = max(3, min(int(len(concepts) * 0.4), 15))  # 40% but cap at 15 words
+        sample_size = min(len(concepts), target_size)
 
-        subset = random.sample(words, sample_size)
+        subset = self._random_sample(concepts, sample_size)
         return ", ".join(subset)
 
     def generate_specific_prompt(self, context_pool: str, idea_type: str) -> str:
@@ -232,55 +595,147 @@ class Ideator(LLMWrapper):
         Returns:
             A sampled context pool string
         """
-        # Combine all concepts from parent genotypes
-        all_concepts = []
+        # Parse concepts for each parent genotype independently.
+        parent_concept_lists: List[List[str]] = []
         for genotype in parent_genotypes:
-            # Split genotype by semicolons and clean up
             concepts = [concept.strip() for concept in genotype.split(';') if concept.strip()]
-            all_concepts.extend(concepts)
-
-        # Remove duplicates while preserving order
-        unique_parent_concepts = list(dict.fromkeys(all_concepts))
+            concepts = list(dict.fromkeys(concepts))
+            if concepts:
+                parent_concept_lists.append(concepts)
 
         # Process mutation concepts if available
         mutation_concepts = []
         if mutation_rate > 0 and mutation_context_pool:
-            mutation_concepts = [c.strip() for c in mutation_context_pool.split(',') if c.strip()]
+            mutation_concepts = self._parse_context_items(mutation_context_pool)
             # Remove duplicates
             mutation_concepts = list(dict.fromkeys(mutation_concepts))
             print(f"Mutation enabled: rate={mutation_rate}, pool size={len(mutation_concepts)}")
 
-        # Determine total sample size (aim for around 10-15 concepts total)
-        total_sample_size = max(3, min(len(unique_parent_concepts) + len(mutation_concepts), 15))
+        if not parent_concept_lists:
+            self._increment_diagnostic(
+                "empty_parent_genotypes",
+                detail=f"parent_genotypes={parent_genotypes!r}",
+            )
+            if mutation_concepts:
+                fallback_count = min(len(mutation_concepts), max(1, min(5, len(mutation_concepts))))
+                return ", ".join(self._random_sample(mutation_concepts, fallback_count))
+            return "general concepts"
 
-        # Calculate how many to draw from each pool
-        if mutation_concepts and mutation_rate > 0:
-            mutation_count = max(1, int(total_sample_size * mutation_rate))
-            parent_count = total_sample_size - mutation_count
-        else:
-            mutation_count = 0
-            parent_count = total_sample_size
+        # Target child context size is the average parent genotype length.
+        parent_lengths = [len(concepts) for concepts in parent_concept_lists]
+        target_child_size = int(round(sum(parent_lengths) / len(parent_lengths)))
+        target_child_size = max(3, min(target_child_size, self.MAX_PARENT_CONTEXT_CONCEPTS))
 
-        # Sample from parents
-        sampled_concepts = []
-        if unique_parent_concepts:
-            # Ensure we don't try to sample more than available
-            actual_parent_count = min(len(unique_parent_concepts), parent_count)
-            sampled_concepts.extend(random.sample(unique_parent_concepts, actual_parent_count))
+        primary_parent_idx = 0
+        primary_parent = parent_concept_lists[primary_parent_idx]
+        primary_ratio = self._random_uniform(0.4, 0.6)
+        desired_primary_count = max(1, int(round(target_child_size * primary_ratio)))
+        desired_primary_count = min(desired_primary_count, len(primary_parent))
 
-        # Sample from mutation pool
-        if mutation_concepts and mutation_count > 0:
-            # Ensure we don't try to sample more than available
-            actual_mutation_count = min(len(mutation_concepts), mutation_count)
-            mutated_selection = random.sample(mutation_concepts, actual_mutation_count)
-            sampled_concepts.extend(mutated_selection)
-            print(f"Injected {len(mutated_selection)} mutation concepts: {mutated_selection}")
+        sampled_concepts: List[str] = []
+        sampled_concepts_lower = set()
 
-        # Shuffle the final mix
-        random.shuffle(sampled_concepts)
+        primary_selection = self._random_sample(primary_parent, desired_primary_count)
+        for concept in primary_selection:
+            concept_key = concept.lower()
+            if concept_key not in sampled_concepts_lower:
+                sampled_concepts.append(concept)
+                sampled_concepts_lower.add(concept_key)
+
+        desired_secondary_count = max(0, target_child_size - len(sampled_concepts))
+        secondary_pool: List[str] = []
+        for idx, concepts in enumerate(parent_concept_lists):
+            if idx == primary_parent_idx:
+                continue
+            secondary_pool.extend(concepts)
+        secondary_pool = list(dict.fromkeys(secondary_pool))
+
+        secondary_added = 0
+        if secondary_pool and desired_secondary_count > 0:
+            secondary_selection = self._random_sample(
+                secondary_pool,
+                min(desired_secondary_count, len(secondary_pool)),
+            )
+            for concept in secondary_selection:
+                concept_key = concept.lower()
+                if concept_key in sampled_concepts_lower:
+                    continue
+                sampled_concepts.append(concept)
+                sampled_concepts_lower.add(concept_key)
+                secondary_added += 1
+
+        # Do not backfill overlaps from the secondary parent pool.
+        if secondary_added < desired_secondary_count:
+            self._increment_diagnostic(
+                "parent_overlap_reduced_child_context",
+                detail=(
+                    f"desired_secondary={desired_secondary_count}, "
+                    f"actual_secondary={secondary_added}, "
+                    f"target_child_size={target_child_size}"
+                ),
+            )
+
+        # Mutation pool is restricted to concepts not already present in selected parent concepts.
+        mutation_candidates = [
+            c for c in mutation_concepts if c.lower() not in sampled_concepts_lower
+        ]
+        if mutation_concepts and not mutation_candidates:
+            self._increment_diagnostic(
+                "mutation_pool_fully_overlapping",
+                detail=f"mutation_pool_size={len(mutation_concepts)}",
+            )
+
+        mutation_count = 0
+        if mutation_candidates and mutation_rate > 0:
+            desired_mutation_count = max(1, int(round(target_child_size * mutation_rate)))
+            available_slots = max(0, self.MAX_PARENT_CONTEXT_CONCEPTS - len(sampled_concepts))
+            actual_mutation_count = min(
+                len(mutation_candidates),
+                desired_mutation_count,
+                available_slots,
+            )
+            if actual_mutation_count > 0:
+                mutated_selection = self._random_sample(mutation_candidates, actual_mutation_count)
+                sampled_concepts.extend(mutated_selection)
+                mutation_count = actual_mutation_count
+                print(f"Injected {len(mutated_selection)} mutation concepts: {mutated_selection}")
+            else:
+                self._increment_diagnostic(
+                    "mutation_injection_capped",
+                    detail=(
+                        f"desired_mutation={desired_mutation_count}, "
+                        f"available_slots={available_slots}, "
+                        f"mutation_candidates={len(mutation_candidates)}"
+                    ),
+                )
+
+        # Safety guard for extremely verbose genotype outputs.
+        if len(sampled_concepts) > self.MAX_PARENT_CONTEXT_CONCEPTS:
+            self._increment_diagnostic(
+                "parent_context_truncated",
+                detail=f"len={len(sampled_concepts)}, cap={self.MAX_PARENT_CONTEXT_CONCEPTS}",
+            )
+            sampled_concepts = sampled_concepts[: self.MAX_PARENT_CONTEXT_CONCEPTS]
+
+        if not sampled_concepts:
+            self._increment_diagnostic(
+                "context_from_parents_empty",
+                detail="No concepts remained after parent/mutation filtering.",
+            )
+            if mutation_concepts:
+                fallback_count = min(len(mutation_concepts), max(1, min(5, len(mutation_concepts))))
+                sampled_concepts = self._random_sample(mutation_concepts, fallback_count)
+            else:
+                return "general concepts"
+
+        # Shuffle the final mix.
+        self._random_shuffle(sampled_concepts)
 
         context_pool = ", ".join(sampled_concepts)
-        print(f"Generated context from parents (with mutation): {context_pool}")
+        print(
+            "Generated context from parents "
+            f"(target={target_child_size}, selected={len(sampled_concepts)}, mutation={mutation_count}): {context_pool}"
+        )
         return context_pool
 
     def generate_idea_from_context(self, context_pool: str, idea_type: str) -> tuple[str, str]:
@@ -300,15 +755,12 @@ class Ideator(LLMWrapper):
         # Generate specific prompt from context pool
         specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
 
-        # Get the special requirements and extend the specific prompt with them
+        # Keep generation compact: specific direction + consolidated template constraints.
         prompts = self._resolve_prompts(idea_type)
         extended_prompt = specific_prompt
-
-        # If there are special requirements, append them to the specific prompt
         if hasattr(prompts, 'template') and prompts.template.special_requirements:
             extended_prompt = f"{specific_prompt}\n\nConstraints:\n{prompts.template.special_requirements}"
 
-        # Generate idea using the extended prompt (specific prompt + requirements)
         response = self.generate_text(extended_prompt)
 
         return response, specific_prompt
@@ -326,10 +778,13 @@ class Ideator(LLMWrapper):
         """
         ideas = []
         specific_prompts = []
+        context_bank = self._build_seed_context_bank(n, idea_type)
 
         for _ in tqdm(range(n), desc="Generating ideas"):
-            # Generate context pool
-            context_pool = self.generate_context(idea_type)
+            # Sample a context pool from a shared context bank.
+            context_pool = self._sample_context_pool(context_bank)
+            if context_pool == "general concepts":
+                context_pool = self.generate_context(idea_type)
 
             response, specific_prompt = self.generate_idea_from_context(context_pool, idea_type)
             specific_prompts.append(specific_prompt)
@@ -386,6 +841,20 @@ class Formatter(LLMWrapper):
             temperature=0.7
         )
 
+        fallback_idea_text = ""
+        if isinstance(idea_text, str):
+            fallback_idea_text = idea_text.strip()
+        elif hasattr(idea_text, "content"):
+            fallback_idea_text = str(getattr(idea_text, "content", "") or "").strip()
+        elif isinstance(idea_text, dict):
+            fallback_idea_text = str(
+                idea_text.get("content")
+                or idea_text.get("idea")
+                or ""
+            ).strip()
+        elif idea_text is not None:
+            fallback_idea_text = str(idea_text).strip()
+
         # Clean up markdown code blocks if present
         clean_response = response.strip()
         if clean_response.startswith("```json"):
@@ -398,6 +867,7 @@ class Formatter(LLMWrapper):
 
         clean_response = clean_response.strip()
 
+        used_fallback = False
         try:
             formatted_idea = Idea(**json.loads(clean_response))
 
@@ -406,6 +876,11 @@ class Formatter(LLMWrapper):
                  raise ValueError("Content field is empty in formatted idea")
 
         except (json.JSONDecodeError, ValueError, Exception) as e:
+            used_fallback = True
+            self._increment_diagnostic(
+                "formatter_schema_parse_failures",
+                detail=f"{e}: {(response or '')[:400]}",
+            )
             print(f"FORMATTER: JSON parsing failed: {e}")
             print(f"FORMATTER: Raw response: {response}")
 
@@ -428,10 +903,15 @@ class Formatter(LLMWrapper):
                      # If successful, create idea and return
                      if content and content.strip():
                          formatted_idea = Idea(title=title, content=content)
+                         self._increment_diagnostic("formatter_json_clean_recovery")
                          # Skip to return block...
                          # But since we can't easily jump, we'll just fall through to manual extraction if this fails
                 except Exception as e:
                     print(f"FORMATTER: JSON fallback cleaning failed: {e}")
+                    self._increment_diagnostic(
+                        "formatter_json_clean_recovery_failures",
+                        detail=str(e),
+                    )
                     pass
 
             # Try to parse "Title: X\nContent: Y" format
@@ -454,9 +934,23 @@ class Formatter(LLMWrapper):
                     title = title_line
                 if content_lines:
                     content = "\n".join(content_lines).strip()
+                self._increment_diagnostic("formatter_title_content_recovery")
+
+            normalized_content = content.strip() if isinstance(content, str) else ""
+            if normalized_content.lower() in {"", "no response", "no response."}:
+                normalized_fallback = fallback_idea_text.strip()
+                if normalized_fallback.lower() not in {"", "no response", "no response."}:
+                    content = normalized_fallback
+                    self._increment_diagnostic("formatter_empty_content_recovery")
+                else:
+                    content = "Model response was empty."
+                    self._increment_diagnostic("formatter_empty_content_recovery")
 
             print(f"FORMATTER: Fallback extracted - Title: '{title}', Content length: {len(content)}")
             formatted_idea = Idea(title=title, content=content)
+
+        if used_fallback:
+            self._increment_diagnostic("formatter_fallback_used")
 
         # If the input was a dictionary with an ID, preserve that ID and all metadata
         if isinstance(raw_idea, dict) and "id" in raw_idea:
@@ -540,21 +1034,7 @@ class Critic(LLMWrapper):
 
     def _elo_update(self, elo_a, elo_b, winner):
         """Update the Elo rating of an idea"""
-        k = 32
-        expected_a = 1 / (1 + 10 ** ((elo_b - elo_a) / 400))
-        expected_b = 1 / (1 + 10 ** ((elo_a - elo_b) / 400))
-
-        if winner == "A":
-            elo_a = elo_a + k * (1 - expected_a)
-            elo_b = elo_b + k * (0 - expected_b)
-        elif winner == "B":
-            elo_a = elo_a + k * (0 - expected_a)
-            elo_b = elo_b + k * (1 - expected_b)
-        else:
-            elo_a = elo_a + k * (0.5 - expected_a)
-            elo_b = elo_b + k * (0.5 - expected_b)
-
-        return elo_a, elo_b
+        return elo_update(elo_a, elo_b, winner)
 
     def _select_swiss_bye(self, ordered_indices: List[int], bye_counts: Dict[int, int]) -> Optional[int]:
         """
@@ -564,15 +1044,7 @@ class Critic(LLMWrapper):
         1) Fewest byes so far
         2) Lowest-ranked (last in ordered list)
         """
-        if not ordered_indices:
-            return None
-
-        min_byes = min(bye_counts.get(idx, 0) for idx in ordered_indices)
-        # Iterate from lowest-ranked to highest-ranked for deterministic selection
-        for idx in reversed(ordered_indices):
-            if bye_counts.get(idx, 0) == min_byes:
-                return idx
-        return ordered_indices[-1]
+        return select_swiss_bye(ordered_indices, bye_counts)
 
     def _pair_players_swiss(
         self,
@@ -586,51 +1058,11 @@ class Critic(LLMWrapper):
         Returns a list of pairs (idx_a, idx_b), or None if no pairing found
         within the backtracking limit.
         """
-        steps = 0
-
-        def backtrack(remaining: List[int]) -> Optional[Tuple[List[Tuple[int, int]], int]]:
-            nonlocal steps
-            steps += 1
-            if steps > backtrack_limit:
-                return None
-            if not remaining:
-                return [], 0
-
-            first = remaining[0]
-            # Prefer non-repeat pairs, then stable by index order.
-            candidates = []
-            for i in range(1, len(remaining)):
-                second = remaining[i]
-                pair_key = (min(first, second), max(first, second))
-                repeat = pair_key in match_history
-                candidates.append((repeat, second, i))
-
-            candidates.sort(key=lambda x: (x[0], x[1]))
-
-            best_pairs = None
-            best_repeats = None
-
-            for repeat, second, idx in candidates:
-                next_remaining = remaining[1:idx] + remaining[idx + 1 :]
-                result = backtrack(next_remaining)
-                if result is None:
-                    continue
-                sub_pairs, sub_repeats = result
-                total_repeats = (1 if repeat else 0) + sub_repeats
-                if best_repeats is None or total_repeats < best_repeats:
-                    best_pairs = [(first, second)] + sub_pairs
-                    best_repeats = total_repeats
-                    if best_repeats == 0:
-                        break
-
-            if best_pairs is None:
-                return None
-            return best_pairs, best_repeats
-
-        result = backtrack(ordered_indices)
-        if result is None:
-            return None
-        return result[0]
+        return pair_players_swiss(
+            ordered_indices,
+            match_history,
+            backtrack_limit=backtrack_limit,
+        )
 
     def _generate_swiss_round_pairs(
         self,
@@ -641,41 +1073,7 @@ class Critic(LLMWrapper):
         """
         Generate Swiss pairings for a single round with minimal repeat matchups.
         """
-        ordered_indices = sorted(ranks.keys(), key=lambda i: (-ranks[i], i))
-
-        bye_idx = None
-        if len(ordered_indices) % 2 == 1:
-            bye_idx = self._select_swiss_bye(ordered_indices, bye_counts)
-            if bye_idx is not None:
-                ordered_indices.remove(bye_idx)
-
-        pairs = self._pair_players_swiss(ordered_indices, match_history)
-        if pairs is None:
-            # Fallback greedy pairing if backtracking exceeded limit
-            pairs = []
-            remaining = ordered_indices[:]
-            while len(remaining) >= 2:
-                a = remaining.pop(0)
-                # Prefer non-repeat partners if available
-                partner_idx = None
-                for i, b in enumerate(remaining):
-                    pair_key = (min(a, b), max(a, b))
-                    if pair_key not in match_history:
-                        partner_idx = i
-                        break
-                if partner_idx is None:
-                    partner_idx = 0
-                b = remaining.pop(partner_idx)
-                pairs.append((a, b))
-
-        # Update match history for this round
-        for a, b in pairs:
-            match_history.add((min(a, b), max(a, b)))
-
-        if bye_idx is not None:
-            bye_counts[bye_idx] = bye_counts.get(bye_idx, 0) + 1
-
-        return pairs, bye_idx
+        return generate_swiss_round_pairs(ranks, match_history, bye_counts)
 
     def _extract_idea_meta(self, idea) -> Dict[str, Optional[str]]:
         """Extract lightweight metadata for tournament display."""
@@ -709,6 +1107,7 @@ class Critic(LLMWrapper):
         progress_callback: Callable[[int, int], None] = None,
         details: Optional[List[Dict[str, Any]]] = None,
         full_tournament_rounds: Optional[int] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> dict:
         """Get tournament ranks using a global Swiss-system tournament.
 
@@ -751,6 +1150,10 @@ class Critic(LLMWrapper):
                     print(f"Error in progress callback: {e}")
 
         for _round in range(rounds):
+            if callable(should_stop) and should_stop():
+                print("Tournament stop requested. Ending tournament rounds early.")
+                break
+
             # For multi-tournament runs we reset Swiss bracket state at each segment,
             # while keeping accumulated Elo scores.
             if segment_rounds and _round > 0 and (_round % segment_rounds) == 0:
@@ -808,6 +1211,7 @@ class Critic(LLMWrapper):
                     concurrency=self._max_workers,
                     randomize_presentation=True,
                     progress_callback=on_pair_complete,
+                    should_stop=should_stop,
                 )
 
                 # Update ranks in the deterministic order of generated pairs
@@ -902,6 +1306,7 @@ class Critic(LLMWrapper):
                     self._compare_cache.popitem(last=False)
             return winner
         except Exception as e:
+            self._increment_diagnostic("compare_ideas_errors", detail=str(e))
             print(f"Error in compare_ideas: {e}")
             return None  # Return None instead of "tie" on error
 
@@ -911,10 +1316,16 @@ class Breeder(LLMWrapper):
     agent_name = "Breeder"
     parent_count = 2
 
-    def __init__(self, mutation_rate: float = 0.0, **kwargs):
+    def __init__(
+        self,
+        mutation_rate: float = 0.0,
+        seed_context_pool_size: Optional[int] = None,
+        **kwargs,
+    ):
         # Don't set temperature directly here, let it come from kwargs
         super().__init__(agent_name=self.agent_name, **kwargs)
         self.mutation_rate = mutation_rate
+        self.seed_context_pool_size = seed_context_pool_size
         self._thread_local = threading.local()
         print(f"Breeder initialized with mutation_rate={mutation_rate}")
 
@@ -926,7 +1337,9 @@ class Breeder(LLMWrapper):
                 model_name=self.model_name,
                 temperature=self.temperature,
                 top_p=self.top_p,
-                api_key=self.api_key
+                api_key=self.api_key,
+                random_seed=self._random_randbits(64),
+                seed_context_pool_size=self.seed_context_pool_size,
             )
             for template_id, template_data in self._iter_custom_templates():
                 ideator.register_custom_template(template_id, template_data)
@@ -1146,6 +1559,10 @@ class Oracle(LLMWrapper):
                 )
             else:
                 # Fallback: treat entire response as new idea content but preserve Oracle metadata
+                self._increment_diagnostic(
+                    "oracle_parse_fallbacks",
+                    detail=(response or "")[:500],
+                )
                 idea_prompt = response.strip()
                 oracle_analysis = (
                     "Oracle response was not properly formatted. Expected sections '=== ORACLE ANALYSIS ===' "
@@ -1154,6 +1571,7 @@ class Oracle(LLMWrapper):
                 print("ORACLE: Fallback parsing - treating entire response as idea content. Response length:", len(response), "chars")
         except Exception as e:
             # Fallback parsing failed
+            self._increment_diagnostic("oracle_parse_errors", detail=str(e))
             idea_prompt = response.strip()
             oracle_analysis = f"Oracle parsing error: {e}. Response was treated as idea content."
             print("ORACLE: Parsing exception -", e)
