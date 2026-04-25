@@ -16,6 +16,12 @@
 - Explore combining cheaper models with expensive ones. Keep models can go wide and explore much larger space of ideas perhaps providing a sampling space for the more expensive models to get better quality ideas from.
 - Consider not replacing entire population each generation but instead only a subset (selected by either weakness, age or both) -- probably need to try larger population sizes to see if this works well.
 
+- Abandon generation approach for a full population approach. Parent sampling based on promising and/or underexplored areas
+- genotype might be too agressive a compression. Inspect them to see if essence of idea is getting lost 
+- Reject ideas that are too similar to previous ones 
+- is critque and refine really worth it? Maybe idea and it's critiqe are just kept together? don't refine. And another parent and it's critique can breed with it? with genotype the refinement is probably lost anyway right? 
+- investigate cheaper evals (e.g. each new idea is rated just vs a ~ median ELO idea)
+
 
 ## Bugs
 

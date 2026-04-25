@@ -62,6 +62,10 @@ class _FakeBreeder(_FakeAgent):
             "idea": "child",
             "parent_ids": [],
             "specific_prompt": "child prompt",
+            "parent_genotypes": [
+                {"parent_id": str(parent["id"]), "genotype": f"gene-{idx}"}
+                for idx, parent in enumerate(_parents)
+            ],
         }
 
 
@@ -316,6 +320,44 @@ def test_stop_during_breeding_emits_stopped_update():
 
     assert any(update.get("is_stopped") for update in updates)
     assert any("breeding" in update.get("stop_message", "") for update in updates)
+
+
+def test_selected_parent_ideas_record_breeding_genotypes():
+    engine = _FakeEngine()
+    updates = []
+
+    async def callback(data):
+        updates.append(data)
+
+    orchestrator = EvolutionOrchestrator(engine, callback)
+    state = GenerationWorkState(
+        generation_index=0,
+        start_generation=0,
+        total_generations=1,
+        total_steps=4,
+        steps_per_generation=4,
+    )
+
+    asyncio.run(
+        orchestrator._evolve_generations(
+            start_generation=0,
+            total_steps=4,
+            step_offset=0,
+            work_state=state,
+            resuming=False,
+        )
+    )
+
+    genotype_entries = [
+        entry
+        for idea in engine.history[0]
+        for entry in idea.get("breeding_genotypes", [])
+    ]
+
+    assert genotype_entries
+    assert genotype_entries[0]["genotype"].startswith("gene-")
+    assert genotype_entries[0]["source_generation"] == 0
+    assert genotype_entries[0]["child_generation"] == 1
 
 
 def test_seed_novelty_guardrail_regenerates_similar_context():

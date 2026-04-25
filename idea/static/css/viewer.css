@@ -959,6 +959,62 @@ small {
   flex-wrap: wrap;
 }
 
+.breeding-genotype-summary {
+  margin: 0 0 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background-color: var(--surface-alt);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.breeding-genotype-summary summary {
+  cursor: pointer;
+  padding: 0.5rem 0.625rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.breeding-genotype-summary summary::-webkit-details-marker {
+  display: none;
+}
+
+.breeding-genotype-count {
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.breeding-genotype-latest {
+  padding: 0 0.625rem 0.5rem;
+  line-height: 1.4;
+}
+
+.breeding-genotype-list {
+  margin: 0;
+  padding: 0.5rem 0.625rem 0.625rem 1.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.breeding-genotype-list li + li {
+  margin-top: 0.625rem;
+}
+
+.breeding-genotype-meta {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-bottom: 0.125rem;
+}
+
+.breeding-genotype-text {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 /* Action Buttons in Cards */
 .view-prompt,
 .view-breeding-prompt,

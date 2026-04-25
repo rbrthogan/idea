@@ -1723,6 +1723,11 @@ def convert_uuids_to_strings(obj):
 
 def idea_to_dict(idea) -> dict:
     """Convert an Idea object or idea dictionary to a dictionary for JSON serialization"""
+    def add_shared_metadata(result: dict, source: dict) -> dict:
+        if "breeding_genotypes" in source:
+            result["breeding_genotypes"] = convert_uuids_to_strings(source.get("breeding_genotypes", []))
+        return result
+
     # If idea is already a dictionary with 'id' and 'idea' keys
     if isinstance(idea, dict) and 'id' in idea and 'idea' in idea:
         idea_obj = idea['idea']
@@ -1765,7 +1770,7 @@ def idea_to_dict(idea) -> dict:
             if elite_selected_source:
                 result["elite_selected_source"] = elite_selected_source
                 result["elite_target_generation"] = elite_target_generation
-            return result
+            return add_shared_metadata(result, idea)
         # If the idea object is a string
         elif isinstance(idea_obj, str):
             result = {
@@ -1789,7 +1794,7 @@ def idea_to_dict(idea) -> dict:
             if elite_selected_source:
                 result["elite_selected_source"] = elite_selected_source
                 result["elite_target_generation"] = elite_target_generation
-            return result
+            return add_shared_metadata(result, idea)
         # If the idea object is already a dict
         elif isinstance(idea_obj, dict):
             result = idea_obj.copy()
@@ -1810,7 +1815,7 @@ def idea_to_dict(idea) -> dict:
             if elite_selected_source:
                 result["elite_selected_source"] = elite_selected_source
                 result["elite_target_generation"] = elite_target_generation
-            return result
+            return add_shared_metadata(result, idea)
 
     # Legacy case: idea is a direct Idea object
     elif hasattr(idea, 'title') and hasattr(idea, 'content'):

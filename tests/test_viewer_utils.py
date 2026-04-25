@@ -85,6 +85,26 @@ def test_idea_to_dict_preserves_oracle_metadata():
     assert result["oracle_analysis"] == "This idea was generated to address diversity gaps in the population."
 
 
+def test_idea_to_dict_preserves_breeding_genotypes():
+    input_data = {
+        "id": "genotype-test-id",
+        "idea": Idea(title="Parent Idea", content="This idea was selected"),
+        "parent_ids": [],
+        "breeding_genotypes": [
+            {
+                "genotype": "Gothic fantasy; dusty attic",
+                "source_generation": 0,
+                "child_generation": 1,
+                "child_id": "child-1",
+            }
+        ],
+    }
+
+    result = idea_to_dict(input_data)
+
+    assert result["breeding_genotypes"] == input_data["breeding_genotypes"]
+
+
 def test_idea_to_dict_without_oracle_metadata():
     """Test that non-Oracle ideas don't have Oracle metadata"""
     input_data = {
@@ -130,3 +150,13 @@ def test_normalize_rating_fields_parses_json_encoded_content():
     assert idea["id"] == "fallback-json"
     assert idea["title"] == "Decoded Title"
     assert idea["content"] == "Decoded content body"
+
+
+def test_prompt_modal_renders_markdown_content():
+    viewer_js = Path(__file__).parent.parent / "idea" / "static" / "js" / "viewer.js"
+    script = viewer_js.read_text()
+    show_prompt_modal = script[script.index("function showPromptModal"):]
+    show_prompt_modal = show_prompt_modal[:show_prompt_modal.index("// Show the modal")]
+
+    assert "renderMarkdown(displayContent)" in show_prompt_modal
+    assert ".map(item => `<div class=\"prompt-item\">${item.trim()}</div>`)" not in show_prompt_modal

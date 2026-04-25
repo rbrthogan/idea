@@ -1060,6 +1060,51 @@ function createCardPreview(text, maxLength = 150) {
     return preview;
 }
 
+function getBreedingGenotypeEntries(idea) {
+    if (!idea || !Array.isArray(idea.breeding_genotypes)) {
+        return [];
+    }
+    return idea.breeding_genotypes.filter(entry => entry && entry.genotype);
+}
+
+function createBreedingGenotypeSummary(entries) {
+    if (!entries.length) {
+        return '';
+    }
+
+    const latest = entries[entries.length - 1];
+    const latestPreview = createCardPreview(String(latest.genotype || ''), 120);
+    const countLabel = entries.length === 1 ? '1 capture' : `${entries.length} captures`;
+    const entryItems = entries.map((entry, index) => {
+        const sourceGeneration = Number.isInteger(entry.source_generation)
+            ? entry.source_generation + 1
+            : '?';
+        const childGeneration = Number.isInteger(entry.child_generation)
+            ? entry.child_generation + 1
+            : '?';
+
+        return `
+            <li>
+                <div class="breeding-genotype-meta">
+                    Selection ${index + 1} - Gen ${sourceGeneration} -> Gen ${childGeneration}
+                </div>
+                <div class="breeding-genotype-text">${escapeHtml(entry.genotype)}</div>
+            </li>
+        `;
+    }).join('');
+
+    return `
+        <details class="breeding-genotype-summary">
+            <summary>
+                <span><i class="fas fa-dna"></i> Genotype</span>
+                <span class="breeding-genotype-count">${countLabel}</span>
+            </summary>
+            <div class="breeding-genotype-latest">${escapeHtml(latestPreview)}</div>
+            <ol class="breeding-genotype-list">${entryItems}</ol>
+        </details>
+    `;
+}
+
 // Helper to extract title and content from possibly nested idea structures
 // Handles: idea.title/content, idea.idea.title/content, or JSON-encoded content
 function getIdeaData(idea) {
@@ -1189,22 +1234,28 @@ function renderGenerations(gens) {
 
         // Process each idea in this generation
         generation.forEach((idea, ideaIndex) => {
+            const genotypeEntries = getBreedingGenotypeEntries(idea);
+            let insertBeforeNode = null;
+
             // Check if this idea card already exists
             const existingCard = document.getElementById(`idea-${index}-${ideaIndex}`);
             if (existingCard) {
                 // An Oracle update might have replaced this idea.
                 // We check if the new data for this slot is an Oracle idea.
                 const isOracleIdea = idea.oracle_generated === true;
+                const existingGenotypeCount = Number(existingCard.dataset.genotypeCount || '0');
+                const genotypeCountChanged = existingGenotypeCount !== genotypeEntries.length;
 
                 // We also check if the existing card in the DOM reflects this.
                 // A simple way is to check the button's inner HTML for the icon.
                 const lineageButton = existingCard.querySelector('.view-lineage');
                 const cardIsAlreadyOracle = lineageButton && lineageButton.innerHTML.includes('fa-eye');
 
-                if (isOracleIdea && !cardIsAlreadyOracle) {
+                if ((isOracleIdea && !cardIsAlreadyOracle) || genotypeCountChanged) {
                     // The data is now an Oracle idea, but the card isn't.
-                    // This means a replacement happened. We must re-render the card completely.
-                    console.log(`Oracle replacement detected for idea ${ideaIndex} in generation ${index}. Re-rendering card.`);
+                    // This means a replacement happened, or metadata was added after the card rendered.
+                    console.log(`Card refresh needed for idea ${ideaIndex} in generation ${index}. Re-rendering card.`);
+                    insertBeforeNode = existingCard.nextSibling;
                     existingCard.remove(); // Remove the old card
                 } else {
                     // The card exists and is up-to-date, so we skip re-rendering.
@@ -1216,6 +1267,7 @@ function renderGenerations(gens) {
             const card = document.createElement('div');
             card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
+            card.dataset.genotypeCount = String(genotypeEntries.length);
 
             // Extract idea data (handles nested structures from Firestore)
             const ideaData = getIdeaData(idea);
@@ -1227,6 +1279,7 @@ function renderGenerations(gens) {
 
             // Create a plain text preview for the card
             const plainPreview = createCardPreview(ideaData.content, 150);
+            const genotypeSummaryHtml = createBreedingGenotypeSummary(genotypeEntries);
 
             // Add "Prompt" button for initial generation cards
             const viewPromptButton = index === 0 ?
@@ -1283,6 +1336,7 @@ function renderGenerations(gens) {
                     <div class="card-text">
                         <p>${plainPreview}</p>
                     </div>
+                    ${genotypeSummaryHtml}
                     <div class="card-actions">
                         ${viewPromptButton}
                         ${breedingPromptButton}
@@ -1326,7 +1380,11 @@ function renderGenerations(gens) {
                 });
             }
 
-            scrollContainer.appendChild(card);
+            if (insertBeforeNode && insertBeforeNode.parentNode === scrollContainer) {
+                scrollContainer.insertBefore(card, insertBeforeNode);
+            } else {
+                scrollContainer.appendChild(card);
+            }
 
             // Log that we've added a new card
             console.log(`Added new idea card: Generation ${index}, Idea ${ideaIndex + 1}`);
@@ -5824,12 +5882,6 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
 
     // Format the content
     if (displayContent && displayContent !== 'No prompt available' && displayContent !== 'No breeding prompt available for this idea') {
-        const contentItems = displayContent
-            .split('\n')
-            .filter(item => item.trim())
-            .map(item => `<div class="prompt-item">${item.trim()}</div>`)
-            .join('');
-
         promptModalContent.innerHTML = `
             <div class="prompt-content">
                 <div class="alert alert-info mb-3">
@@ -5838,11 +5890,11 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
                 ? 'This is the specific prompt used to create this initial idea from the context pool.'
                 : 'This is the specific prompt generated from parent concepts to create this bred idea.'}
                 </div>
-                ${contentItems}
+                <div class="prompt-markdown">${renderMarkdown(displayContent)}</div>
             </div>
         `;
     } else {
-        promptModalContent.innerHTML = `<p class="text-muted">${displayContent}</p>`;
+        promptModalContent.innerHTML = `<p class="text-muted">${escapeHtml(displayContent)}</p>`;
     }
 
     // Show the modal
@@ -5913,7 +5965,7 @@ const THINKING_UI_CONFIGS = {
         defaultBudget: 1024,
         help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
     },
-    'gemini-3-pro-preview': {
+    'gemini-3.1-pro-preview': {
         supportsThinking: true,
         allowOff: false,
         allowMedium: true,

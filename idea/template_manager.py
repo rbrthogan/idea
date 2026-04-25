@@ -525,7 +525,7 @@ async def generate_template(request: TemplateGenerateRequest, user: UserInfo = D
         # Use Gemini 2.5 Pro to generate the template
         llm = LLMWrapper(
             provider="google_generative_ai",
-            model_name="gemini-3-pro-preview",
+            model_name="gemini-3.1-pro-preview",
             temperature=0.7,  # Balanced creativity and consistency
             top_p=0.9,
             api_key=api_key

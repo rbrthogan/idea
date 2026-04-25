@@ -191,6 +191,31 @@ def test_breeder_keeps_mutation_context_per_child():
     assert calls["count"] == 2
 
 
+def test_breeder_returns_parent_genotypes_for_display():
+    with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
+        breeder = Breeder()
+
+    fake_ideator = SimpleNamespace(
+        generate_context_from_parents=lambda parent_genotypes, mutation_rate, mutation_context_pool: "ctx",
+        generate_idea_from_context=lambda context_pool, idea_type: ("child idea", "child prompt"),
+    )
+
+    breeder._get_thread_ideator = lambda: fake_ideator
+    breeder.encode_to_genotype = lambda parent, idea_type: f"gene-{parent['id']}"
+
+    parents = [
+        {"id": "p1", "idea": "idea1"},
+        {"id": "p2", "idea": "idea2"},
+    ]
+
+    result = breeder.breed(parents, "airesearch")
+
+    assert result["parent_genotypes"] == [
+        {"parent_id": "p1", "genotype": "gene-p1"},
+        {"parent_id": "p2", "genotype": "gene-p2"},
+    ]
+
+
 def test_context_from_parents_uses_weighted_parent_mix_and_non_overlapping_mutation():
     ideator = create_ideator()
     ideator._random_sample = lambda population, k: list(population)[:k]

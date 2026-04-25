@@ -1414,9 +1414,17 @@ class Breeder(LLMWrapper):
 
         # Step 1: Get concepts from the parents (their genotypes) and combine them
         parent_genotypes = []
+        parent_genotype_records = []
         for parent in ideas:
             genotype = self.encode_to_genotype(parent, idea_type)
             parent_genotypes.append(genotype)
+            parent_id = parent.get("id") if isinstance(parent, dict) else None
+            parent_genotype_records.append(
+                {
+                    "parent_id": str(parent_id) if parent_id is not None else None,
+                    "genotype": genotype,
+                }
+            )
 
         # Reuse one helper ideator per worker thread to avoid repeated client setup.
         ideator = self._get_thread_ideator()
@@ -1446,7 +1454,8 @@ class Breeder(LLMWrapper):
             "id": uuid.uuid4(),
             "idea": new_idea,
             "parent_ids": parent_ids,
-            "specific_prompt": specific_prompt  # Store the specific prompt for later display
+            "specific_prompt": specific_prompt,  # Store the specific prompt for later display
+            "parent_genotypes": parent_genotype_records,
         }
 
 

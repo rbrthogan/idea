@@ -73,6 +73,50 @@ class EvolutionOrchestrator:
             "null",
         }
 
+    @staticmethod
+    def _record_parent_breeding_genotypes(
+        parent_ideas: List[Any],
+        parent_genotypes: Any,
+        source_generation: int,
+        child_generation: int,
+        child_id: Any,
+    ) -> None:
+        if not isinstance(parent_genotypes, list):
+            return
+
+        parents_by_id = {
+            str(parent.get("id")): parent
+            for parent in parent_ideas
+            if isinstance(parent, dict) and parent.get("id") is not None
+        }
+        child_id_text = str(child_id) if child_id is not None else None
+
+        for index, genotype_record in enumerate(parent_genotypes):
+            if not isinstance(genotype_record, dict):
+                continue
+
+            genotype = str(genotype_record.get("genotype") or "").strip()
+            if not genotype:
+                continue
+
+            parent_id = genotype_record.get("parent_id")
+            parent = parents_by_id.get(str(parent_id)) if parent_id is not None else None
+            if parent is None and index < len(parent_ideas):
+                candidate = parent_ideas[index]
+                parent = candidate if isinstance(candidate, dict) else None
+            if parent is None:
+                continue
+
+            entry = {
+                "genotype": genotype,
+                "source_generation": source_generation,
+                "child_generation": child_generation,
+            }
+            if child_id_text:
+                entry["child_id"] = child_id_text
+
+            parent.setdefault("breeding_genotypes", []).append(entry)
+
     def _record_generation_diagnostic(self, key: str, detail: Optional[str] = None) -> None:
         for agent_name in ("formatter", "critic", "ideator", "breeder", "oracle"):
             agent = getattr(self.engine, agent_name, None)
@@ -829,8 +873,21 @@ class EvolutionOrchestrator:
                 )
 
                 prompt = None
+                parent_genotypes = None
+                child_id = None
                 if isinstance(new_idea, dict) and "specific_prompt" in new_idea:
                     prompt = new_idea["specific_prompt"]
+                if isinstance(new_idea, dict):
+                    parent_genotypes = new_idea.get("parent_genotypes")
+                    child_id = new_idea.get("id")
+
+                self._record_parent_breeding_genotypes(
+                    parent_ideas,
+                    parent_genotypes,
+                    source_generation=gen,
+                    child_generation=next_generation_index,
+                    child_id=child_id,
+                )
 
                 refined_idea = await asyncio.to_thread(
                     self.engine.critic.refine, new_idea, self.engine.idea_type

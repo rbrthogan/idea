@@ -8,7 +8,7 @@ LLM_MODELS = [
     {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
     {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
     {"id": "gemini-3-flash-preview", "name": "Gemini 3 Flash Preview"},
-    {"id": "gemini-3-pro-preview", "name": "Gemini 3 Pro Preview"}
+    {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview"}
 ]
 
 # Default model
@@ -68,7 +68,7 @@ THINKING_MODEL_CONFIG = {
         "min_budget": 0,
         "max_budget": 24576,
     },
-    "gemini-3-pro-preview": {
+    "gemini-3.1-pro-preview": {
         "supports_thinking": True,
         "supports_thinking_level": True,
         "supports_thinking_budget": True,
@@ -99,7 +99,7 @@ model_prices_per_million_tokens = {
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
     "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
-    "gemini-3-pro-preview": {"input": 2.00, "output": 12.00}
+    "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00}
 }
 
 # SMTP Configuration
