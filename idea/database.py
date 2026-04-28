@@ -7,7 +7,6 @@ import base64
 import time
 from datetime import datetime
 from typing import Optional, Dict, List, Any
-from pathlib import Path
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -464,33 +463,6 @@ async def delete_user_template(user_id: str, template_id: str) -> bool:
         doc_ref.delete()
         return True
     return False
-
-
-# --- System Templates (read-only, shared across users) ---
-
-SYSTEM_TEMPLATE_IDS = ["airesearch", "game_design", "drabble"]
-
-
-async def get_system_templates() -> List[Dict[str, Any]]:
-    """Get all system templates (read from YAML files)."""
-    from idea.prompts.loader import list_available_templates
-
-    all_templates = list_available_templates()
-    system_templates = []
-
-    for template_id in SYSTEM_TEMPLATE_IDS:
-        if template_id in all_templates:
-            template_info = all_templates[template_id]
-            if "error" not in template_info:
-                system_templates.append({
-                    "id": template_id,
-                    "name": template_info.get("name", template_id),
-                    "description": template_info.get("description", ""),
-                    "is_system": True
-                })
-
-    return system_templates
-
 
 # --- Admin functions ---
 

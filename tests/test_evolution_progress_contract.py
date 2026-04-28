@@ -1,5 +1,4 @@
 import asyncio
-from types import SimpleNamespace
 
 from idea.evolution_progress import ProgressEmitter
 

@@ -59,7 +59,7 @@ class UserEvolutionState:
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
-            except:
+            except Exception:
                 break
 
     def reset_status(self):

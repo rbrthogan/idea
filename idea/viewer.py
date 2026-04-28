@@ -7,7 +7,6 @@ from fastapi.responses import JSONResponse
 import os
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
-from asyncio import Queue
 import time
 import math
 import traceback
@@ -18,7 +17,7 @@ from datetime import datetime
 import uuid
 from typing import Dict, List, Tuple, Optional, Any, Set
 
-from idea.evolution import EvolutionEngine
+from idea.evolution import EvolutionEngine, get_default_template_id
 from idea.llm import Critic
 from idea.swiss_tournament import elo_update, generate_swiss_round_pairs
 from idea.config import (
@@ -377,13 +376,10 @@ async def _finalize_run_state(user_id: str, state: UserEvolutionState, update_da
     finally:
         state.stop_heartbeat()
 
-# Add this class for the request body
-class SaveEvolutionRequest(BaseModel):
-    data: dict
-    filename: str
 
 class ApiKeyRequest(BaseModel):
     api_key: str
+
 
 class ContactRequest(BaseModel):
     name: str
@@ -493,34 +489,6 @@ async def send_contact_email(request: ContactRequest):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
-@app.get("/api/debug/auth")
-async def debug_auth(user: UserInfo = Depends(require_auth)):
-    """Debug endpoint to verify auth and user info."""
-    return {"status": "ok", "user": user.to_dict()}
-
-@app.get("/api/debug/db")
-
-async def debug_db(user: UserInfo = Depends(require_auth)):
-    """Debug endpoint to verify database connection."""
-    try:
-        # Test basic DB read
-        key = await db.get_user_api_key(user.uid)
-        return {"status": "ok", "key_present": key is not None}
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        try:
-            if 'state' in locals() and state.run_owner_id:
-                await _finalize_run_state(user.uid, state, {"error": str(e), "is_running": False})
-                state.reset_run_tracking()
-        except Exception:
-            pass
-        return JSONResponse({
-            "status": "error",
-            "message": str(e),
-            "traceback": traceback.format_exc()
-        }, status_code=500)
-
 @app.get("/api/template-types")
 async def get_template_types(user: UserInfo = Depends(require_auth)):
     """Get available template types for the evolution UI dropdown"""
@@ -569,19 +537,6 @@ async def get_template_types(user: UserInfo = Depends(require_auth)):
             "status": "error",
             "message": str(e)
         }, status_code=500)
-
-def get_default_template_id():
-    """Get the first available template ID as default"""
-    try:
-        templates = list_available_templates()
-        # Find the first template without errors
-        for template_id, template_info in templates.items():
-            if 'error' not in template_info:
-                return template_id
-        # Fallback to airesearch if nothing else works
-        return 'airesearch'
-    except:
-        return 'airesearch'
 
 @app.post("/api/start-evolution")
 async def start_evolution(request: Request, user: UserInfo = Depends(require_auth)):
@@ -2036,16 +1991,6 @@ async def api_get_generation(gen_id: int, user: UserInfo = Depends(require_auth)
     output = [idea_to_dict(i) for i in ideas]
     return JSONResponse(output)
 
-@app.get("/test-static")
-def test_static():
-    """Debug route to list static files"""
-    static_dir = "idea/static"
-    files = []
-    for root, dirs, filenames in os.walk(static_dir):
-        for filename in filenames:
-            files.append(os.path.join(root, filename))
-    return {"files": files, "js_exists": os.path.exists("idea/static/js/viewer.js")}
-
 @app.get("/api/progress")
 async def get_progress(request: Request, user: UserInfo = Depends(require_auth)):
     """Returns the current progress of the evolution"""
@@ -3338,45 +3283,6 @@ async def get_efficient_pair(
         raise
     except Exception as e:
         print(f"Error in get_efficient_pair: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/debug/idea/{evolution_id}/{idea_id}")
-async def debug_idea_state(evolution_id: str, idea_id: str):
-    """Debug endpoint to check the current state of an idea"""
-    try:
-        # Load the evolution data
-        file_path = DATA_DIR / f"{evolution_id}.json"
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="Evolution not found")
-
-        with open(file_path) as f:
-            evolution_data = json.load(f)
-
-        # Find the idea
-        found_idea = None
-        for generation in evolution_data.get('history', []):
-            for idea in generation:
-                if idea.get('id') == idea_id:
-                    found_idea = idea
-                    break
-            if found_idea:
-                break
-
-        if not found_idea:
-            raise HTTPException(status_code=404, detail="Idea not found")
-
-        return {
-            'id': found_idea.get('id'),
-            'title': found_idea.get('title', 'Untitled'),
-            'ratings': found_idea.get('ratings', {}),
-            'match_count': found_idea.get('match_count', 0),
-            'manual_match_count': found_idea.get('manual_match_count', 0),
-            'auto_match_count': found_idea.get('auto_match_count', 0),
-            'elo': found_idea.get('elo', 1500)
-        }
-
-    except Exception as e:
-        print(f"Error in debug_idea_state: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Run the server

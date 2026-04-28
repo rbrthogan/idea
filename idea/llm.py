@@ -13,7 +13,6 @@ from pydantic import BaseModel
 from typing import Type, Optional, Dict, List, Callable, Tuple, Set, Any
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception
-import numpy as np
 from idea.models import Idea
 from idea.prompts.loader import get_prompts, get_prompts_from_dict
 import uuid
@@ -24,8 +23,6 @@ from idea.ratings import parallel_evaluate_pairs
 from idea.swiss_tournament import (
     elo_update,
     generate_swiss_round_pairs,
-    pair_players_swiss,
-    select_swiss_bye,
 )
 
 try:
@@ -1032,34 +1029,6 @@ class Critic(LLMWrapper):
     def _elo_update(self, elo_a, elo_b, winner):
         """Update the Elo rating of an idea"""
         return elo_update(elo_a, elo_b, winner)
-
-    def _select_swiss_bye(self, ordered_indices: List[int], bye_counts: Dict[int, int]) -> Optional[int]:
-        """
-        Select a bye candidate for an odd-sized Swiss round.
-
-        Preference order:
-        1) Fewest byes so far
-        2) Lowest-ranked (last in ordered list)
-        """
-        return select_swiss_bye(ordered_indices, bye_counts)
-
-    def _pair_players_swiss(
-        self,
-        ordered_indices: List[int],
-        match_history: Set[Tuple[int, int]],
-        backtrack_limit: int = 20000,
-    ) -> Optional[List[Tuple[int, int]]]:
-        """
-        Pair players in Swiss style while minimizing repeat matchups.
-
-        Returns a list of pairs (idx_a, idx_b), or None if no pairing found
-        within the backtracking limit.
-        """
-        return pair_players_swiss(
-            ordered_indices,
-            match_history,
-            backtrack_limit=backtrack_limit,
-        )
 
     def _generate_swiss_round_pairs(
         self,

@@ -2,9 +2,8 @@
 # Provides middleware and utilities for user authentication
 
 import os
-from functools import wraps
-from typing import Optional, Callable
-from fastapi import Request, HTTPException, Depends
+from typing import Optional
+from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # Firebase Admin SDK
@@ -122,11 +121,3 @@ async def require_admin(
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
-
-
-def get_user_from_request(request: Request) -> Optional[UserInfo]:
-    """
-    Utility to get user info attached to a request.
-    Use this in routes where auth is optional.
-    """
-    return getattr(request.state, "user", None)

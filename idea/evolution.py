@@ -6,7 +6,6 @@ import numpy as np
 import asyncio
 import uuid
 import math
-import json
 from pathlib import Path
 from datetime import datetime
 from idea.models import Idea
@@ -14,7 +13,7 @@ from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P, PROGRESS_JITTER_MA
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates, get_prompts, get_prompts_from_dict
 from idea.diversity import DiversityCalculator
-from idea import database as db
+from idea import database as db  # noqa: F401 - compatibility seam for tests and external patches
 
 # Legacy filesystem storage directories (kept for backwards compatibility with local dev)
 # These are not used on Cloud Run - all data goes to Firestore

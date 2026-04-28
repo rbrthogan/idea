@@ -2,12 +2,10 @@
 Test the rate page functionality including evolution loading and data flow
 """
 
-import pytest
 import sys
-import json
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, AsyncMock
 from contextlib import contextmanager
 from fastapi.testclient import TestClient
 
@@ -62,8 +60,7 @@ class TestRatePageAPI:
         we need to mock both the auth dependency and the user state.
         """
         from idea.auth import UserInfo
-        from idea.user_state import UserEvolutionState, user_states
-        from asyncio import Queue
+        from idea.user_state import UserEvolutionState
 
         mock_user = UserInfo(uid="test_user_123", email="test@example.com", is_admin=False)
         mock_state = UserEvolutionState()

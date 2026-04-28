@@ -2997,20 +2997,6 @@ small {
    History & Checkpoints Styles
    ======================================== */
 
-.selected-evolution-card {
-  background: var(--surface-alt);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 0.75rem;
-}
-
-.selected-evolution-card .badge {
-  font-size: 0.65rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
 /* Status badge colors */
 .badge-status-complete {
   background-color: var(--accent-light);
@@ -3170,12 +3156,6 @@ small {
   font-size: 2rem;
   margin-bottom: 0.5rem;
   opacity: 0.5;
-}
-
-/* Action buttons in selected evolution card */
-.selected-evolution-card .btn-sm {
-  font-size: 0.75rem;
-  padding: 0.25rem 0.5rem;
 }
 
 /* Continue action group with inline input */
@@ -3424,13 +3404,4 @@ small {
     flex: 1;
     min-width: 0;
   }
-}
-
-/* Selected evolution card - make it more spacious */
-.selected-evolution-card {
-  padding: 1rem;
-}
-
-.selected-evolution-card .btn {
-  padding: 0.375rem 0.5rem;
 }

@@ -691,32 +691,6 @@ function toggleRatingMode(mode) {
     }
 }
 
-function showMeanElo() {
-    fetch("/mean-elo-per-generation")
-        .then((res) => {
-            if (!res.ok) {
-                throw new Error("Failed to get mean ELO: " + res.statusText);
-            }
-            return res.json();
-        })
-        .then((meanElo) => {
-            const resultsContainer = document.getElementById("results-container");
-            resultsContainer.innerHTML = "<h2>Mean ELO per Generation</h2>";
-
-            const list = document.createElement("ul");
-            for (const genIndex in meanElo) {
-                const item = document.createElement("li");
-                item.textContent = `Generation ${genIndex}: ${meanElo[genIndex].toFixed(2)}`;
-                list.appendChild(item);
-            }
-            resultsContainer.appendChild(list);
-        })
-        .catch((error) => {
-            console.error(error);
-            alert(error.message);
-        });
-}
-
 // Add event listener for keydown events
 document.addEventListener("keydown", (event) => {
     switch (event.key) {
@@ -1669,42 +1643,6 @@ function buildRankingRowHtml(idea, index) {
         <td>${birthGeneration}</td>
         <td>${deathGeneration}</td>
     `;
-}
-
-// Add this function to show idea details in a modal
-function showIdeaDetails(ideaIndex) {
-    if (!window.rankedIdeas || !window.rankedIdeas[ideaIndex]) {
-        console.error('Idea not found');
-        return;
-    }
-
-    const idea = window.rankedIdeas[ideaIndex];
-    currentModalIdea = idea;
-
-    // Set modal title
-    document.getElementById('ideaModalLabel').textContent = idea.title || 'Untitled';
-
-    // Set modal content with markdown rendering
-    const modalContent = document.getElementById('modalIdeaContent');
-    modalContent.innerHTML = `
-        <div class="card">
-            <div class="card-body">
-                <h4>${idea.title || 'Untitled'}</h4>
-                <p><strong>Generation (${currentGenerationView === 'birth' ? 'Birth' : 'Death'} view):</strong> ${getIdeaGenerationLabel(idea)}</p>
-                <p><strong>Birth Generation:</strong> ${getIdeaGenerationLabel(idea, 'birth')}</p>
-                <p><strong>Death Generation:</strong> ${getIdeaGenerationLabel(idea, 'death')}</p>
-                <p><strong>ELO Rating:</strong> ${idea.elo}</p>
-                <hr>
-                <div class="idea-content">
-                    ${renderMarkdown(idea.content || '')}
-                </div>
-            </div>
-        </div>
-    `;
-
-    // Show the modal
-    const modal = new bootstrap.Modal(document.getElementById('ideaModal'));
-    modal.show();
 }
 
 // Add event listener for the return button when the document loads

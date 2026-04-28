@@ -70,29 +70,7 @@
                   <i class="fas fa-list me-1"></i>View All
                 </button>
               </div>
-              <!-- Current/Selected evolution display -->
-              <div id="selectedEvolutionCard" class="selected-evolution-card mb-3" style="display: none;">
-                <div class="d-flex justify-content-between align-items-start">
-                  <div class="flex-grow-1">
-                    <div class="d-flex align-items-center mb-1">
-                      <span class="badge me-2" id="selectedEvolutionStatus">Complete</span>
-                      <small class="text-muted" id="selectedEvolutionDate"></small>
-                    </div>
-                    <div class="fw-medium text-truncate" id="selectedEvolutionName" style="max-width: 180px;"></div>
-                    <small class="text-muted" id="selectedEvolutionMeta"></small>
-                  </div>
-                  <button class="btn btn-sm btn-link text-danger p-0" onclick="clearSelectedEvolution()"
-                    title="Clear selection">
-                    <i class="fas fa-times"></i>
-                  </button>
-                </div>
-                <!-- Action buttons based on status -->
-                <div class="mt-2 d-flex gap-2" id="selectedEvolutionActions">
-                  <!-- Will be populated dynamically -->
-                </div>
-              </div>
               <input type="hidden" id="evolutionSelect" value="">
-              <input type="hidden" id="selectedCheckpointId" value="">
 
               <h6 class="text-uppercase text-muted mb-3 mt-4" style="font-size: 0.75rem; letter-spacing: 0.05em;">
                 Configuration</h6>
