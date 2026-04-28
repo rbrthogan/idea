@@ -249,6 +249,18 @@ async def _refresh_run_state(user_id: str, state: UserEvolutionState, update_dat
             "target_tournament_rounds": update_data.get("target_tournament_rounds", state.status.get("target_tournament_rounds")),
         }
 
+        for field_name in (
+            "token_counts",
+            "diversity_history",
+            "island_diversity_history",
+            "migration_history",
+        ):
+            value = update_data.get(field_name, state.status.get(field_name))
+            if value is not None:
+                if field_name == "token_counts":
+                    value = _compact_token_counts_for_run_state(value)
+                run_update[field_name] = convert_uuids_to_strings(value)
+
         if update_data.get("error"):
             run_update["last_error"] = update_data.get("error")
 
@@ -278,6 +290,43 @@ def _merge_status_update(state: UserEvolutionState, update_data: Dict[str, Any])
         if flag not in update_data:
             state.status.pop(flag, None)
     state.status.update(update_data)
+
+
+def _compact_token_counts_for_run_state(token_counts: Any) -> Any:
+    """Keep active-run cost fresh without writing large diagnostic event logs every second."""
+    if not isinstance(token_counts, dict):
+        return token_counts
+    compact = {
+        key: value
+        for key, value in token_counts.items()
+        if key != "diagnostics"
+    }
+    diagnostics = token_counts.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        compact["diagnostics"] = {
+            "agents": diagnostics.get("agents", {}),
+            "totals": diagnostics.get("totals", {}),
+            "events_truncated": bool(diagnostics.get("events")),
+        }
+    return compact
+
+
+def _attach_live_engine_progress_fields(state: UserEvolutionState) -> None:
+    """Keep live progress payloads aligned with the current engine state."""
+    engine = state.engine
+    if engine is None:
+        return
+
+    if hasattr(engine, "tournament_history"):
+        state.status["tournament_history"] = engine.tournament_history
+    for field_name in ("diversity_history", "island_diversity_history", "migration_history"):
+        value = getattr(engine, field_name, None)
+        if value is not None:
+            state.status[field_name] = value.copy() if isinstance(value, list) else value
+
+    get_total_token_count = getattr(engine, "get_total_token_count", None)
+    if callable(get_total_token_count):
+        state.status["token_counts"] = get_total_token_count()
 
 
 async def _heartbeat_loop(user_id: str, state: UserEvolutionState) -> None:
@@ -639,6 +688,58 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             print(f"Error parsing age decay rate: {e}")
             age_decay_rate = 0.25
 
+        raw_refine_all_ideas = data.get('refineAllIdeas', False)
+        if isinstance(raw_refine_all_ideas, bool):
+            refine_all_ideas = raw_refine_all_ideas
+        else:
+            refine_all_ideas = str(raw_refine_all_ideas).strip().lower() not in {
+                "false",
+                "0",
+                "no",
+                "off",
+            }
+
+        try:
+            survivor_refinement_rate = float(data.get('survivorRefinementRate', 0.1))
+            survivor_refinement_rate = max(0.0, min(1.0, survivor_refinement_rate))
+            print(f"Parsed survivor refinement rate: {survivor_refinement_rate}")
+        except (TypeError, ValueError) as e:
+            print(f"Error parsing survivor refinement rate: {e}")
+            survivor_refinement_rate = 0.1
+
+        try:
+            island_count = int(data.get('islandCount', 2))
+            island_count = max(1, min(5, island_count))
+            island_count = min(island_count, max(1, pop_size))
+            print(f"Parsed island count: {island_count}")
+        except (TypeError, ValueError) as e:
+            print(f"Error parsing island count: {e}")
+            island_count = min(2, max(1, pop_size))
+
+        try:
+            migration_rate = float(data.get('migrationRate', 0.05))
+            migration_rate = max(0.0, min(1.0, migration_rate))
+            print(f"Parsed migration rate: {migration_rate}")
+        except (TypeError, ValueError) as e:
+            print(f"Error parsing migration rate: {e}")
+            migration_rate = 0.05
+
+        try:
+            migration_novelty_protection_quantile = float(
+                data.get('migrationNoveltyProtectionQuantile', 0.8)
+            )
+            migration_novelty_protection_quantile = max(
+                0.0,
+                min(1.0, migration_novelty_protection_quantile),
+            )
+            print(
+                "Parsed migration novelty protection quantile: "
+                f"{migration_novelty_protection_quantile}"
+            )
+        except (TypeError, ValueError) as e:
+            print(f"Error parsing migration novelty protection quantile: {e}")
+            migration_novelty_protection_quantile = 0.8
+
         # Thinking controls (model-aware): supports explicit level or custom budget.
         thinking_level = _normalize_thinking_level(data.get("thinkingLevel"))
         if data.get("thinkingLevel") is not None and thinking_level is None:
@@ -662,7 +763,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
                 # Explicit custom budget takes precedence over level presets.
                 thinking_level = None
             elif thinking_level == "off" and not bool(model_thinking_cfg.get("allow_off", False)):
-                thinking_level = "low"
+                thinking_level = model_thinking_cfg.get("off_replacement_level", "low")
 
             if thinking_level is None and thinking_budget is None:
                 thinking_level, thinking_budget = _get_default_thinking_settings(model_type)
@@ -689,6 +790,9 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
               f"tournament: count={tournament_count}, full_rounds={full_tournament_rounds}, target_rounds={target_tournament_rounds}, "
               f"mutation_rate={mutation_rate}, seed_context_pool_size={seed_context_pool_size}, replacement_rate={replacement_rate}, "
               f"fitness_alpha={fitness_alpha}, age_decay_rate={age_decay_rate}, "
+              f"refine_all_ideas={refine_all_ideas}, survivor_refinement_rate={survivor_refinement_rate}, "
+              f"island_count={island_count}, migration_rate={migration_rate}, "
+              f"migration_novelty_protection_quantile={migration_novelty_protection_quantile}, "
               f"thinking_level={thinking_level}, thinking_budget={thinking_budget}, max_budget={max_budget}")
 
         # Resolve template source. System templates are bundled; custom templates live in Firestore.
@@ -722,6 +826,11 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             full_tournament_rounds=full_tournament_rounds,
             mutation_rate=mutation_rate,
             seed_context_pool_size=seed_context_pool_size,
+            refine_all_ideas=refine_all_ideas,
+            survivor_refinement_rate=survivor_refinement_rate,
+            island_count=island_count,
+            migration_rate=migration_rate,
+            migration_novelty_protection_quantile=migration_novelty_protection_quantile,
             replacement_rate=replacement_rate,
             fitness_alpha=fitness_alpha,
             age_decay_rate=age_decay_rate,
@@ -785,6 +894,11 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             "tournament_count": state.engine.tournament_count,
             "full_tournament_rounds": state.engine.full_tournament_rounds,
             "target_tournament_rounds": state.engine.tournament_rounds,
+            "refine_all_ideas": state.engine.refine_all_ideas,
+            "survivor_refinement_rate": state.engine.survivor_refinement_rate,
+            "island_count": state.engine.island_count,
+            "migration_rate": state.engine.migration_rate,
+            "migration_novelty_protection_quantile": state.engine.migration_novelty_protection_quantile,
         }
 
         # Put initial status in queue
@@ -807,6 +921,11 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             "tournament_count": state.engine.tournament_count,
             "full_tournament_rounds": state.engine.full_tournament_rounds,
             "target_tournament_rounds": state.engine.tournament_rounds,
+            "refine_all_ideas": state.engine.refine_all_ideas,
+            "survivor_refinement_rate": state.engine.survivor_refinement_rate,
+            "island_count": state.engine.island_count,
+            "migration_rate": state.engine.migration_rate,
+            "migration_novelty_protection_quantile": state.engine.migration_novelty_protection_quantile,
             "specific_prompts": []  # Will be populated as evolution progresses
         })
     except Exception as e:
@@ -1484,6 +1603,11 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
             max_budget=config.get('max_budget'),
             mutation_rate=config.get('mutation_rate', 0.2),
             seed_context_pool_size=config.get('seed_context_pool_size'),
+            refine_all_ideas=config.get('refine_all_ideas', False),
+            survivor_refinement_rate=config.get('survivor_refinement_rate', 0.1),
+            island_count=config.get('island_count', 2),
+            migration_rate=config.get('migration_rate', 0.05),
+            migration_novelty_protection_quantile=config.get('migration_novelty_protection_quantile', 0.8),
             replacement_rate=config.get('replacement_rate', 0.5),
             fitness_alpha=config.get('fitness_alpha', 0.7),
             age_decay_rate=config.get('age_decay_rate', 0.25),
@@ -1497,6 +1621,8 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
         engine.breeding_prompts = data.get('breeding_prompts', [])
         engine.tournament_history = data.get('tournament_history', [])
         engine.diversity_history = data.get('diversity_history', [])
+        engine.island_diversity_history = data.get('island_diversity_history', [])
+        engine.migration_history = data.get('migration_history', [])
         engine.current_generation = len(history)
         engine.fitness_elo_stats = data.get("fitness_elo_stats", {"count": 0, "mean": 0.0, "m2": 0.0})
         engine.fitness_diversity_stats = data.get(
@@ -1530,6 +1656,7 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
         # Generate a new checkpoint ID for this continuation
         from datetime import datetime
         engine.checkpoint_id = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+        engine._sync_typed_state_from_attrs()
 
         print(f"Loaded evolution from file: {evolution_id}, generations: {len(history)}")
         return engine
@@ -1573,6 +1700,7 @@ async def run_resume_evolution_task(state: UserEvolutionState):
                 update_data['token_counts'] = engine.get_total_token_count()
 
         _merge_status_update(state, update_data)
+        _attach_live_engine_progress_fields(state)
 
         # Clear queue and add update
         state.reset_queue()
@@ -1621,6 +1749,7 @@ async def run_continue_evolution_task(state: UserEvolutionState, additional_gene
                 update_data['token_counts'] = engine.get_total_token_count()
 
         _merge_status_update(state, update_data)
+        _attach_live_engine_progress_fields(state)
 
         # Clear queue and add update
         state.reset_queue()
@@ -1678,6 +1807,7 @@ async def run_evolution_task(state: UserEvolutionState):
 
         # Update the evolution status by merging the new data
         _merge_status_update(state, update_data)
+        _attach_live_engine_progress_fields(state)
 
         # Clear the queue before adding new update to avoid backlog
         state.reset_queue()
@@ -1726,6 +1856,21 @@ def idea_to_dict(idea) -> dict:
     def add_shared_metadata(result: dict, source: dict) -> dict:
         if "breeding_genotypes" in source:
             result["breeding_genotypes"] = convert_uuids_to_strings(source.get("breeding_genotypes", []))
+        for key in (
+            "island_id",
+            "origin_island_id",
+            "migrated_from_id",
+            "migration_generation",
+            "migration_event",
+            "survivor_refined",
+            "survivor_refined_from_id",
+            "survivor_refinement_rate",
+            "selection_metrics",
+            "survival_metrics",
+        ):
+            if key in source:
+                value = source.get(key)
+                result[key] = str(value) if isinstance(value, uuid.UUID) else value
         return result
 
     # If idea is already a dictionary with 'id' and 'idea' keys
@@ -1915,9 +2060,7 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
         except Exception as e:
             print(f"Error getting queue updates: {e}")
 
-        # Always include latest tournament history if available
-        if hasattr(state.engine, "tournament_history"):
-            state.status["tournament_history"] = state.engine.tournament_history
+        _attach_live_engine_progress_fields(state)
 
         response = state.status.copy()
         response["history_version"] = state.history_version
@@ -1962,6 +2105,15 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
             "history_changed": False,
         }
 
+        for field_name in (
+            "token_counts",
+            "diversity_history",
+            "island_diversity_history",
+            "migration_history",
+        ):
+            if run_state.get(field_name) is not None:
+                response[field_name] = run_state.get(field_name)
+
         if run_state.get("is_stopped"):
             response["is_stopped"] = True
         if run_state.get("is_resumable"):
@@ -2004,8 +2156,22 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
                         "contexts": evolution_data.get("contexts", []),
                         "specific_prompts": evolution_data.get("specific_prompts", []),
                         "breeding_prompts": evolution_data.get("breeding_prompts", []),
-                        "diversity_history": evolution_data.get("diversity_history", []),
-                        "token_counts": evolution_data.get("token_counts"),
+                        "diversity_history": response.get(
+                            "diversity_history",
+                            evolution_data.get("diversity_history", []),
+                        ),
+                        "island_diversity_history": response.get(
+                            "island_diversity_history",
+                            evolution_data.get("island_diversity_history", []),
+                        ),
+                        "migration_history": response.get(
+                            "migration_history",
+                            evolution_data.get("migration_history", []),
+                        ),
+                        "token_counts": response.get(
+                            "token_counts",
+                            evolution_data.get("token_counts"),
+                        ),
                     })
         else:
             response["history_available"] = False
@@ -2256,6 +2422,16 @@ async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth
         # Load from Firestore
         data = await db.get_evolution(user.uid, evolution_id)
         if data:
+            active_run = await db.get_active_run(user.uid)
+            if active_run and active_run.get("evolution_id") == evolution_id:
+                for field_name in (
+                    "token_counts",
+                    "diversity_history",
+                    "island_diversity_history",
+                    "migration_history",
+                ):
+                    if active_run.get(field_name) is not None:
+                        data[field_name] = active_run.get(field_name)
             return JSONResponse({
                 'id': evolution_id,
                 'name': data.get('name', evolution_id),
@@ -2550,7 +2726,7 @@ def _normalize_thinking_level(level: Optional[Any]) -> Optional[str]:
     normalized = str(level).strip().lower()
     if not normalized:
         return None
-    if normalized in {"off", "low", "medium", "high"}:
+    if normalized in {"off", "minimal", "low", "medium", "high"}:
         return normalized
     return None
 

@@ -60,11 +60,6 @@ prompts:
     - "Write a proposal for evaluating synthetic data generation for training small computer-vision models in specialized domains."
     - "Write a proposal for dataset curation via pruning redundant samples using teacher-student learning dynamics."
 
-  idea: |
-    Generate one GPU-constrained AI research proposal from the selected direction.
-    Apply all constraints below:
-    {requirements}
-
   format: |
     You are a formatting assistant. Convert the input research proposal into a JSON object with "title" and "content" fields.
 

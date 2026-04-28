@@ -18,6 +18,11 @@ class EvolutionConfig:
     max_budget: Optional[float]
     mutation_rate: float
     seed_context_pool_size: Optional[int]
+    refine_all_ideas: bool
+    survivor_refinement_rate: float
+    island_count: int
+    migration_rate: float
+    migration_novelty_protection_quantile: float
     replacement_rate: float
     fitness_alpha: float
     age_decay_rate: float
@@ -43,6 +48,8 @@ class EvolutionRuntimeState:
     breeding_prompts: List[List[Any]] = field(default_factory=list)
     tournament_history: List[Dict[str, Any]] = field(default_factory=list)
     diversity_history: List[Dict[str, Any]] = field(default_factory=list)
+    island_diversity_history: List[Dict[str, Any]] = field(default_factory=list)
+    migration_history: List[Dict[str, Any]] = field(default_factory=list)
     avg_idea_cost: float = 0.0
     avg_tournament_cost: float = 0.0
     stop_requested: bool = False

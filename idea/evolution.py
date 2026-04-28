@@ -54,6 +54,11 @@ class EvolutionEngine:
         max_budget: Optional[float] = None,
         mutation_rate: float = 0.2,
         seed_context_pool_size: Optional[int] = None,
+        refine_all_ideas: bool = False,
+        survivor_refinement_rate: float = 0.1,
+        island_count: int = 2,
+        migration_rate: float = 0.05,
+        migration_novelty_protection_quantile: float = 0.8,
         replacement_rate: float = 0.5,
         fitness_alpha: float = 0.7,
         age_decay_rate: float = 0.25,
@@ -70,6 +75,12 @@ class EvolutionEngine:
         self._template_prompt_wrapper = None
         self.pop_size = pop_size
         self.generations = generations
+        self.island_count = self._coerce_island_count(island_count, pop_size=pop_size)
+        self.migration_rate = self._coerce_unit_float(migration_rate, default=0.05)
+        self.migration_novelty_protection_quantile = self._coerce_unit_float(
+            migration_novelty_protection_quantile,
+            default=0.8,
+        )
         if full_tournament_rounds is None or full_tournament_rounds <= 0:
             full_tournament_rounds = max(1, pop_size - 1)
         if tournament_rounds is None or tournament_rounds <= 0:
@@ -101,6 +112,11 @@ class EvolutionEngine:
         self.context_novelty_threshold = max(0.0, min(1.0, float(context_novelty_threshold)))
         self.context_novelty_max_attempts = max(0, int(context_novelty_max_attempts))
         self.api_key = api_key
+        self.refine_all_ideas = self._coerce_bool(refine_all_ideas, default=False)
+        try:
+            self.survivor_refinement_rate = max(0.0, min(1.0, float(survivor_refinement_rate)))
+        except (TypeError, ValueError):
+            self.survivor_refinement_rate = 0.1
         self.random_seed = int(random_seed) if random_seed is not None else int(secrets.randbits(64))
         self._py_rng = random.Random(self.random_seed)
         self._np_rng = np.random.default_rng(self.random_seed)
@@ -183,13 +199,15 @@ class EvolutionEngine:
 
         self.history = []  # List[List[Idea]]
         self.contexts = []  # List of contexts for the initial population
-        self.specific_prompts = []  # List of specific prompts generated from contexts (translation layer)
+        self.specific_prompts = []  # Direction prompts generated from sampled contexts.
         self.breeding_prompts = []  # List of lists: breeding prompts for each generation (empty for gen 0)
         self.tournament_history = []  # List of tournament details per generation
 
         # Initialize diversity calculator
         self.diversity_calculator = DiversityCalculator(api_key=api_key)
         self.diversity_history = []  # List of diversity metrics for each generation
+        self.island_diversity_history = []  # List of per-island diversity snapshots
+        self.migration_history = []  # List of cross-island migration events
 
         # Add stop flag for graceful interruption
         self.stop_requested = False
@@ -216,6 +234,7 @@ class EvolutionEngine:
         self.creative_temp = creative_temp
         self.top_p = top_p
         self.mutation_rate = mutation_rate
+        self.refine_all_ideas = self._coerce_bool(refine_all_ideas, default=False)
         self.replacement_rate = max(0.0, min(1.0, float(replacement_rate)))
         self.fitness_alpha = max(0.0, min(1.0, float(fitness_alpha)))
         self.age_decay_rate = max(0.0, float(age_decay_rate))
@@ -236,6 +255,37 @@ class EvolutionEngine:
         self.current_generation = 0  # Tracks which generation we're on
         self.checkpoint_callback = None  # Callback for saving checkpoints
         self._sync_typed_state_from_attrs()
+
+    @staticmethod
+    def _coerce_bool(value: Any, *, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+            return default
+        return bool(value)
+
+    @staticmethod
+    def _coerce_unit_float(value: Any, *, default: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _coerce_island_count(value: Any, *, pop_size: int) -> int:
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            count = 1
+        max_count = max(1, int(pop_size or 1))
+        return max(1, min(max_count, count))
 
     def _random_randbits(self, bits: int) -> int:
         with self._py_rng_lock:
@@ -385,6 +435,11 @@ class EvolutionEngine:
             max_budget=self.max_budget,
             mutation_rate=self.mutation_rate,
             seed_context_pool_size=self.seed_context_pool_size,
+            refine_all_ideas=self.refine_all_ideas,
+            survivor_refinement_rate=self.survivor_refinement_rate,
+            island_count=self.island_count,
+            migration_rate=self.migration_rate,
+            migration_novelty_protection_quantile=self.migration_novelty_protection_quantile,
             replacement_rate=self.replacement_rate,
             fitness_alpha=self.fitness_alpha,
             age_decay_rate=self.age_decay_rate,
@@ -406,6 +461,8 @@ class EvolutionEngine:
             breeding_prompts=self.breeding_prompts,
             tournament_history=self.tournament_history,
             diversity_history=self.diversity_history,
+            island_diversity_history=self.island_diversity_history,
+            migration_history=self.migration_history,
             avg_idea_cost=self.avg_idea_cost,
             avg_tournament_cost=self.avg_tournament_cost,
             stop_requested=self.stop_requested,
@@ -556,6 +613,133 @@ class EvolutionEngine:
         )
         self._sync_typed_state_from_attrs()
 
+    @staticmethod
+    def _valid_embedding_list(embeddings: List[Optional[np.ndarray]]) -> List[np.ndarray]:
+        return [embedding for embedding in embeddings if embedding is not None]
+
+    @staticmethod
+    def _embedding_mean_distance(embeddings: List[np.ndarray]) -> float:
+        valid_embeddings = EvolutionEngine._valid_embedding_list(embeddings)
+        if len(valid_embeddings) < 2:
+            return 0.0
+        matrix = np.array(valid_embeddings)
+        if matrix.ndim != 2 or matrix.shape[0] < 2:
+            return 0.0
+        deltas = matrix[:, None, :] - matrix[None, :, :]
+        distances = np.linalg.norm(deltas, axis=2)
+        upper = np.triu_indices(matrix.shape[0], k=1)
+        return float(np.mean(distances[upper])) if upper[0].size else 0.0
+
+    @staticmethod
+    def _embedding_centroid(embeddings: List[np.ndarray]) -> Optional[np.ndarray]:
+        valid_embeddings = EvolutionEngine._valid_embedding_list(embeddings)
+        if not valid_embeddings:
+            return None
+        return np.mean(valid_embeddings, axis=0)
+
+    def _build_diversity_analytics(
+        self,
+        history: List[List[Any]],
+        precomputed_embeddings: Optional[List[Optional[np.ndarray]]],
+        diversity_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        current_generation_index = max(0, len(history or []) - 1)
+        current_generation = history[current_generation_index] if history else []
+        embeddings_by_generation: List[List[Optional[np.ndarray]]] = []
+        embedding_index = 0
+
+        for generation in history or []:
+            generation_embeddings: List[Optional[np.ndarray]] = []
+            for _idea in generation:
+                embedding = (
+                    precomputed_embeddings[embedding_index]
+                    if precomputed_embeddings is not None
+                    and embedding_index < len(precomputed_embeddings)
+                    else None
+                )
+                generation_embeddings.append(embedding)
+                embedding_index += 1
+            embeddings_by_generation.append(generation_embeddings)
+
+        current_embeddings = (
+            embeddings_by_generation[current_generation_index]
+            if embeddings_by_generation
+            else []
+        )
+        valid_current_embeddings = self._valid_embedding_list(current_embeddings)
+        current_generation_diversity = self._embedding_mean_distance(valid_current_embeddings)
+        if len(valid_current_embeddings) < 2:
+            for generation_data in diversity_data.get("generation_diversities", []):
+                if generation_data.get("generation") == current_generation_index:
+                    current_generation_diversity = float(
+                        generation_data.get("diversity_score", 0.0) or 0.0
+                    )
+                    break
+
+        island_rows: List[Dict[str, Any]] = []
+        island_centroids: List[np.ndarray] = []
+        island_count = max(1, int(getattr(self, "island_count", 2) or 2))
+        fallback_ids = self._initial_island_ids(len(current_generation))
+
+        for island_id in range(island_count):
+            island_embeddings = [
+                current_embeddings[idx]
+                for idx, idea in enumerate(current_generation)
+                if idx < len(current_embeddings)
+                and self._get_idea_island_id(
+                    idea,
+                    fallback=fallback_ids[idx] if idx < len(fallback_ids) else 0,
+                )
+                == island_id
+            ]
+            valid_island_embeddings = self._valid_embedding_list(island_embeddings)
+            centroid = self._embedding_centroid(valid_island_embeddings)
+            if centroid is not None:
+                island_centroids.append(centroid)
+
+            island_rows.append(
+                {
+                    "island_id": island_id,
+                    "diversity_score": self._embedding_mean_distance(valid_island_embeddings),
+                    "idea_count": len(island_embeddings),
+                    "valid_embeddings": len(valid_island_embeddings),
+                    "centroid_available": centroid is not None,
+                }
+            )
+
+        island_diversity_values = [
+            row["diversity_score"]
+            for row in island_rows
+            if row.get("valid_embeddings", 0) >= 2
+        ]
+        mean_island_diversity = (
+            float(sum(island_diversity_values) / len(island_diversity_values))
+            if island_diversity_values
+            else 0.0
+        )
+        inter_island_diversity = (
+            self._embedding_mean_distance(island_centroids)
+            if len(island_centroids) >= 2
+            else None
+        )
+        island_separation_ratio = (
+            inter_island_diversity / mean_island_diversity
+            if inter_island_diversity is not None and mean_island_diversity > 0
+            else None
+        )
+
+        return {
+            "current_generation": current_generation_index,
+            "current_generation_diversity": current_generation_diversity,
+            "cumulative_diversity": float(diversity_data.get("diversity_score", 0.0) or 0.0),
+            "inter_generation_diversity": diversity_data.get("inter_generation_diversity"),
+            "island_count": island_count,
+            "islands": island_rows,
+            "mean_island_diversity": mean_island_diversity,
+            "inter_island_diversity": inter_island_diversity,
+            "island_separation_ratio": island_separation_ratio,
+        }
+
     async def _calculate_and_store_diversity(self) -> Dict[str, Any]:
         """
         Calculate diversity metrics for the current population history and store them.
@@ -586,6 +770,76 @@ class EvolutionEngine:
                 self.history,
                 precomputed_embeddings=precomputed_embeddings,
             )
+            diversity_analytics = self._build_diversity_analytics(
+                self.history,
+                precomputed_embeddings,
+                diversity_data,
+            )
+            diversity_data["analytics"] = diversity_analytics
+            diversity_data["current_generation"] = diversity_analytics["current_generation"]
+            diversity_data["current_generation_diversity"] = diversity_analytics[
+                "current_generation_diversity"
+            ]
+            diversity_data["mean_island_diversity"] = diversity_analytics[
+                "mean_island_diversity"
+            ]
+            diversity_data["inter_island_diversity"] = diversity_analytics[
+                "inter_island_diversity"
+            ]
+            diversity_data["island_separation_ratio"] = diversity_analytics[
+                "island_separation_ratio"
+            ]
+            diversity_data["current_island_diversities"] = diversity_analytics["islands"]
+            if self.island_count > 1:
+                island_diversities = []
+                for island_id in range(self.island_count):
+                    island_history: List[List[Any]] = []
+                    for generation in self.history:
+                        fallback_ids = self._initial_island_ids(len(generation))
+                        island_generation = [
+                            idea
+                            for idx, idea in enumerate(generation)
+                            if self._get_idea_island_id(
+                                idea,
+                                fallback=fallback_ids[idx] if idx < len(fallback_ids) else 0,
+                            )
+                            == island_id
+                        ]
+                        island_history.append(island_generation)
+
+                    flat_island_ideas = [
+                        idea for generation in island_history for idea in generation
+                    ]
+                    island_embeddings = None
+                    if flat_island_ideas:
+                        island_embeddings = await self._get_or_compute_embeddings_for_ideas(
+                            flat_island_ideas
+                        )
+                    island_data = await self.diversity_calculator.calculate_diversity(
+                        island_history,
+                        precomputed_embeddings=island_embeddings,
+                    )
+                    island_data["island_id"] = island_id
+                    island_data["idea_count"] = len(flat_island_ideas)
+                    island_diversities.append(island_data)
+
+                diversity_data["island_diversities"] = island_diversities
+                self.island_diversity_history.append(
+                    {
+                        "generation": len(self.history) - 1,
+                        "inter_island_diversity": diversity_analytics[
+                            "inter_island_diversity"
+                        ],
+                        "mean_island_diversity": diversity_analytics[
+                            "mean_island_diversity"
+                        ],
+                        "island_separation_ratio": diversity_analytics[
+                            "island_separation_ratio"
+                        ],
+                        "islands": island_diversities,
+                        "current_islands": diversity_analytics["islands"],
+                    }
+                )
             self.diversity_history.append(diversity_data)
 
             # Print diversity summary to logs
@@ -801,129 +1055,134 @@ class EvolutionEngine:
 
     def get_total_token_count(self):
         """Get the total token count from all LLM components with cost calculation"""
-        # Get input and output tokens from each component
-        ideator_input = getattr(self.ideator, 'input_token_count', 0)
-        ideator_output = getattr(self.ideator, 'output_token_count', 0)
-        formatter_input = getattr(self.formatter, 'input_token_count', 0)
-        formatter_output = getattr(self.formatter, 'output_token_count', 0)
-        critic_input = getattr(self.critic, 'input_token_count', 0)
-        critic_output = getattr(self.critic, 'output_token_count', 0)
-        breeder_input = getattr(self.breeder, 'input_token_count', 0)
-        breeder_output = getattr(self.breeder, 'output_token_count', 0)
-
-        oracle_input = getattr(self.oracle, 'input_token_count', 0)
-        oracle_output = getattr(self.oracle, 'output_token_count', 0)
-
-        # Calculate totals
-        total_input = ideator_input + formatter_input + critic_input + breeder_input + oracle_input
-        total_output = ideator_output + formatter_output + critic_output + breeder_output + oracle_output
-        total = total_input + total_output
-
-        # Get pricing information from config
         from idea.config import model_prices_per_million_tokens
 
-        # Get model names for each agent
-        ideator_model = getattr(self.ideator, 'model_name', 'gemini-2.0-flash')
-        formatter_model = getattr(self.formatter, 'model_name', 'gemini-2.0-flash')
-        critic_model = getattr(self.critic, 'model_name', 'gemini-2.0-flash')
-        breeder_model = getattr(self.breeder, 'model_name', 'gemini-2.0-flash')
-        oracle_model = getattr(self.oracle, 'model_name', 'gemini-2.0-flash')
-
-        # Default pricing if model not found in config
         default_price = {"input": 0.1, "output": 0.4}
+        required_components = {"ideator", "formatter", "critic", "breeder", "oracle"}
 
-        # Get pricing for each model
-        ideator_pricing = model_prices_per_million_tokens.get(ideator_model, default_price)
-        formatter_pricing = model_prices_per_million_tokens.get(formatter_model, default_price)
-        critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
-        breeder_pricing = model_prices_per_million_tokens.get(breeder_model, default_price)
-        oracle_pricing = model_prices_per_million_tokens.get(oracle_model, default_price)
+        def safe_int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
 
-        # Calculate cost for each component
-        ideator_input_cost = (ideator_pricing["input"] * ideator_input) / 1_000_000
-        ideator_output_cost = (ideator_pricing["output"] * ideator_output) / 1_000_000
-        formatter_input_cost = (formatter_pricing["input"] * formatter_input) / 1_000_000
-        formatter_output_cost = (formatter_pricing["output"] * formatter_output) / 1_000_000
-        critic_input_cost = (critic_pricing["input"] * critic_input) / 1_000_000
-        critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
-        breeder_input_cost = (breeder_pricing["input"] * breeder_input) / 1_000_000
-        breeder_output_cost = (breeder_pricing["output"] * breeder_output) / 1_000_000
-        oracle_input_cost = (oracle_pricing["input"] * oracle_input) / 1_000_000
-        oracle_output_cost = (oracle_pricing["output"] * oracle_output) / 1_000_000
+        def safe_float(value: Any) -> float:
+            try:
+                return float(value or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
 
-        # Calculate total costs
-        total_input_cost = ideator_input_cost + formatter_input_cost + critic_input_cost + breeder_input_cost + oracle_input_cost
-        total_output_cost = ideator_output_cost + formatter_output_cost + critic_output_cost + breeder_output_cost + oracle_output_cost
+        def summarize_component(component_name: str, component: Any) -> Optional[Dict[str, Any]]:
+            if component is None:
+                return None
+
+            custom_summary = getattr(component, "get_token_usage_summary", None)
+            if callable(custom_summary):
+                summary = custom_summary() or {}
+                component_input = safe_int(summary.get("input"))
+                component_output = safe_int(summary.get("output"))
+                component_total = safe_int(summary.get("total")) or component_input + component_output
+                component_cost = safe_float(summary.get("cost"))
+                component_input_cost = safe_float(summary.get("input_cost", component_cost))
+                component_output_cost = safe_float(summary.get("output_cost"))
+                component_model = summary.get("model") or getattr(component, "model_name", "unknown")
+                if component_name not in required_components and component_total == 0 and component_cost == 0:
+                    return None
+                data = {
+                    "total": component_total,
+                    "input": component_input,
+                    "output": component_output,
+                    "model": component_model,
+                    "cost": component_cost,
+                    "_input_cost": component_input_cost,
+                    "_output_cost": component_output_cost,
+                }
+                for optional_key in ("estimated_input", "requests", "per_model"):
+                    if optional_key in summary:
+                        data[optional_key] = summary[optional_key]
+                return data
+
+            component_input = safe_int(getattr(component, "input_token_count", 0))
+            component_output = safe_int(getattr(component, "output_token_count", 0))
+            component_total = safe_int(
+                getattr(component, "total_token_count", component_input + component_output)
+            )
+            if component_total == 0:
+                component_total = component_input + component_output
+            component_model = getattr(component, "model_name", "gemini-2.0-flash")
+            pricing = model_prices_per_million_tokens.get(component_model, default_price)
+            component_input_cost = (
+                safe_float(pricing.get("input", default_price["input"])) * component_input
+            ) / 1_000_000
+            component_output_cost = (
+                safe_float(pricing.get("output", default_price["output"])) * component_output
+            ) / 1_000_000
+            component_cost = component_input_cost + component_output_cost
+            if component_name not in required_components and component_total == 0 and component_cost == 0:
+                return None
+            return {
+                "total": component_total,
+                "input": component_input,
+                "output": component_output,
+                "model": component_model,
+                "cost": component_cost,
+                "_input_cost": component_input_cost,
+                "_output_cost": component_output_cost,
+            }
+
+        component_specs = [
+            ("ideator", getattr(self, "ideator", None)),
+            ("formatter", getattr(self, "formatter", None)),
+            ("critic", getattr(self, "critic", None)),
+            ("breeder", getattr(self, "breeder", None)),
+            ("genotype_encoder", getattr(self, "genotype_encoder", None)),
+            ("diversity_embeddings", getattr(self, "diversity_calculator", None)),
+            ("oracle", getattr(self, "oracle", None)),
+        ]
+
+        token_data: Dict[str, Any] = {}
+        models: Dict[str, str] = {}
+        diagnostics_by_agent: Dict[str, Any] = {}
+        diagnostic_events_by_agent: Dict[str, Any] = {}
+        total_input = 0
+        total_output = 0
+        total_input_cost = 0.0
+        total_output_cost = 0.0
+
+        for component_name, component in component_specs:
+            summary = summarize_component(component_name, component)
+            if summary is None:
+                continue
+
+            total_input += safe_int(summary.get("input"))
+            total_output += safe_int(summary.get("output"))
+            total_input_cost += safe_float(summary.pop("_input_cost", 0.0))
+            total_output_cost += safe_float(summary.pop("_output_cost", 0.0))
+            models[component_name] = summary.get("model", "unknown")
+            token_data[component_name] = summary
+            diagnostics_by_agent[component_name] = getattr(component, "get_diagnostics", lambda: {})()
+            diagnostic_events_by_agent[component_name] = getattr(
+                component, "get_diagnostic_events", lambda: []
+            )()
+
+        total = total_input + total_output
         total_cost = total_input_cost + total_output_cost
 
-        token_data = {
-            'ideator': {
-                'total': self.ideator.total_token_count,
-                'input': ideator_input,
-                'output': ideator_output,
-                'model': ideator_model,
-                'cost': ideator_input_cost + ideator_output_cost
-            },
-            'formatter': {
-                'total': self.formatter.total_token_count,
-                'input': formatter_input,
-                'output': formatter_output,
-                'model': formatter_model,
-                'cost': formatter_input_cost + formatter_output_cost
-            },
-            'critic': {
-                'total': self.critic.total_token_count,
-                'input': critic_input,
-                'output': critic_output,
-                'model': critic_model,
-                'cost': critic_input_cost + critic_output_cost
-            },
-            'breeder': {
-                'total': self.breeder.total_token_count,
-                'input': breeder_input,
-                'output': breeder_output,
-                'model': breeder_model,
-                'cost': breeder_input_cost + breeder_output_cost
-            },
-            'oracle': {
-                'total': self.oracle.total_token_count,
-                'input': oracle_input,
-                'output': oracle_output,
-                'model': oracle_model,
-                'cost': oracle_input_cost + oracle_output_cost
-            },
-            'total': total,
-            'total_input': total_input,
-            'total_output': total_output,
-            'cost': {
-                'input_cost': total_input_cost,
-                'output_cost': total_output_cost,
-                'total_cost': total_cost,
-                'currency': 'USD'
-            },
-            'models': {
-                'ideator': ideator_model,
-                'formatter': formatter_model,
-                'critic': critic_model,
-                'breeder': breeder_model,
-                'oracle': oracle_model
+        token_data.update(
+            {
+                "total": total,
+                "total_input": total_input,
+                "total_output": total_output,
+                "cost": {
+                    "input_cost": total_input_cost,
+                    "output_cost": total_output_cost,
+                    "total_cost": total_cost,
+                    "currency": "USD",
+                },
+                "models": models,
             }
-        }
+        )
 
-        diagnostics_by_agent = {
-            "ideator": getattr(self.ideator, "get_diagnostics", lambda: {})(),
-            "formatter": getattr(self.formatter, "get_diagnostics", lambda: {})(),
-            "critic": getattr(self.critic, "get_diagnostics", lambda: {})(),
-            "breeder": getattr(self.breeder, "get_diagnostics", lambda: {})(),
-            "oracle": getattr(self.oracle, "get_diagnostics", lambda: {})(),
-        }
-        diagnostic_events_by_agent = {
-            "ideator": getattr(self.ideator, "get_diagnostic_events", lambda: [])(),
-            "formatter": getattr(self.formatter, "get_diagnostic_events", lambda: [])(),
-            "critic": getattr(self.critic, "get_diagnostic_events", lambda: [])(),
-            "breeder": getattr(self.breeder, "get_diagnostic_events", lambda: [])(),
-            "oracle": getattr(self.oracle, "get_diagnostic_events", lambda: [])(),
-        }
         diagnostic_totals: Dict[str, int] = {}
         for stats in diagnostics_by_agent.values():
             for key, value in stats.items():
@@ -1108,6 +1367,67 @@ class EvolutionEngine:
 
         return max(0, min(population_size, replace_count))
 
+    def _compute_island_sizes(self, population_size: Optional[int] = None) -> List[int]:
+        """Split the total population into stable island sizes."""
+        size = self.pop_size if population_size is None else int(population_size or 0)
+        if size <= 0:
+            return []
+
+        count = max(1, min(int(getattr(self, "island_count", 2) or 2), size))
+        base_size = size // count
+        remainder = size % count
+        return [
+            base_size + (1 if island_id < remainder else 0)
+            for island_id in range(count)
+        ]
+
+    def _initial_island_ids(self, population_size: Optional[int] = None) -> List[int]:
+        """Return island assignments in deterministic population order."""
+        island_ids: List[int] = []
+        for island_id, island_size in enumerate(self._compute_island_sizes(population_size)):
+            island_ids.extend([island_id] * island_size)
+        return island_ids
+
+    def _get_idea_island_id(self, idea: Any, *, fallback: int = 0) -> int:
+        """Read normalized island metadata from an idea payload."""
+        count = max(1, int(getattr(self, "island_count", 2) or 2))
+        if isinstance(idea, dict):
+            try:
+                return max(0, min(count - 1, int(idea.get("island_id", fallback))))
+            except (TypeError, ValueError):
+                pass
+        return max(0, min(count - 1, int(fallback or 0)))
+
+    def _set_idea_island_id(self, idea: Any, island_id: int) -> Any:
+        """Attach island metadata when the idea payload is mutable."""
+        if isinstance(idea, dict):
+            idea["island_id"] = self._get_idea_island_id(
+                {"island_id": island_id},
+                fallback=0,
+            )
+        return idea
+
+    def _population_island_entries(
+        self,
+        population: Optional[List[Any]] = None,
+        *,
+        assign_missing: bool = True,
+    ) -> List[List[Dict[str, Any]]]:
+        """Group population entries by island while preserving global indices."""
+        current_population = self.population if population is None else population
+        island_count = max(1, min(int(getattr(self, "island_count", 2) or 2), max(1, len(current_population))))
+        fallback_ids = self._initial_island_ids(len(current_population))
+        groups: List[List[Dict[str, Any]]] = [[] for _ in range(island_count)]
+
+        for global_idx, idea in enumerate(current_population):
+            fallback = fallback_ids[global_idx] if global_idx < len(fallback_ids) else 0
+            island_id = self._get_idea_island_id(idea, fallback=fallback)
+            if assign_missing:
+                self._set_idea_island_id(idea, island_id)
+            groups[island_id].append({"global_index": global_idx, "idea": idea})
+
+        return groups
+
     async def _calculate_population_diversity_scores(
         self, population: List[Any]
     ) -> Dict[int, float]:
@@ -1121,7 +1441,7 @@ class EvolutionEngine:
             return {}
 
         default_scores = {idx: 0.0 for idx in range(len(population))}
-        if not self.diversity_calculator.is_enabled() or len(population) < 2:
+        if not self.diversity_calculator.is_enabled():
             return default_scores
 
         embeddings = await self._get_or_compute_embeddings_for_ideas(population)
@@ -1133,10 +1453,12 @@ class EvolutionEngine:
                 valid_embeddings.append(embedding)
                 valid_indices.append(idx)
 
-        if len(valid_embeddings) < 2:
+        if not valid_embeddings:
             return default_scores
 
-        centroid = np.mean(valid_embeddings, axis=0)
+        centroid = await self._compute_population_centroid()
+        if centroid is None:
+            centroid = np.mean(valid_embeddings, axis=0)
         diversity_scores = default_scores.copy()
         for emb_idx, pop_idx in enumerate(valid_indices):
             embedding = valid_embeddings[emb_idx]

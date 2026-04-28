@@ -4,6 +4,7 @@ import secrets
 import os
 import re
 import socket
+import math
 from google import genai
 from google.genai import types
 import json
@@ -59,6 +60,7 @@ TRANSIENT_MARKERS = (
 
 THINKING_LEVEL_TO_BUDGET_FALLBACK = {
     "off": 0,
+    "minimal": 0,
     "low": 1024,
     "medium": 8192,
     "high": -1,  # Dynamic/high-think fallback
@@ -306,7 +308,7 @@ class LLMWrapper(ABC):
         reraise=True
     )
     def generate_text(self,
-                     prompt: str,
+                     prompt: Any,
                      temperature: Optional[float] = None,
                      top_p: Optional[float] = None,
                      response_schema: Type[BaseModel] = None) -> str:
@@ -315,7 +317,7 @@ class LLMWrapper(ABC):
             return self._generate_content(prompt, temperature, top_p, response_schema)
         return "Not implemented"
 
-    def _generate_content(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
+    def _generate_content(self, prompt: Any, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
         """Generate using google.genai client"""
         try:
             client = self._get_client()
@@ -573,14 +575,14 @@ class Ideator(LLMWrapper):
         return ", ".join(subset)
 
     def generate_specific_prompt(self, context_pool: str, idea_type: str) -> str:
-        """Generate a specific idea prompt from the context pool using the translation layer"""
+        """Generate a concrete idea direction from the context pool."""
         prompts = self._resolve_prompts(idea_type)
 
         # Create the translation prompt with shuffled subset
         translation_prompt = prompts.SPECIFIC_PROMPT.format(context_pool=context_pool)
 
         specific_prompt = self.generate_text(translation_prompt)
-        print(f"Generated specific prompt: {specific_prompt}")
+        print(f"Generated direction prompt: {specific_prompt}")
 
         return specific_prompt
 
@@ -742,17 +744,17 @@ class Ideator(LLMWrapper):
         """Helper function to generate an idea from a context pool
 
         This function encapsulates steps 3 and 4 from the user's request:
-        3. Using the sample to ask LLM to create specific prompt
-        4. Generate an idea from specific prompt
+        3. Use the sample to ask the LLM to create a direction prompt
+        4. Generate an idea from that direction prompt
 
         Args:
             context_pool: The context pool to generate from
             idea_type: Type of idea to generate
 
         Returns:
-            tuple: (generated_idea, specific_prompt_used)
+            tuple: (generated_idea, direction_prompt_used)
         """
-        # Generate specific prompt from context pool
+        # Generate a concrete direction prompt from the context pool.
         specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
 
         # Keep generation compact: specific direction + consolidated template constraints.
@@ -764,11 +766,6 @@ class Ideator(LLMWrapper):
         response = self.generate_text(extended_prompt)
 
         return response, specific_prompt
-
-    def get_idea_prompt(self, idea_type: str) -> str:
-        """Get prompt template for specific idea type"""
-        prompts = self._resolve_prompts(idea_type)
-        return prompts.IDEA_PROMPT
 
     def seed_ideas(self, n: int, idea_type: str) -> tuple[List[str], List[str]]:
         """Generate n initial ideas
@@ -1085,10 +1082,11 @@ class Critic(LLMWrapper):
             if raw_id:
                 idea_id = str(raw_id)
             idea_obj = idea.get("idea", idea)
-            if hasattr(idea_obj, "title"):
-                title = idea_obj.title or title
+            raw_title = getattr(idea_obj, "title", None)
+            if raw_title and not callable(raw_title):
+                title = str(raw_title)
             elif isinstance(idea_obj, dict):
-                title = idea_obj.get("title", title)
+                title = str(idea_obj.get("title", title))
             else:
                 title = str(idea_obj)
         else:
@@ -1098,6 +1096,27 @@ class Critic(LLMWrapper):
             title = title[:117] + "..."
 
         return {"id": idea_id, "title": title}
+
+    def _initial_tournament_rating(self, idea) -> float:
+        """Read the persisted global auto Elo for an idea."""
+        candidates = []
+        if isinstance(idea, dict):
+            ratings = idea.get("ratings")
+            if isinstance(ratings, dict):
+                candidates.append(ratings.get("auto"))
+            selection_metrics = idea.get("selection_metrics")
+            if isinstance(selection_metrics, dict):
+                candidates.append(selection_metrics.get("elo"))
+            candidates.append(idea.get("elo"))
+
+        for candidate in candidates:
+            try:
+                rating = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(rating):
+                return rating
+        return 1500.0
 
     def get_tournament_ranks(
         self,
@@ -1116,12 +1135,12 @@ class Critic(LLMWrapper):
 
         # Handle edge case: if there's only one idea or no ideas, return appropriate ranking
         if len(ideas) <= 1:
-            return {0: 1500} if len(ideas) == 1 else {}
+            return {0: self._initial_tournament_rating(ideas[0])} if len(ideas) == 1 else {}
 
         if rounds <= 0:
             rounds = 1
 
-        ranks = {i: 1500 for i in range(len(ideas))}
+        ranks = {i: self._initial_tournament_rating(idea) for i, idea in enumerate(ideas)}
 
         # Decide whether to enable parallel evaluation
         enable_parallel = (
@@ -1396,8 +1415,8 @@ class Breeder(LLMWrapper):
         This follows the same pattern as initial idea generation:
         1. Get concepts from the parents (their genotypes) and combine them
         2. Sample 50% at random (in python code)
-        3. Using the sample to ask LLM to create specific prompt
-        4. Generate an idea from specific prompt
+        3. Use the sample to ask the LLM to create a direction prompt
+        4. Generate an idea from that direction prompt
 
         Args:
             ideas: List of parent ideas that have already been selected in the main evolution loop
@@ -1430,7 +1449,7 @@ class Breeder(LLMWrapper):
         ideator = self._get_thread_ideator()
 
         # Step 2: Sample 50% at random (handled in generate_context_from_parents)
-        # Step 3 & 4: Using the sample to create specific prompt and generate idea
+        # Step 3 & 4: Use the sample to create a direction prompt and generate an idea.
 
         # Generate fresh context for mutation if enabled
         mutation_context_pool = ""
@@ -1446,15 +1465,15 @@ class Breeder(LLMWrapper):
         new_idea, specific_prompt = ideator.generate_idea_from_context(context_pool, idea_type)
 
         print(f"Generated new idea from parent concepts: {new_idea[:100]}...")
-        print(f"Using specific prompt: {specific_prompt[:100]}...")
+        print(f"Using direction prompt: {specific_prompt[:100]}...")
 
         # Create a new idea with a unique ID and parent IDs
-        # Also include the specific prompt used for breeding
+        # Also include the direction prompt used for breeding.
         return {
             "id": uuid.uuid4(),
             "idea": new_idea,
             "parent_ids": parent_ids,
-            "specific_prompt": specific_prompt,  # Store the specific prompt for later display
+            "specific_prompt": specific_prompt,  # Stored under the legacy key for persistence.
             "parent_genotypes": parent_genotype_records,
         }
 

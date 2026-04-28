@@ -33,7 +33,7 @@ class TestYAMLTemplateLoading:
         prompts = get_prompts(template_name, use_yaml=True)
 
         required_prompts = [
-            'CONTEXT_PROMPT', 'IDEA_PROMPT',
+            'CONTEXT_PROMPT', 'SPECIFIC_PROMPT',
             'FORMAT_PROMPT', 'CRITIQUE_PROMPT', 'REFINE_PROMPT', 'BREED_PROMPT',
             'COMPARISON_PROMPT'
         ]
@@ -43,6 +43,7 @@ class TestYAMLTemplateLoading:
             prompt_text = getattr(prompts, prompt_name)
             assert isinstance(prompt_text, str), f"{prompt_name} should be a string"
             assert len(prompt_text) > 0, f"{prompt_name} should not be empty"
+        assert not hasattr(prompts, 'IDEA_PROMPT')
 
     @pytest.mark.parametrize("template_name", ["drabble", "airesearch", "game_design"])
     def test_comparison_criteria_present(self, template_name):
@@ -82,17 +83,14 @@ class TestSpecialFeatures:
         """Test that special requirements are properly interpolated"""
         prompts = get_prompts('drabble', use_yaml=True)
 
-        # Check that special requirements were interpolated into prompts
-        idea_prompt = prompts.IDEA_PROMPT
-        assert 'A drabble is a short work of fiction' in idea_prompt
+        assert not hasattr(prompts, 'IDEA_PROMPT')
 
 
     def test_game_design_special_requirements_interpolation(self):
         """Test that game design special requirements are properly interpolated"""
         prompts = get_prompts('game_design', use_yaml=True)
 
-        idea_prompt = prompts.IDEA_PROMPT
-        assert 'The game should be simple enough' in idea_prompt
+        assert not hasattr(prompts, 'IDEA_PROMPT')
 
 
     def test_placeholder_validation(self):
@@ -130,8 +128,7 @@ class TestTemplateValidation:
             "metadata": {"item_type": "test"},
             "prompts": {
                 "context": "Context prompt",
-                "idea": "Idea prompt",
-                "specific_prompt": "Specific prompt",
+                "specific_prompt": "Direction builder prompt",
                 "format": "Format prompt missing input_text placeholder",  # Missing {input_text}
                 "critique": "Critique prompt missing idea placeholder",  # Missing {idea}
                 "refine": "Refine prompt missing placeholders",  # Missing {idea} and {critique}

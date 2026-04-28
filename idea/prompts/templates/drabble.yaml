@@ -52,11 +52,6 @@ prompts:
     - "Write a drabble about a child who finds a door to another world in their closet."
     - "A 100-word story about a robot who learns to love."
 
-  idea: |
-    Generate one drabble from the selected direction.
-    Apply all constraints below:
-    {requirements}
-
   format: |
     You are a formatting assistant. Your task is to take the input text and structure it into a JSON object with "title" and "content" fields.
 

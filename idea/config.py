@@ -1,3 +1,5 @@
+import os
+
 # Configuration settings shared across the application
 
 # Available LLM models
@@ -8,6 +10,7 @@ LLM_MODELS = [
     {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
     {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
     {"id": "gemini-3-flash-preview", "name": "Gemini 3 Flash Preview"},
+    {"id": "gemini-3.1-flash-lite-preview", "name": "Gemini 3.1 Flash-Lite Preview"},
     {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview"}
 ]
 
@@ -62,9 +65,21 @@ THINKING_MODEL_CONFIG = {
         "supports_thinking": True,
         "supports_thinking_level": True,
         "supports_thinking_budget": True,
-        "allow_off": True,
-        "default_level": "off",
-        "default_budget": 0,
+        "allow_off": False,
+        "off_replacement_level": "minimal",
+        "default_level": "minimal",
+        "default_budget": None,
+        "min_budget": 0,
+        "max_budget": 24576,
+    },
+    "gemini-3.1-flash-lite-preview": {
+        "supports_thinking": True,
+        "supports_thinking_level": True,
+        "supports_thinking_budget": True,
+        "allow_off": False,
+        "off_replacement_level": "minimal",
+        "default_level": "minimal",
+        "default_budget": None,
         "min_budget": 0,
         "max_budget": 24576,
     },
@@ -99,11 +114,39 @@ model_prices_per_million_tokens = {
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
     "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
+    "gemini-3.1-flash-lite-preview": {"input": 0.25, "output": 1.50},
     "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00}
 }
 
+EMBEDDING_MODELS = [
+    {
+        "id": "gemini-embedding-2",
+        "name": "Gemini Embedding 2",
+        "description": "Multimodal embedding model for text, image, video, audio, and PDF inputs.",
+    },
+    {
+        "id": "gemini-embedding-001",
+        "name": "Gemini Embedding",
+        "description": "Text-only embedding model.",
+    },
+]
+
+DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2"
+
+embedding_prices_per_million_tokens = {
+    "gemini-embedding-2": {
+        "text_input": 0.20,
+        "image_input": 0.45,
+        "audio_input": 6.50,
+        "video_input": 12.00,
+    },
+    "gemini-embedding-001": {
+        "input": 0.15,
+        "batch_input": 0.075,
+    },
+}
+
 # SMTP Configuration
-import os
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")

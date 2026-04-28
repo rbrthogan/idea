@@ -44,6 +44,11 @@ let lastOracleUpdateKey = '';
 let lastEliteUpdateKey = '';
 let lastDiagnosticsSummaryKey = '';
 let latestDiagnosticsTokenCounts = null;
+let evolutionViewMode = 'tree';
+let lastEvolutionTreeSignature = '';
+let treeResizeListenerAttached = false;
+let currentEvolutionTree = null;
+let selectedTreeNodeId = null;
 
 /**
  * Load available templates and populate the idea type dropdown
@@ -90,8 +95,26 @@ function getDiagnosticDescription(key) {
         seed_generation_failures: 'Seed generation attempt failed and was retried.',
         seed_context_novelty_regenerations: 'Seed context was regenerated to improve novelty.',
         seed_context_novelty_guardrail_exhausted: 'Novelty retries were exhausted for one or more seeds.',
+        survivor_refinement_failures: 'Stochastic survivor refinement failed and the original survivor was kept.',
+        invalid_survivor_refinements: 'Stochastic survivor refinement returned unusable content and was discarded.',
     };
     return descriptions[key] || 'No description available for this diagnostic key.';
+}
+
+function updateSurvivorRefinementControls() {
+    const refineAllEl = document.getElementById('refineAllIdeas');
+    const rateEl = document.getElementById('survivorRefinementRate');
+    const rateValueEl = document.getElementById('survivorRefinementRateValue');
+
+    if (rateEl && rateValueEl) {
+        rateValueEl.textContent = parseFloat(rateEl.value || '0').toFixed(2);
+    }
+
+    if (!refineAllEl || !rateEl) {
+        return;
+    }
+
+    rateEl.disabled = refineAllEl.checked;
 }
 
 function formatDiagnosticTimestamp(value) {
@@ -344,6 +367,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     addListener('popSize', 'input', updateTournamentCountFromPopSize);
     updateTournamentCountFromPopSize();
+    addListener('refineAllIdeas', 'change', updateSurvivorRefinementControls);
+    addListener('survivorRefinementRate', 'input', updateSurvivorRefinementControls);
+    updateSurvivorRefinementControls();
+    addListener('islandCount', 'input', () => {
+        const el = document.getElementById('islandCount');
+        const valueEl = document.getElementById('islandCountValue');
+        if (el && valueEl) valueEl.textContent = parseInt(el.value || '1', 10);
+    });
+    addListener('migrationRate', 'input', () => {
+        const el = document.getElementById('migrationRate');
+        const valueEl = document.getElementById('migrationRateValue');
+        if (el && valueEl) valueEl.textContent = parseFloat(el.value || '0').toFixed(2);
+    });
+    addListener('migrationNoveltyProtectionQuantile', 'input', () => {
+        const el = document.getElementById('migrationNoveltyProtectionQuantile');
+        const valueEl = document.getElementById('migrationNoveltyProtectionQuantileValue');
+        if (el && valueEl) valueEl.textContent = parseFloat(el.value || '0.8').toFixed(2);
+    });
+    document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
+        button.addEventListener('click', () => setEvolutionViewMode(button.dataset.viewMode));
+    });
     setupModelChangeListener();
 
     // --- Evolution Controls ---
@@ -381,6 +425,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         const replacementRate = parseFloat(document.getElementById('replacementRate').value);
         const fitnessAlpha = parseFloat(document.getElementById('fitnessAlpha').value);
         const ageDecayRate = parseFloat(document.getElementById('ageDecayRate').value);
+        const refineAllIdeas = document.getElementById('refineAllIdeas')?.checked ?? false;
+        const survivorRefinementRate = parseFloat(
+            document.getElementById('survivorRefinementRate')?.value ?? '0.1'
+        );
+        const islandCount = parseInt(document.getElementById('islandCount')?.value ?? '2', 10);
+        const migrationRate = parseFloat(document.getElementById('migrationRate')?.value ?? '0.05');
+        const migrationNoveltyProtectionQuantile = parseFloat(
+            document.getElementById('migrationNoveltyProtectionQuantile')?.value ?? '0.8'
+        );
 
         // Get model-aware thinking settings.
         const thinkingSettings = getThinkingSettings();
@@ -406,6 +459,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             replacementRate,
             fitnessAlpha,
             ageDecayRate,
+            refineAllIdeas,
+            survivorRefinementRate,
+            islandCount,
+            migrationRate,
+            migrationNoveltyProtectionQuantile,
             thinkingBudget: thinkingSettings.thinkingBudget,
             thinkingLevel: thinkingSettings.thinkingLevel,
             maxBudget,
@@ -731,6 +789,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function restoreCurrentEvolution() {
     try {
         console.log("Attempting to restore current evolution from localStorage...");
+        let serverProgressData = null;
 
         // First check if there's actually an evolution running on the server
         try {
@@ -738,6 +797,7 @@ async function restoreCurrentEvolution() {
             if (progressResponse.ok) {
                 const progressData = await progressResponse.json();
                 console.log("Evolution status from server:", progressData);
+                serverProgressData = progressData;
 
                 // Only restore if evolution is actually running
                 if (!progressData.is_running) {
@@ -760,12 +820,30 @@ async function restoreCurrentEvolution() {
                 // Handle both old format (just history array) and new format (object with history and diversity_history)
                 let generationsData, diversityData, tokenCounts, tournamentData;
                 if (Array.isArray(evolutionState)) {
+                    if (serverProgressData?.evolution_id) {
+                        console.log("Legacy stored evolution has no id; using live active run instead");
+                        localStorage.removeItem('currentEvolutionData');
+                        startPollingActiveEvolution(serverProgressData);
+                        return true;
+                    }
                     // Old format - just the history array
                     generationsData = evolutionState;
                     diversityData = [];
                     tokenCounts = null;
                     tournamentData = [];
                 } else if (evolutionState && evolutionState.history) {
+                    const storedEvolutionId = evolutionState.evolution_id || evolutionState.evolutionId || null;
+                    const serverEvolutionId = serverProgressData?.evolution_id || null;
+                    if (serverEvolutionId && storedEvolutionId !== serverEvolutionId) {
+                        console.log(
+                            "Stored evolution does not match active run; skipping localStorage restore",
+                            { storedEvolutionId, serverEvolutionId }
+                        );
+                        localStorage.removeItem('currentEvolutionData');
+                        startPollingActiveEvolution(serverProgressData);
+                        return true;
+                    }
+
                     // New format - object with history and diversity_history
                     generationsData = evolutionState.history;
                     diversityData = evolutionState.diversity_history || [];
@@ -804,6 +882,8 @@ async function restoreCurrentEvolution() {
 
                     // Set up currentEvolutionData for download functionality
                     currentEvolutionData = {
+                        evolution_id: evolutionState.evolution_id || serverProgressData?.evolution_id || null,
+                        evolution_name: evolutionState.evolution_name || serverProgressData?.evolution_name || null,
                         history: generationsData,
                         history_version: restoredVersion,
                         diversity_history: diversityData,
@@ -832,6 +912,7 @@ async function restoreCurrentEvolution() {
                     }
 
                     console.log("Successfully restored current evolution from localStorage");
+                    startPollingActiveEvolution(serverProgressData);
                     return true;
                 }
             } catch (e) {
@@ -840,6 +921,10 @@ async function restoreCurrentEvolution() {
         }
 
         console.log("No current evolution data found in localStorage");
+        if (serverProgressData?.is_running) {
+            startPollingActiveEvolution(serverProgressData);
+            return true;
+        }
         return false;
     } catch (error) {
         console.error('Error restoring current evolution:', error);
@@ -899,8 +984,13 @@ function schedulePersistEvolutionState(stateData) {
     if (persistStateTimeout) {
         clearTimeout(persistStateTimeout);
     }
+    const stateWithIdentity = {
+        ...stateData,
+        evolution_id: stateData.evolution_id || currentEvolutionId || null,
+        evolution_name: stateData.evolution_name || currentEvolutionName || null
+    };
     persistStateTimeout = setTimeout(() => {
-        localStorage.setItem('currentEvolutionData', JSON.stringify(stateData));
+        localStorage.setItem('currentEvolutionData', JSON.stringify(stateWithIdentity));
     }, LOCAL_STORAGE_PERSIST_DELAY_MS);
 }
 
@@ -1136,6 +1226,1085 @@ function getIdeaData(idea) {
     };
 }
 
+function getIdeaIslandId(idea) {
+    const rawIslandId = idea?.island_id ?? idea?.idea?.island_id;
+    const islandId = Number(rawIslandId);
+    return Number.isInteger(islandId) && islandId >= 0 ? islandId : null;
+}
+
+function getIdeaStableId(idea, generationIndex, ideaIndex) {
+    const rawId = idea?.id ?? idea?.idea?.id;
+    return rawId ? String(rawId) : `generated:${generationIndex}:${ideaIndex}`;
+}
+
+function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function') {
+        return window.CSS.escape(String(value));
+    }
+    return String(value).replace(/["\\]/g, '\\$&');
+}
+
+function getTreeParentIds(idea) {
+    if (idea?.migration_event && idea?.migrated_from_id) {
+        return [String(idea.migrated_from_id)];
+    }
+    if (idea?.survivor_refined && idea?.survivor_refined_from_id) {
+        return [String(idea.survivor_refined_from_id)];
+    }
+    return Array.isArray(idea?.parent_ids)
+        ? idea.parent_ids.filter(Boolean).map(parentId => String(parentId))
+        : [];
+}
+
+function getTreeEdgeType(idea, parentId) {
+    if (idea?.migration_event && String(idea?.migrated_from_id || '') === String(parentId)) {
+        return 'migration';
+    }
+    if (idea?.survivor_refined && String(idea?.survivor_refined_from_id || '') === String(parentId)) {
+        return 'survivor_refinement';
+    }
+    return 'breeding';
+}
+
+function getNearestAvailableTreeLane(preferredLane, occupiedLanes) {
+    if (!Number.isInteger(preferredLane) || preferredLane < 0) {
+        let lane = 0;
+        while (occupiedLanes.has(lane)) {
+            lane += 1;
+        }
+        return lane;
+    }
+
+    if (!occupiedLanes.has(preferredLane)) {
+        return preferredLane;
+    }
+
+    for (let distance = 1; distance <= occupiedLanes.size + preferredLane + 2; distance += 1) {
+        const left = preferredLane - distance;
+        const right = preferredLane + distance;
+        if (left >= 0 && !occupiedLanes.has(left)) {
+            return left;
+        }
+        if (!occupiedLanes.has(right)) {
+            return right;
+        }
+    }
+
+    return occupiedLanes.size;
+}
+
+function getPreferredParentTreeLane(idea, previousLanesById) {
+    const parentLanes = getTreeParentIds(idea)
+        .map(parentId => previousLanesById.get(parentId))
+        .filter(lane => Number.isInteger(lane));
+    if (parentLanes.length === 0) {
+        return null;
+    }
+    const laneSum = parentLanes.reduce((sum, lane) => sum + lane, 0);
+    return Math.round(laneSum / parentLanes.length);
+}
+
+function buildEvolutionTreeModel(gens) {
+    const nodesById = new Map();
+    const occurrencesById = new Map();
+    const orderedIds = [];
+
+    (gens || []).forEach((generation, generationIndex) => {
+        (generation || []).forEach((idea, ideaIndex) => {
+            const nodeId = getIdeaStableId(idea, generationIndex, ideaIndex);
+            if (!nodesById.has(nodeId)) {
+                const islandId = getIdeaIslandId(idea);
+                nodesById.set(nodeId, {
+                    id: nodeId,
+                    title: getIdeaData(idea).title || 'Untitled',
+                    idea,
+                    firstGeneration: generationIndex,
+                    lastGeneration: generationIndex,
+                    firstIndex: ideaIndex,
+                    islandId,
+                    originIslandId: Number.isInteger(Number(idea?.origin_island_id))
+                        ? Number(idea.origin_island_id)
+                        : islandId,
+                    continuationGenerations: [],
+                    laneIndex: null
+                });
+                orderedIds.push(nodeId);
+            }
+
+            const node = nodesById.get(nodeId);
+            node.lastGeneration = Math.max(node.lastGeneration, generationIndex);
+            node.idea = idea;
+            if (!occurrencesById.has(nodeId)) {
+                occurrencesById.set(nodeId, []);
+            }
+            occurrencesById.get(nodeId).push(generationIndex);
+        });
+    });
+
+    const continuations = [];
+    occurrencesById.forEach((rawGenerations, nodeId) => {
+        const uniqueGenerations = [...new Set(rawGenerations)].sort((a, b) => a - b);
+        const node = nodesById.get(nodeId);
+        if (!node) return;
+        node.continuationGenerations = uniqueGenerations.slice(1);
+        for (let i = 1; i < uniqueGenerations.length; i += 1) {
+            const previous = uniqueGenerations[i - 1];
+            const current = uniqueGenerations[i];
+            if (current === previous + 1) {
+                continuations.push({
+                    id: `${nodeId}:${previous}->${current}`,
+                    nodeId,
+                    fromGeneration: previous,
+                    toGeneration: current
+                });
+            }
+        }
+    });
+
+    const edges = [];
+    const seenEdges = new Set();
+    (gens || []).forEach((generation, generationIndex) => {
+        (generation || []).forEach((idea, ideaIndex) => {
+            const childId = getIdeaStableId(idea, generationIndex, ideaIndex);
+            const childNode = nodesById.get(childId);
+            if (!childNode || childNode.firstGeneration !== generationIndex) return;
+
+            getTreeParentIds(idea).forEach(parentId => {
+                if (!nodesById.has(parentId)) return;
+                const key = `${parentId}->${childId}:${generationIndex}`;
+                if (seenEdges.has(key)) return;
+                seenEdges.add(key);
+                edges.push({
+                    id: key,
+                    from: parentId,
+                    to: childId,
+                    generation: generationIndex,
+                    type: getTreeEdgeType(idea, parentId)
+                });
+            });
+        });
+    });
+
+    let previousLanesById = new Map();
+    let laneCount = 0;
+    const generationsModel = (gens || []).map((generation, generationIndex) => {
+        const nodeIds = [];
+        const continuationIds = [];
+        const entries = [];
+        (generation || []).forEach((idea, ideaIndex) => {
+            const nodeId = getIdeaStableId(idea, generationIndex, ideaIndex);
+            const node = nodesById.get(nodeId);
+            if (!node) return;
+            const kind = node.firstGeneration === generationIndex ? 'node' : 'continuation';
+            if (node.firstGeneration === generationIndex) {
+                nodeIds.push(nodeId);
+            } else {
+                continuationIds.push(nodeId);
+            }
+            entries.push({ nodeId, idea, kind });
+        });
+
+        const occupiedLanes = new Set();
+        const currentLanesById = new Map();
+        const slots = [];
+
+        entries.filter(entry => entry.kind === 'continuation').forEach((entry) => {
+            const node = nodesById.get(entry.nodeId);
+            const preferredLane = previousLanesById.has(entry.nodeId)
+                ? previousLanesById.get(entry.nodeId)
+                : node?.laneIndex;
+            const laneIndex = getNearestAvailableTreeLane(preferredLane, occupiedLanes);
+            occupiedLanes.add(laneIndex);
+            currentLanesById.set(entry.nodeId, laneIndex);
+            if (node && !Number.isInteger(node.laneIndex)) {
+                node.laneIndex = laneIndex;
+            }
+            slots.push({ nodeId: entry.nodeId, kind: 'continuation', laneIndex });
+        });
+
+        entries.filter(entry => entry.kind === 'node').forEach((entry) => {
+            const node = nodesById.get(entry.nodeId);
+            const preferredLane = getPreferredParentTreeLane(entry.idea, previousLanesById);
+            const laneIndex = getNearestAvailableTreeLane(preferredLane, occupiedLanes);
+            occupiedLanes.add(laneIndex);
+            currentLanesById.set(entry.nodeId, laneIndex);
+            if (node) {
+                node.laneIndex = laneIndex;
+            }
+            slots.push({ nodeId: entry.nodeId, kind: 'node', laneIndex });
+        });
+
+        if (occupiedLanes.size > 0) {
+            laneCount = Math.max(laneCount, Math.max(...occupiedLanes) + 1);
+        }
+        previousLanesById = currentLanesById;
+
+        slots.sort((a, b) => (
+            a.laneIndex - b.laneIndex
+            || a.kind.localeCompare(b.kind)
+            || a.nodeId.localeCompare(b.nodeId)
+        ));
+        return { generation: generationIndex, nodeIds, continuationIds, slots };
+    });
+
+    const parentsById = new Map(orderedIds.map(id => [id, []]));
+    const childrenById = new Map(orderedIds.map(id => [id, []]));
+    edges.forEach((edge) => {
+        if (!parentsById.has(edge.to)) parentsById.set(edge.to, []);
+        if (!childrenById.has(edge.from)) childrenById.set(edge.from, []);
+        parentsById.get(edge.to).push(edge.from);
+        childrenById.get(edge.from).push(edge.to);
+    });
+
+    const nodes = orderedIds.map(id => nodesById.get(id));
+    nodes.forEach((node) => {
+        node.parentIds = parentsById.get(node.id) || [];
+        node.childIds = childrenById.get(node.id) || [];
+        node.ancestorIds = getTransitiveTreeIds(node.id, parentsById);
+        node.descendantIds = getTransitiveTreeIds(node.id, childrenById);
+        node.metricGeneration = getTreeMetricGeneration(node);
+        node.metricValues = {
+            elo: getTreeMetricValue(node.idea || {}, 'elo'),
+            diversity: getTreeMetricValue(node.idea || {}, 'diversity'),
+            fitness: getTreeMetricValue(node.idea || {}, 'fitness')
+        };
+        node.fitnessValue = getTreeMetricValue(node.idea || {}, 'fitness');
+    });
+    const metricStats = getTreeMetricStats(nodes);
+    nodes.forEach((node) => {
+        node.metricContexts = {
+            elo: buildTreeMetricContext(node, metricStats, 'elo'),
+            diversity: buildTreeMetricContext(node, metricStats, 'diversity'),
+            fitness: buildTreeMetricContext(node, metricStats, 'fitness')
+        };
+        node.fitnessContext = buildTreeFitnessContext(node, nodesById);
+    });
+
+    return {
+        nodes,
+        nodesById,
+        edges,
+        continuations,
+        generations: generationsModel,
+        laneCount,
+        fitnessRange: getTreeFitnessRange(nodes),
+        metricStats
+    };
+}
+
+function formatTreeMetric(value, digits = 2) {
+    if (value === null || value === undefined || value === '') return '-';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return '-';
+    return numeric.toFixed(digits);
+}
+
+function getTreeMetricValue(idea, key) {
+    const selection = idea?.selection_metrics || {};
+    const survival = idea?.survival_metrics || {};
+    const aliases = {
+        elo: [selection.elo, idea?.elo, idea?.ratings?.auto],
+        diversity: [selection.diversity, idea?.diversity_score, idea?.diversity],
+        fitness: [selection.fitness, survival.survival_score, idea?.fitness]
+    };
+    const candidates = aliases[key] || [];
+    for (const candidate of candidates) {
+        const numeric = Number(candidate);
+        if (Number.isFinite(numeric)) return numeric;
+    }
+    return null;
+}
+
+function getTreeFitnessRange(nodes) {
+    const values = (nodes || [])
+        .map(node => getTreeMetricValue(node?.idea || {}, 'fitness'))
+        .filter(value => Number.isFinite(value));
+    if (values.length === 0) {
+        return { min: null, max: null };
+    }
+    return {
+        min: Math.min(...values),
+        max: Math.max(...values)
+    };
+}
+
+function getTreeFitnessStrength(value, fitnessRange) {
+    if (!Number.isFinite(value) || !Number.isFinite(fitnessRange?.min) || !Number.isFinite(fitnessRange?.max)) {
+        return null;
+    }
+    if (fitnessRange.max === fitnessRange.min) {
+        return 26;
+    }
+    const normalized = Math.max(0, Math.min(1, (value - fitnessRange.min) / (fitnessRange.max - fitnessRange.min)));
+    return 10 + normalized * 34;
+}
+
+function getEvolutionTreeMaxGenerationSlots(tree) {
+    const slotCounts = (tree?.generations || []).map(row => (row?.slots || []).length);
+    return slotCounts.length > 0 ? Math.max(...slotCounts) : 0;
+}
+
+function getEvolutionTreeDensity(tree) {
+    const laneCount = Math.max(1, Number(tree?.laneCount) || 1);
+    const maxGenerationSlots = getEvolutionTreeMaxGenerationSlots(tree);
+    const nodeCount = (tree?.nodes || []).length;
+
+    if (laneCount >= 26 || maxGenerationSlots >= 24 || (laneCount >= 18 && nodeCount >= 110)) {
+        return 'micro';
+    }
+    if (laneCount >= 16 || maxGenerationSlots >= 15 || nodeCount >= 90) {
+        return 'compact';
+    }
+    return 'normal';
+}
+
+function getTreeNodeAbbreviation(title) {
+    const cleanWords = String(title || '')
+        .trim()
+        .split(/\s+/)
+        .map(word => (word.match(/[A-Za-z0-9]/g) || []).join(''))
+        .filter(Boolean);
+
+    if (cleanWords.length >= 2) {
+        return `${cleanWords[0][0]}${cleanWords[1][0]}`.toUpperCase();
+    }
+    if (cleanWords.length === 1) {
+        return cleanWords[0].slice(0, 2).toUpperCase();
+    }
+    return 'ID';
+}
+
+function getTreeMetricGeneration(node) {
+    const idea = node?.idea || {};
+    const selectionGeneration = Number(idea?.selection_metrics?.evaluation_generation);
+    if (Number.isInteger(selectionGeneration)) {
+        return selectionGeneration;
+    }
+    const survivalGeneration = Number(idea?.survival_metrics?.survived_to_generation);
+    if (Number.isInteger(survivalGeneration)) {
+        return survivalGeneration;
+    }
+    return Number.isInteger(node?.lastGeneration) ? node.lastGeneration : (node?.firstGeneration || 0);
+}
+
+function getTransitiveTreeIds(startId, adjacency) {
+    const seen = new Set();
+    const ordered = [];
+    const stack = [...(adjacency.get(startId) || [])].reverse();
+    while (stack.length > 0) {
+        const nodeId = stack.pop();
+        if (seen.has(nodeId)) continue;
+        seen.add(nodeId);
+        ordered.push(nodeId);
+        stack.push(...[...(adjacency.get(nodeId) || [])].reverse());
+    }
+    return ordered;
+}
+
+function getTreeMean(values) {
+    return values.length > 0
+        ? values.reduce((sum, value) => sum + value, 0) / values.length
+        : null;
+}
+
+function getTreeRankDesc(value, values) {
+    if (!Number.isFinite(value) || !values.length) return null;
+    const sortedValues = [...values].sort((a, b) => b - a);
+    const rankIndex = sortedValues.findIndex(candidate => candidate <= value);
+    return rankIndex >= 0 ? rankIndex + 1 : sortedValues.length;
+}
+
+function getTreeMetricStats(nodes) {
+    const stats = {};
+    ['elo', 'diversity', 'fitness'].forEach((metric) => {
+        const records = (nodes || [])
+            .map(node => ({
+                generation: getTreeMetricGeneration(node),
+                value: getTreeMetricValue(node?.idea || {}, metric)
+            }))
+            .filter(record => Number.isFinite(record.value));
+        const values = records.map(record => record.value);
+        const byGeneration = new Map();
+        [...new Set(records.map(record => record.generation))].forEach((generation) => {
+            const generationValues = records
+                .filter(record => record.generation === generation)
+                .map(record => record.value);
+            const historyValues = records
+                .filter(record => record.generation <= generation)
+                .map(record => record.value);
+            byGeneration.set(generation, {
+                generationValues,
+                generationMean: getTreeMean(generationValues),
+                generationPopulationSize: generationValues.length,
+                historyValues,
+                historyMean: getTreeMean(historyValues),
+                historyPopulationSize: historyValues.length
+            });
+        });
+        stats[metric] = {
+            values,
+            mean: getTreeMean(values),
+            populationSize: values.length,
+            byGeneration
+        };
+    });
+    return stats;
+}
+
+function buildTreeMetricContext(node, metricStats, metric) {
+    const value = getTreeMetricValue(node?.idea || {}, metric);
+    const generation = getTreeMetricGeneration(node);
+    const globalStats = metricStats?.[metric] || { values: [], populationSize: 0, mean: null, byGeneration: new Map() };
+    const scopedStats = globalStats.byGeneration?.get(generation) || {
+        generationValues: [],
+        generationMean: null,
+        generationPopulationSize: 0,
+        historyValues: [],
+        historyMean: null,
+        historyPopulationSize: 0
+    };
+    return {
+        value,
+        generation,
+        globalRank: getTreeRankDesc(value, globalStats.values || []),
+        globalPopulationSize: globalStats.populationSize || 0,
+        historyRank: getTreeRankDesc(value, scopedStats.historyValues || []),
+        historyPopulationSize: scopedStats.historyPopulationSize || 0,
+        generationRank: getTreeRankDesc(value, scopedStats.generationValues || []),
+        generationPopulationSize: scopedStats.generationPopulationSize || 0,
+        globalMean: globalStats.mean,
+        historyMean: scopedStats.historyMean,
+        generationMean: scopedStats.generationMean,
+        deltaVsGlobalMean: Number.isFinite(value) && Number.isFinite(globalStats.mean)
+            ? value - globalStats.mean
+            : null,
+        deltaVsHistoryMean: Number.isFinite(value) && Number.isFinite(scopedStats.historyMean)
+            ? value - scopedStats.historyMean
+            : null,
+        deltaVsGenerationMean: Number.isFinite(value) && Number.isFinite(scopedStats.generationMean)
+            ? value - scopedStats.generationMean
+            : null
+    };
+}
+
+function buildTreeFitnessContext(node, nodesById) {
+    const value = getTreeMetricValue(node?.idea || {}, 'fitness');
+    const context = node?.metricContexts?.fitness || buildTreeMetricContext(node, null, 'fitness');
+    const parentValues = (node?.parentIds || [])
+        .map(parentId => nodesById.get(parentId))
+        .map(parent => parent ? getTreeMetricValue(parent.idea || {}, 'fitness') : null)
+        .filter(parentValue => Number.isFinite(parentValue));
+    const parentAverage = parentValues.length > 0
+        ? parentValues.reduce((sum, parentValue) => sum + parentValue, 0) / parentValues.length
+        : null;
+    const descendantCandidates = (node?.descendantIds || [])
+        .map(descendantId => {
+            const descendant = nodesById.get(descendantId);
+            return {
+                id: descendantId,
+                fitness: descendant ? getTreeMetricValue(descendant.idea || {}, 'fitness') : null
+            };
+        })
+        .filter(candidate => Number.isFinite(candidate.fitness));
+    const bestDescendant = descendantCandidates.length > 0
+        ? descendantCandidates.reduce((best, candidate) => (
+            candidate.fitness > best.fitness ? candidate : best
+        ))
+        : null;
+
+    return {
+        ...context,
+        value,
+        parentAverage,
+        deltaVsParentAverage: Number.isFinite(value) && Number.isFinite(parentAverage)
+            ? value - parentAverage
+            : null,
+        bestDescendantId: bestDescendant?.id || null,
+        bestDescendantFitness: bestDescendant?.fitness ?? null,
+        deltaVsBestDescendant: Number.isFinite(value) && bestDescendant
+            ? bestDescendant.fitness - value
+            : null
+    };
+}
+
+function getTreeNodeFlags(idea) {
+    const flags = [];
+    if (idea?.oracle_generated) flags.push('Oracle');
+    if (idea?.migration_event) flags.push('Migrated');
+    if (idea?.survivor_refined) flags.push('Refined');
+    if (idea?.elite_selected || idea?.elite_selected_source) flags.push('Creative');
+    return flags;
+}
+
+function formatTreeSignedMetric(value, digits = 2) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return '-';
+    const sign = numeric > 0 ? '+' : '';
+    return `${sign}${numeric.toFixed(digits)}`;
+}
+
+function getTreePercentile(fitnessContext, scope = 'global') {
+    const rankKey = scope === 'history' ? 'historyRank' : 'globalRank';
+    const sizeKey = scope === 'history' ? 'historyPopulationSize' : 'globalPopulationSize';
+    const rank = Number(fitnessContext?.[rankKey]);
+    const populationSize = Number(fitnessContext?.[sizeKey]);
+    if (!Number.isFinite(rank) || !Number.isFinite(populationSize) || populationSize <= 0) {
+        return null;
+    }
+    if (populationSize === 1) {
+        return 100;
+    }
+    return Math.max(0, Math.min(100, ((populationSize - rank) / (populationSize - 1)) * 100));
+}
+
+function getTreeSelectionRelations(tree, nodeId) {
+    if (!tree?.nodesById?.has(nodeId)) {
+        return {
+            ancestors: new Set(),
+            descendants: new Set(),
+            ancestorEdges: new Set(),
+            descendantEdges: new Set()
+        };
+    }
+
+    const incomingEdges = new Map();
+    const outgoingEdges = new Map();
+    (tree.edges || []).forEach((edge) => {
+        if (!incomingEdges.has(edge.to)) incomingEdges.set(edge.to, []);
+        if (!outgoingEdges.has(edge.from)) outgoingEdges.set(edge.from, []);
+        incomingEdges.get(edge.to).push(edge);
+        outgoingEdges.get(edge.from).push(edge);
+    });
+
+    const collect = (startId, edgeMap, direction) => {
+        const nodeIds = new Set();
+        const edgeIds = new Set();
+        const stack = [startId];
+        while (stack.length > 0) {
+            const currentId = stack.pop();
+            (edgeMap.get(currentId) || []).forEach((edge) => {
+                const nextId = direction === 'ancestors' ? edge.from : edge.to;
+                edgeIds.add(edge.id);
+                if (!nodeIds.has(nextId)) {
+                    nodeIds.add(nextId);
+                    stack.push(nextId);
+                }
+            });
+        }
+        return { nodeIds, edgeIds };
+    };
+
+    const ancestors = collect(nodeId, incomingEdges, 'ancestors');
+    const descendants = collect(nodeId, outgoingEdges, 'descendants');
+    return {
+        ancestors: ancestors.nodeIds,
+        descendants: descendants.nodeIds,
+        ancestorEdges: ancestors.edgeIds,
+        descendantEdges: descendants.edgeIds
+    };
+}
+
+function renderTreeMetricItem(label, value, options = {}) {
+    return `
+        <div class="tree-inspector-metric">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(formatTreeMetric(value, options.digits ?? 2))}</strong>
+        </div>
+    `;
+}
+
+function renderTreeContextItem(label, value) {
+    return `
+        <div class="tree-inspector-context-item">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+        </div>
+    `;
+}
+
+function renderTreeLineageRows(tree, nodeIds, role) {
+    const rows = (nodeIds || []).slice(0, 5).map((nodeId) => {
+        const node = tree.nodesById.get(nodeId);
+        if (!node) return '';
+        const context = node.fitnessContext || {};
+        const fitness = getTreeMetricValue(node.idea || {}, 'fitness');
+        return `
+            <button type="button" class="tree-inspector-lineage-row" data-tree-jump-node="${escapeHtml(nodeId)}">
+                <span>${escapeHtml(node.title || 'Untitled')}</span>
+                <small>G${node.firstGeneration}${node.lastGeneration > node.firstGeneration ? `-${node.lastGeneration}` : ''}</small>
+                <small>Fit ${escapeHtml(formatTreeMetric(fitness, 2))}</small>
+                <small>${escapeHtml(formatTreeSignedMetric(context.deltaVsHistoryMean, 2))} hist</small>
+            </button>
+        `;
+    }).join('');
+    if (!rows) {
+        return '';
+    }
+    const remaining = Math.max(0, (nodeIds || []).length - 5);
+    return `
+        <div class="tree-inspector-lineage-group">
+            <div class="tree-inspector-section-title">${escapeHtml(role)}</div>
+            <div class="tree-inspector-lineage-list">${rows}</div>
+            ${remaining > 0 ? `<div class="tree-inspector-more">+${remaining} more</div>` : ''}
+        </div>
+    `;
+}
+
+function renderEvolutionTreeInspector(tree, nodeId) {
+    const node = tree?.nodesById?.get(nodeId);
+    if (!node) return '';
+
+    const idea = node.idea || {};
+    const ideaData = getIdeaData(idea);
+    const islandId = Number.isInteger(node.islandId) ? node.islandId : getIdeaIslandId(idea);
+    const flags = getTreeNodeFlags(idea);
+    const context = node.fitnessContext || {};
+    const globalPercentile = getTreePercentile(context, 'global');
+    const historyPercentile = getTreePercentile(context, 'history');
+    const eloContext = node.metricContexts?.elo || {};
+    const diversityContext = node.metricContexts?.diversity || {};
+    const generationSpan = node.lastGeneration > node.firstGeneration
+        ? `Gen ${node.firstGeneration}-${node.lastGeneration}`
+        : `Gen ${node.firstGeneration}`;
+    const metricHtml = [
+        renderTreeMetricItem('ELO', getTreeMetricValue(idea, 'elo'), { digits: 0 }),
+        renderTreeMetricItem('Diversity', getTreeMetricValue(idea, 'diversity'), { digits: 2 }),
+        renderTreeMetricItem('Fitness', getTreeMetricValue(idea, 'fitness'), { digits: 2 })
+    ].join('');
+    const hasFitnessContext = Number.isFinite(context.value);
+    const contextHtml = hasFitnessContext
+        ? [
+            renderTreeContextItem(
+                'Global rank',
+                context.globalRank && context.globalPopulationSize
+                    ? `#${context.globalRank} / ${context.globalPopulationSize}`
+                    : '-'
+            ),
+            renderTreeContextItem(
+                'History rank',
+                context.historyRank && context.historyPopulationSize
+                    ? `#${context.historyRank} / ${context.historyPopulationSize}`
+                    : '-'
+            ),
+            renderTreeContextItem('Global pct', Number.isFinite(globalPercentile) ? `${globalPercentile.toFixed(0)}%` : '-'),
+            renderTreeContextItem('History pct', Number.isFinite(historyPercentile) ? `${historyPercentile.toFixed(0)}%` : '-'),
+            renderTreeContextItem('Δ global', formatTreeSignedMetric(context.deltaVsGlobalMean, 2)),
+            renderTreeContextItem('Δ history', formatTreeSignedMetric(context.deltaVsHistoryMean, 2)),
+            renderTreeContextItem('Δ parents', formatTreeSignedMetric(context.deltaVsParentAverage, 2)),
+            renderTreeContextItem('Best descendant Δ', formatTreeSignedMetric(context.deltaVsBestDescendant, 2)),
+            renderTreeContextItem(
+                'ELO global',
+                eloContext.globalRank && eloContext.globalPopulationSize
+                    ? `#${eloContext.globalRank} / ${eloContext.globalPopulationSize}`
+                    : '-'
+            ),
+            renderTreeContextItem(
+                'Diversity global',
+                diversityContext.globalRank && diversityContext.globalPopulationSize
+                    ? `#${diversityContext.globalRank} / ${diversityContext.globalPopulationSize}`
+                    : '-'
+            )
+        ].join('')
+        : '<div class="tree-inspector-empty">Metrics unavailable for this run.</div>';
+    const ancestors = [...(node.ancestorIds || [])];
+    const descendants = [...(node.descendantIds || [])];
+    const lineageHtml = [
+        renderTreeLineageRows(tree, ancestors, 'Ancestors'),
+        renderTreeLineageRows(tree, descendants, 'Descendants')
+    ].join('');
+    const metaPills = [
+        Number.isInteger(islandId) ? `Island ${islandId + 1}` : null,
+        generationSpan,
+        ...flags
+    ].filter(Boolean);
+
+    return `
+        <div class="tree-inspector-header">
+            <div>
+                <div class="tree-inspector-kicker">Selected idea</div>
+                <h3>${escapeHtml(ideaData.title || node.title || 'Untitled')}</h3>
+            </div>
+            <button type="button" class="tree-inspector-close" data-tree-inspector-close aria-label="Close tree inspector">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="tree-inspector-meta">
+            ${metaPills.map(pill => `<span>${escapeHtml(pill)}</span>`).join('')}
+        </div>
+        <div class="tree-inspector-metrics">${metricHtml}</div>
+        <div class="tree-inspector-section-title">Fitness context</div>
+        <div class="tree-inspector-context">${contextHtml}</div>
+        ${lineageHtml ? `<div class="tree-inspector-lineage">${lineageHtml}</div>` : ''}
+        <div class="tree-inspector-section-header">
+            <div class="tree-inspector-section-title">Content</div>
+            <button type="button" class="tree-inspector-popout" data-tree-inspector-popout>
+                <i class="fas fa-up-right-from-square"></i>
+                <span>Read</span>
+            </button>
+        </div>
+        <div class="tree-inspector-content markdown-content">${renderMarkdown(ideaData.content || '')}</div>
+    `;
+}
+
+function updateEvolutionTreeInspector(tree, nodeId) {
+    const inspector = document.getElementById('evolution-tree-inspector');
+    if (!inspector) return;
+    if (!tree?.nodesById?.has(nodeId)) {
+        inspector.hidden = true;
+        inspector.innerHTML = '';
+        return;
+    }
+    inspector.hidden = false;
+    inspector.innerHTML = renderEvolutionTreeInspector(tree, nodeId);
+    inspector.querySelector('[data-tree-inspector-close]')?.addEventListener('click', clearEvolutionTreeSelection);
+    inspector.querySelector('[data-tree-inspector-popout]')?.addEventListener('click', () => {
+        const node = tree.nodesById.get(nodeId);
+        if (node) {
+            showIdeaModal(getIdeaData(node.idea || {}));
+        }
+    });
+    inspector.querySelectorAll('[data-tree-jump-node]').forEach((button) => {
+        button.addEventListener('click', () => selectEvolutionTreeNode(button.dataset.treeJumpNode));
+    });
+}
+
+function applyEvolutionTreeSelection({ redraw = true } = {}) {
+    const tree = currentEvolutionTree;
+    const container = document.getElementById('evolution-tree-container');
+    const shell = container?.querySelector('.evolution-tree-shell');
+    if (!container || !shell || !tree) return;
+
+    const selectedNode = selectedTreeNodeId && tree.nodesById.has(selectedTreeNodeId)
+        ? selectedTreeNodeId
+        : null;
+    const relations = selectedNode
+        ? getTreeSelectionRelations(tree, selectedNode)
+        : null;
+
+    shell.classList.toggle('has-selection', Boolean(selectedNode));
+    container.querySelectorAll('.evolution-tree-node, .evolution-tree-continuation').forEach((el) => {
+        const nodeId = el.dataset.nodeId;
+        el.classList.remove('tree-selected', 'tree-ancestor', 'tree-descendant', 'tree-muted');
+        if (!selectedNode) return;
+        if (nodeId === selectedNode) {
+            el.classList.add('tree-selected');
+        } else if (relations.ancestors.has(nodeId)) {
+            el.classList.add('tree-ancestor');
+        } else if (relations.descendants.has(nodeId)) {
+            el.classList.add('tree-descendant');
+        } else {
+            el.classList.add('tree-muted');
+        }
+    });
+
+    updateEvolutionTreeInspector(tree, selectedNode);
+    if (redraw) {
+        requestAnimationFrame(drawEvolutionTreeConnectors);
+    }
+}
+
+function selectEvolutionTreeNode(nodeId) {
+    if (!nodeId) return;
+    selectedTreeNodeId = String(nodeId);
+    applyEvolutionTreeSelection();
+}
+
+function clearEvolutionTreeSelection() {
+    selectedTreeNodeId = null;
+    applyEvolutionTreeSelection();
+}
+
+function renderEvolutionTree(gens) {
+    const container = document.getElementById('evolution-tree-container');
+    if (!container) return;
+
+    const signature = safeSignature(gens || []);
+    if (signature === lastEvolutionTreeSignature && container.children.length > 0) {
+        applyEvolutionTreeSelection({ redraw: false });
+        requestAnimationFrame(drawEvolutionTreeConnectors);
+        return;
+    }
+    lastEvolutionTreeSignature = signature;
+    container.innerHTML = '';
+
+    if (!gens || gens.length === 0) {
+        container.innerHTML = '<div class="evolution-tree-empty">No evolution history available.</div>';
+        return;
+    }
+
+    const tree = buildEvolutionTreeModel(gens);
+    currentEvolutionTree = tree;
+    if (selectedTreeNodeId && !tree.nodesById.has(selectedTreeNodeId)) {
+        selectedTreeNodeId = null;
+    }
+    if (tree.nodes.length === 0) {
+        container.innerHTML = '<div class="evolution-tree-empty">No tree nodes available.</div>';
+        return;
+    }
+
+    const shell = document.createElement('div');
+    shell.className = 'evolution-tree-shell';
+    shell.dataset.laneCount = String(tree.laneCount);
+    shell.dataset.maxGenerationSlots = String(getEvolutionTreeMaxGenerationSlots(tree));
+    shell.dataset.nodeCount = String(tree.nodes.length);
+    shell.dataset.density = getEvolutionTreeDensity(tree);
+
+    const scroll = document.createElement('div');
+    scroll.className = 'evolution-tree-scroll';
+    scroll.id = 'evolution-tree-scroll';
+
+    const connectorSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    connectorSvg.classList.add('evolution-tree-connectors');
+    connectorSvg.setAttribute('aria-hidden', 'true');
+    scroll.appendChild(connectorSvg);
+
+    tree.generations.forEach((generationRow) => {
+        const row = document.createElement('div');
+        row.className = 'evolution-tree-row';
+        row.dataset.generation = String(generationRow.generation);
+
+        const label = document.createElement('div');
+        label.className = 'evolution-tree-generation-label';
+        label.innerHTML = `<span>Gen ${generationRow.generation}</span>`;
+        row.appendChild(label);
+
+        const lanes = document.createElement('div');
+        lanes.className = 'evolution-tree-lanes';
+        lanes.style.gridTemplateColumns = `repeat(${Math.max(1, tree.laneCount)}, minmax(0, 1fr))`;
+
+        const slotsByLane = new Map((generationRow.slots || []).map(slot => [slot.laneIndex, slot]));
+        for (let laneIndex = 0; laneIndex < Math.max(1, tree.laneCount); laneIndex += 1) {
+            const lane = document.createElement('div');
+            lane.className = 'evolution-tree-lane';
+            lane.dataset.laneIndex = String(laneIndex);
+
+            const slot = slotsByLane.get(laneIndex);
+            const node = slot ? tree.nodesById.get(slot.nodeId) : null;
+            if (node && slot.kind === 'node') {
+                lane.appendChild(createEvolutionTreeNode(node, tree.fitnessRange));
+            } else if (node && slot.kind === 'continuation') {
+                lane.appendChild(createEvolutionTreeContinuation(node, generationRow.generation));
+            }
+            lanes.appendChild(lane);
+        }
+
+        row.appendChild(lanes);
+        scroll.appendChild(row);
+    });
+
+    shell.appendChild(scroll);
+    const inspector = document.createElement('aside');
+    inspector.className = 'evolution-tree-inspector';
+    inspector.id = 'evolution-tree-inspector';
+    inspector.hidden = true;
+    shell.appendChild(inspector);
+    container.appendChild(shell);
+
+    if (!treeResizeListenerAttached) {
+        window.addEventListener('resize', () => {
+            if (evolutionViewMode === 'tree') {
+                drawEvolutionTreeConnectors();
+            }
+        });
+        treeResizeListenerAttached = true;
+    }
+
+    applyEvolutionTreeSelection({ redraw: false });
+    requestAnimationFrame(drawEvolutionTreeConnectors);
+}
+
+function createEvolutionTreeNode(node, fitnessRange) {
+    const idea = node.idea || {};
+    const islandId = Number.isInteger(node.islandId) ? node.islandId : getIdeaIslandId(idea);
+    const fitnessValue = getTreeMetricValue(idea, 'fitness');
+    const fitnessStrength = getTreeFitnessStrength(fitnessValue, fitnessRange);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'evolution-tree-node';
+    button.dataset.nodeId = node.id;
+    button.dataset.hasFitness = fitnessStrength === null ? 'false' : 'true';
+    if (fitnessStrength !== null) {
+        button.style.setProperty('--tree-fitness-strength', `${fitnessStrength.toFixed(1)}%`);
+    }
+    if (Number.isInteger(islandId)) {
+        button.dataset.islandId = String(islandId);
+        button.classList.add(`island-${islandId % 5}`);
+    }
+    if (idea?.oracle_generated) {
+        button.dataset.oracle = 'true';
+        button.classList.add('tree-oracle');
+    }
+    const detailParts = [node.title || 'Untitled'];
+    if (Number.isInteger(islandId)) detailParts.push(`Island ${islandId + 1}`);
+    if (Number.isFinite(fitnessValue)) detailParts.push(`Fitness ${formatTreeMetric(fitnessValue, 2)}`);
+    getTreeNodeFlags(idea).forEach(flag => detailParts.push(flag));
+    button.title = detailParts.join(' | ');
+    button.setAttribute('aria-label', detailParts.join(', '));
+
+    button.innerHTML = `
+        <div class="tree-node-title">${escapeHtml(node.title || 'Untitled')}</div>
+        <div class="tree-node-abbrev" aria-hidden="true">${escapeHtml(getTreeNodeAbbreviation(node.title || 'Untitled'))}</div>
+    `;
+    button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        selectEvolutionTreeNode(node.id);
+    });
+    return button;
+}
+
+function createEvolutionTreeContinuation(node, generationIndex) {
+    const idea = node.idea || {};
+    const islandId = Number.isInteger(node.islandId) ? node.islandId : getIdeaIslandId(idea);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'evolution-tree-continuation';
+    button.dataset.nodeId = node.id;
+    button.dataset.generation = String(generationIndex);
+    if (Number.isInteger(islandId)) {
+        button.dataset.islandId = String(islandId);
+        button.classList.add(`island-${islandId % 5}`);
+    }
+    if (idea?.oracle_generated) {
+        button.dataset.oracle = 'true';
+        button.classList.add('tree-oracle');
+    }
+    button.setAttribute(
+        'aria-label',
+        `${node.title || 'Idea'} survived unchanged to generation ${generationIndex}`
+    );
+    button.innerHTML = '<span class="tree-continuation-line"></span>';
+    button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        selectEvolutionTreeNode(node.id);
+    });
+    return button;
+}
+
+function drawEvolutionTreeConnectors() {
+    const container = document.getElementById('evolution-tree-container');
+    const scroll = document.getElementById('evolution-tree-scroll');
+    const svg = scroll?.querySelector('.evolution-tree-connectors');
+    if (!container || !scroll || !svg || container.hidden) return;
+
+    const tree = currentEvolutionTree || buildEvolutionTreeModel(generations || []);
+    const selectedNode = selectedTreeNodeId && tree.nodesById.has(selectedTreeNodeId)
+        ? selectedTreeNodeId
+        : null;
+    const relations = selectedNode ? getTreeSelectionRelations(tree, selectedNode) : null;
+    const scrollRect = scroll.getBoundingClientRect();
+    const width = scroll.clientWidth;
+    const height = Math.max(scroll.scrollHeight, scroll.clientHeight);
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.innerHTML = '';
+
+    const getAnchor = (selector, side = 'center') => {
+        const el = scroll.querySelector(selector);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        const x = rect.left - scrollRect.left + scroll.scrollLeft + (rect.width / 2);
+        const y = rect.top - scrollRect.top + scroll.scrollTop + (
+            side === 'bottom' ? rect.height : side === 'top' ? 0 : rect.height / 2
+        );
+        return { x, y };
+    };
+
+    const addPath = (d, className) => {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('class', className);
+        path.setAttribute('fill', 'none');
+        svg.appendChild(path);
+    };
+
+    tree.edges.forEach((edge) => {
+        const fromNode = tree.nodesById.get(edge.from);
+        const toNode = tree.nodesById.get(edge.to);
+        if (!fromNode || !toNode) return;
+        const escapedFrom = cssEscape(edge.from);
+        const escapedTo = cssEscape(edge.to);
+        const parentSelector = fromNode.lastGeneration >= edge.generation - 1
+            ? `[data-node-id="${escapedFrom}"][data-generation="${edge.generation - 1}"]`
+            : `[data-node-id="${escapedFrom}"].evolution-tree-node`;
+        const from = getAnchor(parentSelector, 'bottom')
+            || getAnchor(`[data-node-id="${escapedFrom}"].evolution-tree-node`, 'bottom');
+        const to = getAnchor(`[data-node-id="${escapedTo}"].evolution-tree-node`, 'top');
+        if (!from || !to) return;
+        const midY = from.y + Math.max(24, (to.y - from.y) * 0.45);
+        let relationClass = '';
+        if (relations) {
+            if (relations.ancestorEdges.has(edge.id)) {
+                relationClass = ' tree-connector-lineage-ancestor';
+            } else if (relations.descendantEdges.has(edge.id)) {
+                relationClass = ' tree-connector-lineage-descendant';
+            } else {
+                relationClass = ' tree-connector-muted';
+            }
+        }
+        const className = `tree-connector tree-connector-${edge.type || 'breeding'}${relationClass}`;
+        addPath(`M ${from.x} ${from.y} C ${from.x} ${midY}, ${to.x} ${midY}, ${to.x} ${to.y}`, className);
+    });
+}
+
+function setEvolutionViewMode(mode) {
+    evolutionViewMode = mode === 'tree' ? 'tree' : 'cards';
+    const cardsContainer = document.getElementById('generations-container');
+    const treeContainer = document.getElementById('evolution-tree-container');
+    const toolbar = document.getElementById('evolution-view-toolbar');
+    if (toolbar) {
+        toolbar.style.display = generations && generations.length > 0 ? 'flex' : 'none';
+    }
+    if (cardsContainer) {
+        cardsContainer.hidden = evolutionViewMode === 'tree';
+    }
+    if (treeContainer) {
+        treeContainer.hidden = evolutionViewMode !== 'tree';
+    }
+    document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
+        const isActive = button.dataset.viewMode === evolutionViewMode;
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+    if (evolutionViewMode === 'tree') {
+        renderEvolutionTree(generations);
+    }
+}
+
+function syncEvolutionViewMode() {
+    const toolbar = document.getElementById('evolution-view-toolbar');
+    if (toolbar) {
+        toolbar.style.display = generations && generations.length > 0 ? 'flex' : 'none';
+    }
+    setEvolutionViewMode(evolutionViewMode);
+}
+
+function resetEvolutionTreeView() {
+    generations = [];
+    lastEvolutionTreeSignature = '';
+    currentEvolutionTree = null;
+    selectedTreeNodeId = null;
+    const treeContainer = document.getElementById('evolution-tree-container');
+    if (treeContainer) {
+        treeContainer.innerHTML = '';
+        treeContainer.hidden = true;
+    }
+    const toolbar = document.getElementById('evolution-view-toolbar');
+    if (toolbar) {
+        toolbar.style.display = 'none';
+    }
+    const cardsContainer = document.getElementById('generations-container');
+    if (cardsContainer) {
+        cardsContainer.hidden = false;
+    }
+    evolutionViewMode = 'tree';
+    document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
+        const isActive = button.dataset.viewMode === 'tree';
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+}
+
 // Update the renderGenerations function to use the improved preview
 function renderGenerations(gens) {
     generations = gens; // Store the generations globally
@@ -1145,6 +2314,7 @@ function renderGenerations(gens) {
         console.warn("Received empty generations data");
         return;
     }
+    syncEvolutionViewMode();
     const container = document.getElementById('generations-container');
 
     generations.forEach((generation, index) => {
@@ -1235,6 +2405,8 @@ function renderGenerations(gens) {
         // Process each idea in this generation
         generation.forEach((idea, ideaIndex) => {
             const genotypeEntries = getBreedingGenotypeEntries(idea);
+            const islandId = getIdeaIslandId(idea);
+            const isOracleGenerated = idea.oracle_generated === true;
             let insertBeforeNode = null;
 
             // Check if this idea card already exists
@@ -1242,16 +2414,22 @@ function renderGenerations(gens) {
             if (existingCard) {
                 // An Oracle update might have replaced this idea.
                 // We check if the new data for this slot is an Oracle idea.
-                const isOracleIdea = idea.oracle_generated === true;
                 const existingGenotypeCount = Number(existingCard.dataset.genotypeCount || '0');
                 const genotypeCountChanged = existingGenotypeCount !== genotypeEntries.length;
+                const islandChanged = (existingCard.dataset.islandId || '') !== (
+                    islandId === null ? '' : String(islandId)
+                );
+                const migrationChanged = (existingCard.dataset.migrationEvent === 'true') !== (
+                    idea.migration_event === true
+                );
+                const oracleChanged = (existingCard.dataset.oracle === 'true') !== isOracleGenerated;
 
                 // We also check if the existing card in the DOM reflects this.
                 // A simple way is to check the button's inner HTML for the icon.
                 const lineageButton = existingCard.querySelector('.view-lineage');
                 const cardIsAlreadyOracle = lineageButton && lineageButton.innerHTML.includes('fa-eye');
 
-                if ((isOracleIdea && !cardIsAlreadyOracle) || genotypeCountChanged) {
+                if ((isOracleGenerated && !cardIsAlreadyOracle) || genotypeCountChanged || islandChanged || migrationChanged || oracleChanged) {
                     // The data is now an Oracle idea, but the card isn't.
                     // This means a replacement happened, or metadata was added after the card rendered.
                     console.log(`Card refresh needed for idea ${ideaIndex} in generation ${index}. Re-rendering card.`);
@@ -1268,6 +2446,17 @@ function renderGenerations(gens) {
             card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
             card.dataset.genotypeCount = String(genotypeEntries.length);
+            if (islandId !== null) {
+                card.dataset.islandId = String(islandId);
+                card.classList.add(`island-${islandId % 5}`);
+            }
+            if (idea.migration_event === true) {
+                card.dataset.migrationEvent = 'true';
+            }
+            if (isOracleGenerated) {
+                card.dataset.oracle = 'true';
+                card.classList.add('oracle-card');
+            }
 
             // Extract idea data (handles nested structures from Firestore)
             const ideaData = getIdeaData(idea);
@@ -1280,6 +2469,15 @@ function renderGenerations(gens) {
             // Create a plain text preview for the card
             const plainPreview = createCardPreview(ideaData.content, 150);
             const genotypeSummaryHtml = createBreedingGenotypeSummary(genotypeEntries);
+            const islandBadgeHtml = islandId !== null
+                ? `<span class="island-badge">Island ${islandId + 1}</span>`
+                : '';
+            const migrationBadgeHtml = idea.migration_event === true
+                ? '<span class="migration-badge">Migrated</span>'
+                : '';
+            const oracleBadgeHtml = isOracleGenerated
+                ? '<span class="oracle-badge">Oracle</span>'
+                : '';
 
             // Add "Prompt" button for initial generation cards
             const viewPromptButton = index === 0 ?
@@ -1332,6 +2530,11 @@ function renderGenerations(gens) {
 
             card.innerHTML = `
                 <div class="card-body">
+                    <div class="idea-card-meta">
+                        ${islandBadgeHtml}
+                        ${migrationBadgeHtml}
+                        ${oracleBadgeHtml}
+                    </div>
                     <h5 class="card-title">${ideaData.title || 'Untitled'}</h5>
                     <div class="card-text">
                         <p>${plainPreview}</p>
@@ -1500,12 +2703,12 @@ function updateContextDisplay() {
         // Make sure the container is visible
         contextContainer.style.display = 'block';
 
-        // Use specific prompts if available (translation layer), otherwise use raw contexts (legacy)
+        // Use direction prompts if available, otherwise use raw contexts (legacy)
         const displayContent = specificPrompts.length > 0 && specificPrompts[currentContextIndex]
             ? specificPrompts[currentContextIndex]
             : contexts[currentContextIndex];
 
-        const displayTitle = specificPrompts.length > 0 ? "Specific Prompt" : "Context Pool";
+        const displayTitle = specificPrompts.length > 0 ? "Direction Prompt" : "Context Pool";
 
         // Format the content into separate items
         const contentItems = displayContent
@@ -2493,6 +3696,7 @@ function clearHistorySelection() {
 
     // Clear main content
     document.getElementById('generations-container').innerHTML = '';
+    resetEvolutionTreeView();
     resetDiversityPlot();
 }
 
@@ -2623,6 +3827,7 @@ async function pollProgress() {
             if (container) {
                 container.innerHTML = '';
             }
+            resetEvolutionTreeView();
             // Reset diversity plot for new evolution
             resetDiversityPlot();
             showDiversityPlotLoading();
@@ -3474,6 +4679,7 @@ function resetUIState() {
     if (container) {
         container.innerHTML = '';
     }
+    resetEvolutionTreeView();
 
     // Reset contexts
     contexts = [];
@@ -4069,12 +5275,12 @@ function showContextModal(ideaIndex) {
         const contextIndex = (ideaIndex !== undefined && ideaIndex < contexts.length) ?
             ideaIndex : currentContextIndex;
 
-        // Use specific prompts if available (translation layer), otherwise use raw contexts (legacy)
+        // Use direction prompts if available, otherwise use raw contexts (legacy)
         const displayContent = specificPrompts.length > 0 && specificPrompts[contextIndex]
             ? specificPrompts[contextIndex]
             : contexts[contextIndex];
 
-        const displayTitle = specificPrompts.length > 0 ? "Specific Prompt" : "Context Pool";
+        const displayTitle = specificPrompts.length > 0 ? "Direction Prompt" : "Context Pool";
 
         console.log(`Using contextIndex: ${contextIndex}, ${displayTitle.toLowerCase()}: "${displayContent}"`);
 
@@ -4093,7 +5299,7 @@ function showContextModal(ideaIndex) {
             <div class="context-content">
                 <div class="alert alert-info mb-3">
                     <strong>${displayTitle}:</strong> ${specificPrompts.length > 0 ?
-                'This is the specific prompt generated from the context pool to create this idea.' :
+                'This direction prompt was generated from the context pool to create this idea.' :
                 'This is the raw context pool used to inspire this idea.'}
                 </div>
                 ${contextItems}
@@ -4768,7 +5974,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
     let colorIndex = 0;
 
     // Check for each possible component and add to componentData if it exists
-    const possibleComponents = ['ideator', 'formatter', 'critic', 'breeder', 'genotype_encoder', 'oracle'];
+    const possibleComponents = ['ideator', 'formatter', 'critic', 'breeder', 'genotype_encoder', 'diversity_embeddings', 'oracle'];
 
     for (const componentName of possibleComponents) {
         if (tokenCounts[componentName]) {
@@ -4776,6 +5982,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
             componentData.push({
                 name: componentName.charAt(0).toUpperCase() + componentName.slice(1).replace('_', ' '),
                 displayName: componentName === 'genotype_encoder' ? 'Genotype Encoder' :
+                    componentName === 'diversity_embeddings' ? 'Diversity Embeddings' :
                     componentName.charAt(0).toUpperCase() + componentName.slice(1),
                 total: component.total.toLocaleString(),
                 input: component.input.toLocaleString(),
@@ -5085,17 +6292,35 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
 // Global variables for diversity plotting
 let diversityChart = null;
 let diversityData = {
-    overall: [],
-    perGeneration: [],
-    interGeneration: []
+    labels: [],
+    overview: {},
+    islands: {},
+    latest: null
 };
-let isSplitAxes = false;
+let diversityChartMode = 'overview';
+
+function startPollingActiveEvolution(progressData = {}) {
+    if (progressData.evolution_id) {
+        currentEvolutionId = progressData.evolution_id;
+    }
+    if (progressData.evolution_name) {
+        currentEvolutionName = progressData.evolution_name;
+    }
+    if (!document.getElementById('progress-container')) {
+        createProgressBar(currentEvolutionName);
+    }
+    if (!progressData.diversity_history || progressData.diversity_history.length === 0) {
+        showDiversityPlotLoading();
+    }
+    isEvolutionRunning = true;
+    pollProgress();
+}
 
 /**
  * Get chart scales configuration based on current axis mode
  */
 function getDiversityChartScales() {
-    const baseScales = {
+    return {
         x: {
             title: {
                 display: true,
@@ -5124,7 +6349,9 @@ function getDiversityChartScales() {
         y: {
             title: {
                 display: true,
-                text: isSplitAxes ? 'Diversity Score (Population & Per-Gen)' : 'Diversity Score',
+                text: diversityChartMode === 'islands'
+                    ? 'Diversity / Separation'
+                    : 'Diversity Score',
                 color: '#64748B',
                 font: {
                     size: 14,
@@ -5145,69 +6372,27 @@ function getDiversityChartScales() {
             position: 'left'
         }
     };
-
-    // Add second y-axis if in split mode
-    if (isSplitAxes) {
-        baseScales.y1 = {
-            type: 'linear',
-            display: true,
-            position: 'right',
-            title: {
-                display: true,
-                text: 'Inter-Generation Diversity',
-                color: 'rgba(34, 197, 94, 1)',
-                font: {
-                    size: 14,
-                    weight: 'bold'
-                }
-            },
-            grid: {
-                drawOnChartArea: false,
-            },
-            ticks: {
-                color: 'rgba(34, 197, 94, 1)',
-                font: {
-                    size: 12
-                }
-            },
-            beginAtZero: false
-        };
-    }
-
-    return baseScales;
 }
 
 /**
- * Toggle between combined and split y-axes
+ * Switch between population and island diversity views.
  */
-function toggleDiversityAxes() {
+function setDiversityChartMode(mode) {
+    const nextMode = mode === 'islands' ? 'islands' : 'overview';
+    const button = document.querySelector(`[data-diversity-mode="${nextMode}"]`);
+    if (button?.disabled) return;
+    diversityChartMode = nextMode;
+    document.querySelectorAll('[data-diversity-mode]').forEach((button) => {
+        button.classList.toggle('active', button.dataset.diversityMode === nextMode);
+    });
+
     if (!diversityChart) {
-        console.warn('Diversity chart not initialized');
         return;
     }
 
-    isSplitAxes = !isSplitAxes;
-
-    // Update button text
-    const toggleButton = document.getElementById('diversity-axis-toggle');
-    if (toggleButton) {
-        const icon = toggleButton.querySelector('i');
-        const text = isSplitAxes ? ' Combined Axes' : ' Split Axes';
-        toggleButton.innerHTML = `<i class="fas fa-arrows-alt-v"></i>${text}`;
-    }
-
-    // Update dataset yAxisID for inter-generation diversity
-    if (isSplitAxes) {
-        diversityChart.data.datasets[2].yAxisID = 'y1';
-    } else {
-        diversityChart.data.datasets[2].yAxisID = 'y';
-    }
-
-    // Update scales configuration
+    diversityChart.data.datasets = getDiversityChartDatasets(diversityData, nextMode);
     diversityChart.options.scales = getDiversityChartScales();
-
-    // Update the chart
-    diversityChart.update('active');
+    diversityChart.update('none');
 }
 
 /**
@@ -5239,63 +6424,7 @@ function initializeDiversityChart() {
             type: 'line',
             data: {
                 labels: [],
-                datasets: [
-                    {
-                        label: 'Overall Population Diversity',
-                        data: [],
-                        borderColor: 'rgba(139, 124, 246, 1)',
-                        backgroundColor: 'rgba(139, 124, 246, 0.1)',
-                        borderWidth: 3,
-                        fill: true,
-                        tension: 0.4,
-                        pointBackgroundColor: 'rgba(139, 124, 246, 1)',
-                        pointBorderColor: '#ffffff',
-                        pointBorderWidth: 2,
-                        pointRadius: 6,
-                        pointHoverRadius: 8,
-                        pointHoverBackgroundColor: 'rgba(139, 124, 246, 1)',
-                        pointHoverBorderColor: '#ffffff',
-                        pointHoverBorderWidth: 3
-                    },
-                    {
-                        label: 'Per-Generation Diversity',
-                        data: [],
-                        borderColor: 'rgba(244, 114, 182, 1)',
-                        backgroundColor: 'rgba(244, 114, 182, 0.1)',
-                        borderWidth: 3,
-                        fill: false,
-                        tension: 0.4,
-                        pointBackgroundColor: 'rgba(244, 114, 182, 1)',
-                        pointBorderColor: '#ffffff',
-                        pointBorderWidth: 2,
-                        pointRadius: 6,
-                        pointHoverRadius: 8,
-                        pointHoverBackgroundColor: 'rgba(244, 114, 182, 1)',
-                        pointHoverBorderColor: '#ffffff',
-                        pointHoverBorderWidth: 3,
-                        borderDash: [5, 5]
-                    },
-                    {
-                        label: 'Inter-Generation Diversity',
-                        data: [],
-                        borderColor: 'rgba(34, 197, 94, 1)',
-                        backgroundColor: 'rgba(34, 197, 94, 0.1)',
-                        borderWidth: 3,
-                        fill: false,
-                        tension: 0.4,
-                        pointBackgroundColor: 'rgba(34, 197, 94, 1)',
-                        pointBorderColor: '#ffffff',
-                        pointBorderWidth: 2,
-                        pointRadius: 6,
-                        pointHoverRadius: 8,
-                        pointHoverBackgroundColor: 'rgba(34, 197, 94, 1)',
-                        pointHoverBorderColor: '#ffffff',
-                        pointHoverBorderWidth: 3,
-                        borderDash: [10, 3],
-                        spanGaps: true, // Skip null values instead of breaking the line
-                        yAxisID: 'y'
-                    }
-                ]
+                datasets: getDiversityChartDatasets(diversityData, diversityChartMode)
             },
             options: {
                 responsive: true,
@@ -5347,10 +6476,8 @@ function initializeDiversityChart() {
                                 return generation === '0' ? 'Initial Population' : `Generation ${generation}`;
                             },
                             label: function (context) {
-                                const value = parseFloat(context.parsed.y).toFixed(4);
-                                const axisLabel = isSplitAxes && context.datasetIndex === 2 ?
-                                    ' (right axis)' : (isSplitAxes ? ' (left axis)' : '');
-                                return `${context.dataset.label}: ${value}${axisLabel}`;
+                                const value = Number(context.parsed.y);
+                                return `${context.dataset.label}: ${Number.isFinite(value) ? value.toFixed(4) : '-'}`;
                             }
                         }
                     }
@@ -5369,11 +6496,6 @@ function initializeDiversityChart() {
                         borderCapStyle: 'round',
                         borderJoinStyle: 'round'
                     }
-                },
-                onResize: function (chart, size) {
-                    // Ensure proper sizing on resize
-                    chart.canvas.style.height = '400px';
-                    chart.canvas.style.width = '100%';
                 }
             }
         };
@@ -5399,75 +6521,308 @@ function initializeDiversityChart() {
  * @param {Array} diversityHistory - Array of diversity calculation results
  * @returns {Object} Processed data for charting
  */
+function toFiniteDiversityNumber(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+}
+
+function firstFiniteDiversityValue(...values) {
+    for (const value of values) {
+        const numeric = toFiniteDiversityNumber(value);
+        if (numeric !== null) return numeric;
+    }
+    return null;
+}
+
+function getSnapshotGeneration(diversityData, index) {
+    const generation = firstFiniteDiversityValue(
+        diversityData?.analytics?.current_generation,
+        diversityData?.current_generation,
+        diversityData?.generation
+    );
+    return Number.isInteger(generation) ? generation : index;
+}
+
+function getCurrentGenerationDiversity(diversityData, generation) {
+    const explicit = firstFiniteDiversityValue(
+        diversityData?.analytics?.current_generation_diversity,
+        diversityData?.current_generation_diversity
+    );
+    if (explicit !== null) return explicit;
+
+    const generationRows = Array.isArray(diversityData?.generation_diversities)
+        ? diversityData.generation_diversities
+        : [];
+    const row = generationRows.find(genData => Number(genData?.generation) === generation);
+    return firstFiniteDiversityValue(row?.diversity_score, row?.score, diversityData?.diversity_score, 0);
+}
+
+function getSnapshotIslandRows(diversityData) {
+    const analyticsRows = diversityData?.analytics?.islands;
+    if (Array.isArray(analyticsRows) && analyticsRows.length > 0) {
+        return analyticsRows;
+    }
+    if (Array.isArray(diversityData?.current_island_diversities)) {
+        return diversityData.current_island_diversities;
+    }
+    if (Array.isArray(diversityData?.island_diversities)) {
+        return diversityData.island_diversities;
+    }
+    return [];
+}
+
 function processDiversityData(diversityHistory) {
     if (!diversityHistory || diversityHistory.length === 0) {
-        return { labels: [], overall: [], perGeneration: [], interGeneration: [] };
+        return {
+            labels: [],
+            overview: { current: [], cumulative: [], drift: [] },
+            islands: { meanWithin: [], interIsland: [], separationRatio: [], perIsland: new Map() },
+            latest: null,
+            hasIslandData: false
+        };
     }
 
     const labels = [];
-    const overallScores = [];
-    const perGenerationScores = [];
-    const interGenerationScores = [];
-
-    console.log("Processing diversity history:", diversityHistory);
+    const overview = {
+        current: [],
+        cumulative: [],
+        drift: []
+    };
+    const islands = {
+        meanWithin: [],
+        interIsland: [],
+        separationRatio: [],
+        perIsland: new Map()
+    };
+    let latest = null;
+    let hasIslandData = false;
 
     diversityHistory.forEach((diversityData, index) => {
-        // Check if we have valid diversity data
         if (!diversityData) {
-            console.log(`Skipping index ${index}: Invalid data`);
             return;
         }
 
-        // Handle case where diversity calculation is disabled or failed
-        if (diversityData.enabled === false) {
-            console.log(`Skipping index ${index}: Diversity calculation disabled`);
+        if (diversityData.enabled === false || diversityData.error) {
             return;
         }
 
-        if (diversityData.error) {
-            console.log(`Skipping index ${index}: Error in diversity data:`, diversityData.error);
-            return;
-        }
+        const generation = getSnapshotGeneration(diversityData, index);
+        const label = String(generation);
+        const current = getCurrentGenerationDiversity(diversityData, generation);
+        const cumulative = firstFiniteDiversityValue(
+            diversityData?.analytics?.cumulative_diversity,
+            diversityData?.diversity_score,
+            diversityData?.overall_diversity,
+            diversityData?.score
+        );
+        const drift = firstFiniteDiversityValue(
+            diversityData?.analytics?.inter_generation_diversity,
+            diversityData?.inter_generation_diversity
+        );
+        const meanWithin = firstFiniteDiversityValue(
+            diversityData?.analytics?.mean_island_diversity,
+            diversityData?.mean_island_diversity
+        );
+        const interIsland = firstFiniteDiversityValue(
+            diversityData?.analytics?.inter_island_diversity,
+            diversityData?.inter_island_diversity
+        );
+        const separationRatio = firstFiniteDiversityValue(
+            diversityData?.analytics?.island_separation_ratio,
+            diversityData?.island_separation_ratio
+        );
 
-        // Add to charts - we have valid data
-        labels.push(index.toString());
+        labels.push(label);
+        overview.current.push(current);
+        overview.cumulative.push(cumulative);
+        overview.drift.push(drift);
+        islands.meanWithin.push(meanWithin);
+        islands.interIsland.push(interIsland);
+        islands.separationRatio.push(separationRatio);
 
-        // Try different property names for diversity score
-        const overallScore = diversityData.diversity_score ||
-            diversityData.overall_diversity ||
-            diversityData.score || 0;
-        overallScores.push(overallScore);
+        getSnapshotIslandRows(diversityData).forEach((row) => {
+            const islandId = Number(row?.island_id);
+            if (!Number.isInteger(islandId)) return;
+            const value = firstFiniteDiversityValue(
+                row.current_generation_diversity,
+                row.diversity_score,
+                row.score
+            );
+            if (!islands.perIsland.has(islandId)) {
+                islands.perIsland.set(islandId, []);
+            }
+            islands.perIsland.get(islandId)[labels.length - 1] = value;
+            hasIslandData = true;
+        });
 
-        // Try to find per-generation diversity
-        let perGenScore = 0;
-        if (diversityData.generation_diversities && Array.isArray(diversityData.generation_diversities)) {
-            // Find the diversity for the current generation
-            const currentGenData = diversityData.generation_diversities.find(gen => gen.generation === index);
-            perGenScore = currentGenData ? (currentGenData.diversity_score || currentGenData.score || 0) : 0;
-        } else if (diversityData.current_generation_diversity) {
-            perGenScore = diversityData.current_generation_diversity;
-        } else {
-            // Fallback: use overall score for per-generation as well
-            perGenScore = overallScore;
-        }
+        latest = {
+            generation,
+            current,
+            cumulative,
+            drift,
+            meanWithin,
+            interIsland,
+            separationRatio,
+            islandCount: Number(diversityData?.analytics?.island_count ?? diversityData?.island_count) || null
+        };
+    });
 
-        perGenerationScores.push(perGenScore);
-
-        // Extract inter-generation diversity (skip None/null values)
-        const interGenScore = diversityData.inter_generation_diversity;
-        if (interGenScore !== null && interGenScore !== undefined) {
-            interGenerationScores.push(interGenScore);
-        } else {
-            interGenerationScores.push(null); // Chart.js can handle null values
+    islands.perIsland.forEach((series) => {
+        for (let i = 0; i < labels.length; i += 1) {
+            if (series[i] === undefined) {
+                series[i] = null;
+            }
         }
     });
 
     return {
         labels,
-        overall: overallScores,
-        perGeneration: perGenerationScores,
-        interGeneration: interGenerationScores
+        overview,
+        islands,
+        latest,
+        hasIslandData
     };
+}
+
+function getDiversityDatasetStyle(color, options = {}) {
+    return {
+        borderColor: color,
+        backgroundColor: color.replace('1)', '0.10)'),
+        borderWidth: options.borderWidth ?? 2,
+        fill: options.fill ?? false,
+        tension: 0.3,
+        pointBackgroundColor: color,
+        pointBorderColor: '#ffffff',
+        pointBorderWidth: 1.5,
+        pointRadius: options.pointRadius ?? 4,
+        pointHoverRadius: 6,
+        borderDash: options.borderDash || [],
+        spanGaps: true
+    };
+}
+
+function getDiversityIslandColor(islandId) {
+    const colors = [
+        'rgba(37, 99, 235, 1)',
+        'rgba(5, 150, 105, 1)',
+        'rgba(220, 38, 38, 1)',
+        'rgba(124, 58, 237, 1)',
+        'rgba(217, 119, 6, 1)'
+    ];
+    return colors[Math.abs(Number(islandId) || 0) % colors.length];
+}
+
+function getDiversityChartDatasets(processedData, mode = diversityChartMode) {
+    if (mode === 'islands') {
+        const datasets = [
+            {
+                label: 'Mean Within-Island Diversity',
+                data: processedData?.islands?.meanWithin || [],
+                ...getDiversityDatasetStyle('rgba(5, 150, 105, 1)', { fill: true, borderWidth: 3 })
+            },
+            {
+                label: 'Inter-Island Separation',
+                data: processedData?.islands?.interIsland || [],
+                ...getDiversityDatasetStyle('rgba(217, 119, 6, 1)', { borderWidth: 3 })
+            }
+        ];
+        const perIsland = processedData?.islands?.perIsland;
+        if (perIsland instanceof Map) {
+            [...perIsland.keys()].sort((a, b) => a - b).forEach((islandId) => {
+                datasets.push({
+                    label: `Island ${islandId + 1}`,
+                    data: perIsland.get(islandId),
+                    ...getDiversityDatasetStyle(getDiversityIslandColor(islandId), {
+                        pointRadius: 3,
+                        borderDash: [4, 4]
+                    })
+                });
+            });
+        }
+        return datasets;
+    }
+
+    return [
+        {
+            label: 'Current Population Diversity',
+            data: processedData?.overview?.current || [],
+            ...getDiversityDatasetStyle('rgba(79, 70, 229, 1)', { fill: true, borderWidth: 3 })
+        },
+        {
+            label: 'Cumulative Archive Diversity',
+            data: processedData?.overview?.cumulative || [],
+            ...getDiversityDatasetStyle('rgba(14, 165, 233, 1)', { borderWidth: 2 })
+        },
+        {
+            label: 'Generation Drift',
+            data: processedData?.overview?.drift || [],
+            ...getDiversityDatasetStyle('rgba(16, 185, 129, 1)', { borderDash: [6, 4] })
+        }
+    ];
+}
+
+function formatDiversityMetric(value, digits = 3) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric.toFixed(digits) : '-';
+}
+
+function renderDiversitySummary(latest) {
+    const summary = document.getElementById('diversity-summary');
+    if (!summary) return;
+    if (!latest) {
+        summary.innerHTML = '';
+        return;
+    }
+
+    const items = [
+        {
+            label: 'Current population',
+            value: formatDiversityMetric(latest.current),
+            hint: latest.generation === 0 ? 'Initial generation' : `Generation ${latest.generation}`
+        },
+        {
+            label: 'Cumulative archive',
+            value: formatDiversityMetric(latest.cumulative),
+            hint: 'All ideas seen so far'
+        },
+        {
+            label: 'Inter-island',
+            value: formatDiversityMetric(latest.interIsland),
+            hint: latest.islandCount && latest.islandCount > 1
+                ? `${latest.islandCount} islands`
+                : 'Requires 2+ islands'
+        },
+        {
+            label: 'Island separation',
+            value: formatDiversityMetric(latest.separationRatio, 2),
+            hint: 'Inter / within ratio'
+        }
+    ];
+
+    summary.innerHTML = items.map(item => `
+        <div class="diversity-summary-item">
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(item.value)}</strong>
+            <small>${escapeHtml(item.hint)}</small>
+        </div>
+    `).join('');
+}
+
+function updateDiversityModeAvailability(processedData) {
+    const islandsButton = document.querySelector('[data-diversity-mode="islands"]');
+    if (!islandsButton) return;
+    const hasIslandData = Boolean(processedData?.hasIslandData)
+        || (processedData?.latest?.islandCount && processedData.latest.islandCount > 1);
+    islandsButton.disabled = !hasIslandData;
+    islandsButton.title = hasIslandData
+        ? 'Show island-level diversity'
+        : 'Island diversity requires an island run';
+    if (!hasIslandData && diversityChartMode === 'islands') {
+        diversityChartMode = 'overview';
+    }
+    document.querySelectorAll('[data-diversity-mode]').forEach((button) => {
+        button.classList.toggle('active', button.dataset.diversityMode === diversityChartMode);
+    });
 }
 
 function buildDiversitySignature(processedData) {
@@ -5475,12 +6830,50 @@ function buildDiversitySignature(processedData) {
         return '';
     }
 
-    return [
-        processedData.labels.join(','),
-        processedData.overall.join(','),
-        processedData.perGeneration.join(','),
-        processedData.interGeneration.join(','),
-    ].join('|');
+    return JSON.stringify({
+        labels: processedData.labels,
+        overview: processedData.overview,
+        islands: {
+            meanWithin: processedData.islands?.meanWithin || [],
+            interIsland: processedData.islands?.interIsland || [],
+            separationRatio: processedData.islands?.separationRatio || [],
+            perIsland: processedData.islands?.perIsland instanceof Map
+                ? [...processedData.islands.perIsland.entries()]
+                : []
+        },
+        mode: diversityChartMode
+    });
+}
+
+function revealDiversityPlot(processedData) {
+    const plotSection = document.getElementById('diversity-plot-section');
+    if (!plotSection || !processedData || processedData.labels.length === 0) {
+        return;
+    }
+
+    plotSection.style.display = 'block';
+    const loadingElement = plotSection.querySelector('.diversity-loading');
+    if (loadingElement) {
+        loadingElement.style.display = 'none';
+    }
+
+    const canvas = document.getElementById('diversity-chart');
+    const plotContainer = document.querySelector('.diversity-plot-container');
+    if (canvas && plotContainer) {
+        plotContainer.style.display = 'block';
+        canvas.style.display = 'block';
+    }
+}
+
+function scheduleDiversityChartResize(delay = 50) {
+    window.setTimeout(() => {
+        window.requestAnimationFrame(() => {
+            if (!diversityChart) return;
+            diversityChart.resize();
+            diversityChart.update('none');
+            diversityPlotSized = true;
+        });
+    }, delay);
 }
 
 /**
@@ -5525,18 +6918,24 @@ function updateDiversityChart(diversityHistory) {
     try {
         // Process the data
         const processedData = processDiversityData(diversityHistory);
+        updateDiversityModeAvailability(processedData);
         const nextSignature = buildDiversitySignature(processedData);
+        renderDiversitySummary(processedData.latest);
+        revealDiversityPlot(processedData);
 
-        // Skip redraws when data has not changed.
+        // Skip data replacement when unchanged, but still resize because Chart.js
+        // may have initialized while the panel was collapsed or hidden.
         if (nextSignature === lastDiversityRenderSignature) {
+            if (processedData.labels.length > 0) {
+                scheduleDiversityChartResize();
+            }
             return false;
         }
 
         // Update chart data
         diversityChart.data.labels = processedData.labels;
-        diversityChart.data.datasets[0].data = processedData.overall;
-        diversityChart.data.datasets[1].data = processedData.perGeneration;
-        diversityChart.data.datasets[2].data = processedData.interGeneration;
+        diversityChart.data.datasets = getDiversityChartDatasets(processedData, diversityChartMode);
+        diversityChart.options.scales = getDiversityChartScales();
         diversityData = processedData;
         lastDiversityRenderSignature = nextSignature;
 
@@ -5567,26 +6966,9 @@ function updateDiversityChart(diversityHistory) {
 
                 // Force proper sizing
                 plotContainer.style.display = 'block';
-                plotContainer.style.height = '450px';
-                plotContainer.style.width = '100%';
-                plotContainer.style.padding = '20px';
-                plotContainer.style.boxSizing = 'border-box';
-
-                // Ensure canvas takes full available space
                 canvas.style.display = 'block';
-                canvas.style.width = '100%';
-                canvas.style.height = '400px';
-                canvas.style.maxWidth = '100%';
 
-                if (!diversityPlotSized) {
-                    // Only force a resize when first displayed.
-                    setTimeout(() => {
-                        if (diversityChart) {
-                            diversityChart.resize();
-                        }
-                        diversityPlotSized = true;
-                    }, 100);
-                }
+                scheduleDiversityChartResize(diversityPlotSized ? 50 : 100);
             }
         }
         return true;
@@ -5643,18 +7025,18 @@ function resetDiversityPlot() {
 
     if (diversityChart) {
         diversityChart.data.labels = [];
-        diversityChart.data.datasets[0].data = [];
-        diversityChart.data.datasets[1].data = [];
-        diversityChart.data.datasets[2].data = [];
+        diversityChart.data.datasets = getDiversityChartDatasets(null, diversityChartMode);
         diversityChart.update();
     }
 
     // Reset global diversity data
     diversityData = {
-        overall: [],
-        perGeneration: [],
-        interGeneration: []
+        labels: [],
+        overview: {},
+        islands: {},
+        latest: null
     };
+    renderDiversitySummary(null);
     lastDiversityRenderSignature = '';
     diversityPlotSized = false;
 }
@@ -5742,11 +7124,9 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    // Add event listener for diversity axis toggle
-    const axisToggleButton = document.getElementById('diversity-axis-toggle');
-    if (axisToggleButton) {
-        axisToggleButton.addEventListener('click', toggleDiversityAxes);
-    }
+    document.querySelectorAll('[data-diversity-mode]').forEach((button) => {
+        button.addEventListener('click', () => setDiversityChartMode(button.dataset.diversityMode));
+    });
 });
 
 /**
@@ -5887,8 +7267,8 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
                 <div class="alert alert-info mb-3">
                     <strong>${promptType === 'initial' ? 'Initial' : 'Breeding'} Prompt:</strong>
                     ${promptType === 'initial'
-                ? 'This is the specific prompt used to create this initial idea from the context pool.'
-                : 'This is the specific prompt generated from parent concepts to create this bred idea.'}
+                ? 'This direction prompt was generated from the context pool to create this initial idea.'
+                : 'This direction prompt was generated from parent concepts to create this bred idea.'}
                 </div>
                 <div class="prompt-markdown">${renderMarkdown(displayContent)}</div>
             </div>
@@ -5958,17 +7338,34 @@ const THINKING_UI_CONFIGS = {
         supportsThinking: true,
         allowOff: true,
         allowMedium: true,
-        defaultMode: 'off',
+        defaultMode: 'minimal',
+        offValue: 'minimal',
+        offLabel: 'Minimal',
+        offDescription: ' - Lowest Gemini 3 thinking level',
         min: 0,
         max: 24576,
         step: 128,
         defaultBudget: 1024,
-        help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+        help: 'Default is Minimal for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+    },
+    'gemini-3.1-flash-lite-preview': {
+        supportsThinking: true,
+        allowOff: true,
+        allowMedium: true,
+        defaultMode: 'minimal',
+        offValue: 'minimal',
+        offLabel: 'Minimal',
+        offDescription: ' - Lowest Gemini 3 thinking level',
+        min: 0,
+        max: 24576,
+        step: 128,
+        defaultBudget: 1024,
+        help: 'Default is Minimal for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
     },
     'gemini-3.1-pro-preview': {
         supportsThinking: true,
         allowOff: false,
-        allowMedium: true,
+        allowMedium: false,
         defaultMode: 'low',
         min: 128,
         max: 32768,
@@ -6026,6 +7423,8 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
     const thinkingBudgetMax = document.getElementById('thinkingBudgetMax');
     const offOption = document.getElementById('thinkingOffOption');
     const mediumOption = document.getElementById('thinkingMediumOption');
+    const offLabel = document.getElementById('thinkingOffLabel');
+    const offDescription = document.getElementById('thinkingOffDescription');
 
     const offRadio = document.getElementById('thinkingOff');
     const lowRadio = document.getElementById('thinkingLow');
@@ -6038,6 +7437,9 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
     // Toggle option availability by model capability.
     if (offOption) offOption.style.display = config.allowOff ? 'block' : 'none';
     if (mediumOption) mediumOption.style.display = config.allowMedium ? 'block' : 'none';
+    if (offRadio) offRadio.value = config.offValue || 'off';
+    if (offLabel) offLabel.textContent = config.offLabel || 'Off';
+    if (offDescription) offDescription.textContent = config.offDescription || ' - Prefer speed and lower cost';
 
     if (offRadio) offRadio.checked = false;
     if (lowRadio) lowRadio.checked = false;
@@ -6053,7 +7455,7 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
         effectiveDefault = 'low';
     }
 
-    if (effectiveDefault === 'off' && offRadio) {
+    if (offRadio && effectiveDefault === offRadio.value) {
         offRadio.checked = true;
     } else if (effectiveDefault === 'low' && lowRadio) {
         lowRadio.checked = true;
@@ -6135,7 +7537,7 @@ function getThinkingSettings() {
         };
     }
     if (offRadio && offRadio.checked) {
-        return { thinkingLevel: 'off', thinkingBudget: null };
+        return { thinkingLevel: offRadio.value || 'off', thinkingBudget: null };
     }
     if (lowRadio && lowRadio.checked) {
         return { thinkingLevel: 'low', thinkingBudget: null };
@@ -6156,7 +7558,7 @@ function getThinkingSettings() {
     }
 
     return {
-        thinkingLevel: config.defaultMode === 'off' ? 'off' : 'low',
+        thinkingLevel: config.defaultMode || 'low',
         thinkingBudget: null,
     };
 }

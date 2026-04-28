@@ -32,7 +32,7 @@ def test_repository_restore_from_state():
     state = {
         "config": {
             "idea_type": "airesearch",
-            "pop_size": 2,
+            "pop_size": 6,
             "generations": 3,
             "model_type": "gemini-2.0-flash",
             "creative_temp": 1.1,
@@ -45,6 +45,11 @@ def test_repository_restore_from_state():
             "max_budget": None,
             "mutation_rate": 0.2,
             "seed_context_pool_size": 3,
+            "refine_all_ideas": False,
+            "survivor_refinement_rate": 0.42,
+            "island_count": 3,
+            "migration_rate": 0.05,
+            "migration_novelty_protection_quantile": 0.75,
         },
         "evolution_id": "evo-1",
         "name": "Test Evolution",
@@ -73,6 +78,8 @@ def test_repository_restore_from_state():
         "breeding_prompts": [["bp"]],
         "tournament_history": [{"generation": 1, "rounds": []}],
         "diversity_history": [{"enabled": True, "diversity_score": 0.5}],
+        "island_diversity_history": [{"generation": 1, "islands": []}],
+        "migration_history": [{"generation": 1, "from_island_id": 0, "to_island_id": 1}],
         "avg_idea_cost": 0.1,
         "avg_tournament_cost": 0.2,
         "template_data": {"name": "Custom"},
@@ -94,5 +101,12 @@ def test_repository_restore_from_state():
     assert engine.breeding_prompts == [["bp"]]
     assert engine.seed_context_pool_size == 3
     assert engine.thinking_level == "low"
+    assert engine.refine_all_ideas is False
+    assert engine.survivor_refinement_rate == 0.42
+    assert engine.island_count == 3
+    assert engine.migration_rate == 0.05
+    assert engine.migration_novelty_protection_quantile == 0.75
+    assert engine.island_diversity_history == [{"generation": 1, "islands": []}]
+    assert engine.migration_history == [{"generation": 1, "from_island_id": 0, "to_island_id": 1}]
     assert isinstance(engine.population[0]["idea"], Idea)
     assert engine.population[0]["idea"].title == "A"

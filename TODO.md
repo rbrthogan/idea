@@ -1,26 +1,25 @@
 # TODO
 
 ## Features
-- Allow users to provide more guidance on particular flavours of ideas or add more contraints e.g. not general AI research but specifically on mechanistic interpretability.
+- Allow users to provide more guidance on particular flavours of ideas or add more constraints e.g. not general AI research but specifically on mechanistic interpretability.
 - Add an Idea type that focuses on field cross-pollination, e.g. "Idea from field X that could be applied to problem Y from field Z".
-- For slower models with high latency it seems like nothing is happening for a while, and a some more verbosity to the UI e.g. One line of grey text under the progress bar that reports the current log activity. e.g. "Generating initial context for idea x of y ... ", "rated limited, backing off for X seconds", etc. This will whizz by quickly for fast models, but be more visible for slow models.
-- Add download button for to charts (diversity and ELO ratings) to allow easy use later.
+- For slower models with high latency it seems like nothing is happening for a while. Add more verbosity to the UI, e.g. one line of grey text under the progress bar that reports the current log activity: "Generating initial context for idea x of y ... ", "rated limited, backing off for X seconds", etc. This will whizz by quickly for fast models, but be more visible for slow models.
+- Add download button for charts (diversity and ELO ratings) to allow easy use later.
+- Add file upload for e.g. pdf to provide context to idea template generation 
+- update default template generator to 3.1
 
 ## Research Ideas
 - Have an evolution variant to take human ratings as input during evolution
-- Add a meta prompt to get the model to improve the new idea generation prompts based on the history of the evolution.
-- Split evolution population into multiple "islands" of ideas, which are evolved independently with only rare opportunity for cross-island communication.
-- introduce a concept of mutation to the genotype
-- improve the tournament selection by using niching - group similar ideas to keep with each other -> maintain multiple directions of exploration -> similar to the "island" idea but more dynamic vs frozen in from the start.
-- There is still too much dependency on the intital context prompt - similar themes are often generated --> inject more true randomness e.g return to original idea of random words but now just augment the prompt with these random words. Or ideally something better.
-- Explore combining cheaper models with expensive ones. Keep models can go wide and explore much larger space of ideas perhaps providing a sampling space for the more expensive models to get better quality ideas from.
-- Consider not replacing entire population each generation but instead only a subset (selected by either weakness, age or both) -- probably need to try larger population sizes to see if this works well.
-
-- Abandon generation approach for a full population approach. Parent sampling based on promising and/or underexplored areas
-- genotype might be too agressive a compression. Inspect them to see if essence of idea is getting lost 
-- Reject ideas that are too similar to previous ones 
-- is critque and refine really worth it? Maybe idea and it's critiqe are just kept together? don't refine. And another parent and it's critique can breed with it? with genotype the refinement is probably lost anyway right? 
-- investigate cheaper evals (e.g. each new idea is rated just vs a ~ median ELO idea)
+- Add a meta prompt to get the model to improve the new idea generation and breeding prompts based on the history of the evolution.
+- Improve LLM-as-a-judge quality using debate.
+- Improve tournament selection using niching: group similar ideas with each other to maintain multiple exploration directions, similar to islands but more dynamic.
+- Reduce remaining dependency on the initial context prompt. Seed novelty checks and genotype mutation help, but similar themes can still recur; consider stronger randomness or richer novelty sources.
+- Explore combining cheaper models with expensive ones. Cheap models can go wide and explore a much larger space of ideas, perhaps providing a sampling space for the more expensive models to improve.
+- Explore a fuller population-level approach. Current partial replacement and hybrid fitness help, but the algorithm is still generation based.
+- Genotype might be too aggressive a compression. Use the captured genotype history to inspect whether the essence of the idea is getting lost.
+- Reject bred or Oracle-generated ideas that are too similar to previous ones.
+- Is critique and refine really worth it? Maybe the idea and its critique should be kept together without mandatory refinement. Another parent and its critique could breed with it, especially if genotype compression loses the refinement anyway.
+- Investigate cheaper evals (e.g. each new idea is rated just vs a ~ median ELO idea)
 
 
 ## Bugs

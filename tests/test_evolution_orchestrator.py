@@ -37,6 +37,15 @@ class _EmptyChildFormatter(_FakeAgent):
 
 
 class _FakeCritic(_FakeAgent):
+    def __init__(self):
+        super().__init__()
+        self.refined_ideas = []
+
+    def refine(self, idea, _idea_type):
+        idea_value = idea.get("idea") if isinstance(idea, dict) else idea
+        self.refined_ideas.append(idea_value)
+        return idea
+
     def get_tournament_ranks(
         self,
         population,
@@ -99,6 +108,11 @@ class _FakeEngine:
         self.checkpoint_id = "ckpt"
         self.avg_idea_cost = 0.0
         self.avg_tournament_cost = 0.0
+        self.refine_all_ideas = True
+        self.survivor_refinement_rate = 0.1
+        self.island_count = 1
+        self.migration_rate = 0.05
+        self.migration_novelty_protection_quantile = 0.8
 
         self.population = [
             {"id": uuid.uuid4(), "idea": "A", "parent_ids": [], "birth_generation": 0},
@@ -110,6 +124,8 @@ class _FakeEngine:
         self.breeding_prompts = [["bp0", "bp1"]]
         self.tournament_history = []
         self.diversity_history = []
+        self.island_diversity_history = []
+        self.migration_history = []
 
         self.ideator = SimpleNamespace(generate_text=lambda _p: "oracle idea")
         self.critic = _FakeCritic()
@@ -124,6 +140,9 @@ class _FakeEngine:
 
     def random_shuffle(self, values):
         random.shuffle(values)
+
+    def random_uniform(self, a, b):
+        return a
 
     def random_choice(self, a, *, size=None, replace=True, p=None):
         if size is None:
@@ -204,6 +223,9 @@ class _FakeEngine:
     async def _calculate_and_store_diversity(self):
         self.diversity_history.append({"enabled": True, "diversity_score": 0.3})
         return self.diversity_history[-1]
+
+    async def _calculate_population_diversity_scores(self, population):
+        return {idx: float(idx) for idx in range(len(population))}
 
     async def _find_least_interesting_idea_idx(self, _population):
         return 0
@@ -360,6 +382,107 @@ def test_selected_parent_ideas_record_breeding_genotypes():
     assert genotype_entries[0]["child_generation"] == 1
 
 
+def test_generation_scoring_metadata_is_attached_for_tree_view():
+    engine = _FakeEngine()
+    engine.oracle = None
+    updates = []
+
+    async def callback(data):
+        updates.append(data)
+
+    orchestrator = EvolutionOrchestrator(engine, callback)
+    state = GenerationWorkState(
+        generation_index=0,
+        start_generation=0,
+        total_generations=1,
+        total_steps=4,
+        steps_per_generation=4,
+    )
+
+    asyncio.run(
+        orchestrator._evolve_generations(
+            start_generation=0,
+            total_steps=4,
+            step_offset=0,
+            work_state=state,
+            resuming=False,
+        )
+    )
+
+    scored_parent = next(idea for idea in engine.history[0] if idea.get("idea") == "A")
+    assert scored_parent["selection_metrics"]["evaluation_generation"] == 0
+    assert scored_parent["selection_metrics"]["elo"] in {1499.0, 1500.0}
+    assert scored_parent["selection_metrics"]["diversity"] in {0.0, 0.1}
+    assert scored_parent["selection_metrics"]["fitness"] > 0
+    assert scored_parent["survival_metrics"]["survived_to_generation"] == 1
+
+
+def test_final_generation_is_tournament_scored_for_continuation_and_tree_view():
+    engine = _FakeEngine()
+    engine.oracle = None
+    updates = []
+
+    async def callback(data):
+        updates.append(data)
+
+    orchestrator = EvolutionOrchestrator(engine, callback)
+    state = GenerationWorkState(
+        generation_index=0,
+        start_generation=0,
+        total_generations=1,
+        total_steps=4,
+        steps_per_generation=4,
+    )
+
+    asyncio.run(
+        orchestrator._evolve_generations(
+            start_generation=0,
+            total_steps=4,
+            step_offset=0,
+            work_state=state,
+            resuming=False,
+        )
+    )
+
+    final_generation = engine.history[-1]
+    assert final_generation
+    assert all("selection_metrics" in idea for idea in final_generation)
+    assert all(
+        idea["selection_metrics"]["evaluation_generation"] == engine.generations
+        for idea in final_generation
+    )
+    assert [entry["generation"] for entry in engine.tournament_history] == [0, 1]
+    assert engine.tournament_history[-1]["generation"] == engine.generations
+    assert any(update.get("history") for update in updates)
+
+
+def test_attach_tree_metrics_persists_global_elo_on_idea():
+    engine = _FakeEngine()
+    orchestrator = EvolutionOrchestrator(engine, lambda _data: asyncio.sleep(0))
+    population = [{"id": uuid.uuid4(), "idea": "A", "parent_ids": []}]
+
+    orchestrator._attach_tree_metrics(
+        population,
+        {
+            0: {
+                "elo": 1632.4,
+                "diversity": 0.25,
+                "elo_norm": 0.8,
+                "diversity_norm": 0.4,
+                "fitness": 0.68,
+            }
+        },
+        {0: {"age": 1.0, "age_decay": 0.9, "survival_score": 0.61}},
+        evaluation_generation=2,
+        target_generation=3,
+    )
+
+    idea = population[0]
+    assert idea["selection_metrics"]["elo"] == 1632.4
+    assert idea["elo"] == 1632.4
+    assert idea["ratings"]["auto"] == 1632.4
+
+
 def test_seed_novelty_guardrail_regenerates_similar_context():
     engine = _FakeEngine()
     engine.context_novelty_threshold = 0.5
@@ -454,3 +577,212 @@ def test_invalid_bred_child_is_dropped_before_next_generation():
     assert len(engine.population) == engine.pop_size
     assert all(EvolutionOrchestrator._is_usable_idea(idea) for idea in engine.population)
     assert updates
+
+
+def test_stochastic_survivor_refinement_applies_only_to_survivors_when_legacy_refine_disabled():
+    engine = _FakeEngine()
+    engine.oracle = None
+    engine.refine_all_ideas = False
+    engine.survivor_refinement_rate = 1.0
+    engine.population.append(
+        {"id": uuid.uuid4(), "idea": "C", "parent_ids": [], "birth_generation": 0}
+    )
+    engine.pop_size = 3
+    updates = []
+
+    async def callback(data):
+        updates.append(data)
+
+    orchestrator = EvolutionOrchestrator(engine, callback)
+    state = GenerationWorkState(
+        generation_index=0,
+        start_generation=0,
+        total_generations=1,
+        total_steps=4,
+        steps_per_generation=4,
+    )
+
+    asyncio.run(
+        orchestrator._evolve_generations(
+            start_generation=0,
+            total_steps=4,
+            step_offset=0,
+            work_state=state,
+            resuming=False,
+        )
+    )
+
+    assert set(engine.critic.refined_ideas).issubset({"A", "B", "C"})
+    assert len(engine.critic.refined_ideas) == 2
+    assert "child" not in engine.critic.refined_ideas
+
+
+def test_zero_survivor_refinement_probability_is_off_when_legacy_refine_disabled():
+    engine = _FakeEngine()
+    engine.oracle = None
+    engine.refine_all_ideas = False
+    engine.survivor_refinement_rate = 0.0
+    updates = []
+
+    async def callback(data):
+        updates.append(data)
+
+    orchestrator = EvolutionOrchestrator(engine, callback)
+    state = GenerationWorkState(
+        generation_index=0,
+        start_generation=0,
+        total_generations=1,
+        total_steps=4,
+        steps_per_generation=4,
+    )
+
+    asyncio.run(
+        orchestrator._evolve_generations(
+            start_generation=0,
+            total_steps=4,
+            step_offset=0,
+            work_state=state,
+            resuming=False,
+        )
+    )
+
+    assert engine.critic.refined_ideas == []
+
+
+def test_migration_excludes_most_novel_source_and_destination_ideas():
+    engine = _FakeEngine()
+    source_protected_id = uuid.uuid4()
+    source_candidate_id = uuid.uuid4()
+    destination_protected_id = uuid.uuid4()
+    destination_replacement_id = uuid.uuid4()
+    engine.island_count = 2
+    engine.migration_rate = 1.0
+    engine.migration_novelty_protection_quantile = 0.5
+    engine.population = [
+        {
+            "id": source_protected_id,
+            "idea": "most novel source",
+            "parent_ids": [],
+            "birth_generation": 0,
+            "island_id": 0,
+        },
+        {
+            "id": source_candidate_id,
+            "idea": "ordinary source",
+            "parent_ids": [],
+            "birth_generation": 0,
+            "island_id": 0,
+        },
+        {
+            "id": destination_protected_id,
+            "idea": "most novel destination",
+            "parent_ids": [],
+            "birth_generation": 0,
+            "island_id": 1,
+        },
+        {
+            "id": destination_replacement_id,
+            "idea": "ordinary destination",
+            "parent_ids": [],
+            "birth_generation": 0,
+            "island_id": 1,
+        },
+    ]
+    engine.history = [engine.population.copy()]
+    engine.breeding_prompts = [[None, None, None, None]]
+
+    async def diversity_scores(population):
+        score_by_id = {
+            str(source_protected_id): 10.0,
+            str(source_candidate_id): 1.0,
+            str(destination_protected_id): 10.0,
+            str(destination_replacement_id): 1.0,
+        }
+        return {
+            idx: score_by_id.get(str(idea.get("id")), 0.0)
+            for idx, idea in enumerate(population)
+        }
+
+    engine._calculate_population_diversity_scores = diversity_scores
+
+    async def callback(_data):
+        pass
+
+    orchestrator = EvolutionOrchestrator(engine, callback)
+    asyncio.run(orchestrator._apply_island_migration(gen=0))
+
+    migrated = [idea for idea in engine.population if idea.get("migration_event")]
+    assert len(migrated) == 2
+    assert all(idea["migrated_from_id"] != str(source_protected_id) for idea in migrated)
+    assert any(idea["migrated_from_id"] == str(source_candidate_id) for idea in migrated)
+    assert any(str(idea["id"]) == str(destination_protected_id) for idea in engine.population)
+    assert all(str(idea["id"]) != str(destination_replacement_id) for idea in engine.population)
+
+
+def test_island_generation_breeds_locally_and_preserves_island_sizes():
+    engine = _FakeEngine()
+    engine.oracle = None
+    engine.island_count = 2
+    engine.migration_rate = 0.0
+    engine.pop_size = 4
+    engine.population = [
+        {"id": uuid.uuid4(), "idea": "A0", "parent_ids": [], "birth_generation": 0, "island_id": 0},
+        {"id": uuid.uuid4(), "idea": "A1", "parent_ids": [], "birth_generation": 0, "island_id": 0},
+        {"id": uuid.uuid4(), "idea": "B0", "parent_ids": [], "birth_generation": 0, "island_id": 1},
+        {"id": uuid.uuid4(), "idea": "B1", "parent_ids": [], "birth_generation": 0, "island_id": 1},
+    ]
+    engine.history = [engine.population.copy()]
+    engine.contexts = ["ctx0", "ctx1", "ctx2", "ctx3"]
+    engine.specific_prompts = ["sp0", "sp1", "sp2", "sp3"]
+    engine.breeding_prompts = [[None, None, None, None]]
+    parent_island_sets = []
+
+    def breed(parents, _idea_type):
+        parent_island_sets.append({parent.get("island_id") for parent in parents})
+        return {
+            "id": uuid.uuid4(),
+            "idea": "child",
+            "parent_ids": [parent["id"] for parent in parents],
+            "specific_prompt": "child prompt",
+            "parent_genotypes": [
+                {"parent_id": str(parent["id"]), "genotype": f"gene-{idx}"}
+                for idx, parent in enumerate(parents)
+            ],
+        }
+
+    engine.breeder.breed = breed
+    updates = []
+
+    async def callback(data):
+        updates.append(data)
+
+    orchestrator = EvolutionOrchestrator(engine, callback)
+    state = GenerationWorkState(
+        generation_index=0,
+        start_generation=0,
+        total_generations=1,
+        total_steps=4,
+        steps_per_generation=4,
+    )
+
+    asyncio.run(
+        orchestrator._evolve_generations(
+            start_generation=0,
+            total_steps=4,
+            step_offset=0,
+            work_state=state,
+            resuming=False,
+        )
+    )
+
+    assert len(engine.population) == 4
+    assert [idea.get("island_id") for idea in engine.population].count(0) == 2
+    assert [idea.get("island_id") for idea in engine.population].count(1) == 2
+    assert all(
+        idea.get("selection_metrics", {}).get("evaluation_generation") == engine.generations
+        for idea in engine.population
+    )
+    assert [entry["generation"] for entry in engine.tournament_history] == [0, 1]
+    assert parent_island_sets
+    assert all(len(island_set) == 1 for island_set in parent_island_sets)
+    assert any(update.get("history") for update in updates)

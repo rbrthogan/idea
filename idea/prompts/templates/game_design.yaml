@@ -89,11 +89,6 @@ prompts:
     - "Design a 2048 variant on a hex grid with a once-per-level rotate action."
     - "Design a twist on Sokoban where boxes are magnets with simple attract/repel rules."
 
-  idea: |
-    Generate one browser-game design document from the selected direction.
-    Apply all constraints below:
-    {requirements}
-
   format: |
     You are a formatting assistant. Convert the input game design into a JSON object with "title" and "content" fields.
 

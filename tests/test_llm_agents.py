@@ -15,7 +15,6 @@ class DummyPrompts:
     ORACLE_INSTRUCTION = ""
     ORACLE_FORMAT_INSTRUCTIONS = ""
     ORACLE_MAIN_PROMPT = "{mode_instruction}{format_instructions}{example_idea_prompts}"
-    IDEA_PROMPT = ""
     SPECIFIC_PROMPT = "{context_pool}"
     BREED_PROMPT = "{ideas}"
     EXAMPLE_IDEA_PROMPTS = ""
@@ -62,6 +61,32 @@ def test_get_tournament_ranks_deterministic():
     with patch.object(Critic, 'compare_ideas', side_effect=["A"]):
         ranks = critic.get_tournament_ranks(ideas, "airesearch", rounds=1)
     assert ranks[0] > ranks[1]
+
+
+def test_tournament_ranks_start_from_persisted_global_elo():
+    critic = create_critic()
+    ideas = [
+        {"id": "high", "idea": "high", "selection_metrics": {"elo": 1800}},
+        {"id": "low", "idea": "low", "selection_metrics": {"elo": 1200}},
+    ]
+
+    with patch.object(Critic, 'compare_ideas', side_effect=["tie"]):
+        ranks = critic.get_tournament_ranks(ideas, "airesearch", rounds=1)
+
+    assert 1780 < ranks[0] < 1800
+    assert 1200 < ranks[1] < 1220
+    assert ranks[0] > ranks[1]
+
+
+def test_single_idea_tournament_preserves_persisted_global_elo():
+    critic = create_critic()
+    ranks = critic.get_tournament_ranks(
+        [{"id": "solo", "idea": "solo", "selection_metrics": {"elo": 1712}}],
+        "airesearch",
+        rounds=1,
+    )
+
+    assert ranks == {0: 1712.0}
 
 
 def test_swiss_pairings_even_no_repeats():
@@ -274,7 +299,6 @@ def test_generate_idea_from_context_appends_template_constraints():
     ideator = create_ideator()
     prompts = SimpleNamespace(
         SPECIFIC_PROMPT="SPEC:{context_pool}",
-        IDEA_PROMPT="UNUSED",
         BREED_PROMPT="UNUSED",
         template=SimpleNamespace(special_requirements="must include title and content"),
     )
@@ -300,7 +324,6 @@ def test_generate_idea_from_context_without_requirements_uses_specific_prompt_on
     ideator = create_ideator()
     prompts = SimpleNamespace(
         SPECIFIC_PROMPT="SPEC:{context_pool}",
-        IDEA_PROMPT="UNUSED",
         BREED_PROMPT="UNUSED",
     )
 

@@ -58,6 +58,15 @@ class EvolutionSerializer:
                 "max_budget": engine.max_budget,
                 "mutation_rate": engine.mutation_rate,
                 "seed_context_pool_size": engine.seed_context_pool_size,
+                "refine_all_ideas": engine.refine_all_ideas,
+                "survivor_refinement_rate": engine.survivor_refinement_rate,
+                "island_count": getattr(engine, "island_count", 2),
+                "migration_rate": getattr(engine, "migration_rate", 0.05),
+                "migration_novelty_protection_quantile": getattr(
+                    engine,
+                    "migration_novelty_protection_quantile",
+                    0.8,
+                ),
                 "replacement_rate": engine.replacement_rate,
                 "fitness_alpha": engine.fitness_alpha,
                 "age_decay_rate": engine.age_decay_rate,
@@ -71,6 +80,8 @@ class EvolutionSerializer:
             "breeding_prompts": engine.breeding_prompts,
             "tournament_history": engine.tournament_history,
             "diversity_history": engine.diversity_history,
+            "island_diversity_history": getattr(engine, "island_diversity_history", []),
+            "migration_history": getattr(engine, "migration_history", []),
             "avg_idea_cost": engine.avg_idea_cost,
             "avg_tournament_cost": engine.avg_tournament_cost,
             "fitness_elo_stats": engine.fitness_elo_stats,
@@ -134,6 +145,8 @@ class EvolutionSerializer:
         engine.breeding_prompts = state.get("breeding_prompts", [])
         engine.tournament_history = state.get("tournament_history", [])
         engine.diversity_history = state.get("diversity_history", [])
+        engine.island_diversity_history = state.get("island_diversity_history", [])
+        engine.migration_history = state.get("migration_history", [])
         engine.avg_idea_cost = state.get("avg_idea_cost", 0.0)
         engine.avg_tournament_cost = state.get("avg_tournament_cost", 0.0)
         engine.fitness_elo_stats = _coerce_stats(state.get("fitness_elo_stats"))
@@ -325,6 +338,14 @@ class EvolutionRepository:
             max_budget=config.get("max_budget"),
             mutation_rate=config.get("mutation_rate", 0.2),
             seed_context_pool_size=config.get("seed_context_pool_size"),
+            refine_all_ideas=config.get("refine_all_ideas", False),
+            survivor_refinement_rate=config.get("survivor_refinement_rate", 0.1),
+            island_count=config.get("island_count", 2),
+            migration_rate=config.get("migration_rate", 0.05),
+            migration_novelty_protection_quantile=config.get(
+                "migration_novelty_protection_quantile",
+                0.8,
+            ),
             replacement_rate=config.get("replacement_rate", 0.5),
             fitness_alpha=config.get("fitness_alpha", 0.7),
             age_decay_rate=config.get("age_decay_rate", 0.25),

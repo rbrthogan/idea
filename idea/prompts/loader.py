@@ -270,7 +270,7 @@ def validate_template(idea_type: str) -> tuple[bool, list]:
         try:
             module = import_module(f"idea.prompts.{idea_type}")
             # Basic check for required attributes
-            required_attrs = ['ITEM_TYPE', 'CONTEXT_PROMPT', 'IDEA_PROMPT', 'COMPARISON_CRITERIA']
+            required_attrs = ['ITEM_TYPE', 'CONTEXT_PROMPT', 'SPECIFIC_PROMPT', 'COMPARISON_CRITERIA']
             missing = [attr for attr in required_attrs if not hasattr(module, attr)]
             if missing:
                 return False, [f"Missing required attributes: {missing}"]

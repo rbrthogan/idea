@@ -117,6 +117,7 @@
                   <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                   <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                   <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
+                  <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash-Lite Preview</option>
                   <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
                 </select>
               </div>
@@ -247,7 +248,7 @@
                     <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingOff"
                       value="off" checked onchange="updateThinkingBudgetMode()">
                     <label class="form-check-label" for="thinkingOff">
-                      <strong>Off</strong> - Prefer speed and lower cost
+                      <strong id="thinkingOffLabel">Off</strong><span id="thinkingOffDescription"> - Prefer speed and lower cost</span>
                     </label>
                   </div>
                   <div class="form-check">
@@ -353,6 +354,57 @@
                 <input type="range" class="form-range" min="0" max="1.5" step="0.05" id="ageDecayRate" value="0.25"
                   oninput="document.getElementById('ageDecayRateValue').textContent = parseFloat(this.value).toFixed(2)">
                 <small class="text-muted">Higher values retire old ideas faster during survivor selection.</small>
+              </div>
+
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="refineAllIdeas">
+                  <label class="form-check-label" for="refineAllIdeas">Refine All Ideas (Legacy)</label>
+                </div>
+                <small class="text-muted">Uses critique and refine for every seed, child, and Oracle idea.</small>
+              </div>
+
+              <div class="mb-3" id="survivorRefinementRateContainer">
+                <label for="survivorRefinementRate" class="form-label d-flex justify-content-between">
+                  <span>Survivor Refinement Probability</span>
+                  <span id="survivorRefinementRateValue">0.10</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1" step="0.05" id="survivorRefinementRate" value="0.1"
+                  oninput="document.getElementById('survivorRefinementRateValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Used only when legacy refine-all is off. 0 disables stochastic survivor refinement.</small>
+              </div>
+
+              <h6 class="mb-3 mt-4">Island Controls</h6>
+
+              <div class="mb-3">
+                <label for="islandCount" class="form-label d-flex justify-content-between">
+                  <span>Island Count</span>
+                  <span id="islandCountValue">2</span>
+                </label>
+                <input type="range" class="form-range" min="1" max="5" step="1" id="islandCount" value="2"
+                  oninput="document.getElementById('islandCountValue').textContent = parseInt(this.value, 10)">
+                <small class="text-muted">Splits the total population into independent sub-populations.</small>
+              </div>
+
+              <div class="mb-3">
+                <label for="migrationRate" class="form-label d-flex justify-content-between">
+                  <span>Migration Probability</span>
+                  <span id="migrationRateValue">0.05</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="0.25" step="0.01" id="migrationRate" value="0.05"
+                  oninput="document.getElementById('migrationRateValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Chance each island sends one non-protected survivor to another island.</small>
+              </div>
+
+              <div class="mb-3">
+                <label for="migrationNoveltyProtectionQuantile" class="form-label d-flex justify-content-between">
+                  <span>Migration Novelty Protection</span>
+                  <span id="migrationNoveltyProtectionQuantileValue">0.80</span>
+                </label>
+                <input type="range" class="form-range" min="0.5" max="0.95" step="0.05"
+                  id="migrationNoveltyProtectionQuantile" value="0.8"
+                  oninput="document.getElementById('migrationNoveltyProtectionQuantileValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Protects the most novel ideas from being migrated or replaced.</small>
               </div>
             </div>
           </div>
@@ -499,9 +551,28 @@
                 <i class="fas fa-magic me-2"></i>
                 Describe what you want to generate
               </h5>
-              <textarea class="form-control entry-input" id="ideaTypeInput"
-                placeholder="Describe the ideas you want to generate and evolve, specifying any important constraints and/or evaluation criteria"
-                rows="3"></textarea>
+              <div class="template-prompt-field">
+                <textarea class="form-control entry-input" id="ideaTypeInput"
+                  placeholder="Describe the ideas you want to generate and evolve, specifying any important constraints and/or evaluation criteria"
+                  rows="3"></textarea>
+                <label class="template-attach-control" title="Attach context file">
+                  <input type="file" id="templateContextFile" class="template-context-file-input"
+                    aria-label="Attach context file"
+                    accept=".pdf,application/pdf,text/plain,text/markdown,text/html,text/csv,application/json,image/*,audio/*,video/*">
+                  <span class="template-attach-btn" id="templateAttachBtn" aria-hidden="true">
+                    <i class="fas fa-paperclip"></i>
+                  </span>
+                </label>
+              </div>
+              <div class="template-attachment-chip" id="templateAttachmentChip" style="display: none;">
+                <i class="fas fa-file-alt"></i>
+                <span class="template-attachment-name" id="templateAttachmentName"></span>
+                <span class="template-attachment-meta" id="templateAttachmentMeta"></span>
+                <button type="button" class="template-attachment-remove" id="templateRemoveAttachmentBtn"
+                  aria-label="Remove attached file">
+                  <i class="fas fa-times"></i>
+                </button>
+              </div>
 
               <div class="entry-actions mt-3">
                 <button class="btn btn-primary btn-lg w-100" id="generateTemplateBtn">
@@ -658,20 +729,45 @@
           </div>
         </div>
 
+        <div id="evolution-view-toolbar" class="evolution-view-toolbar" style="display: none;">
+          <div class="evolution-view-title">
+            <span>Evolution View</span>
+          </div>
+          <div class="evolution-view-toggle" role="tablist" aria-label="Evolution view mode">
+            <button type="button" class="evolution-view-toggle-btn" data-view-mode="cards"
+              aria-selected="false">
+              <i class="fas fa-table-cells-large"></i>
+              <span>Cards</span>
+            </button>
+            <button type="button" class="evolution-view-toggle-btn active" data-view-mode="tree"
+              aria-selected="true">
+              <i class="fas fa-sitemap"></i>
+              <span>Tree</span>
+            </button>
+          </div>
+        </div>
+
         <!-- Generations will be rendered here -->
         <div id="generations-container" class="generations-container">
           <!-- Generation content will be dynamically added here -->
         </div>
 
+        <div id="evolution-tree-container" class="evolution-tree-container" hidden>
+          <!-- Evolution tree content will be dynamically added here -->
+        </div>
+
         <!-- Diversity Plot Section -->
         <div id="diversity-plot-section" class="diversity-plot-section" style="display: none;">
           <div class="diversity-plot-header">
-            <h3 class="diversity-plot-title">Population Diversity Evolution</h3>
+            <div>
+              <h3 class="diversity-plot-title">Diversity</h3>
+              <p class="diversity-plot-subtitle">Population spread, island separation, and drift over time.</p>
+            </div>
             <div class="diversity-plot-controls">
-              <button class="btn btn-sm btn-outline-primary" id="diversity-axis-toggle"
-                title="Toggle between combined and split y-axes">
-                <i class="fas fa-arrows-alt-v"></i> Split Axes
-              </button>
+              <div class="diversity-mode-toggle" role="group" aria-label="Diversity chart mode">
+                <button type="button" class="active" data-diversity-mode="overview">Overview</button>
+                <button type="button" data-diversity-mode="islands">Islands</button>
+              </div>
               <button class="diversity-plot-toggle btn btn-outline-secondary" type="button" data-bs-toggle="collapse"
                 data-bs-target="#diversity-plot-content" aria-expanded="true" aria-controls="diversity-plot-content">
                 <i class="fas fa-chevron-up"></i>
@@ -679,6 +775,7 @@
             </div>
           </div>
           <div class="collapse show" id="diversity-plot-content">
+            <div id="diversity-summary" class="diversity-summary"></div>
             <div class="diversity-plot-container">
               <canvas id="diversity-chart" width="800" height="400"></canvas>
             </div>
@@ -768,7 +865,7 @@
 
   <!-- Modal for idea details -->
   <div class="modal fade" id="ideaModal" tabindex="-1" aria-labelledby="ideaModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-lg">
+    <div class="modal-dialog modal-xl idea-reader-dialog">
       <div class="modal-content">
         <div class="modal-header">
           <h5 class="modal-title" id="ideaModalLabel">Idea Title</h5>
@@ -781,7 +878,7 @@
           </div>
         </div>
         <div class="modal-body">
-          <div id="ideaModalContent" class="idea-content"></div>
+          <div id="ideaModalContent" class="idea-content markdown-content"></div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
@@ -980,6 +1077,8 @@
 
       // Template generation event listeners
       document.getElementById('generateTemplateBtn')?.addEventListener('click', handleTemplateGeneration);
+      document.getElementById('templateContextFile')?.addEventListener('change', handleTemplateAttachmentChange);
+      document.getElementById('templateRemoveAttachmentBtn')?.addEventListener('click', clearTemplateAttachment);
       document.getElementById('saveTemplateBtn')?.addEventListener('click', saveAndUseTemplate);
       document.getElementById('reviewEditBtn')?.addEventListener('click', reviewAndEditTemplate);
 
@@ -1379,6 +1478,83 @@
       document.getElementById('ideaTypeInput').focus();
     }
 
+    const TEMPLATE_CONTEXT_MAX_BYTES = 50 * 1024 * 1024;
+    const TEMPLATE_CONTEXT_ALLOWED_EXACT_TYPES = new Set([
+      'application/pdf',
+      'application/json',
+      'application/xml',
+      'text/plain',
+      'text/markdown',
+      'text/html',
+      'text/xml',
+      'text/csv'
+    ]);
+    const TEMPLATE_CONTEXT_ALLOWED_PREFIXES = ['image/', 'audio/', 'video/'];
+
+    function formatTemplateFileSize(bytes) {
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+      const value = bytes / Math.pow(1024, exponent);
+      return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
+    }
+
+    function isTemplateContextFileSupported(file) {
+      const type = (file?.type || '').toLowerCase();
+      if (TEMPLATE_CONTEXT_ALLOWED_EXACT_TYPES.has(type)) return true;
+      if (TEMPLATE_CONTEXT_ALLOWED_PREFIXES.some(prefix => type.startsWith(prefix))) return true;
+
+      const name = (file?.name || '').toLowerCase();
+      return ['.pdf', '.txt', '.md', '.markdown', '.html', '.htm', '.csv', '.json', '.xml'].some(ext => name.endsWith(ext));
+    }
+
+    function getSelectedTemplateContextFile() {
+      const input = document.getElementById('templateContextFile');
+      return input?.files?.[0] || null;
+    }
+
+    function handleTemplateAttachmentChange() {
+      const file = getSelectedTemplateContextFile();
+      if (!file) {
+        clearTemplateAttachment();
+        return;
+      }
+
+      if (!isTemplateContextFileSupported(file)) {
+        showSimpleAlert('Attach a PDF, text file, image, audio, or video file.', 'warning');
+        clearTemplateAttachment();
+        return;
+      }
+
+      if (file.size > TEMPLATE_CONTEXT_MAX_BYTES) {
+        showSimpleAlert('Attached context file is too large. The limit is 50 MB.', 'warning');
+        clearTemplateAttachment();
+        return;
+      }
+
+      const chip = document.getElementById('templateAttachmentChip');
+      const nameEl = document.getElementById('templateAttachmentName');
+      const metaEl = document.getElementById('templateAttachmentMeta');
+      const attachBtn = document.getElementById('templateAttachBtn');
+      if (nameEl) nameEl.textContent = file.name;
+      if (metaEl) metaEl.textContent = formatTemplateFileSize(file.size);
+      if (chip) chip.style.display = 'inline-flex';
+      if (attachBtn) attachBtn.classList.add('has-attachment');
+    }
+
+    function clearTemplateAttachment() {
+      const input = document.getElementById('templateContextFile');
+      const chip = document.getElementById('templateAttachmentChip');
+      const nameEl = document.getElementById('templateAttachmentName');
+      const metaEl = document.getElementById('templateAttachmentMeta');
+      const attachBtn = document.getElementById('templateAttachBtn');
+      if (input) input.value = '';
+      if (nameEl) nameEl.textContent = '';
+      if (metaEl) metaEl.textContent = '';
+      if (chip) chip.style.display = 'none';
+      if (attachBtn) attachBtn.classList.remove('has-attachment');
+    }
+
     async function handleTemplateGeneration() {
       const ideaType = document.getElementById('ideaTypeInput').value.trim();
 
@@ -1395,15 +1571,33 @@
         // Show loading state
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Generating...';
-        showStatus('Generating template with Gemini 3.1 Pro...', 'info');
+        const contextFile = getSelectedTemplateContextFile();
+        showStatus(
+          contextFile
+            ? 'Uploading context file and generating template with Gemini 3.1 Pro...'
+            : 'Generating template with Gemini 3.1 Pro...',
+          'info'
+        );
         hideTemplatePreview();
 
-        // Generate template
-        const response = await fetch('/api/templates/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idea_type_suggestion: ideaType })
-        });
+        let requestOptions;
+        if (contextFile) {
+          const formData = new FormData();
+          formData.append('idea_type_suggestion', ideaType);
+          formData.append('context_file', contextFile);
+          requestOptions = {
+            method: 'POST',
+            body: formData
+          };
+        } else {
+          requestOptions = {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idea_type_suggestion: ideaType })
+          };
+        }
+
+        const response = await fetch('/api/templates/generate', requestOptions);
 
         const data = await response.json();
 
@@ -1484,7 +1678,6 @@
             special_requirements: currentGeneratedTemplate.special_requirements || '',
             context_prompt: currentGeneratedTemplate.prompts.context,
             specific_prompt: currentGeneratedTemplate.prompts.specific_prompt,
-            idea_prompt: currentGeneratedTemplate.prompts.idea,
             format_prompt: currentGeneratedTemplate.prompts.format,
             critique_prompt: currentGeneratedTemplate.prompts.critique,
             refine_prompt: currentGeneratedTemplate.prompts.refine,
@@ -1683,7 +1876,6 @@
       // Populate all prompt fields
       document.getElementById('editContextPrompt').value = template.prompts?.context || '';
       document.getElementById('editSpecificPrompt').value = template.prompts?.specific_prompt || '';
-      document.getElementById('editIdeaPrompt').value = template.prompts?.idea || '';
       document.getElementById('editFormatPrompt').value = template.prompts?.format || '';
       document.getElementById('editCritiquePrompt').value = template.prompts?.critique || '';
       document.getElementById('editRefinePrompt').value = template.prompts?.refine || '';
@@ -1713,7 +1905,6 @@
       // Clear all prompt fields
       document.getElementById('editContextPrompt').value = '';
       document.getElementById('editSpecificPrompt').value = '';
-      document.getElementById('editIdeaPrompt').value = '';
       document.getElementById('editFormatPrompt').value = '';
       document.getElementById('editCritiquePrompt').value = '';
       document.getElementById('editRefinePrompt').value = '';
@@ -1751,7 +1942,6 @@
       // Get all prompt fields
       const contextPrompt = document.getElementById('editContextPrompt').value.trim();
       const specificPrompt = document.getElementById('editSpecificPrompt').value.trim();
-      const ideaPrompt = document.getElementById('editIdeaPrompt').value.trim();
       const formatPrompt = document.getElementById('editFormatPrompt').value.trim();
       const critiquePrompt = document.getElementById('editCritiquePrompt').value.trim();
       const refinePrompt = document.getElementById('editRefinePrompt').value.trim();
@@ -1763,7 +1953,7 @@
         return;
       }
 
-      if (!contextPrompt || !specificPrompt || !ideaPrompt || !formatPrompt ||
+      if (!contextPrompt || !specificPrompt || !formatPrompt ||
         !critiquePrompt || !refinePrompt || !breedPrompt || !genotypePrompt) {
         alert('Please fill in all prompt fields. All prompts are required for a complete template.');
         return;
@@ -1771,8 +1961,7 @@
 
       // Validate required placeholders
       const placeholderValidation = [
-        { field: 'Specific Prompt', value: specificPrompt, required: ['{context_pool}'] },
-        { field: 'Idea Prompt', value: ideaPrompt, required: ['{requirements}'] },
+        { field: 'Direction Builder Prompt', value: specificPrompt, required: ['{context_pool}'] },
         { field: 'Format Prompt', value: formatPrompt, required: ['{input_text}'] },
         { field: 'Critique Prompt', value: critiquePrompt, required: ['{idea}'] },
         { field: 'Refine Prompt', value: refinePrompt, required: ['{idea}', '{critique}'] },
@@ -1808,7 +1997,6 @@
         special_requirements: specialRequirements || undefined,
         context_prompt: contextPrompt,
         specific_prompt: specificPrompt,
-        idea_prompt: ideaPrompt,
         format_prompt: formatPrompt,
         critique_prompt: critiquePrompt,
         refine_prompt: refinePrompt,
@@ -2009,29 +2197,16 @@
                     placeholder="Generate a diverse list of 50 specific concepts for your domain..."></textarea>
                 </div>
 
-                <!-- Specific Prompt -->
+                <!-- Direction Builder Prompt -->
                 <div class="mb-3">
                   <label for="editSpecificPrompt" class="form-label">
-                    <strong>Specific Prompt</strong> *
-                    <small class="text-muted">(Creates focused prompts from context pool)</small>
+                    <strong>Direction Builder Prompt</strong> *
+                    <small class="text-muted">(Turns sampled concepts into the prompt used to generate an idea)</small>
                   </label>
                   <textarea class="form-control font-monospace" id="editSpecificPrompt" rows="4" required placeholder="From the following concepts, select 2-3 that would create an interesting combination...
 Must include: {context_pool}"></textarea>
                   <div class="form-text">
                     <strong>Required placeholder:</strong> <code>{context_pool}</code>
-                  </div>
-                </div>
-
-                <!-- Idea Prompt -->
-                <div class="mb-3">
-                  <label for="editIdeaPrompt" class="form-label">
-                    <strong>Idea Generation Prompt</strong> *
-                    <small class="text-muted">(Main prompt for generating ideas)</small>
-                  </label>
-                  <textarea class="form-control font-monospace" id="editIdeaPrompt" rows="6" required placeholder="Your idea must incorporate concepts from the context above...
-Must include: {requirements}"></textarea>
-                  <div class="form-text">
-                    <strong>Required placeholder:</strong> <code>{requirements}</code>
                   </div>
                 </div>
 

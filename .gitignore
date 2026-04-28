@@ -3,6 +3,7 @@
 .DS_Store
 .env
 .cloudignore
+.superpowers/
 __pycache__/
 *.pyc
 

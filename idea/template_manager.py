@@ -2,11 +2,18 @@
 Template Manager API endpoints for CRUD operations on YAML prompt templates
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from dataclasses import dataclass
+from email.parser import BytesParser
+from email.policy import default as email_policy
+import io
+import mimetypes
+import time
+
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import yaml
 import re
 from datetime import datetime
@@ -24,6 +31,32 @@ router = APIRouter(prefix="/api/templates", tags=["templates"])
 TEMPLATES_DIR = Path(__file__).parent / "prompts" / "templates"
 TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
+TEMPLATE_GENERATION_MODEL = "gemini-3.1-pro-preview"
+TEMPLATE_GENERATION_THINKING_BUDGET = 24576
+TEMPLATE_CONTEXT_MAX_BYTES = 50 * 1024 * 1024
+TEMPLATE_CONTEXT_EXACT_MIME_TYPES = {
+    "application/pdf",
+    "application/json",
+    "application/xml",
+    "text/plain",
+    "text/markdown",
+    "text/html",
+    "text/xml",
+    "text/csv",
+}
+TEMPLATE_CONTEXT_MIME_PREFIXES = ("image/", "audio/", "video/")
+
+
+@dataclass(frozen=True)
+class TemplateContextFile:
+    filename: str
+    content_type: str
+    data: bytes
+
+
+class TemplateContextFileError(ValueError):
+    """Raised when an uploaded template context file cannot be accepted."""
+
 
 class TemplateCreateRequest(BaseModel):
     """Request model for creating a new template"""
@@ -33,8 +66,7 @@ class TemplateCreateRequest(BaseModel):
     item_type: str = Field(..., description="Type of items generated")
     special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")
     context_prompt: str = Field(..., description="Context generation prompt")
-    specific_prompt: str = Field(..., description="Specific prompt generation from context")
-    idea_prompt: str = Field(..., description="Idea generation prompt")
+    specific_prompt: str = Field(..., description="Direction builder prompt generated from context")
     format_prompt: str = Field(..., description="Format prompt")
     critique_prompt: str = Field(..., description="Critique prompt")
     refine_prompt: str = Field(..., description="Refine prompt")
@@ -52,7 +84,6 @@ class TemplateUpdateRequest(BaseModel):
     special_requirements: Optional[str] = None
     context_prompt: Optional[str] = None
     specific_prompt: Optional[str] = None
-    idea_prompt: Optional[str] = None
     format_prompt: Optional[str] = None
     critique_prompt: Optional[str] = None
     refine_prompt: Optional[str] = None
@@ -64,6 +95,146 @@ class TemplateUpdateRequest(BaseModel):
 class TemplateGenerateRequest(BaseModel):
     """Request model for generating a draft template"""
     idea_type_suggestion: str = Field(..., description="Brief description of the idea type to generate a template for")
+
+
+def _is_supported_template_context_mime_type(content_type: str) -> bool:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    if normalized in TEMPLATE_CONTEXT_EXACT_MIME_TYPES:
+        return True
+    return any(normalized.startswith(prefix) for prefix in TEMPLATE_CONTEXT_MIME_PREFIXES)
+
+
+async def _read_template_context_upload(upload: Any) -> Optional[TemplateContextFile]:
+    """Read and validate an optional uploaded context file for template generation."""
+    if upload is None:
+        return None
+
+    filename = Path(getattr(upload, "filename", "") or "").name
+    data = await upload.read()
+    content_type = getattr(upload, "content_type", "") or ""
+    return _read_template_context_bytes(filename, content_type, data)
+
+
+def _read_template_context_bytes(
+    filename: str,
+    content_type: str,
+    data: bytes,
+) -> Optional[TemplateContextFile]:
+    """Validate a raw uploaded context file payload."""
+    filename = Path(filename or "").name
+    if not filename:
+        return None
+
+    content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if not content_type:
+        content_type = (mimetypes.guess_type(filename)[0] or "").lower()
+    if not _is_supported_template_context_mime_type(content_type):
+        raise TemplateContextFileError(
+            "Unsupported context file type. Attach a PDF, text file, image, audio, or video file."
+        )
+
+    if not data:
+        raise TemplateContextFileError("Attached context file is empty.")
+    if len(data) > TEMPLATE_CONTEXT_MAX_BYTES:
+        raise TemplateContextFileError("Attached context file is too large. The limit is 50 MB.")
+
+    return TemplateContextFile(filename=filename, content_type=content_type, data=data)
+
+
+async def _parse_multipart_template_generation_request(
+    request: Request,
+) -> Tuple[str, Optional[TemplateContextFile]]:
+    """Parse the simple prompt + optional file multipart form without extra dependencies."""
+    content_type = request.headers.get("content-type") or ""
+    body = await request.body()
+    raw_message = (
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+        + body
+    )
+    message = BytesParser(policy=email_policy).parsebytes(raw_message)
+
+    idea_type_suggestion = ""
+    context_file = None
+    if not message.is_multipart():
+        raise TemplateContextFileError("Invalid template generation upload request.")
+
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        disposition_params = dict(part.get_params(header="content-disposition") or [])
+        field_name = disposition_params.get("name")
+        if field_name == "idea_type_suggestion":
+            payload = part.get_payload(decode=True) or b""
+            idea_type_suggestion = payload.decode(part.get_content_charset() or "utf-8", errors="replace").strip()
+        elif field_name == "context_file":
+            payload = part.get_payload(decode=True) or b""
+            filename = part.get_filename() or ""
+            if filename:
+                context_file = _read_template_context_bytes(
+                    filename=filename,
+                    content_type=part.get_content_type(),
+                    data=payload,
+                )
+
+    return idea_type_suggestion, context_file
+
+
+async def _parse_template_generation_request(request: Request) -> Tuple[str, Optional[TemplateContextFile]]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    if content_type.startswith("multipart/form-data"):
+        return await _parse_multipart_template_generation_request(request)
+
+    payload = await request.json()
+    generate_request = TemplateGenerateRequest(**payload)
+    return generate_request.idea_type_suggestion.strip(), None
+
+
+def _load_template_generation_examples() -> Dict[str, Any]:
+    example_templates = {}
+    for template_id in ['airesearch', 'drabble', 'game_design']:
+        template_path = TEMPLATES_DIR / f"{template_id}.yaml"
+        if template_path.exists():
+            with open(template_path, 'r', encoding='utf-8') as f:
+                example_templates[template_id] = yaml.safe_load(f)
+    return example_templates
+
+
+def _file_state_value(file_info: Any) -> str:
+    state = getattr(file_info, "state", None)
+    if state is None:
+        return ""
+    return str(getattr(state, "name", state)).upper()
+
+
+def _wait_for_template_context_file(client: Any, uploaded_file: Any, timeout_seconds: int = 60) -> Any:
+    deadline = time.monotonic() + timeout_seconds
+    current_file = uploaded_file
+    while True:
+        state = _file_state_value(current_file)
+        if not state or state in {"ACTIVE", "SUCCEEDED"}:
+            return current_file
+        if "FAILED" in state:
+            raise RuntimeError("Attached context file failed to process.")
+        if "PROCESSING" not in state or time.monotonic() >= deadline:
+            return current_file
+        time.sleep(1)
+        current_file = client.files.get(name=current_file.name)
+
+
+def _upload_template_context_file(client: Any, context_file: TemplateContextFile) -> Any:
+    if client is None:
+        raise RuntimeError("Gemini client is not initialized")
+
+    file_obj = io.BytesIO(context_file.data)
+    file_obj.name = context_file.filename
+    uploaded_file = client.files.upload(
+        file=file_obj,
+        config={
+            "mime_type": context_file.content_type,
+            "display_name": context_file.filename,
+        },
+    )
+    return _wait_for_template_context_file(client, uploaded_file)
 
 
 def _normalize_template_id(name: str) -> str:
@@ -106,7 +277,6 @@ def _coerce_template_payload(template_id: str, source: Dict[str, Any]) -> Dict[s
         "prompts": {
             "context": prompts.get("context", ""),
             "specific_prompt": prompts.get("specific_prompt", ""),
-            "idea": prompts.get("idea", ""),
             "format": prompts.get("format", ""),
             "critique": prompts.get("critique", ""),
             "refine": prompts.get("refine", ""),
@@ -145,9 +315,6 @@ def get_template_starter() -> Dict[str, Any]:
                               "{context_pool}\n\n"
                               "Create a brief, focused prompt that combines these concepts in an interesting way.\n"
                               "Your concise prompt:",
-            "idea": "Using the above context for inspiration, generate a creative and innovative idea.\n"
-                   "Keep it detailed enough to be useful but concise enough to be clear.\n"
-                   "\n{requirements}",
             "format": "Take the following idea and rewrite it in a clear, structured format.\n"
                      "Ensure it has a compelling title and well-organized content: {input_text}",
             "critique": "You are an expert evaluator reviewing the following idea:\n"
@@ -299,7 +466,6 @@ async def create_template(request: TemplateCreateRequest, user: UserInfo = Depen
             "prompts": {
                 "context": request.context_prompt,
                 "specific_prompt": request.specific_prompt,
-                "idea": request.idea_prompt,
                 "format": request.format_prompt,
                 "critique": request.critique_prompt,
                 "refine": request.refine_prompt,
@@ -372,8 +538,6 @@ async def update_template(template_id: str, request: TemplateUpdateRequest, user
             template_data["prompts"]["context"] = request.context_prompt
         if request.specific_prompt is not None:
             template_data["prompts"]["specific_prompt"] = request.specific_prompt
-        if request.idea_prompt is not None:
-            template_data["prompts"]["idea"] = request.idea_prompt
         if request.format_prompt is not None:
             template_data["prompts"]["format"] = request.format_prompt
         if request.critique_prompt is not None:
@@ -494,8 +658,40 @@ async def validate_template_endpoint(template_id: str):
 
 
 @router.post("/generate")
-async def generate_template(request: TemplateGenerateRequest, user: UserInfo = Depends(require_auth)):
-    """Generate a draft template using Gemini 3 Pro based on user's idea type suggestion"""
+async def generate_template(request: Request, user: UserInfo = Depends(require_auth)):
+    """Generate a draft template using Gemini 3 Pro based on user's idea type suggestion."""
+    try:
+        idea_type_suggestion, context_file = await _parse_template_generation_request(request)
+        if not idea_type_suggestion:
+            return JSONResponse({
+                "status": "error",
+                "message": "Please describe the type of ideas you want to generate."
+            }, status_code=400)
+
+        return await _generate_template_from_inputs(
+            idea_type_suggestion,
+            user,
+            context_file=context_file,
+        )
+    except TemplateContextFileError as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=400)
+    except Exception as e:
+        print(f"Error generating template: {e}")
+        return JSONResponse({
+            "status": "error",
+            "message": f"Failed to generate template: {str(e)}"
+        }, status_code=500)
+
+
+async def _generate_template_from_inputs(
+    idea_type_suggestion: str,
+    user: UserInfo,
+    context_file: Optional[TemplateContextFile] = None,
+) -> JSONResponse:
+    """Generate a draft template from validated request inputs."""
     try:
         # Get user's API key
         api_key = await db.get_user_api_key(user.uid)
@@ -506,12 +702,7 @@ async def generate_template(request: TemplateGenerateRequest, user: UserInfo = D
             }, status_code=400)
 
         # Get the existing 3 core templates as examples
-        example_templates = {}
-        for template_id in ['airesearch', 'drabble', 'game_design']:
-            template_path = TEMPLATES_DIR / f"{template_id}.yaml"
-            if template_path.exists():
-                with open(template_path, 'r', encoding='utf-8') as f:
-                    example_templates[template_id] = yaml.safe_load(f)
+        example_templates = _load_template_generation_examples()
 
         if len(example_templates) < 3:
             return JSONResponse({
@@ -520,21 +711,40 @@ async def generate_template(request: TemplateGenerateRequest, user: UserInfo = D
             }, status_code=500)
 
         # Create the few-shot prompt using existing templates
-        prompt = create_template_generation_prompt(request.idea_type_suggestion, example_templates)
+        prompt = create_template_generation_prompt(
+            idea_type_suggestion,
+            example_templates,
+            context_filename=context_file.filename if context_file else None,
+        )
 
-        # Use Gemini 2.5 Pro to generate the template
+        # Use Gemini 3.1 Pro with a high, near-max thinking budget for template design.
         llm = LLMWrapper(
             provider="google_generative_ai",
-            model_name="gemini-3.1-pro-preview",
+            model_name=TEMPLATE_GENERATION_MODEL,
             temperature=0.7,  # Balanced creativity and consistency
             top_p=0.9,
+            thinking_level=None,
+            thinking_budget=TEMPLATE_GENERATION_THINKING_BUDGET,
             api_key=api_key
         )
 
-        response = llm.generate_text(prompt)
+        uploaded_context_file = None
+        try:
+            contents = prompt
+            if context_file is not None:
+                uploaded_context_file = _upload_template_context_file(llm.client, context_file)
+                contents = [uploaded_context_file, prompt]
+
+            response = llm.generate_text(contents)
+        finally:
+            if uploaded_context_file is not None and llm.client is not None:
+                try:
+                    llm.client.files.delete(name=uploaded_context_file.name)
+                except Exception as delete_error:
+                    print(f"Warning: failed to delete uploaded template context file: {delete_error}")
 
         # Parse the response into a template structure
-        generated_template = parse_generated_template(response, request.idea_type_suggestion)
+        generated_template = parse_generated_template(response, idea_type_suggestion)
 
         return JSONResponse({
             "status": "success",
@@ -550,7 +760,11 @@ async def generate_template(request: TemplateGenerateRequest, user: UserInfo = D
         }, status_code=500)
 
 
-def create_template_generation_prompt(idea_type_suggestion: str, example_templates: Dict[str, Any]) -> str:
+def create_template_generation_prompt(
+    idea_type_suggestion: str,
+    example_templates: Dict[str, Any],
+    context_filename: Optional[str] = None,
+) -> str:
     """Create a few-shot prompt using existing templates as examples"""
 
     # Format the examples
@@ -565,14 +779,20 @@ def create_template_generation_prompt(idea_type_suggestion: str, example_templat
             examples_text += f"Special Requirements: {template_data['special_requirements']}\n"
 
         examples_text += f"Context Prompt: {template_data['prompts']['context']}\n"
-        examples_text += f"Specific Prompt: {template_data['prompts']['specific_prompt']}\n"
-        examples_text += f"Idea Prompt: {template_data['prompts']['idea']}\n"
+        examples_text += f"Direction Builder Prompt: {template_data['prompts']['specific_prompt']}\n"
         examples_text += f"Format Prompt: {template_data['prompts']['format']}\n"
         examples_text += f"Critique Prompt: {template_data['prompts']['critique']}\n"
         examples_text += f"Refine Prompt: {template_data['prompts']['refine']}\n"
         examples_text += f"Breed Prompt: {template_data['prompts']['breed']}\n"
         examples_text += f"Genotype Encode Prompt: {template_data['prompts']['genotype_encode']}\n"
         examples_text += f"Comparison Criteria: {', '.join(template_data['comparison_criteria'])}\n"
+
+    context_guidance = ""
+    if context_filename:
+        context_guidance = f"""
+
+The user attached a context file named "{context_filename}". Read and use that file as source material for the new template. If it is a research paper or technical document, make the template useful for generating follow-up work, new applications, and extensions grounded in the paper's ideas. Do not merely summarize the file; design reusable prompts that make future idea generation refer back to the uploaded context and explore credible directions from it.
+"""
 
     # Create the main prompt
     prompt = f"""You are an expert at creating prompt templates for AI idea generation systems. I will show you three existing templates as examples, and then ask you to create a new template based on a user's idea type suggestion.
@@ -582,20 +802,20 @@ Here are the existing template examples:
 
 Now, please create a new template for the following idea type:
 "{idea_type_suggestion}"
+{context_guidance}
 
 Guidelines:
 1. Follow the same structure as the examples above
 2. Create prompts that are specific to the requested idea type
 3. Make the context prompt generate 50 relevant concepts for that domain
-4. Make the specific_prompt create focused prompts from the context pool using {{context_pool}} placeholder
-5. Ensure the idea prompt incorporates context and includes {{requirements}} placeholder
+4. Make the Direction Builder Prompt turn a sampled context pool into a concrete generation request using {{context_pool}} placeholder
+5. Put hard output constraints, format rules, and domain guardrails in Special Requirements
 6. Make the format prompt include {{input_text}} placeholder
 7. Make the critique prompt include {{idea}} placeholder
 8. Make the refine prompt include {{idea}} and {{critique}} placeholders
 9. Make the breed prompt include {{ideas}} placeholder
 10. Make the genotype_encode prompt extract fundamental elements using {{idea_content}} placeholder
 11. Choose appropriate comparison criteria for evaluating ideas in this domain
-12. If the idea type has specific constraints (like word limits, format requirements, etc.), include them in special_requirements
 
 Please provide your response in this exact format:
 
@@ -604,8 +824,7 @@ Description: [Template description]
 Item Type: [Type of items generated]
 Special Requirements: [Any special constraints or requirements, or "None" if not applicable]
 Context Prompt: [Context generation prompt]
-Specific Prompt: [Specific prompt creation - must include {{context_pool}}]
-Idea Prompt: [Idea generation prompt - must include {{requirements}}]
+Direction Builder Prompt: [Turns sampled context into a concrete generation request - must include {{context_pool}}]
 Format Prompt: [Format prompt - must include {{input_text}}]
 Critique Prompt: [Critique prompt - must include {{idea}}]
 Refine Prompt: [Refine prompt - must include {{idea}} and {{critique}}]
@@ -670,16 +889,11 @@ def parse_generated_template(response: str, idea_type_suggestion: str) -> Dict[s
                     _save_field(template, current_field, current_content)
                 current_field = 'context_prompt'
                 current_content = [line[15:].strip()]
-            elif line.startswith('Specific Prompt:'):
+            elif line.startswith('Direction Builder Prompt:'):
                 if current_field:
                     _save_field(template, current_field, current_content)
                 current_field = 'specific_prompt'
-                current_content = [line[16:].strip()]
-            elif line.startswith('Idea Prompt:'):
-                if current_field:
-                    _save_field(template, current_field, current_content)
-                current_field = 'idea_prompt'
-                current_content = [line[12:].strip()]
+                current_content = [line.split(':', 1)[1].strip()]
             elif line.startswith('Format Prompt:'):
                 if current_field:
                     _save_field(template, current_field, current_content)
@@ -745,8 +959,6 @@ def _save_field(template: Dict[str, Any], field: str, content: List[str]):
         template['prompts']['context'] = content_str
     elif field == 'specific_prompt':
         template['prompts']['specific_prompt'] = content_str
-    elif field == 'idea_prompt':
-        template['prompts']['idea'] = content_str
     elif field == 'format_prompt':
         template['prompts']['format'] = content_str
     elif field == 'critique_prompt':

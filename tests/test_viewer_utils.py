@@ -105,6 +105,52 @@ def test_idea_to_dict_preserves_breeding_genotypes():
     assert result["breeding_genotypes"] == input_data["breeding_genotypes"]
 
 
+def test_idea_to_dict_preserves_island_metadata():
+    input_data = {
+        "id": "island-test-id",
+        "idea": Idea(title="Island Idea", content="This idea migrated"),
+        "parent_ids": [],
+        "island_id": 2,
+        "origin_island_id": 0,
+        "migrated_from_id": "source-id",
+        "migration_generation": 3,
+        "migration_event": True,
+    }
+
+    result = idea_to_dict(input_data)
+
+    assert result["island_id"] == 2
+    assert result["origin_island_id"] == 0
+    assert result["migrated_from_id"] == "source-id"
+    assert result["migration_generation"] == 3
+    assert result["migration_event"] is True
+
+
+def test_idea_to_dict_preserves_tree_metric_metadata():
+    input_data = {
+        "id": "metric-test-id",
+        "idea": Idea(title="Metric Idea", content="This idea has scores"),
+        "parent_ids": [],
+        "selection_metrics": {
+            "evaluation_generation": 2,
+            "elo": 1532.5,
+            "diversity": 0.84,
+            "fitness": 0.62,
+        },
+        "survival_metrics": {
+            "survived_to_generation": 3,
+            "survival_score": 0.51,
+        },
+    }
+
+    result = idea_to_dict(input_data)
+
+    assert result["selection_metrics"]["elo"] == 1532.5
+    assert result["selection_metrics"]["diversity"] == 0.84
+    assert result["selection_metrics"]["fitness"] == 0.62
+    assert result["survival_metrics"]["survived_to_generation"] == 3
+
+
 def test_idea_to_dict_without_oracle_metadata():
     """Test that non-Oracle ideas don't have Oracle metadata"""
     input_data = {

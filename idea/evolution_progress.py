@@ -21,6 +21,16 @@ class ProgressEmitter:
             "total_generations": self.engine.generations,
             "is_running": is_running,
             "diversity_history": self.engine.diversity_history.copy() if self.engine.diversity_history else [],
+            "island_diversity_history": (
+                self.engine.island_diversity_history.copy()
+                if getattr(self.engine, "island_diversity_history", None)
+                else []
+            ),
+            "migration_history": (
+                self.engine.migration_history.copy()
+                if getattr(self.engine, "migration_history", None)
+                else []
+            ),
         }
 
         if include_core_state:
@@ -39,13 +49,33 @@ class ProgressEmitter:
         payload["token_counts"] = self.engine.get_total_token_count()
         return payload
 
+    def _backfill_tokens(self, payload: Dict[str, Any]) -> None:
+        if "token_counts" in payload:
+            return
+        get_total_token_count = getattr(self.engine, "get_total_token_count", None)
+        if callable(get_total_token_count):
+            payload["token_counts"] = get_total_token_count()
+
     async def emit(
         self,
         progress_callback: Callable[[Dict[str, Any]], Awaitable[None]],
         payload: Dict[str, Any],
     ) -> None:
+        self._backfill_tokens(payload)
         if "diversity_history" not in payload:
             payload["diversity_history"] = (
                 self.engine.diversity_history.copy() if self.engine.diversity_history else []
+            )
+        if "island_diversity_history" not in payload:
+            payload["island_diversity_history"] = (
+                self.engine.island_diversity_history.copy()
+                if getattr(self.engine, "island_diversity_history", None)
+                else []
+            )
+        if "migration_history" not in payload:
+            payload["migration_history"] = (
+                self.engine.migration_history.copy()
+                if getattr(self.engine, "migration_history", None)
+                else []
             )
         await progress_callback(payload)

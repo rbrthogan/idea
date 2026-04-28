@@ -1,11 +1,13 @@
 import os
 import hashlib
+import math
 import numpy as np
 from typing import List, Dict, Any, Optional
 from google import genai
 from google.genai import types
 import asyncio
 import logging
+from idea.config import DEFAULT_EMBEDDING_MODEL, embedding_prices_per_million_tokens
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -22,7 +24,7 @@ class DiversityCalculator:
         """Initialize the diversity calculator with Gemini client."""
         # Use provided key or fallback to environment variable
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        self.embedding_model = os.environ.get("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+        self.embedding_model = os.environ.get("GEMINI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
 
         if not self.api_key:
             logger.warning("GEMINI_API_KEY not found. Diversity calculation will be disabled.")
@@ -50,8 +52,17 @@ class DiversityCalculator:
 
         # Cache for embeddings to avoid re-computing for same content
         self._embedding_cache = {}
+        self.model_name = self.embedding_model
+        self.input_token_count = 0
+        self.output_token_count = 0
+        self.total_token_count = 0
+        self.estimated_input_token_count = 0
+        self.embedding_request_count = 0
+        self.embedding_token_counts_by_model: Dict[str, Dict[str, float]] = {}
         # Fallback models to try if the primary model fails or returns no embeddings
         fallback_models = [
+            "models/gemini-embedding-2",
+            "gemini-embedding-2",
             "models/gemini-embedding-001",
             "gemini-embedding-001",
             "models/text-embedding-004",
@@ -65,6 +76,120 @@ class DiversityCalculator:
     def is_enabled(self) -> bool:
         """Check if diversity calculation is available."""
         return self.client is not None
+
+    @staticmethod
+    def _normalize_embedding_model_name(model_name: str) -> str:
+        return (model_name or DEFAULT_EMBEDDING_MODEL).removeprefix("models/")
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        # Gemini embedding responses do not always expose usage metadata. This
+        # conservative estimate keeps embedding spend visible instead of free.
+        return max(1, math.ceil(len(text or "") / 4))
+
+    @staticmethod
+    def _get_usage_value(usage: Any, *keys: str) -> Optional[int]:
+        if usage is None:
+            return None
+        for key in keys:
+            if isinstance(usage, dict):
+                value = usage.get(key)
+            else:
+                value = getattr(usage, key, None)
+            if value is None:
+                continue
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError):
+                continue
+            if numeric >= 0:
+                return numeric
+        return None
+
+    def _embedding_input_price(self, model_name: str) -> float:
+        normalized = self._normalize_embedding_model_name(model_name)
+        pricing = embedding_prices_per_million_tokens.get(normalized, {})
+        return float(
+            pricing.get("text_input")
+            or pricing.get("input")
+            or pricing.get("batch_input")
+            or 0.0
+        )
+
+    def _record_embedding_usage(self, model_name: str, text: str, result: Any) -> None:
+        usage = (
+            getattr(result, "usage_metadata", None)
+            or getattr(result, "usageMetadata", None)
+            or getattr(result, "metadata", None)
+        )
+        input_tokens = self._get_usage_value(
+            usage,
+            "prompt_token_count",
+            "input_token_count",
+            "text_token_count",
+            "total_token_count",
+        )
+        used_estimate = input_tokens is None
+        if input_tokens is None:
+            input_tokens = self._estimate_text_tokens(text)
+
+        normalized = self._normalize_embedding_model_name(model_name)
+        input_cost = self._embedding_input_price(normalized) * input_tokens / 1_000_000
+
+        self.input_token_count += input_tokens
+        self.total_token_count += input_tokens
+        self.embedding_request_count += 1
+        if used_estimate:
+            self.estimated_input_token_count += input_tokens
+
+        model_counts = self.embedding_token_counts_by_model.setdefault(
+            normalized,
+            {
+                "input": 0,
+                "total": 0,
+                "cost": 0.0,
+                "requests": 0,
+                "estimated_input": 0,
+            },
+        )
+        model_counts["input"] += input_tokens
+        model_counts["total"] += input_tokens
+        model_counts["cost"] += input_cost
+        model_counts["requests"] += 1
+        if used_estimate:
+            model_counts["estimated_input"] += input_tokens
+
+    def get_token_usage_summary(self) -> Dict[str, Any]:
+        """Return embedding token usage in the same shape as LLM components."""
+        total_cost = sum(
+            float(model_counts.get("cost", 0.0))
+            for model_counts in self.embedding_token_counts_by_model.values()
+        )
+        model_names = sorted(self.embedding_token_counts_by_model.keys())
+        model_name = model_names[0] if len(model_names) == 1 else (
+            "mixed-embeddings" if model_names else self._normalize_embedding_model_name(self.embedding_model)
+        )
+        return {
+            "total": int(self.total_token_count),
+            "input": int(self.input_token_count),
+            "output": int(self.output_token_count),
+            "model": model_name,
+            "cost": total_cost,
+            "input_cost": total_cost,
+            "output_cost": 0.0,
+            "estimated_input": int(self.estimated_input_token_count),
+            "requests": int(self.embedding_request_count),
+            "per_model": {
+                model: {
+                    "input": int(counts.get("input", 0)),
+                    "total": int(counts.get("total", 0)),
+                    "cost": float(counts.get("cost", 0.0)),
+                    "requests": int(counts.get("requests", 0)),
+                    "estimated_input": int(counts.get("estimated_input", 0)),
+                }
+                for model, counts in self.embedding_token_counts_by_model.items()
+            },
+        }
 
     def _get_idea_text(self, idea_dict: Dict[str, Any]) -> str:
         """
@@ -146,26 +271,34 @@ class DiversityCalculator:
                 return np.array(values)
             return None
 
+        def _embedding_config_for_model(model_name: str):
+            bare_model_name = model_name.removeprefix("models/")
+            if bare_model_name == "gemini-embedding-2":
+                return None
+            return types.EmbedContentConfig(task_type="CLUSTERING")
+
         try:
             last_error = None
             for model_name in self._embedding_models:
                 try:
+                    request_config = _embedding_config_for_model(model_name)
+                    request_kwargs = {
+                        "model": model_name,
+                        "contents": cleaned_text,
+                    }
+                    if request_config is not None:
+                        request_kwargs["config"] = request_config
+
                     # Try embedding call with single string
-                    result = self.client.models.embed_content(
-                        model=model_name,
-                        contents=cleaned_text,
-                        config=types.EmbedContentConfig(task_type="CLUSTERING")
-                    )
+                    result = self.client.models.embed_content(**request_kwargs)
                     embedding = _extract_embedding(result)
                     if embedding is None:
                         # Some SDK versions expect a list of contents
-                        result = self.client.models.embed_content(
-                            model=model_name,
-                            contents=[cleaned_text],
-                            config=types.EmbedContentConfig(task_type="CLUSTERING")
-                        )
+                        request_kwargs["contents"] = [cleaned_text]
+                        result = self.client.models.embed_content(**request_kwargs)
                         embedding = _extract_embedding(result)
                     if embedding is not None:
+                        self._record_embedding_usage(model_name, cleaned_text, result)
                         self._embedding_cache[cache_key] = embedding
                         return embedding
                 except Exception as e:

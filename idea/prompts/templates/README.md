@@ -26,12 +26,9 @@ prompts:
   context: |
     Prompt for generating contextual concepts/inspiration
 
-  idea: |
-    Prompt for generating initial ideas
-    Can reference {requirements} for template-specific constraints
-
-  # (No separate new_idea key; new ideas during breeding are produced via
-  # context -> specific_prompt -> idea pipeline)
+  specific_prompt: |
+    Prompt for turning sampled concepts into the concrete direction used to generate an idea
+    Must include {context_pool} placeholder
 
   format: |
     Prompt for formatting raw ideas
@@ -84,13 +81,14 @@ Templates are automatically validated when loaded. The system checks for:
 ## Template Placeholders (required at authoring time)
 
 ### Required Placeholders
+- `{context_pool}` in direction builder prompts (`specific_prompt`)
 - `{input_text}` in format prompts
 - `{idea}` in critique prompts
 - `{idea}` and `{critique}` in refine prompts
 - `{ideas}` in breed prompts
 
 ### Optional Interpolation
-- `{requirements}` in idea/refine/breed prompts is replaced with the `special_requirements` block if present
+- `{requirements}` in refine/breed prompts is replaced with the `special_requirements` block if present
 
 ## Special Requirements
 
