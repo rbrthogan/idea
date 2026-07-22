@@ -37,7 +37,13 @@ class PromptTemplate(BaseModel):
 
     metadata: PromptMetadata = Field(..., description="Template metadata")
     prompts: PromptSet = Field(..., description="Set of prompts")
-    comparison_criteria: List[str] = Field(..., description="Criteria for comparing generated ideas")
+    comparison_criteria: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional criteria for the legacy pairwise LLM evaluator. "
+            "Templates that use other evaluators do not need to define them."
+        ),
+    )
     # Optional comparison prompt at root level for backward compatibility
     comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas (optional - auto-generated)")
 
@@ -69,9 +75,11 @@ class PromptTemplate(BaseModel):
     @field_validator('comparison_criteria')
     @classmethod
     def validate_criteria(cls, v):
-        """Ensure at least one comparison criterion"""
-        if not v or len(v) == 0:
-            raise ValueError('At least one comparison criterion is required')
+        """Reject blank criteria while allowing non-LLM evaluation templates."""
+        if v is None:
+            return []
+        if any(not isinstance(criterion, str) or not criterion.strip() for criterion in v):
+            raise ValueError('Comparison criteria must be non-empty strings')
         return v
 
 

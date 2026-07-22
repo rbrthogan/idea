@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from idea.evolution import EvolutionEngine
@@ -252,3 +253,203 @@ def test_diversity_analytics_tracks_island_and_inter_island_metrics():
     assert analytics["mean_island_diversity"] == 3.0
     assert analytics["inter_island_diversity"] == 11.0
     assert round(analytics["island_separation_ratio"], 6) == round(11.0 / 3.0, 6)
+
+
+def test_default_evaluation_suite_preserves_legacy_hybrid_fitness():
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        fitness_alpha=0.75,
+    )
+    population = [
+        {"id": "idea-a", "idea": "A"},
+        {"id": "idea-b", "idea": "B"},
+    ]
+
+    async def diversity_scores(_population):
+        return {0: 0.1, 1: 0.9}
+
+    engine._calculate_population_diversity_scores = diversity_scores
+    fitness = asyncio.run(
+        engine._score_population_fitness(
+            population,
+            {0: 1400.0, 1: 1600.0},
+        )
+    )
+
+    for row in fitness.values():
+        assert row["fitness"] == (
+            pytest.approx(0.75 * row["elo_norm"] + 0.25 * row["diversity_norm"])
+        )
+        assert "quality_elo.quality_elo" in row["components"]
+        assert "diversity.diversity" in row["components"]
+
+    assert population[0]["evaluations"]["quality_elo"]["metrics"] == {
+        "quality_elo": 1400.0
+    }
+    assert population[0]["evaluations"]["diversity"]["metrics"] == {
+        "diversity": 0.1
+    }
+    assert engine.last_evaluation_batch is not None
+
+
+def test_disabled_evaluation_suite_uses_uniform_selection_fitness():
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        evaluation_config={
+            "enabled": False,
+            "components": [],
+            "fitness": {"enabled": False, "metrics": []},
+        },
+    )
+    population = [
+        {"id": "idea-a", "idea": "A"},
+        {"id": "idea-b", "idea": "B"},
+    ]
+
+    fitness = asyncio.run(
+        engine._score_population_fitness(population, {0: 1500.0, 1: 1500.0})
+    )
+
+    assert [fitness[index]["fitness"] for index in range(2)] == [0.5, 0.5]
+    assert all("evaluations" not in candidate for candidate in population)
+
+
+def test_python_metric_runner_can_drive_selection_without_llm_judging():
+    class Runner:
+        async def run(self, candidate, **_kwargs):
+            from idea.evaluation import ScriptResultManifest
+
+            return ScriptResultManifest(
+                status="ok",
+                metrics={"score": float(candidate["score"])},
+            )
+
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        evaluation_config={
+            "components": [
+                {
+                    "id": "numeric",
+                    "kind": "python_metric",
+                    "script_ref": "evaluators/score.py",
+                    "metric_names": ["score"],
+                }
+            ],
+            "fitness": {
+                "metrics": [
+                    {
+                        "component_id": "numeric",
+                        "metric_name": "score",
+                        "normalization": "bounds",
+                        "bounds": [0, 100],
+                    }
+                ]
+            },
+        },
+        evaluation_runners={"numeric": Runner()},
+    )
+    population = [
+        {"id": "idea-a", "idea": "A", "score": 25},
+        {"id": "idea-b", "idea": "B", "score": 90},
+    ]
+
+    fitness = asyncio.run(
+        engine._score_population_fitness(population, {0: 1500.0, 1: 1500.0})
+    )
+
+    assert fitness[0]["fitness"] == pytest.approx(0.25)
+    assert fitness[1]["fitness"] == pytest.approx(0.90)
+    assert "numeric.score" in fitness[0]["components"]
+    assert population[0]["evaluations"]["numeric"]["metrics"] == {"score": 25.0}
+
+
+def test_explicit_bounds_normalization_is_not_overridden_by_legacy_running_stats():
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        evaluation_config={
+            "components": [
+                {
+                    "id": "quality",
+                    "kind": "llm_pairwise",
+                    "metric_name": "score",
+                }
+            ],
+            "fitness": {
+                "metrics": [
+                    {
+                        "component_id": "quality",
+                        "metric_name": "score",
+                        "normalization": "bounds",
+                        "bounds": [0, 100],
+                    }
+                ]
+            },
+        },
+    )
+    population = [
+        {"id": "idea-a", "idea": "A"},
+        {"id": "idea-b", "idea": "B"},
+    ]
+
+    fitness = asyncio.run(
+        engine._score_population_fitness(population, {0: 0.0, 1: 100.0})
+    )
+
+    assert fitness[0]["fitness"] == pytest.approx(0.0)
+    assert fitness[1]["fitness"] == pytest.approx(1.0)
+    assert fitness[0]["elo_norm"] == pytest.approx(0.0)
+    assert fitness[1]["elo_norm"] == pytest.approx(1.0)
+    assert population[0]["evaluations"]["quality"]["normalized_metrics"] == {}
+
+
+def test_python_metric_supports_persistable_running_normalization_state():
+    class Runner:
+        async def run(self, candidate, **_kwargs):
+            from idea.evaluation import ScriptResultManifest
+
+            return ScriptResultManifest(
+                status="ok",
+                metrics={"score": float(candidate["score"])},
+            )
+
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        evaluation_config={
+            "components": [
+                {
+                    "id": "numeric",
+                    "kind": "python_metric",
+                    "script_ref": "evaluators/score.py",
+                    "metric_names": ["score"],
+                }
+            ],
+            "fitness": {
+                "metrics": [
+                    {
+                        "component_id": "numeric",
+                        "metric_name": "score",
+                        "normalization": "running_zscore",
+                    }
+                ]
+            },
+        },
+        evaluation_runners={"numeric": Runner()},
+    )
+    population = [
+        {"id": "idea-a", "idea": "A", "score": 0},
+        {"id": "idea-b", "idea": "B", "score": 100},
+    ]
+
+    fitness = asyncio.run(
+        engine._score_population_fitness(population, {0: 1500.0, 1: 1500.0})
+    )
+
+    assert fitness[0]["fitness"] < 0.5
+    assert fitness[1]["fitness"] > 0.5
+    assert engine.fitness_metric_stats["numeric.score"]["count"] == 2
+    assert population[0]["evaluations"]["numeric"]["normalized_metrics"]["score"] < 0.5

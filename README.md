@@ -16,6 +16,8 @@ Idea Evolution is a small web app that uses multiple LLM agents (Ideator, Critic
 - Rate ideas with an ELO‑style tournament (manual and automated)
 - Create and edit YAML prompt templates in the UI
 - Save/load evolutions and re‑rate them later
+- Configure a versioned evaluator suite in the backend (the existing LLM
+  tournament + diversity behavior remains the default)
 
 ## Quickstart
 
@@ -44,6 +46,18 @@ enable the localhost-only development auth shim:
 IDEA_DEV_AUTH=1 uv run uvicorn idea.viewer:app --host 127.0.0.1 --port 8000
 ```
 
+The development shim uses a per-process random bearer token and is non-admin by
+default; set `IDEA_DEV_AUTH_ADMIN=1` only when admin testing is required.
+`run_local.sh` also binds to `127.0.0.1` unless `IDEA_BIND_HOST` is explicitly
+set. Browser access is same-origin by default; a separate frontend must be
+allow-listed with comma-separated `IDEA_CORS_ORIGINS`.
+
+Local JSON exports are stored in an opaque per-user directory under
+`data/local-users/`. Root-level `data/*.json` files are not exposed through the
+rating or history APIs by default. For a temporary legacy migration, opt in
+explicitly with `IDEA_ALLOW_UNSCOPED_LEGACY_LOCAL_FILES=1`; rating a legacy file
+creates a private user-scoped copy and leaves the root file unchanged.
+
 4) Open the UI
 
 - Evolution viewer/creator: http://localhost:8000/
@@ -71,6 +85,8 @@ uv run pytest -q
 
 - `idea/viewer.py` – FastAPI app serving the viewer, rater, and template APIs
 - `idea/evolution.py` – Evolution engine, hybrid fitness, survivor selection, parent allocation, diversity tracking
+- `idea/evaluation/` – Typed evaluator configs/results, legacy LLM/diversity adapters, fitness aggregation, and script result contracts
+- `idea/artifact_store.py` – Contained, content-addressed local artifact storage
 - `idea/llm.py` – LLM wrapper and agents (Ideator, Formatter, Critic, Breeder, Oracle)
 - `idea/prompts/` – YAML templates system, validation, loader, and Oracle prompt bundle
 - `idea/static/` – Frontend HTML/CSS/JS (viewer and rater UIs)
@@ -94,6 +110,30 @@ Create new templates from the UI (on the main page) or by adding YAML files. See
   - `replacementRate` (fraction of population replaced per generation)
   - `fitnessAlpha` (weight of Elo vs diversity in hybrid fitness)
   - `ageDecayRate` (how quickly older ideas lose survival probability)
+
+## Evaluators and artifacts
+
+Evaluation is being migrated from a hard-wired LLM tournament to a composable
+suite. Runs with no explicit `evaluation` configuration retain the legacy
+behavior: pairwise LLM Elo weighted by `fitnessAlpha`, embedding diversity
+weighted by `1 - fitnessAlpha`, then age decay for survivor selection.
+
+The typed backend now supports explicit metric direction, normalization,
+weights, failure policies, and a no-evaluation mode. A Python metric evaluator
+can consume the strict JSON contract documented in
+[`docs/PluggableEvaluators.md`](docs/PluggableEvaluators.md) through an injected
+execution runner. Generated code execution is intentionally not enabled in the
+web app: it requires the isolated no-network container backend described in the
+design before it is safe to expose.
+
+Local artifact output can be imported into the content-addressed artifact store
+after traversal, symlink, media-type, size, and digest checks. Firestore history
+stores references rather than artifact bytes.
+
+The bundled `prime_visualization` template turns the Ulam spiral into a
+baseline/anti-copy reference and asks for explicit mappings, falsifiable nulls,
+deterministic implementation plans, and PNG/metadata/result contracts. It does
+not execute generated code or claim that proposed patterns were observed.
 
 ## Troubleshooting
 

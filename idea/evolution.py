@@ -18,6 +18,20 @@ from idea.config import (
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates, get_prompts, get_prompts_from_dict
 from idea.diversity import DiversityCalculator
+from idea.evaluation import (
+    ComponentKind,
+    EmbeddingDiversityEvaluator,
+    EvaluationBatch,
+    EvaluationRecord,
+    EvaluationStatus,
+    FitnessAggregator,
+    LLMPairwiseEvaluator,
+    MetricNormalization,
+    PythonMetricEvaluator,
+    attach_evaluation_record,
+    candidate_identifier,
+    resolve_evaluation_suite,
+)
 from idea import database as db  # noqa: F401 - compatibility seam for tests and external patches
 
 # Legacy filesystem storage directories (kept for backwards compatibility with local dev)
@@ -72,6 +86,8 @@ class EvolutionEngine:
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,  # Required for Firestore storage
         template_data: Optional[Dict[str, Any]] = None,  # Custom template data from Firestore
+        evaluation_config: Optional[Dict[str, Any]] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
     ):
         self.user_id = user_id  # User ID for scoped storage
         self.idea_type = idea_type or get_default_template_id()
@@ -245,7 +261,15 @@ class EvolutionEngine:
         # Running normalization state (persisted) to keep fitness scores comparable across generations.
         self.fitness_elo_stats = {"count": 0, "mean": 0.0, "m2": 0.0}
         self.fitness_diversity_stats = {"count": 0, "mean": 0.0, "m2": 0.0}
+        # Stateful normalization is keyed by the evaluator metric rather than
+        # hard-wired to Elo/diversity.  The two legacy aliases remain the same
+        # dictionary objects so older checkpoints and UI payloads stay valid.
+        self.fitness_metric_stats: Dict[str, Dict[str, float]] = {
+            "quality_elo.quality_elo": self.fitness_elo_stats,
+            "diversity.diversity": self.fitness_diversity_stats,
+        }
         self.comparison_cache: Dict[str, Any] = {}
+        self._configure_evaluation(evaluation_config, evaluation_runners)
 
         # Evolution identity and tracking
         self.evolution_id = None  # Unique ID for this evolution (UUID)
@@ -273,6 +297,55 @@ class EvolutionEngine:
                 return False
             return default
         return bool(value)
+
+    def _configure_evaluation(
+        self,
+        config: Optional[Dict[str, Any]],
+        runners: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Resolve evaluator configuration and instantiate supported adapters."""
+
+        self.evaluation_config = resolve_evaluation_suite(
+            config,
+            fitness_alpha=self.fitness_alpha,
+        )
+        self.fitness_aggregator = FitnessAggregator(self.evaluation_config)
+        self.quality_evaluator = None
+        self.diversity_evaluator = None
+        self.python_metric_evaluators = []
+        self.unsupported_evaluation_components = []
+        self.last_evaluation_batch = None
+
+        if not self.evaluation_config.enabled:
+            return
+
+        runners = runners or {}
+        for component in self.evaluation_config.components:
+            if not component.enabled:
+                continue
+            if (
+                component.kind == ComponentKind.LLM_PAIRWISE
+                and self.quality_evaluator is None
+            ):
+                self.quality_evaluator = LLMPairwiseEvaluator(component)
+            elif (
+                component.kind == ComponentKind.EMBEDDING_DIVERSITY
+                and self.diversity_evaluator is None
+            ):
+                self.diversity_evaluator = EmbeddingDiversityEvaluator(component)
+            elif component.kind == ComponentKind.PYTHON_METRIC:
+                runner = runners.get(component.id)
+                if runner is None:
+                    self.unsupported_evaluation_components.append(component.id)
+                else:
+                    self.python_metric_evaluators.append(
+                        (PythonMetricEvaluator(component), runner)
+                    )
+            elif component.kind in {
+                ComponentKind.LLM_CODE_ARTIFACT,
+                ComponentKind.LLM_ARTIFACT_SCORE,
+            }:
+                self.unsupported_evaluation_components.append(component.id)
 
     @staticmethod
     def _coerce_unit_float(value: Any, *, default: float) -> float:
@@ -447,6 +520,7 @@ class EvolutionEngine:
             fitness_alpha=self.fitness_alpha,
             age_decay_rate=self.age_decay_rate,
             age_decay_floor=self.age_decay_floor,
+            evaluation=self.evaluation_config.model_dump(mode="json"),
         )
         self.identity_state = EvolutionIdentity(
             evolution_id=self.evolution_id,
@@ -541,6 +615,7 @@ class EvolutionEngine:
         user_id: str,
         evolution_id: str,
         api_key: Optional[str] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
     ) -> Optional['EvolutionEngine']:
         from idea.evolution_persistence import EvolutionRepository
 
@@ -549,6 +624,7 @@ class EvolutionEngine:
             user_id,
             evolution_id,
             api_key=api_key,
+            evaluation_runners=evaluation_runners,
         )
 
     @classmethod
@@ -564,10 +640,20 @@ class EvolutionEngine:
         return await EvolutionRepository.delete_evolution_for_user(user_id, evolution_id)
 
     @classmethod
-    def _load_from_file(cls, file_path: Path, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
+    def _load_from_file(
+        cls,
+        file_path: Path,
+        api_key: Optional[str] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
+    ) -> Optional['EvolutionEngine']:
         from idea.evolution_persistence import EvolutionRepository
 
-        return EvolutionRepository.load_from_file(cls, file_path, api_key=api_key)
+        return EvolutionRepository.load_from_file(
+            cls,
+            file_path,
+            api_key=api_key,
+            evaluation_runners=evaluation_runners,
+        )
 
     @classmethod
     def _restore_from_state(
@@ -575,6 +661,7 @@ class EvolutionEngine:
         state: Dict[str, Any],
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
     ) -> 'EvolutionEngine':
         from idea.evolution_persistence import EvolutionRepository
 
@@ -583,13 +670,24 @@ class EvolutionEngine:
             state,
             api_key=api_key,
             user_id=user_id,
+            evaluation_runners=evaluation_runners,
         )
 
     @classmethod
-    def load_checkpoint(cls, checkpoint_id: str, api_key: Optional[str] = None) -> Optional['EvolutionEngine']:
+    def load_checkpoint(
+        cls,
+        checkpoint_id: str,
+        api_key: Optional[str] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
+    ) -> Optional['EvolutionEngine']:
         from idea.evolution_persistence import EvolutionRepository
 
-        return EvolutionRepository.load_checkpoint(cls, checkpoint_id, api_key=api_key)
+        return EvolutionRepository.load_checkpoint(
+            cls,
+            checkpoint_id,
+            api_key=api_key,
+            evaluation_runners=evaluation_runners,
+        )
 
     @classmethod
     def delete_checkpoint(cls, checkpoint_id: str) -> bool:
@@ -1425,6 +1523,58 @@ class EvolutionEngine:
         z = max(-3.0, min(3.0, z))
         return (z + 3.0) / 6.0
 
+    @staticmethod
+    def _empty_running_stats() -> Dict[str, float]:
+        return {"count": 0, "mean": 0.0, "m2": 0.0}
+
+    def _running_stats_for_metric(self, metric_key: str) -> Dict[str, float]:
+        """Return persisted state for one configured evaluator metric."""
+
+        stats = self.fitness_metric_stats.get(metric_key)
+        if not isinstance(stats, dict):
+            stats = self._empty_running_stats()
+            self.fitness_metric_stats[metric_key] = stats
+        return stats
+
+    def _apply_stateful_metric_normalization(
+        self,
+        records: List[EvaluationRecord],
+    ) -> None:
+        """Populate running-z-score values for every configured metric.
+
+        Normalization belongs to the fitness configuration, not to a specific
+        evaluator implementation.  This lets injected Python metrics use the
+        same persisted normalization behavior as legacy Elo and diversity.
+        """
+
+        successful_statuses = {EvaluationStatus.OK, EvaluationStatus.CACHED}
+        for metric in self.evaluation_config.fitness.metrics:
+            if metric.normalization != MetricNormalization.RUNNING_ZSCORE:
+                continue
+
+            matching_records = [
+                record
+                for record in records
+                if record.component_id == metric.component_id
+                and record.status in successful_statuses
+                and metric.metric_name in record.metrics
+            ]
+            if not matching_records:
+                continue
+
+            stats = self._running_stats_for_metric(metric.key)
+            self._update_running_stats(
+                stats,
+                [float(record.metrics[metric.metric_name]) for record in matching_records],
+            )
+            for record in matching_records:
+                normalized = dict(record.normalized_metrics)
+                normalized[metric.metric_name] = self._normalize_with_running_stats(
+                    float(record.metrics[metric.metric_name]),
+                    stats,
+                )
+                record.normalized_metrics = normalized
+
     def _get_birth_generation(self, idea: Any) -> int:
         """Read persisted birth generation metadata (defaults to 0 for legacy ideas)."""
         if not isinstance(idea, dict):
@@ -1551,49 +1701,218 @@ class EvolutionEngine:
 
     async def _score_population_fitness(
         self, population: List[Any], ranks: Dict[int, float]
-    ) -> Dict[int, Dict[str, float]]:
+    ) -> Dict[int, Dict[str, Any]]:
         """
-        Compute normalized hybrid fitness for the current population.
+        Evaluate and aggregate fitness while preserving legacy score aliases.
 
-        fitness = alpha * elo_norm + (1 - alpha) * diversity_norm
+        The default suite remains equivalent to the historical formula:
+        ``alpha * elo_norm + (1 - alpha) * diversity_norm``. Typed
+        evaluation records make the inputs and weighting extensible without
+        changing the survivor/parent-selection contract in one step.
         """
-        if not population or not ranks:
+        if not population:
             return {}
 
-        valid_indices = [idx for idx in ranks.keys() if 0 <= idx < len(population)]
-        if not valid_indices:
-            return {}
+        candidate_ids = [
+            candidate_identifier(candidate, index)
+            for index, candidate in enumerate(population)
+        ]
+        generation = max(0, int(getattr(self, "current_generation", 0) or 0))
+        records: List[EvaluationRecord] = []
 
-        diversity_scores = await self._calculate_population_diversity_scores(population)
-        elo_values = [float(ranks[idx]) for idx in valid_indices]
-        diversity_values = [float(diversity_scores.get(idx, 0.0)) for idx in valid_indices]
-
-        self._update_running_stats(self.fitness_elo_stats, elo_values)
-        self._update_running_stats(self.fitness_diversity_stats, diversity_values)
-
-        fitness_map: Dict[int, Dict[str, float]] = {}
-        for idx in valid_indices:
-            elo = float(ranks[idx])
-            diversity = float(diversity_scores.get(idx, 0.0))
-            elo_norm = self._normalize_with_running_stats(elo, self.fitness_elo_stats)
-            diversity_norm = self._normalize_with_running_stats(
-                diversity, self.fitness_diversity_stats
+        if self.unsupported_evaluation_components:
+            raise RuntimeError(
+                "evaluation execution backends are not configured for: "
+                + ", ".join(self.unsupported_evaluation_components)
             )
-            fitness = (self.fitness_alpha * elo_norm) + (
-                (1.0 - self.fitness_alpha) * diversity_norm
+
+        prior_batch = self.last_evaluation_batch
+        quality_scores: Dict[int, float] = {}
+        quality_records: Dict[str, EvaluationRecord] = {}
+        if self.quality_evaluator is not None:
+            if isinstance(prior_batch, EvaluationBatch):
+                quality_records = {
+                    record.candidate_id: record
+                    for record in prior_batch.records
+                    if record.component_id == self.quality_evaluator.config.id
+                }
+            for index in range(len(population)):
+                try:
+                    score = float(ranks.get(index))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(score):
+                    quality_scores[index] = score
+
+        diversity_scores: Dict[int, float] = {}
+        diversity_records: Dict[int, EvaluationRecord] = {}
+        if self.diversity_evaluator is not None:
+            diversity_result = await self.diversity_evaluator.evaluate_population(
+                population,
+                self._calculate_population_diversity_scores,
+                evaluation_generation=generation,
             )
-            fitness_map[idx] = {
+            diversity_scores = diversity_result.scores
+            diversity_records = {
+                index: record
+                for index, record in enumerate(diversity_result.batch.records)
+            }
+
+        for evaluator, runner in self.python_metric_evaluators:
+            python_result = await evaluator.evaluate_population(
+                population,
+                runner,
+                evaluation_generation=generation,
+            )
+            records.extend(python_result.batch.records)
+
+        if self.quality_evaluator is not None:
+            quality_config = self.quality_evaluator.config
+            for index, candidate in enumerate(population):
+                if index in quality_scores:
+                    record = EvaluationRecord(
+                        candidate_id=candidate_ids[index],
+                        component_id=quality_config.id,
+                        component_kind=quality_config.kind,
+                        component_version=quality_config.component_version,
+                        scope=quality_config.scope,
+                        generation=generation,
+                        status=EvaluationStatus.OK,
+                        metrics={quality_config.metric_name: quality_scores[index]},
+                        metadata={
+                            "kind": quality_config.kind.value,
+                            "generation": generation,
+                        },
+                    )
+                else:
+                    prior_record = quality_records.get(candidate_ids[index])
+                    record = prior_record or EvaluationRecord(
+                        candidate_id=candidate_ids[index],
+                        component_id=quality_config.id,
+                        component_kind=quality_config.kind,
+                        component_version=quality_config.component_version,
+                        scope=quality_config.scope,
+                        generation=generation,
+                        status=EvaluationStatus.FAILED,
+                        error="pairwise evaluator did not return a finite rating",
+                        metadata={
+                            "kind": quality_config.kind.value,
+                            "generation": generation,
+                        },
+                    )
+                records.append(record)
+
+        if self.diversity_evaluator is not None:
+            diversity_config = self.diversity_evaluator.config
+            for index, candidate in enumerate(population):
+                if index in diversity_scores:
+                    record = EvaluationRecord(
+                        candidate_id=candidate_ids[index],
+                        component_id=diversity_config.id,
+                        component_kind=diversity_config.kind,
+                        component_version=diversity_config.component_version,
+                        scope=diversity_config.scope,
+                        generation=generation,
+                        status=EvaluationStatus.OK,
+                        metrics={diversity_config.metric_name: diversity_scores[index]},
+                        metadata={
+                            "kind": diversity_config.kind.value,
+                            "generation": generation,
+                        },
+                    )
+                else:
+                    record = diversity_records.get(index) or EvaluationRecord(
+                        candidate_id=candidate_ids[index],
+                        component_id=diversity_config.id,
+                        component_kind=diversity_config.kind,
+                        component_version=diversity_config.component_version,
+                        scope=diversity_config.scope,
+                        generation=generation,
+                        status=EvaluationStatus.FAILED,
+                        error="diversity evaluator did not return a finite score",
+                        metadata={
+                            "kind": diversity_config.kind.value,
+                            "generation": generation,
+                        },
+                    )
+                records.append(record)
+
+        self._apply_stateful_metric_normalization(records)
+        records_by_candidate: Dict[str, List[EvaluationRecord]] = {}
+        for record in records:
+            records_by_candidate.setdefault(record.candidate_id, []).append(record)
+        for index, candidate in enumerate(population):
+            for record in records_by_candidate.get(candidate_ids[index], []):
+                attach_evaluation_record(candidate, record)
+
+        batch = EvaluationBatch(
+            generation=generation,
+            records=records,
+            metadata={"suite": self.evaluation_config.model_dump(mode="json")},
+        )
+        self.last_evaluation_batch = batch
+        aggregated = self.fitness_aggregator.aggregate(
+            batch,
+            candidate_ids=candidate_ids,
+        )
+
+        records_by_key = {
+            (record.candidate_id, record.component_id): record
+            for record in records
+        }
+        fitness_map: Dict[int, Dict[str, Any]] = {}
+        for index, candidate_id in enumerate(candidate_ids):
+            fitness_score = aggregated[candidate_id]
+            try:
+                elo = float(quality_scores.get(index, ranks.get(index, 1500.0)))
+            except (TypeError, ValueError):
+                elo = 1500.0
+            diversity = float(diversity_scores.get(index, 0.0))
+
+            elo_norm = 0.5
+            if self.quality_evaluator is not None:
+                config = self.quality_evaluator.config
+                metric_key = f"{config.id}.{config.metric_name}"
+                record = records_by_key.get((candidate_id, config.id))
+                contribution = fitness_score.components.get(metric_key)
+                if record and config.metric_name in record.normalized_metrics:
+                    elo_norm = float(record.normalized_metrics[config.metric_name])
+                elif contribution and contribution.score_value is not None:
+                    elo_norm = float(contribution.score_value)
+
+            diversity_norm = 0.5
+            if self.diversity_evaluator is not None:
+                config = self.diversity_evaluator.config
+                metric_key = f"{config.id}.{config.metric_name}"
+                record = records_by_key.get((candidate_id, config.id))
+                contribution = fitness_score.components.get(metric_key)
+                if record and config.metric_name in record.normalized_metrics:
+                    diversity_norm = float(
+                        record.normalized_metrics[config.metric_name]
+                    )
+                elif contribution and contribution.score_value is not None:
+                    diversity_norm = float(contribution.score_value)
+            fitness = (
+                float(fitness_score.score)
+                if fitness_score.score is not None
+                else 0.5
+            )
+            fitness_map[index] = {
                 "elo": elo,
                 "diversity": diversity,
                 "elo_norm": elo_norm,
                 "diversity_norm": diversity_norm,
                 "fitness": fitness,
+                "components": {
+                    key: value.model_dump(mode="json")
+                    for key, value in fitness_score.components.items()
+                },
             }
 
         return fitness_map
 
     def _score_survival_with_age_decay(
-        self, population: List[Any], fitness_map: Dict[int, Dict[str, float]], target_generation: int
+        self, population: List[Any], fitness_map: Dict[int, Dict[str, Any]], target_generation: int
     ) -> Dict[int, Dict[str, float]]:
         """
         Combine hybrid fitness with age decay to produce survivor selection weights.

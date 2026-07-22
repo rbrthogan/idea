@@ -294,6 +294,7 @@ EVOLUTION_JSON_FIELDS = [
     'config',                     # dict with config values
     'fitness_elo_stats',
     'fitness_diversity_stats',
+    'fitness_metric_stats',
 ]
 
 EVOLUTION_NESTED_FIELDS = EVOLUTION_JSON_FIELDS

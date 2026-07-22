@@ -48,7 +48,7 @@ prompts:
     Must include {ideas} placeholder
     Can reference {requirements} for template-specific constraints
 
-comparison_criteria:
+comparison_criteria:  # Optional; used by the legacy pairwise LLM evaluator
   - "First criterion (most important)"
   - "Second criterion"
   - "Additional criteria..."
@@ -77,6 +77,9 @@ Templates are automatically validated when loaded. The system checks for:
 - Proper placeholder usage in prompts
 - Valid semantic versioning
 - Proper date formatting
+
+`comparison_criteria` is optional. Define it when a run may use the pairwise
+LLM evaluator; deterministic/script-only evaluation templates can omit it.
 
 ## Template Placeholders (required at authoring time)
 

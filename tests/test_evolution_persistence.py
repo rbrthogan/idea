@@ -2,9 +2,21 @@ import asyncio
 import uuid
 from unittest.mock import patch
 
+import pytest
+
 from idea.evolution import EvolutionEngine
 from idea.evolution_persistence import EvolutionRepository, EvolutionSerializer
 from idea.models import Idea
+
+
+class _NumericRunner:
+    async def run(self, candidate, **_kwargs):
+        from idea.evaluation import ScriptResultManifest
+
+        return ScriptResultManifest(
+            status="ok",
+            metrics={"score": float(candidate["score"])},
+        )
 
 
 def test_serializer_round_trip_for_idea_payload():
@@ -122,6 +134,14 @@ def test_repository_restore_from_state():
     assert engine.population[0]["idea"].title == "A"
 
 
+@pytest.mark.parametrize("checkpoint_id", ["../secret", "/tmp/secret", r"..\\secret"])
+def test_local_checkpoint_helpers_reject_path_components(checkpoint_id):
+    with pytest.raises(ValueError, match="path-free"):
+        EvolutionRepository.load_checkpoint(EvolutionEngine, checkpoint_id)
+    with pytest.raises(ValueError, match="path-free"):
+        EvolutionRepository.delete_checkpoint(checkpoint_id)
+
+
 def test_serializer_persists_comparison_cache():
     with patch("idea.llm.LLMWrapper._setup_provider", return_value=None):
         engine = EvolutionEngine(
@@ -158,6 +178,90 @@ def test_serializer_persists_age_decay_floor():
     state = EvolutionSerializer.to_checkpoint_state(engine)
 
     assert state["config"]["age_decay_floor"] == 0.18
+
+
+def test_serializer_persists_resolved_evaluation_suite():
+    with patch("idea.llm.LLMWrapper._setup_provider", return_value=None):
+        engine = EvolutionEngine(
+            idea_type="airesearch",
+            pop_size=2,
+            generations=1,
+            fitness_alpha=0.6,
+            api_key=None,
+            user_id="user-1",
+        )
+
+    state = EvolutionSerializer.to_checkpoint_state(engine)
+
+    assert state["config"]["evaluation"]["schema_version"] == 1
+    assert [
+        metric["weight"]
+        for metric in state["config"]["evaluation"]["fitness"]["metrics"]
+    ] == [0.6, 0.4]
+
+
+def test_python_evaluator_checkpoint_restores_with_injected_runner_and_stats():
+    evaluation = {
+        "components": [
+            {
+                "id": "numeric",
+                "kind": "python_metric",
+                "script_ref": "evaluators/score.py",
+                "metric_names": ["score"],
+            }
+        ],
+        "fitness": {
+            "metrics": [
+                {
+                    "component_id": "numeric",
+                    "metric_name": "score",
+                    "normalization": "running_zscore",
+                }
+            ]
+        },
+    }
+    with patch("idea.llm.LLMWrapper._setup_provider", return_value=None):
+        engine = EvolutionEngine(
+            idea_type="airesearch",
+            pop_size=2,
+            generations=1,
+            user_id="user-1",
+            evaluation_config=evaluation,
+            evaluation_runners={"numeric": _NumericRunner()},
+        )
+
+    asyncio.run(
+        engine._score_population_fitness(
+            [
+                {"id": "idea-a", "idea": "A", "score": 10},
+                {"id": "idea-b", "idea": "B", "score": 20},
+            ],
+            {},
+        )
+    )
+    state = EvolutionSerializer.to_checkpoint_state(engine)
+
+    with patch("idea.llm.LLMWrapper._setup_provider", return_value=None):
+        restored = EvolutionRepository.restore_from_state(
+            EvolutionEngine,
+            state,
+            user_id="user-1",
+            evaluation_runners={"numeric": _NumericRunner()},
+        )
+
+    assert restored.unsupported_evaluation_components == []
+    assert restored.fitness_metric_stats["numeric.score"]["count"] == 2
+    fitness = asyncio.run(
+        restored._score_population_fitness(
+            [
+                {"id": "idea-c", "idea": "C", "score": 30},
+                {"id": "idea-d", "idea": "D", "score": 40},
+            ],
+            {},
+        )
+    )
+    assert fitness[0]["fitness"] < fitness[1]["fitness"]
+    assert restored.fitness_metric_stats["numeric.score"]["count"] == 4
 
 
 def test_list_evolutions_includes_saved_config_metadata():

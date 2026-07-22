@@ -152,13 +152,16 @@ function completeSignOut() {
 }
 
 function buildDevUser() {
+    if (!devAuthConfig.token) {
+        throw new Error('Local development auth is missing its bearer token');
+    }
     return {
         uid: devAuthConfig.uid || 'local-dev-user',
         email: devAuthConfig.email || 'local-dev@example.local',
         displayName: devAuthConfig.displayName || 'Local Dev',
         photoURL: '',
         isAdmin: Boolean(devAuthConfig.isAdmin),
-        getIdToken: async () => devAuthConfig.token || 'local-dev-token',
+        getIdToken: async () => devAuthConfig.token,
     };
 }
 

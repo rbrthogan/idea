@@ -1,0 +1,167 @@
+name: "Prime Visualization Experiments"
+description: "Generate mathematically explicit, artifact-ready experiments for discovering visual structure in the prime numbers"
+version: "1.0.0"
+author: "Original Idea App"
+created_date: "2026-07-22"
+
+metadata:
+  item_type: "prime visualization experiment proposals"
+
+special_requirements: |
+  Prime-visualization proposal constraints:
+  - Treat the Ulam spiral (integers placed on a square spiral, with primes marked to reveal diagonal concentrations) as a baseline and anti-copy reference. A rotation, recoloring, animation, projection, or other cosmetic restyling of the same mapping is not a new proposal.
+  - Define the integer sample and every mathematical mapping explicitly. State the domain bound, whether the inputs are integers n or indexed primes p_k, the coordinate or graph map, adjacency/order, and every mark, size, opacity, and color quantity as a formula or unambiguous algorithm.
+  - State one falsifiable hypothesis about prime structure, one baseline or null comparison, a quantitative signal or predeclared visual signature, and an outcome that would count against the hypothesis. Distinguish exploratory pattern-finding from confirmatory evidence and guard against visual apophenia.
+  - Supply a deterministic, bounded implementation specification for a future isolated Python runner. It is a plan and artifact contract only: never claim that code was executed, a PNG was rendered, or a pattern was observed.
+
+  Mathematical and experimental requirements:
+  - Use exact notation and define all symbols. Explain why the mapping might expose arithmetic structure rather than merely create an attractive picture.
+  - Compute primality with a deterministic sieve for the declared finite range. Do not use an external prime list or network data.
+  - Include at least one control, such as shuffled prime labels, density-matched random integers, residue-preserving surrogates, or a conventional Ulam-spiral rendering over the same range.
+  - Name likely confounders, including changing prime density, aspect-ratio distortion, overplotting, interpolation, color normalization, and arbitrary parameter tuning when relevant.
+  - Do not present an unproved visual pattern as a theorem or imply that a finite plot proves an asymptotic claim.
+
+  Deterministic implementation envelope:
+  - Target one noninteractive Python 3.11 script using only the standard library, NumPy, and Matplotlib with the Agg backend.
+  - Use a default upper bound N no greater than 250,000, a fixed seed of 0 for any control sampling, and an explicit time-complexity and memory-complexity estimate. No network, subprocesses, shell commands, package installation, user input, or reads outside the job inputs.
+  - Keep the primary image at or below 1600 x 1600 pixels and 25 MiB. Use a colorblind-safe palette, readable labels, a legend, and a caption that explains what position and color encode without relying on color alone.
+  - Use relative output paths only. The proposed script must write visualization.png, metadata.json, and result.json. metadata.json records parameters, formulas/algorithm steps, seed, hypotheses, controls, and metric definitions.
+  - result.json follows this exact shape: schema_version=1; status="ok" or "failed"; metrics is a map of finite numeric values; artifacts lists relative path, role, and media_type; summary is concise; failed results include error and no metrics. The successful manifest must identify visualization.png as role="primary" with media_type="image/png" and metadata.json as role="metadata" with media_type="application/json".
+  - A successful manifest is structurally equivalent to {"schema_version": 1, "status": "ok", "metrics": {"structure_signal": 0.0}, "artifacts": [{"path": "visualization.png", "role": "primary", "media_type": "image/png"}, {"path": "metadata.json", "role": "metadata", "media_type": "application/json"}], "summary": "...", "error": null}. Define structure_signal mathematically in the proposal; do not invent its value. A failed manifest uses empty metrics/artifacts and a non-empty error.
+
+  Required proposal sections:
+  - Concept & Ulam Departure
+  - Mathematical Mapping
+  - Hypothesis, Null & Falsification
+  - Visual Encoding
+  - Deterministic Implementation Plan
+  - Artifact & Metric Contract
+  - Interpretation Limits
+
+  Output format:
+  - Return exactly two labeled fields:
+    Title: [concise experiment name]
+    Content: [full markdown proposal with all required sections]
+  - Do not include implementation results, invented measurements, or commentary outside those fields.
+
+prompts:
+  context: |
+    Generate 60 technically distinct ingredients for prime-number visualization experiments. Seek mappings that could expose arithmetic relationships, not visual styles.
+
+    Draw from varied mathematical families, including:
+    - Residue classes, quotient/remainder coordinates, modular tori, and Chinese-remainder coordinates
+    - Prime gaps, constellations, indexed-prime sequences, and local density
+    - Digit and bit representations with explicitly chosen bases
+    - Graphs defined by arithmetic relations, with deterministic layouts rather than force-directed randomness
+    - Recurrences, dynamical systems, and trajectories seeded by integers or primes
+    - Multiscale bins, transforms, and projections with invertible or well-explained information loss
+    - Comparisons against density-matched, shuffled, or residue-preserving controls
+
+    The Ulam spiral is an established baseline: integers follow a square spiral and prime marks form diagonal concentrations. Do not propose rotated, recolored, animated, or otherwise cosmetically transformed Ulam spirals as new mappings.
+
+    Make each ingredient concrete enough to combine later. Use exactly one line per ingredient with this schema:
+    Domain=<finite integer or indexed-prime domain> | Mapping=<explicit coordinate/graph rule> | Candidate signal=<measurable pattern> | Control=<null or baseline>
+
+    Return as:
+    CONCEPTS:
+    - <ingredient 1>
+    - <ingredient 2>
+    - ...
+
+  specific_prompt: |
+    From the following pool, select two or three complementary ingredients and turn them into one coherent prime-visualization experiment direction:
+
+    {context_pool}
+
+    Selection rules:
+    - The central mapping must be mathematically explicit and substantively different from the Ulam spiral.
+    - Prefer a simple mapping with a strong test over a complicated collage of encodings.
+    - Name the finite domain, the position/edge rule, the encoded arithmetic quantity, the hypothesis, and the null comparison.
+    - Ensure a deterministic Python/PNG implementation is plausible inside the bounded template requirements.
+    - Do not claim that the experiment has been run or that the predicted structure exists.
+
+    Write one concise request in this form:
+    "Design an experiment that maps [defined inputs] by [mathematical rule], encodes [quantity], and tests whether [falsifiable hypothesis] against [control]."
+
+    Your concise experiment request:
+
+  format: |
+    You are a formatting assistant. Convert the input prime-visualization proposal into a JSON object with "title" and "content" fields.
+
+    Preserve equations, algorithm details, hypotheses, controls, implementation bounds, and the artifact manifest specification. The content must be markdown and must not imply that the proposed script has run or that any result has been observed.
+
+    If the input has a clear title, use it. Otherwise, generate a concise title that names the mathematical mapping rather than an aesthetic style.
+
+    Input to format:
+    {input_text}
+
+  critique: |
+    You are a rigorous reviewer of computational number-theory visualizations.
+
+    Current proposal:
+    {idea}
+
+    Audit the proposal for:
+    - Mathematical completeness and correctness of the domain, mapping, and encodings
+    - Substantive novelty beyond a restyled Ulam spiral
+    - A falsifiable hypothesis, appropriate null/control, and a predeclared signal
+    - Confounders, multiple-comparison risk, and safeguards against visual apophenia
+    - Deterministic feasibility within the Python, range, dependency, resource, and PNG bounds
+    - A complete, traversal-free artifact and metric contract
+    - Honest language that does not fabricate execution or findings
+
+    Apply these full constraints:
+    {requirements}
+
+    Identify precise repairs. No additional text, just the critique.
+
+  refine: |
+    Current proposal:
+    {idea}
+
+    Critique:
+    {critique}
+
+    Produce an improved prime-visualization experiment proposal. Repair mathematical ambiguity before adding complexity, strengthen the null and falsification conditions, and keep the implementation deterministic and bounded. If the concept is only a cosmetic Ulam variant, replace its central mapping.
+
+    Do not claim execution or observed results.
+
+    {requirements}
+
+  breed: |
+    Candidate proposals:
+    {ideas}
+
+    Generate one new proposal by combining only mathematically complementary elements. Preserve the clearest mapping and strongest falsifiable test; do not accumulate unrelated panels, encodings, or hypotheses. The result must be substantively different from the Ulam spiral and must not claim execution.
+
+    {requirements}
+
+  genotype_encode: |
+    You are a computational number theorist extracting the design DNA of a prime-visualization experiment.
+
+    Capture:
+    - Integer or indexed-prime domain and bound
+    - Coordinate, graph, or trajectory mapping
+    - Encoded arithmetic quantities
+    - Hypothesis and predicted signature
+    - Null model or baseline
+    - Quantitative metric and falsification condition
+    - Determinism and resource envelope
+    - Artifact set
+    - Key interpretation limitation
+
+    Explicitly tag whether the mapping is independent of the Ulam spiral or how it departs from it. Strip away names and decorative styling. Format as a condensed semicolon-separated list.
+
+    Prime-visualization proposal to encode:
+    {idea_content}
+
+    Genotype:
+
+comparison_criteria:
+  - mathematical correctness and explicitness of the domain, mapping, and visual encodings
+  - strength and falsifiability of the hypothesis, null comparison, metric, and disconfirming outcome
+  - substantive novelty beyond the Ulam spiral rather than cosmetic restyling
+  - likelihood of producing an interpretable view that helps investigate prime structure without overstating finite visual evidence
+  - deterministic implementation feasibility within the declared Python, resource, and artifact constraints
+  - completeness of the PNG, metadata, and result-manifest contract
+  - honesty about unexecuted code and absence of fabricated observations

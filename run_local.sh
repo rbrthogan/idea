@@ -77,4 +77,5 @@ echo -e "${GREEN}Application will be available at http://localhost:8000${NC}"
 echo ""
 
 # Run the application
-uv run uvicorn idea.viewer:app --reload --host 0.0.0.0 --port 8000
+IDEA_BIND_HOST="${IDEA_BIND_HOST:-127.0.0.1}"
+uv run uvicorn idea.viewer:app --reload --host "$IDEA_BIND_HOST" --port 8000

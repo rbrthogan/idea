@@ -8,8 +8,10 @@ from fastapi.responses import JSONResponse
 import os
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
+import hashlib
 import time
 import math
+import stat
 import traceback
 from pathlib import Path
 import json
@@ -19,6 +21,7 @@ import uuid
 from typing import Dict, List, Tuple, Optional, Any, Set
 
 from idea.evolution import EvolutionEngine, get_default_template_id
+from idea.evaluation import resolve_evaluation_suite
 from idea.llm import Critic
 from idea.swiss_tournament import elo_update, generate_swiss_round_pairs
 from idea.config import (
@@ -54,12 +57,19 @@ logger = logging.getLogger(__name__)
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
 
-# Add CORS middleware
+# Same-origin is the safe default. Deployments with a separate frontend can
+# opt in to a comma-separated allow-list; wildcard browser access is never
+# enabled implicitly, especially when localhost development auth is active.
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("IDEA_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # Include routers
@@ -75,6 +85,9 @@ templates = Jinja2Templates(directory="idea/static/html")
 # Add this near other constants
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
+
+LOCAL_EVOLUTION_USERS_DIR = "local-users"
+ALLOW_UNSCOPED_LEGACY_LOCAL_FILES_ENV = "IDEA_ALLOW_UNSCOPED_LEGACY_LOCAL_FILES"
 
 # Unified evolutions directory
 EVOLUTIONS_DIR = Path("data/evolutions")
@@ -443,6 +456,9 @@ def _engine_config_payload(engine: EvolutionEngine) -> Dict[str, Any]:
         "fitness_alpha": getattr(engine, "fitness_alpha", 0.7),
         "age_decay_rate": getattr(engine, "age_decay_rate", 0.25),
         "age_decay_floor": getattr(engine, "age_decay_floor", 0.35),
+        "evaluation": getattr(engine, "evaluation_config", None).model_dump(mode="json")
+        if getattr(engine, "evaluation_config", None) is not None
+        else None,
     }
 
 
@@ -726,7 +742,15 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             )
 
         data = await request.json()
-        print(f"Received request data: {data}")
+        if not isinstance(data, dict):
+            return JSONResponse(
+                {"status": "error", "message": "Request body must be a JSON object"},
+                status_code=400,
+            )
+        logger.info(
+            "Received start-evolution request",
+            extra={"request_field_count": len(data)},
+        )
 
         # Clear the latest evolution data when starting a new evolution
         state.latest_data = []
@@ -947,6 +971,39 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
                     status_code=400,
                 )
 
+        try:
+            evaluation_config = resolve_evaluation_suite(
+                data.get("evaluation"),
+                fitness_alpha=fitness_alpha,
+            )
+        except (TypeError, ValueError) as exc:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": f"Invalid evaluation configuration: {exc}",
+                },
+                status_code=400,
+            )
+
+        unavailable_components = [
+            component.id
+            for component in evaluation_config.components
+            if component.enabled
+            and component.kind.value
+            not in {"llm_pairwise", "embedding_diversity"}
+        ]
+        if unavailable_components:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": (
+                        "Evaluation execution backend is not configured for: "
+                        + ", ".join(unavailable_components)
+                    ),
+                },
+                status_code=400,
+            )
+
         # Create the evolution engine (assigned after run claim)
         engine = EvolutionEngine(
             pop_size=pop_size,
@@ -975,6 +1032,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             api_key=api_key,
             user_id=user.uid,  # Store user_id for Firestore scoping
             template_data=template_data,
+            evaluation_config=evaluation_config,
         )
 
         # Initialize evolution with name (auto-generates if not provided)
@@ -1245,22 +1303,20 @@ async def list_checkpoints_endpoint(user: UserInfo = Depends(require_auth)):
         }, status_code=500)
 
 @app.get("/api/checkpoints/{checkpoint_id}")
-async def get_checkpoint(checkpoint_id: str):
+async def get_checkpoint(
+    checkpoint_id: str,
+    user: UserInfo = Depends(require_auth),
+):
     """
     Get details of a specific checkpoint.
     """
     try:
-        from pathlib import Path
-        checkpoint_path = Path("data/checkpoints") / f"checkpoint_{checkpoint_id}.json"
-        if not checkpoint_path.exists():
+        data = await db.get_checkpoint(user.uid, checkpoint_id)
+        if data is None:
             return JSONResponse({
                 "status": "error",
                 "message": "Checkpoint not found"
             }, status_code=404)
-
-        import json
-        with open(checkpoint_path) as f:
-            data = json.load(f)
 
         return JSONResponse({
             "status": "success",
@@ -1273,12 +1329,15 @@ async def get_checkpoint(checkpoint_id: str):
         }, status_code=500)
 
 @app.delete("/api/checkpoints/{checkpoint_id}")
-async def delete_checkpoint(checkpoint_id: str):
+async def delete_checkpoint(
+    checkpoint_id: str,
+    user: UserInfo = Depends(require_auth),
+):
     """
     Delete a specific checkpoint.
     """
     try:
-        success = EvolutionEngine.delete_checkpoint(checkpoint_id)
+        success = await db.delete_checkpoint(user.uid, checkpoint_id)
         if success:
             return JSONResponse({
                 "status": "success",
@@ -1709,118 +1768,6 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
         "full_tournament_rounds": state.engine.full_tournament_rounds,
         "target_tournament_rounds": state.engine.tournament_rounds,
     })
-
-async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] = None) -> Optional[EvolutionEngine]:
-    """
-    Create an EvolutionEngine from a saved evolution file.
-    This allows continuing evolutions that weren't saved as checkpoints.
-    """
-    try:
-        # Try unified evolutions first
-        # EvolutionEngine can handle loading from file path now
-        engine = EvolutionEngine.load_evolution(evolution_id, api_key=api_key)
-        if engine:
-            return engine
-
-        # Fallback for manual loading if needed (legacy files)
-        file_path = DATA_DIR / f"{evolution_id}.json"
-        if not file_path.exists():
-            print(f"Evolution file not found: {file_path}")
-            return None
-
-        import json
-        with open(file_path) as f:
-            data = json.load(f)
-
-        # Extract configuration from the saved data
-        config = data.get('config', {})
-        history = data.get('history', [])
-
-        if not history:
-            print("No history found in evolution file")
-            return None
-
-        # Create engine with default or saved config
-        engine = EvolutionEngine(
-            idea_type=config.get('idea_type', data.get('idea_type', get_default_template_id())),
-            pop_size=config.get('pop_size', len(history[-1]) if history else 5),
-            generations=len(history),  # Current number of generations
-            model_type=config.get('model_type', DEFAULT_MODEL),
-            creative_temp=config.get('creative_temp', DEFAULT_CREATIVE_TEMP),
-            top_p=config.get('top_p', DEFAULT_TOP_P),
-            tournament_rounds=config.get('tournament_rounds', 1),
-            tournament_count=config.get('tournament_count'),
-            full_tournament_rounds=config.get('full_tournament_rounds'),
-            thinking_level=config.get('thinking_level'),
-            thinking_budget=config.get('thinking_budget'),
-            max_budget=config.get('max_budget'),
-            mutation_rate=config.get('mutation_rate', 0.2),
-            seed_context_pool_size=config.get('seed_context_pool_size'),
-            refine_all_ideas=config.get('refine_all_ideas', False),
-            survivor_refinement_rate=config.get('survivor_refinement_rate', 0.1),
-            island_count=config.get('island_count', 2),
-            migration_rate=config.get('migration_rate', 0.05),
-            migration_novelty_protection_quantile=config.get('migration_novelty_protection_quantile', 0.8),
-            replacement_rate=config.get('replacement_rate', 0.5),
-            fitness_alpha=config.get('fitness_alpha', 0.7),
-            age_decay_rate=config.get('age_decay_rate', 0.25),
-            age_decay_floor=config.get('age_decay_floor', 0.35),
-            api_key=api_key,
-        )
-
-        # Restore state from the saved evolution
-        engine.contexts = data.get('contexts', [])
-        engine.specific_prompts = data.get('specific_prompts', [])
-        engine.breeding_prompts = data.get('breeding_prompts', [])
-        engine.tournament_history = data.get('tournament_history', [])
-        engine.diversity_history = data.get('diversity_history', [])
-        engine.island_diversity_history = data.get('island_diversity_history', [])
-        engine.migration_history = data.get('migration_history', [])
-        comparison_cache = data.get('comparison_cache', {})
-        engine.comparison_cache = comparison_cache if isinstance(comparison_cache, dict) else {}
-        engine.current_generation = len(history)
-        engine.fitness_elo_stats = data.get("fitness_elo_stats", {"count": 0, "mean": 0.0, "m2": 0.0})
-        engine.fitness_diversity_stats = data.get(
-            "fitness_diversity_stats", {"count": 0, "mean": 0.0, "m2": 0.0}
-        )
-
-        # Restore history and population
-        def deserialize_idea(idea_data):
-            if not isinstance(idea_data, dict):
-                return idea_data
-            result = dict(idea_data)
-            if 'id' in result and isinstance(result['id'], str):
-                try:
-                    result['id'] = uuid.UUID(result['id'])
-                except ValueError:
-                    result['id'] = uuid.uuid4()
-            if 'parent_ids' in result:
-                result['parent_ids'] = [
-                    uuid.UUID(pid) if isinstance(pid, str) else pid
-                    for pid in result['parent_ids']
-                ]
-            # Restore Idea object if needed
-            if 'title' in result and 'content' in result and 'idea' not in result:
-                from idea.models import Idea
-                result['idea'] = Idea(title=result.get('title'), content=result.get('content', ''))
-            return result
-
-        engine.history = [[deserialize_idea(idea) for idea in gen] for gen in history]
-        engine.population = engine.history[-1] if engine.history else []
-
-        # Generate a new checkpoint ID for this continuation
-        from datetime import datetime
-        engine.checkpoint_id = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
-        engine._sync_typed_state_from_attrs()
-
-        print(f"Loaded evolution from file: {evolution_id}, generations: {len(history)}")
-        return engine
-
-    except Exception as e:
-        print(f"Error loading evolution from file: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 async def run_resume_evolution_task(state: UserEvolutionState):
     """Run resumed evolution in background with progress updates"""
@@ -2337,13 +2284,233 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
 
     return JSONResponse(convert_uuids_to_strings(state.status))
 
+
+def _allow_unscoped_legacy_local_files() -> bool:
+    """Return whether root-level ``data/*.json`` compatibility is enabled."""
+
+    return os.getenv(ALLOW_UNSCOPED_LEGACY_LOCAL_FILES_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _validate_local_evolution_filename(filename: Any) -> str:
+    """Validate a single JSON basename without resolving or following it."""
+
+    if not isinstance(filename, str):
+        raise HTTPException(status_code=400, detail="Filename must be a string")
+
+    filename = filename.strip()
+    candidate = Path(filename)
+    if (
+        not filename
+        or len(filename) > 255
+        or len(os.fsencode(filename)) > 255
+        or "\x00" in filename
+        or candidate.is_absolute()
+        or candidate.name != filename
+        or "/" in filename
+        or "\\" in filename
+        or candidate.suffix.lower() != ".json"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Filename must be a plain .json filename without directory components",
+        )
+    return filename
+
+
+def _resolved_data_root() -> Path:
+    try:
+        root = DATA_DIR.resolve(strict=True)
+        root_stat = root.stat()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Local data directory is unavailable") from exc
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise HTTPException(status_code=500, detail="Local data path is not a directory")
+    return root
+
+
+def _contained_directory(parent: Path, name: str, *, create: bool) -> Optional[Path]:
+    """Open-or-create one server-controlled directory component without symlinks."""
+
+    candidate = parent / name
+    if create:
+        try:
+            candidate.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Local user directory is unavailable") from exc
+
+    try:
+        candidate_stat = candidate.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Local user directory is unavailable") from exc
+
+    if stat.S_ISLNK(candidate_stat.st_mode) or not stat.S_ISDIR(candidate_stat.st_mode):
+        raise HTTPException(status_code=500, detail="Local user directory is invalid")
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(parent)
+        os.chmod(resolved, 0o700)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="Local user directory is invalid") from exc
+    return resolved
+
+
+def _local_user_evolution_directory(user_id: str, *, create: bool) -> Optional[Path]:
+    """Return a stable, opaque, traversal-safe directory for one authenticated user."""
+
+    if not isinstance(user_id, str) or not user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user ID is required")
+    root = _resolved_data_root()
+    users_root = _contained_directory(root, LOCAL_EVOLUTION_USERS_DIR, create=create)
+    if users_root is None:
+        return None
+    user_key = "user-" + hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+    return _contained_directory(users_root, user_key, create=create)
+
+
+def _open_local_directory_fd(directory: Path) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_fd = -1
+    try:
+        directory_fd = os.open(directory, flags)
+        directory_stat = os.fstat(directory_fd)
+    except OSError as exc:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        raise HTTPException(status_code=500, detail="Local evolution directory is unavailable") from exc
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        os.close(directory_fd)
+        raise HTTPException(status_code=500, detail="Local evolution directory is invalid")
+    return directory_fd
+
+
+def _read_local_json_file(
+    directory: Path,
+    filename: Any,
+) -> Optional[Tuple[Any, os.stat_result]]:
+    """Read one regular JSON file through a no-follow directory-FD boundary."""
+
+    safe_filename = _validate_local_evolution_filename(filename)
+    directory_fd = _open_local_directory_fd(directory)
+    file_fd = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            file_fd = os.open(safe_filename, flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Local evolution must be a regular, non-symbolic-link file",
+            ) from exc
+
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise HTTPException(
+                status_code=400,
+                detail="Local evolution must be a regular, non-symbolic-link file",
+            )
+        with os.fdopen(file_fd, "r", encoding="utf-8") as handle:
+            file_fd = -1
+            return json.load(handle), file_stat
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def _atomic_write_local_json_file(directory: Path, filename: Any, payload: Any) -> Path:
+    """Atomically replace one user-scoped JSON file without following symlinks."""
+
+    safe_filename = _validate_local_evolution_filename(filename)
+    directory_fd = _open_local_directory_fd(directory)
+    temp_name = f".evolution-{uuid.uuid4().hex}.tmp"
+    temp_fd = -1
+    committed = False
+    try:
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        temp_fd = os.open(temp_name, flags, 0o600, dir_fd=directory_fd)
+        os.fchmod(temp_fd, 0o600)
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
+            temp_fd = -1
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(
+            temp_name,
+            safe_filename,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        committed = True
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            pass
+        return directory / safe_filename
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        if not committed:
+            try:
+                os.unlink(temp_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        os.close(directory_fd)
+
+
+def _write_user_local_evolution(user: UserInfo, filename: Any, payload: Any) -> Path:
+    safe_filename = _validate_local_evolution_filename(filename)
+    directory = _local_user_evolution_directory(user.uid, create=True)
+    assert directory is not None
+    return _atomic_write_local_json_file(directory, safe_filename, payload)
+
+
+def _list_local_json_filenames(directory: Path) -> List[str]:
+    """List only direct regular JSON files; symlinks and nested paths are ignored."""
+
+    filenames: List[str] = []
+    try:
+        for entry in os.scandir(directory):
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            try:
+                filenames.append(_validate_local_evolution_filename(entry.name))
+            except HTTPException:
+                continue
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Local evolution directory is unavailable") from exc
+    return sorted(filenames)
+
+
 @app.post("/api/save-evolution")
-async def save_evolution(request: Request):
-    """Save evolution data to file"""
+async def save_evolution(request: Request, user: UserInfo = Depends(require_auth)):
+    """Save an authenticated user's evolution export to the local data directory."""
     try:
         # Parse the request body manually
         data = await request.json()
-        print(f"Received save request: {data}")
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
 
         if 'data' not in data or 'filename' not in data:
             print("Missing required fields in request")
@@ -2354,6 +2521,7 @@ async def save_evolution(request: Request):
 
         evolution_data = data['data']
         filename = data['filename']
+        file_path = _write_user_local_evolution(user, filename, evolution_data)
 
         print(f"Saving evolution data to file: {filename}")
         if isinstance(evolution_data, dict):
@@ -2361,14 +2529,10 @@ async def save_evolution(request: Request):
         else:
             print(f"Data is not a dictionary: {type(evolution_data)}")
 
-        file_path = DATA_DIR / filename
-        print(f"Full file path: {file_path}")
-
-        with open(file_path, "w") as f:
-            json.dump(evolution_data, f, indent=2)
-
         print(f"Successfully saved evolution data to {file_path}")
         return JSONResponse({"status": "success", "file_path": str(file_path)})
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         print(f"Error saving evolution: {e}")
@@ -2377,6 +2541,7 @@ async def save_evolution(request: Request):
             "status": "error",
             "message": str(e)
         }, status_code=500)
+
 
 @app.get('/api/evolutions')
 async def get_evolutions(user: UserInfo = Depends(require_auth)):
@@ -2498,45 +2663,62 @@ async def get_unified_history(user: UserInfo = Depends(require_auth)):
                 'can_delete': True,
             })
 
-        # 3. Load legacy saved evolutions from data/*.json (for backwards compatibility)
-        for file_path in DATA_DIR.glob('*.json'):
-            try:
-                evolution_id = file_path.stem
-                # Skip if already in unified storage or checkpoints
-                if evolution_id in existing_ids or any(item['id'] == evolution_id for item in history_items):
+        # 3. Load authenticated user-scoped local saves. Root-level legacy files
+        # are deliberately excluded unless the operator enables the compatibility
+        # flag; a scoped save with the same id always wins.
+        local_sources: List[Tuple[Path, bool]] = []
+        user_local_directory = _local_user_evolution_directory(user.uid, create=False)
+        if user_local_directory is not None:
+            local_sources.append((user_local_directory, False))
+        if _allow_unscoped_legacy_local_files():
+            local_sources.append((_resolved_data_root(), True))
+
+        for local_directory, is_unscoped_legacy in local_sources:
+            for filename in _list_local_json_filenames(local_directory):
+                file_path = local_directory / filename
+                try:
+                    evolution_id = Path(filename).stem
+                    # Skip if already in unified storage, checkpoints, or the
+                    # higher-priority user-scoped local directory.
+                    if evolution_id in existing_ids or any(
+                        item['id'] == evolution_id for item in history_items
+                    ):
+                        continue
+
+                    loaded = _read_local_json_file(local_directory, filename)
+                    if loaded is None:
+                        continue
+                    data, file_stat = loaded
+                    if not isinstance(data, dict):
+                        raise ValueError("local evolution root must be a JSON object")
+
+                    history = data.get('history', [])
+                    config = data.get('config', {})
+                    num_generations = len(history)
+                    pop_size = len(history[0]) if history else 0
+
+                    history_items.append({
+                        'id': evolution_id,
+                        'type': 'legacy_saved',
+                        'status': 'complete',
+                        'timestamp': datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
+                        'display_name': evolution_id.replace('_', ' ').replace('-', ' '),
+                        'generations': num_generations,
+                        'total_generations': num_generations,
+                        'pop_size': pop_size,
+                        'idea_type': config.get('idea_type') or data.get('idea_type', 'Unknown'),
+                        'model_type': config.get('model_type', 'Unknown'),
+                        'total_ideas': sum(len(gen) for gen in history),
+                        'config': config,
+                        'can_use_config': bool(config),
+                        'can_continue': True,
+                        'can_rate': True,
+                        'can_rename': False,
+                        'can_delete': not is_unscoped_legacy,
+                    })
+                except Exception as e:
+                    print(f"Error reading local evolution file {file_path}: {e}")
                     continue
-
-                file_stat = file_path.stat()
-                with open(file_path) as f:
-                    data = json.load(f)
-
-                history = data.get('history', [])
-                config = data.get('config', {})
-                num_generations = len(history)
-                pop_size = len(history[0]) if history else 0
-
-                history_items.append({
-                    'id': evolution_id,
-                    'type': 'legacy_saved',
-                    'status': 'complete',
-                    'timestamp': datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
-                    'display_name': evolution_id.replace('_', ' ').replace('-', ' '),
-                    'generations': num_generations,
-                    'total_generations': num_generations,
-                    'pop_size': pop_size,
-                    'idea_type': config.get('idea_type') or data.get('idea_type', 'Unknown'),
-                    'model_type': config.get('model_type', 'Unknown'),
-                    'total_ideas': sum(len(gen) for gen in history),
-                    'config': config,
-                    'can_use_config': bool(config),
-                    'can_continue': True,
-                    'can_rate': True,
-                    'can_rename': False,  # Legacy format
-                    'can_delete': True,
-                })
-            except Exception as e:
-                print(f"Error reading legacy file {file_path}: {e}")
-                continue
 
         # Sort by timestamp descending (most recent first)
         history_items.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
@@ -2698,6 +2880,7 @@ async def repair_evolution_endpoint(request: Request, evolution_id: str, user: U
             "comparison_cache",
             "fitness_elo_stats",
             "fitness_diversity_stats",
+            "fitness_metric_stats",
         ):
             if client_data.get(field_name) is not None:
                 repaired[field_name] = client_data.get(field_name)
@@ -2816,21 +2999,35 @@ async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 async def _load_rating_evolution(
     evolution_id: str,
-    user: Optional[UserInfo] = None,
+    user: UserInfo,
 ) -> Tuple[Optional[Path], Dict[str, Any], str]:
-    """Load rating evolution from Firestore (preferred) or local file fallback."""
-    if user:
-        firestore_data = await db.get_evolution(user.uid, evolution_id)
-        if firestore_data:
-            return None, firestore_data, "firestore"
+    """Load Firestore first, then the user's local namespace and opt-in legacy root."""
 
-    file_path = DATA_DIR / f"{evolution_id}.json"
-    if file_path.exists():
-        with open(file_path) as f:
-            evolution_data = json.load(f)
-        return file_path, evolution_data, "file"
+    filename = _validate_local_evolution_filename(f"{evolution_id}.json")
+    firestore_data = await db.get_evolution(user.uid, evolution_id)
+    if firestore_data:
+        return None, firestore_data, "firestore"
+
+    user_directory = _local_user_evolution_directory(user.uid, create=False)
+    if user_directory is not None:
+        loaded = _read_local_json_file(user_directory, filename)
+        if loaded is not None:
+            evolution_data, _ = loaded
+            if not isinstance(evolution_data, dict):
+                raise HTTPException(status_code=400, detail="Local evolution must be a JSON object")
+            return user_directory / filename, evolution_data, "file"
+
+    if _allow_unscoped_legacy_local_files():
+        legacy_directory = _resolved_data_root()
+        loaded = _read_local_json_file(legacy_directory, filename)
+        if loaded is not None:
+            evolution_data, _ = loaded
+            if not isinstance(evolution_data, dict):
+                raise HTTPException(status_code=400, detail="Local evolution must be a JSON object")
+            return legacy_directory / filename, evolution_data, "legacy_file"
 
     raise HTTPException(status_code=404, detail="Evolution not found")
 
@@ -2839,19 +3036,19 @@ async def _save_rating_evolution(
     evolution_id: str,
     evolution_data: Dict[str, Any],
     source: str,
-    user: Optional[UserInfo] = None,
-    file_path: Optional[Path] = None,
+    user: UserInfo,
 ) -> None:
-    """Persist rating evolution back to its source."""
+    """Persist Firestore in place, or atomically save a user-scoped local copy."""
+
     if source == "firestore":
-        if not user:
-            raise HTTPException(status_code=401, detail="Authentication required to save this evolution")
         await db.save_evolution(user.uid, evolution_id, evolution_data)
         return
 
-    target_path = file_path or (DATA_DIR / f"{evolution_id}.json")
-    with open(target_path, "w") as f:
-        json.dump(evolution_data, f, indent=2)
+    if source not in {"file", "legacy_file"}:
+        raise HTTPException(status_code=400, detail="Unknown local evolution source")
+    # Legacy root files are never modified. The first rating write migrates a
+    # private copy into the authenticated user's namespace.
+    _write_user_local_evolution(user, f"{evolution_id}.json", evolution_data)
 
 
 def _resolve_rating_title_content(idea: Dict[str, Any]) -> Tuple[str, str]:
@@ -3227,7 +3424,7 @@ def _get_autorating_costs(critic_agent: Critic) -> Dict[str, Any]:
 @app.post("/api/submit-rating")
 async def submit_rating(
     request: Request,
-    user: Optional[UserInfo] = Depends(get_current_user),
+    user: UserInfo = Depends(require_auth),
 ):
     """Submit a manual Swiss comparison result."""
     try:
@@ -3242,7 +3439,7 @@ async def submit_rating(
 
         print(f"Submitting manual Swiss rating for {idea_a_id} vs {idea_b_id}, outcome: {outcome}")
 
-        file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
+        _file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
         all_ideas, _ = _collect_latest_ideas_for_rating(evolution_data)
         ideas_by_id = {idea["id"]: idea for idea in all_ideas}
 
@@ -3284,7 +3481,6 @@ async def submit_rating(
             evolution_data=evolution_data,
             source=source,
             user=user,
-            file_path=file_path,
         )
 
         return JSONResponse({
@@ -3323,7 +3519,7 @@ async def submit_rating(
 @app.post("/api/auto-rate")
 async def auto_rate(
     request: Request,
-    user: Optional[UserInfo] = Depends(get_current_user),
+    user: UserInfo = Depends(require_auth),
 ):
     """Automatically rate ideas using Swiss rounds from the Critic tournament flow."""
     state: Optional[UserEvolutionState] = None
@@ -3337,7 +3533,7 @@ async def auto_rate(
         if user:
             state = await user_states.get(user.uid)
 
-        file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
+        _file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
         if not idea_type:
             idea_type = evolution_data.get("idea_type", get_default_template_id())
 
@@ -3556,7 +3752,6 @@ async def auto_rate(
                 evolution_data=evolution_data,
                 source=source,
                 user=user,
-                file_path=file_path,
             )
 
         final_token_counts = _get_autorating_costs(critic)
@@ -3665,7 +3860,7 @@ async def get_models():
 @app.post("/api/reset-ratings")
 async def reset_ratings(
     request: Request,
-    user: Optional[UserInfo] = Depends(get_current_user),
+    user: UserInfo = Depends(require_auth),
 ):
     """Reset ratings for an evolution."""
     try:
@@ -3673,7 +3868,7 @@ async def reset_ratings(
         evolution_id = data.get("evolutionId")
         rating_type = data.get("ratingType", "all")
 
-        file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
+        _file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
 
         for generation in evolution_data.get("history", []):
             for idea in generation:
@@ -3707,7 +3902,6 @@ async def reset_ratings(
             evolution_data=evolution_data,
             source=source,
             user=user,
-            file_path=file_path,
         )
 
         return JSONResponse({
@@ -3731,7 +3925,7 @@ async def reset_ratings(
 @app.post("/api/get-efficient-pair")
 async def get_efficient_pair(
     request: Request,
-    user: Optional[UserInfo] = Depends(get_current_user),
+    user: UserInfo = Depends(require_auth),
 ):
     """Get the next Swiss pair for manual rating."""
     try:
@@ -3740,7 +3934,7 @@ async def get_efficient_pair(
         if not evolution_id:
             raise HTTPException(status_code=400, detail="Evolution ID is required")
 
-        file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
+        _file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
         all_ideas, _ = _collect_latest_ideas_for_rating(evolution_data)
         if len(all_ideas) < 2:
             raise HTTPException(status_code=400, detail="Not enough ideas for comparison")
@@ -3754,7 +3948,6 @@ async def get_efficient_pair(
             evolution_data=evolution_data,
             source=source,
             user=user,
-            file_path=file_path,
         )
 
         return {

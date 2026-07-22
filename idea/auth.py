@@ -3,6 +3,7 @@
 
 import logging
 import os
+import secrets
 from typing import Optional
 from fastapi import HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -56,6 +57,7 @@ class UserInfo:
 ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").split(",")
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 LOCAL_REQUEST_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_GENERATED_DEV_AUTH_TOKEN = secrets.token_urlsafe(32)
 
 
 def _env_flag(name: str, default: str = "") -> bool:
@@ -80,10 +82,12 @@ def _is_local_request(request: Optional[Request]) -> bool:
         return False
 
     client_host = getattr(getattr(request, "client", None), "host", None)
-    if client_host:
-        return _local_host_name(client_host) in LOCAL_REQUEST_HOSTS
-
-    return _local_host_name(request.headers.get("host")) in LOCAL_REQUEST_HOSTS
+    host_header = request.headers.get("host")
+    client_is_local = (
+        not client_host or _local_host_name(client_host) in LOCAL_REQUEST_HOSTS
+    )
+    host_is_local = _local_host_name(host_header) in LOCAL_REQUEST_HOSTS
+    return client_is_local and host_is_local
 
 
 def _dev_auth_allowed(request: Optional[Request]) -> bool:
@@ -91,7 +95,7 @@ def _dev_auth_allowed(request: Optional[Request]) -> bool:
 
 
 def get_dev_auth_token() -> str:
-    return os.getenv("IDEA_DEV_AUTH_TOKEN", "local-dev-token")
+    return os.getenv("IDEA_DEV_AUTH_TOKEN") or _GENERATED_DEV_AUTH_TOKEN
 
 
 def get_dev_user_info() -> UserInfo:
@@ -100,7 +104,7 @@ def get_dev_user_info() -> UserInfo:
         uid=os.getenv("IDEA_DEV_AUTH_UID", "local-dev-user"),
         email=email,
         display_name=os.getenv("IDEA_DEV_AUTH_NAME", "Local Dev"),
-        is_admin=_env_flag("IDEA_DEV_AUTH_ADMIN", "1") or email in ADMIN_EMAILS,
+        is_admin=_env_flag("IDEA_DEV_AUTH_ADMIN") or email in ADMIN_EMAILS,
     )
 
 
@@ -128,7 +132,10 @@ async def get_current_user(
     Returns None if no valid token is provided.
     """
     if _dev_auth_allowed(request):
-        if credentials is None or credentials.credentials == get_dev_auth_token():
+        if credentials is not None and secrets.compare_digest(
+            credentials.credentials,
+            get_dev_auth_token(),
+        ):
             return get_dev_user_info()
 
     if credentials is None:

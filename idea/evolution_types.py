@@ -27,6 +27,7 @@ class EvolutionConfig:
     fitness_alpha: float
     age_decay_rate: float
     age_decay_floor: float
+    evaluation: Dict[str, Any]
 
 
 @dataclass

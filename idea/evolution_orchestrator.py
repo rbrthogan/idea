@@ -41,6 +41,30 @@ class EvolutionOrchestrator:
         evaluation_generation: int,
         early_stop_top_n: Optional[int] = None,
     ) -> Dict[int, float]:
+        evaluator = getattr(self.engine, "quality_evaluator", None)
+        if evaluator is not None:
+            result = evaluator.evaluate_population(
+                self.engine.critic,
+                population,
+                self.engine.idea_type,
+                rounds=rounds,
+                progress_callback=progress_callback,
+                details=details,
+                full_tournament_rounds=full_tournament_rounds,
+                should_stop=should_stop,
+                comparison_cache=self._comparison_cache(),
+                evaluation_generation=evaluation_generation,
+                early_stop_top_n=early_stop_top_n,
+            )
+            self.engine.last_evaluation_batch = result.batch
+            return result.scores
+
+        # Engines with an explicit suite but no pairwise component intentionally
+        # skip LLM judging. Uniform placeholder ratings preserve legacy
+        # selection aliases while other configured evaluators supply fitness.
+        if hasattr(self.engine, "evaluation_config"):
+            return {index: 1500.0 for index in range(len(population))}
+
         try:
             return self.engine.critic.get_tournament_ranks(
                 population,
@@ -185,7 +209,7 @@ class EvolutionOrchestrator:
     def _attach_tree_metrics(
         self,
         population: List[Any],
-        fitness_map: Dict[int, Dict[str, float]],
+        fitness_map: Dict[int, Dict[str, Any]],
         survival_scores: Dict[int, Dict[str, float]],
         *,
         evaluation_generation: int,
@@ -215,6 +239,9 @@ class EvolutionOrchestrator:
                         idea["diversity_score"] = numeric
                     elif key == "fitness":
                         idea["fitness"] = numeric
+            components = fitness_data.get("components")
+            if isinstance(components, dict):
+                selection_metrics["components"] = dict(components)
             idea["selection_metrics"] = selection_metrics
 
             existing_generation_metrics = idea.get("generation_metrics")

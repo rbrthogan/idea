@@ -61,14 +61,21 @@ def test_get_current_user_returns_none_without_credentials():
     assert asyncio.run(get_current_user(credentials=None)) is None
 
 
-def test_dev_auth_supplies_local_user_without_firebase_credentials(monkeypatch):
+def test_dev_auth_supplies_local_user_with_ephemeral_bearer_token(monkeypatch):
     monkeypatch.setenv("IDEA_DEV_AUTH", "1")
+    monkeypatch.setenv("IDEA_DEV_AUTH_TOKEN", "test-local-token")
     monkeypatch.setenv("IDEA_DEV_AUTH_UID", "codex-local")
     monkeypatch.setenv("IDEA_DEV_AUTH_EMAIL", "codex@example.local")
     monkeypatch.setenv("IDEA_DEV_AUTH_NAME", "Codex Local")
     monkeypatch.setenv("IDEA_DEV_AUTH_ADMIN", "1")
 
-    user = asyncio.run(get_current_user(credentials=None, request=local_request()))
+    credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer",
+        credentials="test-local-token",
+    )
+    user = asyncio.run(
+        get_current_user(credentials=credentials, request=local_request())
+    )
 
     assert user is not None
     assert user.to_dict() == {
@@ -79,6 +86,16 @@ def test_dev_auth_supplies_local_user_without_firebase_credentials(monkeypatch):
     }
 
 
+def test_dev_auth_rejects_missing_bearer_token_and_defaults_admin_off(monkeypatch):
+    monkeypatch.setenv("IDEA_DEV_AUTH", "1")
+    monkeypatch.delenv("IDEA_DEV_AUTH_ADMIN", raising=False)
+
+    assert asyncio.run(
+        get_current_user(credentials=None, request=local_request())
+    ) is None
+    assert auth.get_dev_user_info().is_admin is False
+
+
 def test_dev_auth_is_rejected_for_non_local_requests(monkeypatch):
     monkeypatch.setenv("IDEA_DEV_AUTH", "1")
 
@@ -86,6 +103,24 @@ def test_dev_auth_is_rejected_for_non_local_requests(monkeypatch):
         get_current_user(
             credentials=None,
             request=local_request(host="idea.example.com", client_host="203.0.113.9"),
+        )
+    )
+
+    assert user is None
+
+
+def test_dev_auth_rejects_external_host_behind_local_proxy(monkeypatch):
+    monkeypatch.setenv("IDEA_DEV_AUTH", "1")
+    monkeypatch.setenv("IDEA_DEV_AUTH_TOKEN", "local-token")
+    credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer",
+        credentials="local-token",
+    )
+
+    user = asyncio.run(
+        get_current_user(
+            credentials=credentials,
+            request=local_request(host="idea.example.com", client_host="127.0.0.1"),
         )
     )
 

@@ -182,3 +182,79 @@ class TestTemplateManagerCompatibility:
         assert hasattr(wrapper, 'COMPARISON_PROMPT')
         assert isinstance(wrapper.COMPARISON_PROMPT, str)
         assert len(wrapper.COMPARISON_PROMPT) > 0
+
+    def test_comparison_criteria_are_optional_for_non_llm_evaluators(self):
+        """A prompt template should not force every run to use an LLM judge."""
+        template_path = Path('idea/prompts/templates/drabble.yaml')
+        data = yaml.safe_load(template_path.read_text())
+        data.pop('comparison_criteria', None)
+
+        template = TemplateValidator.validate_dict(data)
+        wrapper = YAMLTemplateWrapper(template)
+
+        assert template.comparison_criteria == []
+        assert wrapper.COMPARISON_CRITERIA == []
+        # The compatibility wrapper still exposes a default prompt for callers
+        # that explicitly select the legacy LLM evaluator.
+        assert isinstance(wrapper.COMPARISON_PROMPT, str)
+        assert wrapper.COMPARISON_PROMPT
+
+
+class TestPrimeVisualizationTemplate:
+    """Contract tests for the artifact-ready prime experiment preset."""
+
+    def test_prime_visualization_template_validates_and_loads(self):
+        is_valid, warnings = validate_template('prime_visualization')
+        assert is_valid
+        assert warnings == []
+
+        prompts = get_prompts('prime_visualization', use_yaml=True)
+        assert prompts.ITEM_TYPE == 'prime visualization experiment proposals'
+        assert prompts.get_info()['version'] == '1.0.0'
+
+        required_prompts = [
+            'CONTEXT_PROMPT',
+            'SPECIFIC_PROMPT',
+            'FORMAT_PROMPT',
+            'CRITIQUE_PROMPT',
+            'REFINE_PROMPT',
+            'BREED_PROMPT',
+            'GENOTYPE_ENCODE_PROMPT',
+        ]
+        for prompt_name in required_prompts:
+            assert getattr(prompts, prompt_name).strip()
+
+    def test_prime_visualization_contract_is_explicit_and_honest(self):
+        template_path = Path('idea/prompts/templates/prime_visualization.yaml')
+        data = yaml.safe_load(template_path.read_text())
+        requirements = data['special_requirements']
+        all_prompts = '\n'.join(data['prompts'].values())
+
+        for contract_term in [
+            'Ulam spiral',
+            'falsifiable hypothesis',
+            'deterministic sieve',
+            'fixed seed of 0',
+            'visualization.png',
+            'metadata.json',
+            'result.json',
+            'media_type="image/png"',
+        ]:
+            assert contract_term in requirements
+
+        assert 'never claim that code was executed' in requirements
+        assert 'Do not claim that the experiment has been run' in all_prompts
+        assert '{context_pool}' in data['prompts']['specific_prompt']
+        assert '{input_text}' in data['prompts']['format']
+
+    def test_prime_visualization_is_catalogued_with_opt_in_llm_criteria(self):
+        templates = list_available_templates()
+        template_info = templates['prime_visualization']
+        assert template_info['type'] == 'yaml'
+        assert template_info['name'] == 'Prime Visualization Experiments'
+        assert template_info['warnings'] == []
+
+        prompts = get_prompts('prime_visualization', use_yaml=True)
+        assert len(prompts.COMPARISON_CRITERIA) >= 5
+        assert any('Ulam spiral' in criterion for criterion in prompts.COMPARISON_CRITERIA)
+        assert any('fabricated' in criterion for criterion in prompts.COMPARISON_CRITERIA)
