@@ -12,11 +12,21 @@ from idea.config import LLM_MODELS
 
 
 class DummyAgent:
-    def __init__(self, model_name, input_tokens, output_tokens):
+    def __init__(
+        self,
+        model_name,
+        input_tokens,
+        output_tokens,
+        thought_tokens=0,
+        cached_input_tokens=0,
+    ):
         self.model_name = model_name
         self.input_token_count = input_tokens
         self.output_token_count = output_tokens
-        self.total_token_count = input_tokens + output_tokens
+        self.thought_token_count = thought_tokens
+        self.cached_input_token_count = cached_input_tokens
+        self.uncached_input_token_count = max(input_tokens - cached_input_tokens, 0)
+        self.total_token_count = input_tokens + output_tokens + thought_tokens
 
 
 def test_get_total_token_count():
@@ -105,6 +115,46 @@ def test_get_total_token_count_includes_auxiliary_components():
     assert result["total"] == 32
     assert result["models"]["genotype_encoder"] == "gemini-2.0-flash"
     assert result["models"]["diversity_embeddings"] == "gemini-embedding-2"
+
+
+def test_get_total_token_count_includes_thinking_cached_and_tiered_costs():
+    engine = EvolutionEngine(pop_size=1, generations=1)
+    engine.ideator = DummyAgent(
+        "gemini-2.5-pro",
+        input_tokens=210_000,
+        output_tokens=1_000,
+        thought_tokens=2_000,
+        cached_input_tokens=50_000,
+    )
+    engine.formatter = DummyAgent("gemini-2.0-flash", 0, 0)
+    engine.critic = DummyAgent("gemini-2.0-flash-lite", 0, 0)
+    engine.breeder = DummyAgent("gemini-2.0-flash", 0, 0)
+    engine.oracle = DummyAgent("gemini-2.0-flash", 0, 0)
+
+    result = engine.get_total_token_count()
+
+    assert result["ideator"]["thoughts"] == 2_000
+    assert result["ideator"]["cached_input"] == 50_000
+    assert result["ideator"]["uncached_input"] == 160_000
+    assert result["total"] == 213_000
+    assert result["total_input"] == 210_000
+    assert result["total_output"] == 1_000
+    assert result["total_thoughts"] == 2_000
+    assert result["total_cached_input"] == 50_000
+
+    expected_cost = (
+        160_000 * 2.50 / 1_000_000
+        + 50_000 * 0.25 / 1_000_000
+        + 1_000 * 15.00 / 1_000_000
+        + 2_000 * 15.00 / 1_000_000
+    )
+    assert result["cost"]["input_cost"] == expected_cost - (
+        1_000 * 15.00 / 1_000_000
+        + 2_000 * 15.00 / 1_000_000
+    )
+    assert result["cost"]["thought_cost"] == 2_000 * 15.00 / 1_000_000
+    assert result["cost"]["total_cost"] == expected_cost
+    assert result["estimates"]["gemini-2.5-pro"]["cost"] == expected_cost
 
 
 def test_island_sizes_split_total_population_evenly():

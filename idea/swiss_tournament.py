@@ -47,6 +47,7 @@ def select_swiss_bye(ordered_indices: List[int], bye_counts: Dict[int, int]) -> 
 def pair_players_swiss(
     ordered_indices: List[int],
     match_history: Set[Tuple[int, int]],
+    ranks: Optional[Dict[int, float]] = None,
     backtrack_limit: int = 20000,
 ) -> Optional[List[Tuple[int, int]]]:
     """
@@ -71,14 +72,19 @@ def pair_players_swiss(
             second = remaining[i]
             pair_key = (min(first, second), max(first, second))
             repeat = pair_key in match_history
-            candidates.append((repeat, second, i))
+            rating_gap = (
+                abs(float(ranks.get(first, 0.0)) - float(ranks.get(second, 0.0)))
+                if ranks is not None
+                else abs(i)
+            )
+            candidates.append((repeat, rating_gap, second, i))
 
-        candidates.sort(key=lambda x: (x[0], x[1]))
+        candidates.sort(key=lambda x: (x[0], x[1], x[2]))
 
         best_pairs = None
         best_repeats = None
 
-        for repeat, second, idx in candidates:
+        for repeat, _rating_gap, second, idx in candidates:
             next_remaining = remaining[1:idx] + remaining[idx + 1 :]
             result = backtrack(next_remaining)
             if result is None:
@@ -121,7 +127,7 @@ def generate_swiss_round_pairs(
         if bye_idx is not None:
             ordered_indices.remove(bye_idx)
 
-    pairs = pair_players_swiss(ordered_indices, match_history)
+    pairs = pair_players_swiss(ordered_indices, match_history, ranks)
     if pairs is None:
         # Fallback greedy pairing if backtracking exceeded limit
         pairs = []
@@ -129,11 +135,18 @@ def generate_swiss_round_pairs(
         while len(remaining) >= 2:
             a = remaining.pop(0)
             partner_idx = None
+            best_score = None
             for i, b in enumerate(remaining):
                 pair_key = (min(a, b), max(a, b))
-                if pair_key not in match_history:
+                repeat = pair_key in match_history
+                score = (
+                    repeat,
+                    abs(float(ranks.get(a, 0.0)) - float(ranks.get(b, 0.0))),
+                    b,
+                )
+                if best_score is None or score < best_score:
+                    best_score = score
                     partner_idx = i
-                    break
             if partner_idx is None:
                 partner_idx = 0
             b = remaining.pop(partner_idx)

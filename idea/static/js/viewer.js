@@ -45,10 +45,13 @@ let lastEliteUpdateKey = '';
 let lastDiagnosticsSummaryKey = '';
 let latestDiagnosticsTokenCounts = null;
 let evolutionViewMode = 'tree';
+let rankedSortMetric = 'fitness';
+let rankedScope = 'history';
 let lastEvolutionTreeSignature = '';
 let treeResizeListenerAttached = false;
 let currentEvolutionTree = null;
 let selectedTreeNodeId = null;
+const TREE_CONNECTOR_BOUNDARY_GAP = 2;
 
 /**
  * Load available templates and populate the idea type dropdown
@@ -376,6 +379,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         const valueEl = document.getElementById('migrationNoveltyProtectionQuantileValue');
         if (el && valueEl) valueEl.textContent = parseFloat(el.value || '0.8').toFixed(2);
     });
+    addListener('ageDecayFloor', 'input', () => {
+        const el = document.getElementById('ageDecayFloor');
+        const valueEl = document.getElementById('ageDecayFloorValue');
+        if (el && valueEl) valueEl.textContent = parseFloat(el.value || '0.35').toFixed(2);
+    });
     document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
         button.addEventListener('click', () => setEvolutionViewMode(button.dataset.viewMode));
     });
@@ -416,6 +424,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const replacementRate = parseFloat(document.getElementById('replacementRate').value);
         const fitnessAlpha = parseFloat(document.getElementById('fitnessAlpha').value);
         const ageDecayRate = parseFloat(document.getElementById('ageDecayRate').value);
+        const ageDecayFloor = parseFloat(document.getElementById('ageDecayFloor')?.value ?? '0.35');
         const refineAllIdeas = document.getElementById('refineAllIdeas')?.checked ?? false;
         const survivorRefinementRate = parseFloat(
             document.getElementById('survivorRefinementRate')?.value ?? '0.1'
@@ -450,6 +459,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             replacementRate,
             fitnessAlpha,
             ageDecayRate,
+            ageDecayFloor,
             refineAllIdeas,
             survivorRefinementRate,
             islandCount,
@@ -782,23 +792,17 @@ async function restoreCurrentEvolution() {
         console.log("Attempting to restore current evolution from localStorage...");
         let serverProgressData = null;
 
-        // First check if there's actually an evolution running on the server
+        // First check whether there is an active server-side run. Completed
+        // local state can still be restored below so refresh does not blank the view.
         try {
             const progressResponse = await fetch('/api/progress');
             if (progressResponse.ok) {
                 const progressData = await progressResponse.json();
                 console.log("Evolution status from server:", progressData);
                 serverProgressData = progressData;
-
-                // Only restore if evolution is actually running
-                if (!progressData.is_running) {
-                    console.log("No evolution is currently running, skipping localStorage restoration");
-                    return false;
-                }
             }
         } catch (e) {
-            console.log("Could not check evolution status, skipping restoration:", e);
-            return false;
+            console.log("Could not check evolution status, attempting local restoration:", e);
         }
 
         // Check localStorage for current evolution data
@@ -809,9 +813,9 @@ async function restoreCurrentEvolution() {
                 console.log("Found evolution data in localStorage:", evolutionState);
 
                 // Handle both old format (just history array) and new format (object with history and diversity_history)
-                let generationsData, diversityData, tokenCounts, tournamentData;
+                let generationsData, diversityData, islandDiversityData, tokenCounts, tournamentData, migrationData;
                 if (Array.isArray(evolutionState)) {
-                    if (serverProgressData?.evolution_id) {
+                    if (serverProgressData?.is_running && serverProgressData?.evolution_id) {
                         console.log("Legacy stored evolution has no id; using live active run instead");
                         localStorage.removeItem('currentEvolutionData');
                         startPollingActiveEvolution(serverProgressData);
@@ -820,12 +824,14 @@ async function restoreCurrentEvolution() {
                     // Old format - just the history array
                     generationsData = evolutionState;
                     diversityData = [];
+                    islandDiversityData = [];
                     tokenCounts = null;
                     tournamentData = [];
+                    migrationData = [];
                 } else if (evolutionState && evolutionState.history) {
                     const storedEvolutionId = evolutionState.evolution_id || evolutionState.evolutionId || null;
                     const serverEvolutionId = serverProgressData?.evolution_id || null;
-                    if (serverEvolutionId && storedEvolutionId !== serverEvolutionId) {
+                    if (serverProgressData?.is_running && serverEvolutionId && storedEvolutionId !== serverEvolutionId) {
                         console.log(
                             "Stored evolution does not match active run; skipping localStorage restore",
                             { storedEvolutionId, serverEvolutionId }
@@ -838,8 +844,10 @@ async function restoreCurrentEvolution() {
                     // New format - object with history and diversity_history
                     generationsData = evolutionState.history;
                     diversityData = evolutionState.diversity_history || [];
+                    islandDiversityData = evolutionState.island_diversity_history || [];
                     tokenCounts = evolutionState.token_counts || null;
                     tournamentData = evolutionState.tournament_history || [];
+                    migrationData = evolutionState.migration_history || [];
                     // Restore context data if available
                     if (evolutionState.contexts) {
                         contexts = evolutionState.contexts;
@@ -863,12 +871,14 @@ async function restoreCurrentEvolution() {
                     lastRenderedHistoryVersion = restoredVersion;
                     lastStoredHistoryVersion = restoredVersion;
 
-                    // Restore diversity plot if we have diversity data
-                    if (diversityData && diversityData.length > 0) {
+                    // Restore metric plot if we have diversity data or per-generation population metrics.
+                    if ((diversityData && diversityData.length > 0) || (generationsData && generationsData.length > 0)) {
                         console.log("Restoring diversity plot with data:", diversityData);
-                        updateDiversityChart(diversityData);
-                        // Ensure proper sizing after restoration
-                        setTimeout(ensureDiversityChartSizing, 200);
+                        const chartUpdated = updateDiversityChart(diversityData || [], generationsData, islandDiversityData || []);
+                        if (chartUpdated) {
+                            // Ensure proper sizing after restoration
+                            setTimeout(ensureDiversityChartSizing, 200);
+                        }
                     }
 
                     // Set up currentEvolutionData for download functionality
@@ -882,8 +892,13 @@ async function restoreCurrentEvolution() {
                         specific_prompts: specificPrompts,
                         breeding_prompts: breedingPrompts,
                         tournament_history: tournamentData,
+                        island_diversity_history: islandDiversityData,
+                        migration_history: migrationData,
                         token_counts: tokenCounts
                     };
+                    if (typeof repairPersistedEvolutionFromClientCache === 'function') {
+                        repairPersistedEvolutionFromClientCache(currentEvolutionData);
+                    }
 
                     // Render tournament details if available
                     tournamentHistory = tournamentData || [];
@@ -903,7 +918,9 @@ async function restoreCurrentEvolution() {
                     }
 
                     console.log("Successfully restored current evolution from localStorage");
-                    startPollingActiveEvolution(serverProgressData);
+                    if (serverProgressData?.is_running) {
+                        startPollingActiveEvolution(serverProgressData);
+                    }
                     return true;
                 }
             } catch (e) {
@@ -985,12 +1002,83 @@ function schedulePersistEvolutionState(stateData) {
     }, LOCAL_STORAGE_PERSIST_DELAY_MS);
 }
 
+function normalizeMarkdownStructure(text) {
+    if (!text) return '';
+
+    const commonSectionHeadings = [
+        'Base Game & Twists',
+        'Rules & Turn Sequence',
+        'Level/Progression',
+        'Scoring/Win/Lose',
+        'Visuals & Audio',
+        'Technical Notes',
+        'Minimum Prototype',
+        'Emergent Complexity',
+        'Win Condition',
+        'Stretch Ideas',
+        'Core Loop',
+        'Components',
+        'Mechanics',
+        'Controls',
+        'Overview',
+        'Setup',
+        'Summary',
+        'Objective',
+        'Implementation',
+        'Constraints',
+        'Features',
+        'Description'
+    ].sort((a, b) => b.length - a.length);
+    const headingPattern = commonSectionHeadings
+        .map(heading => heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|');
+    const inlineKnownHeadingPattern = new RegExp(`([^#\\n])\\s*(#{1,6})\\s*(${headingPattern})(?=\\s|[*:_\\-0-9A-Z("]|$)`, 'g');
+
+    const normalizeSegment = (segment) => {
+        let normalized = segment;
+
+        // Repair heading markers that were emitted inline after a sentence.
+        normalized = normalized.replace(inlineKnownHeadingPattern, '$1\n$2 $3');
+        normalized = normalized.replace(/^(#{1,6})(?!#)(?=\S)/gm, '$1 ');
+
+        // Repair common inline list markers emitted without line breaks.
+        normalized = normalized.replace(/([:.!?])\s*(\d+\.\s+)/g, '$1\n$2');
+        normalized = normalized.replace(/([.!?])\s*([*-]\s+)/g, '$1\n$2');
+
+        // Repair common section headings where the heading body follows on the same line.
+        normalized = normalized.replace(/^(#{1,6})\s+(.+)$/gm, (match, hashes, content) => {
+            const trimmedContent = content.trim();
+            for (const heading of commonSectionHeadings) {
+                if (trimmedContent === heading) {
+                    return `${hashes} ${heading}`;
+                }
+                if (trimmedContent.startsWith(heading)) {
+                    const body = trimmedContent.slice(heading.length).trim();
+                    if (!body || !/^(?:\s|[*:_\-0-9A-Z("])/.test(body)) {
+                        continue;
+                    }
+                    return `${hashes} ${heading}\n${body}`;
+                }
+            }
+            return `${hashes} ${trimmedContent}`;
+        });
+
+        return normalized;
+    };
+
+    return String(text)
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split(/(```[\s\S]*?```)/g)
+        .map(part => part.startsWith('```') ? part : normalizeSegment(part))
+        .join('');
+}
+
 // Improve the markdown rendering function with better newline handling
 function renderMarkdown(text) {
     if (!text) return '';
 
-    // Normalize line endings
-    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    text = normalizeMarkdownStructure(text);
 
     // Escape HTML to prevent XSS
     text = text.replace(/&/g, '&amp;')
@@ -998,8 +1086,11 @@ function renderMarkdown(text) {
         .replace(/>/g, '&gt;');
 
     // Process code blocks first
-    text = text.replace(/```([\s\S]*?)```/g, function (match, code) {
-        return '<pre><code>' + code.trim() + '</code></pre>';
+    const codeBlocks = [];
+    text = text.replace(/```(?:[^\n`]*\n)?([\s\S]*?)```/g, function (match, code) {
+        const index = codeBlocks.length;
+        codeBlocks.push('<pre><code>' + code.trim() + '</code></pre>');
+        return `<pre data-md-code-block="${index}"></pre>`;
     });
 
     // Process inline code
@@ -1046,8 +1137,9 @@ function renderMarkdown(text) {
             }
         }
         // Not a list item
-        else if (inList && line.trim() === '') {
-            lines[i] = listType === 'ul' ? '</ul>' : '</ol>';
+        else if (inList) {
+            const closingTag = listType === 'ul' ? '</ul>' : '</ol>';
+            lines[i] = line.trim() === '' ? closingTag : `${closingTag}\n${line}`;
             inList = false;
             listType = null;
         }
@@ -1108,7 +1200,12 @@ function renderMarkdown(text) {
         lines[lines.length - 1] += '</p>';
     }
 
-    return lines.join('\n');
+    let rendered = lines.join('\n');
+    codeBlocks.forEach((codeBlock, index) => {
+        rendered = rendered.split(`<pre data-md-code-block="${index}"></pre>`).join(codeBlock);
+    });
+
+    return rendered;
 }
 
 // Update the card preview function to better handle text
@@ -2005,6 +2102,76 @@ function clearEvolutionTreeSelection() {
     applyEvolutionTreeSelection();
 }
 
+function assignTreeConnectorTracks(routes) {
+    const routesByGeneration = new Map();
+    (routes || []).forEach((route) => {
+        const generationKey = String(route.generation);
+        if (!routesByGeneration.has(generationKey)) {
+            routesByGeneration.set(generationKey, []);
+        }
+        routesByGeneration.get(generationKey).push(route);
+    });
+
+    routesByGeneration.forEach((generationRoutes) => {
+        const tracks = [];
+        generationRoutes
+            .map(route => ({
+                route,
+                left: Math.min(route.from.x, route.to.x),
+                right: Math.max(route.from.x, route.to.x)
+            }))
+            .sort((a, b) => (
+                a.left - b.left
+                || b.right - a.right
+                || a.route.from.x - b.route.from.x
+                || a.route.to.x - b.route.to.x
+            ))
+            .forEach((entry) => {
+                let trackIndex = tracks.findIndex(trackRight => entry.left > trackRight + 8);
+                if (trackIndex === -1) {
+                    trackIndex = tracks.length;
+                    tracks.push(entry.right);
+                } else {
+                    tracks[trackIndex] = entry.right;
+                }
+                entry.route.track = {
+                    index: trackIndex,
+                    count: 0
+                };
+            });
+
+        const trackCount = Math.max(1, tracks.length);
+        generationRoutes.forEach((route) => {
+            route.track.count = trackCount;
+        });
+    });
+
+    return routes;
+}
+
+function buildTreeSCurvePath(from, to, track = {}) {
+    const gap = to.y - from.y;
+    const trackCount = Math.max(1, Number(track.count) || 1);
+    const trackIndex = Math.max(0, Math.min(trackCount - 1, Number(track.index) || 0));
+    const channelRatio = (trackIndex + 1) / (trackCount + 1);
+    const channelOffset = gap > 28
+        ? Math.max(14, Math.min(gap - 14, gap * channelRatio))
+        : gap * channelRatio;
+    const channelY = from.y + channelOffset;
+    const midX = (from.x + to.x) / 2;
+    const direction = to.x >= from.x ? 1 : -1;
+    const horizontalDistance = Math.abs(to.x - from.x);
+    const bendX = Math.max(14, Math.min(72, horizontalDistance * 0.32));
+    const firstControlY = from.y + ((channelY - from.y) * 0.62);
+    const secondControlY = to.y - ((to.y - channelY) * 0.62);
+
+    if (horizontalDistance < 4) {
+        return `M ${from.x} ${from.y} C ${from.x} ${firstControlY}, ${to.x} ${secondControlY}, ${to.x} ${to.y}`;
+    }
+
+    return `M ${from.x} ${from.y} C ${from.x} ${firstControlY}, ${midX - (direction * bendX)} ${channelY}, ${midX} ${channelY} S ${to.x} ${secondControlY}, ${to.x} ${to.y}`;
+}
+
 function renderEvolutionTree(gens) {
     const container = document.getElementById('evolution-tree-container');
     if (!container) return;
@@ -2039,6 +2206,9 @@ function renderEvolutionTree(gens) {
     shell.dataset.maxGenerationSlots = String(getEvolutionTreeMaxGenerationSlots(tree));
     shell.dataset.nodeCount = String(tree.nodes.length);
     shell.dataset.density = getEvolutionTreeDensity(tree);
+    const latestGeneration = tree.generations.length > 0
+        ? tree.generations[tree.generations.length - 1].generation
+        : 0;
 
     const scroll = document.createElement('div');
     scroll.className = 'evolution-tree-scroll';
@@ -2050,6 +2220,7 @@ function renderEvolutionTree(gens) {
     scroll.appendChild(connectorSvg);
 
     tree.generations.forEach((generationRow) => {
+        const isCurrentPopulation = generationRow.generation === latestGeneration;
         const row = document.createElement('div');
         row.className = 'evolution-tree-row';
         row.dataset.generation = String(generationRow.generation);
@@ -2071,10 +2242,12 @@ function renderEvolutionTree(gens) {
 
             const slot = slotsByLane.get(laneIndex);
             const node = slot ? tree.nodesById.get(slot.nodeId) : null;
-            if (node && slot.kind === 'node') {
-                lane.appendChild(createEvolutionTreeNode(node, tree.fitnessRange));
-            } else if (node && slot.kind === 'continuation') {
-                lane.appendChild(createEvolutionTreeContinuation(node, generationRow.generation));
+            if (node) {
+                lane.appendChild(createEvolutionTreeNode(node, tree.fitnessRange, {
+                    generationIndex: generationRow.generation,
+                    isCurrentPopulation,
+                    isSurvivorStep: slot.kind === 'continuation'
+                }));
             }
             lanes.appendChild(lane);
         }
@@ -2104,7 +2277,7 @@ function renderEvolutionTree(gens) {
     requestAnimationFrame(drawEvolutionTreeConnectors);
 }
 
-function createEvolutionTreeNode(node, fitnessRange) {
+function createEvolutionTreeNode(node, fitnessRange, options = {}) {
     const idea = node.idea || {};
     const islandId = Number.isInteger(node.islandId) ? node.islandId : getIdeaIslandId(idea);
     const fitnessValue = getTreeMetricValue(idea, 'fitness');
@@ -2113,9 +2286,22 @@ function createEvolutionTreeNode(node, fitnessRange) {
     button.type = 'button';
     button.className = 'evolution-tree-node';
     button.dataset.nodeId = node.id;
+    if (Number.isInteger(options.generationIndex)) {
+        button.dataset.generation = String(options.generationIndex);
+    }
     button.dataset.hasFitness = fitnessStrength === null ? 'false' : 'true';
+    button.classList.add(options.isCurrentPopulation ? 'tree-current-population' : 'tree-historical');
+    if (options.isSurvivorStep) {
+        button.classList.add('tree-survivor-step');
+    }
     if (fitnessStrength !== null) {
         button.style.setProperty('--tree-fitness-strength', `${fitnessStrength.toFixed(1)}%`);
+        const historicalFitnessStrength = Math.max(9, Math.min(28, 5 + (fitnessStrength * 0.52)));
+        const historicalBorderStrength = Math.max(42, Math.min(82, 34 + fitnessStrength));
+        const historicalTextStrength = Math.max(50, Math.min(78, 44 + (fitnessStrength * 0.72)));
+        button.style.setProperty('--tree-historical-fitness-strength', `${historicalFitnessStrength.toFixed(1)}%`);
+        button.style.setProperty('--tree-historical-border-strength', `${historicalBorderStrength.toFixed(1)}%`);
+        button.style.setProperty('--tree-historical-text-strength', `${historicalTextStrength.toFixed(1)}%`);
     }
     if (Number.isInteger(islandId)) {
         button.dataset.islandId = String(islandId);
@@ -2161,7 +2347,7 @@ function createEvolutionTreeContinuation(node, generationIndex) {
     }
     button.setAttribute(
         'aria-label',
-        `${node.title || 'Idea'} survived unchanged to generation ${generationIndex}`
+        `${node.title || 'Idea'} remained in the population at generation ${generationIndex}`
     );
     button.innerHTML = '<span class="tree-continuation-line"></span>';
     button.addEventListener('click', (event) => {
@@ -2209,6 +2395,38 @@ function drawEvolutionTreeConnectors() {
         svg.appendChild(path);
     };
 
+    tree.continuations.forEach((continuation) => {
+        const escapedNodeId = cssEscape(continuation.nodeId);
+        const from = getAnchor(
+            `[data-node-id="${escapedNodeId}"][data-generation="${continuation.fromGeneration}"]`,
+            'bottom'
+        );
+        const to = getAnchor(
+            `[data-node-id="${escapedNodeId}"][data-generation="${continuation.toGeneration}"]`,
+            'top'
+        );
+        if (!from || !to) return;
+        const fromY = from.y + TREE_CONNECTOR_BOUNDARY_GAP;
+        const toY = to.y - TREE_CONNECTOR_BOUNDARY_GAP;
+        if (toY <= fromY) return;
+        const midY = fromY + Math.max(18, (toY - fromY) * 0.5);
+        let relationClass = '';
+        if (relations) {
+            if (continuation.nodeId === selectedNode) {
+                relationClass = ' tree-connector-lineage-descendant';
+            } else if (relations.ancestors.has(continuation.nodeId) || relations.descendants.has(continuation.nodeId)) {
+                relationClass = ' tree-connector-lineage-ancestor';
+            } else {
+                relationClass = ' tree-connector-muted';
+            }
+        }
+        addPath(
+            `M ${from.x} ${fromY} C ${from.x} ${midY}, ${to.x} ${midY}, ${to.x} ${toY}`,
+            `tree-connector tree-connector-continuation${relationClass}`
+        );
+    });
+
+    const edgeRoutes = [];
     tree.edges.forEach((edge) => {
         const fromNode = tree.nodesById.get(edge.from);
         const toNode = tree.nodesById.get(edge.to);
@@ -2220,9 +2438,11 @@ function drawEvolutionTreeConnectors() {
             : `[data-node-id="${escapedFrom}"].evolution-tree-node`;
         const from = getAnchor(parentSelector, 'bottom')
             || getAnchor(`[data-node-id="${escapedFrom}"].evolution-tree-node`, 'bottom');
-        const to = getAnchor(`[data-node-id="${escapedTo}"].evolution-tree-node`, 'top');
+        const to = getAnchor(
+            `[data-node-id="${escapedTo}"][data-generation="${edge.generation}"]`,
+            'top'
+        ) || getAnchor(`[data-node-id="${escapedTo}"].evolution-tree-node`, 'top');
         if (!from || !to) return;
-        const midY = from.y + Math.max(24, (to.y - from.y) * 0.45);
         let relationClass = '';
         if (relations) {
             if (relations.ancestorEdges.has(edge.id)) {
@@ -2234,23 +2454,342 @@ function drawEvolutionTreeConnectors() {
             }
         }
         const className = `tree-connector tree-connector-${edge.type || 'breeding'}${relationClass}`;
-        addPath(`M ${from.x} ${from.y} C ${from.x} ${midY}, ${to.x} ${midY}, ${to.x} ${to.y}`, className);
+        edgeRoutes.push({
+            edge,
+            generation: edge.generation,
+            from,
+            to,
+            className
+        });
+    });
+
+    assignTreeConnectorTracks(edgeRoutes).forEach((route) => {
+        addPath(buildTreeSCurvePath(route.from, route.to, route.track), route.className);
+    });
+}
+
+function compareRankMetricDesc(left, right) {
+    const leftFinite = Number.isFinite(left);
+    const rightFinite = Number.isFinite(right);
+    if (leftFinite && rightFinite) return right - left;
+    if (leftFinite) return -1;
+    if (rightFinite) return 1;
+    return 0;
+}
+
+function normalizeRankMetric(metric) {
+    return ['fitness', 'elo', 'diversity'].includes(metric) ? metric : 'fitness';
+}
+
+function normalizeRankScope(scope) {
+    return scope === 'current' ? 'current' : 'history';
+}
+
+function normalizeRankOptions(options = {}) {
+    if (Number.isInteger(options)) {
+        return {
+            sortMetric: 'fitness',
+            scope: 'current',
+            generationIndex: options
+        };
+    }
+    const config = options && typeof options === 'object' ? options : {};
+    const defaultSortMetric = typeof rankedSortMetric !== 'undefined' ? rankedSortMetric : 'fitness';
+    const defaultScope = typeof rankedScope !== 'undefined' ? rankedScope : 'history';
+    return {
+        sortMetric: normalizeRankMetric(config.sortMetric ?? defaultSortMetric),
+        scope: normalizeRankScope(config.scope ?? defaultScope),
+        generationIndex: Number.isInteger(config.generationIndex) ? config.generationIndex : null
+    };
+}
+
+function getRankGenerationSpan(firstGeneration, lastGeneration) {
+    if (!Number.isInteger(firstGeneration) && !Number.isInteger(lastGeneration)) return 'Gen -';
+    if (firstGeneration === lastGeneration || !Number.isInteger(lastGeneration)) {
+        return `Gen ${firstGeneration}`;
+    }
+    return `Gen ${firstGeneration}-${lastGeneration}`;
+}
+
+function getRankMetricRanks(rows, metric) {
+    const values = (rows || [])
+        .map(row => row?.[metric])
+        .filter(value => Number.isFinite(value));
+    return {
+        values,
+        populationSize: values.length
+    };
+}
+
+function getRankDesc(value, values) {
+    if (!Number.isFinite(value) || !values.length) return null;
+    const sortedValues = [...values].sort((a, b) => b - a);
+    const rankIndex = sortedValues.findIndex(candidate => candidate <= value);
+    return rankIndex >= 0 ? rankIndex + 1 : sortedValues.length;
+}
+
+function getRankRowFlags(row) {
+    const idea = row?.idea || {};
+    const flags = [];
+    if (idea?.oracle_generated) flags.push('Oracle');
+    if (idea?.migration_event) flags.push('Migrated');
+    if (idea?.survivor_refined) flags.push('Refined');
+    if (idea?.elite_selected || idea?.elite_selected_source) flags.push('Creative');
+    if (row?.occurrenceCount > 1) flags.push('Survivor');
+    return flags;
+}
+
+function buildEvolutionRankRows(gens, options = {}) {
+    const history = Array.isArray(gens) ? gens : [];
+    if (history.length === 0) return [];
+
+    const config = normalizeRankOptions(options);
+    const selectedGeneration = config.generationIndex !== null
+        ? Math.max(0, Math.min(history.length - 1, config.generationIndex))
+        : history.length - 1;
+    const latestGeneration = Math.max(0, history.length - 1);
+    const rowsById = new Map();
+
+    history.forEach((generation, generationIndex) => {
+        if (!Array.isArray(generation)) return;
+        generation.forEach((idea, ideaIndex) => {
+            const id = getIdeaStableId(idea, generationIndex, ideaIndex);
+            const ideaData = getIdeaData(idea || {});
+            const existing = rowsById.get(id);
+            const next = existing || {
+                rank: 0,
+                id,
+                title: ideaData.title || 'Untitled',
+                content: ideaData.content || '',
+                idea,
+                firstGeneration: generationIndex,
+                lastGeneration: generationIndex,
+                generationIndex,
+                firstIndex: ideaIndex,
+                ideaIndex,
+                generations: [],
+                occurrenceCount: 0,
+                islandId: getIdeaIslandId(idea),
+                fitness: null,
+                elo: null,
+                diversity: null,
+                metricRanks: {}
+            };
+            next.title = ideaData.title || next.title || 'Untitled';
+            next.content = ideaData.content || next.content || '';
+            next.idea = idea;
+            next.lastGeneration = generationIndex;
+            next.generationIndex = generationIndex;
+            next.ideaIndex = ideaIndex;
+            next.occurrenceCount += 1;
+            next.generations.push(generationIndex);
+            next.islandId = getIdeaIslandId(idea) ?? next.islandId;
+            next.fitness = getTreeMetricValue(idea, 'fitness');
+            next.elo = getTreeMetricValue(idea, 'elo');
+            next.diversity = getTreeMetricValue(idea, 'diversity');
+            rowsById.set(id, next);
+        });
+    });
+
+    const allRows = Array.from(rowsById.values()).map((row) => ({
+        ...row,
+        generationSpan: getRankGenerationSpan(row.firstGeneration, row.lastGeneration),
+        isCurrent: row.generations.includes(latestGeneration),
+        flags: getRankRowFlags(row)
+    }));
+
+    ['fitness', 'elo', 'diversity'].forEach((metric) => {
+        const stats = getRankMetricRanks(allRows, metric);
+        allRows.forEach((row) => {
+            row.metricRanks[metric] = {
+                rank: getRankDesc(row[metric], stats.values),
+                populationSize: stats.populationSize
+            };
+        });
+    });
+
+    const fallbackMetrics = [config.sortMetric, 'fitness', 'elo', 'diversity']
+        .filter((metric, index, list) => list.indexOf(metric) === index);
+    const scopedRows = config.scope === 'current'
+        ? allRows.filter(row => row.generations.includes(selectedGeneration))
+        : allRows;
+
+    return scopedRows.sort((left, right) => {
+        for (const metric of fallbackMetrics) {
+            const comparison = compareRankMetricDesc(left[metric], right[metric]);
+            if (comparison !== 0) return comparison;
+        }
+        return left.title.localeCompare(right.title) || left.firstGeneration - right.firstGeneration || left.ideaIndex - right.ideaIndex;
+    }).map((row, index) => {
+        const rankContext = row.metricRanks?.[config.sortMetric] || { rank: null, populationSize: 0 };
+        return {
+            ...row,
+            rank: index + 1,
+            sortMetric: config.sortMetric,
+            sortValue: row[config.sortMetric],
+            metricRank: rankContext.rank,
+            metricPopulationSize: rankContext.populationSize,
+            scope: config.scope,
+            selectedGeneration
+        };
+    });
+}
+
+function formatRankMetric(value, digits = 2) {
+    if (!Number.isFinite(value)) return '-';
+    return value.toFixed(digits);
+}
+
+function formatRankMetricLabel(metric) {
+    if (metric === 'elo') return 'ELO';
+    return metric.charAt(0).toUpperCase() + metric.slice(1);
+}
+
+function formatRankMetricValue(metric, value) {
+    return formatRankMetric(value, metric === 'elo' ? 0 : 3);
+}
+
+function renderRankScopeLabel(scope, selectedGeneration) {
+    return scope === 'current'
+        ? `Current generation ${selectedGeneration}`
+        : 'All historical ideas';
+}
+
+function renderRankButtonClasses(currentValue, buttonValue) {
+    return currentValue === buttonValue ? 'active' : '';
+}
+
+function renderRankMetricPill(row, metric) {
+    const isActive = row.sortMetric === metric;
+    const rankContext = row.metricRanks?.[metric] || {};
+    const globalRank = rankContext.rank && rankContext.populationSize
+        ? `#${rankContext.rank}/${rankContext.populationSize}`
+        : '-';
+    return `
+        <span class="evolution-rank-metric${isActive ? ' active' : ''}">
+            <span>${escapeHtml(formatRankMetricLabel(metric))}</span>
+            <strong>${escapeHtml(formatRankMetricValue(metric, row[metric]))}</strong>
+            <small>${escapeHtml(globalRank)}</small>
+        </span>
+    `;
+}
+
+function renderRankIslandBadge(row) {
+    if (!Number.isInteger(row.islandId)) {
+        return '<span class="evolution-rank-island evolution-rank-island-empty">No island</span>';
+    }
+    return `
+        <span class="evolution-rank-island island-badge">
+            <span class="evolution-rank-island-dot"></span>
+            <span>Island ${row.islandId + 1}</span>
+        </span>
+    `;
+}
+
+function renderEvolutionRankedList(gens) {
+    const container = document.getElementById('evolution-ranked-container');
+    if (!container) return;
+
+    const rows = buildEvolutionRankRows(gens, {
+        sortMetric: rankedSortMetric,
+        scope: rankedScope
+    });
+    const selectedGeneration = rows.length > 0 ? rows[0].selectedGeneration : Math.max(0, (gens || []).length - 1);
+    if (rows.length === 0) {
+        container.innerHTML = '<div class="evolution-ranked-empty">No population metrics available yet.</div>';
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="evolution-ranked-header">
+            <div>
+                <div class="evolution-ranked-kicker">${escapeHtml(renderRankScopeLabel(rankedScope, selectedGeneration))}</div>
+                <h3>Ranked Ideas</h3>
+            </div>
+            <div class="evolution-ranked-controls">
+                <div class="evolution-ranked-segment" role="group" aria-label="Ranked idea scope">
+                    <button type="button" class="${renderRankButtonClasses(rankedScope, 'history')}" data-rank-scope="history">All history</button>
+                    <button type="button" class="${renderRankButtonClasses(rankedScope, 'current')}" data-rank-scope="current">Current gen</button>
+                </div>
+                <div class="evolution-ranked-segment" role="group" aria-label="Ranked idea sort metric">
+                    <button type="button" class="${renderRankButtonClasses(rankedSortMetric, 'fitness')}" data-rank-sort="fitness">Fitness</button>
+                    <button type="button" class="${renderRankButtonClasses(rankedSortMetric, 'elo')}" data-rank-sort="elo">ELO</button>
+                    <button type="button" class="${renderRankButtonClasses(rankedSortMetric, 'diversity')}" data-rank-sort="diversity">Diversity</button>
+                </div>
+                <div class="evolution-ranked-count">${rows.length} ideas</div>
+            </div>
+        </div>
+        <div class="evolution-ranked-list" role="list" aria-label="Ranked evolution ideas">
+            ${rows.map(row => `
+                <button type="button" class="evolution-rank-row ${Number.isInteger(row.islandId) ? `island-${row.islandId % 5}` : ''}" role="listitem" data-rank-id="${escapeHtml(row.id)}" data-rank-index="${row.rank - 1}">
+                    <span class="evolution-rank-number">
+                        <strong>#${row.rank}</strong>
+                        <small>${escapeHtml(formatRankMetricLabel(row.sortMetric))}</small>
+                    </span>
+                    <span class="evolution-rank-main">
+                        <span class="evolution-rank-title">${escapeHtml(row.title)}</span>
+                        <span class="evolution-rank-preview">${escapeHtml((row.content || '').replace(/\s+/g, ' ').trim().slice(0, 180))}</span>
+                        <span class="evolution-rank-meta">
+                            ${renderRankIslandBadge(row)}
+                            <span class="evolution-rank-chip"><i class="fas fa-code-branch"></i>${escapeHtml(row.generationSpan)}</span>
+                            <span class="evolution-rank-chip ${row.isCurrent ? 'rank-current' : 'rank-historical'}">${row.isCurrent ? 'Current' : 'Historical'}</span>
+                            ${row.flags.map(flag => `<span class="evolution-rank-chip">${escapeHtml(flag)}</span>`).join('')}
+                        </span>
+                    </span>
+                    <span class="evolution-rank-score">
+                        <span>Global ${escapeHtml(formatRankMetricLabel(row.sortMetric))}</span>
+                        <strong>${row.metricRank && row.metricPopulationSize ? `#${row.metricRank}` : '-'}</strong>
+                        <small>${row.metricPopulationSize ? `of ${row.metricPopulationSize}` : 'No metric'}</small>
+                    </span>
+                    <span class="evolution-rank-metrics">
+                        ${renderRankMetricPill(row, 'fitness')}
+                        ${renderRankMetricPill(row, 'elo')}
+                        ${renderRankMetricPill(row, 'diversity')}
+                    </span>
+                </button>
+            `).join('')}
+        </div>
+    `;
+
+    container.querySelectorAll('[data-rank-sort]').forEach((button) => {
+        button.addEventListener('click', () => {
+            rankedSortMetric = normalizeRankMetric(button.dataset.rankSort);
+            renderEvolutionRankedList(gens);
+        });
+    });
+    container.querySelectorAll('[data-rank-scope]').forEach((button) => {
+        button.addEventListener('click', () => {
+            rankedScope = normalizeRankScope(button.dataset.rankScope);
+            renderEvolutionRankedList(gens);
+        });
+    });
+    container.querySelectorAll('.evolution-rank-row').forEach((button) => {
+        const rowIndex = Number(button.dataset.rankIndex);
+        const row = rows[rowIndex];
+        if (!row) return;
+        button.addEventListener('click', () => {
+            showIdeaModal(getIdeaData(row.idea || {}));
+        });
     });
 }
 
 function setEvolutionViewMode(mode) {
-    evolutionViewMode = mode === 'tree' ? 'tree' : 'cards';
+    evolutionViewMode = mode === 'tree' || mode === 'ranked' ? mode : 'cards';
     const cardsContainer = document.getElementById('generations-container');
     const treeContainer = document.getElementById('evolution-tree-container');
+    const rankedContainer = document.getElementById('evolution-ranked-container');
     const toolbar = document.getElementById('evolution-view-toolbar');
     if (toolbar) {
         toolbar.style.display = generations && generations.length > 0 ? 'flex' : 'none';
     }
     if (cardsContainer) {
-        cardsContainer.hidden = evolutionViewMode === 'tree';
+        cardsContainer.hidden = evolutionViewMode !== 'cards';
     }
     if (treeContainer) {
         treeContainer.hidden = evolutionViewMode !== 'tree';
+    }
+    if (rankedContainer) {
+        rankedContainer.hidden = evolutionViewMode !== 'ranked';
     }
     document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
         const isActive = button.dataset.viewMode === evolutionViewMode;
@@ -2259,6 +2798,9 @@ function setEvolutionViewMode(mode) {
     });
     if (evolutionViewMode === 'tree') {
         renderEvolutionTree(generations);
+    }
+    if (evolutionViewMode === 'ranked') {
+        renderEvolutionRankedList(generations);
     }
 }
 
@@ -2280,6 +2822,11 @@ function resetEvolutionTreeView() {
         treeContainer.innerHTML = '';
         treeContainer.hidden = true;
     }
+    const rankedContainer = document.getElementById('evolution-ranked-container');
+    if (rankedContainer) {
+        rankedContainer.innerHTML = '';
+        rankedContainer.hidden = true;
+    }
     const toolbar = document.getElementById('evolution-view-toolbar');
     if (toolbar) {
         toolbar.style.display = 'none';
@@ -2289,6 +2836,8 @@ function resetEvolutionTreeView() {
         cardsContainer.hidden = false;
     }
     evolutionViewMode = 'tree';
+    rankedSortMetric = 'fitness';
+    rankedScope = 'history';
     document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
         const isActive = button.dataset.viewMode === 'tree';
         button.classList.toggle('active', isActive);
@@ -2763,10 +3312,14 @@ function downloadResults(data) {
     const saveData = {
         history: data.history || [],
         diversity_history: data.diversity_history || [],
+        island_diversity_history: data.island_diversity_history || [],
+        migration_history: data.migration_history || [],
+        tournament_history: data.tournament_history || tournamentHistory || [],
         contexts: data.contexts || [],
         specific_prompts: data.specific_prompts || specificPrompts || [],
         breeding_prompts: data.breeding_prompts || breedingPrompts || [],
         token_counts: data.token_counts || {},
+        config: data.config || currentEvolutionData?.config || {},
         timestamp: new Date().toISOString(),
         metadata: {
             total_generations: data.total_generations || (data.history ? data.history.length : 0),
@@ -2821,6 +3374,157 @@ function downloadResults(data) {
 // Global history state
 let historyItems = [];
 let selectedHistoryItem = null;
+const repairedEvolutionCacheIds = new Set();
+
+function getCachedEvolutionState() {
+    if (currentEvolutionData?.history?.length) {
+        return currentEvolutionData;
+    }
+    try {
+        const storedData = localStorage.getItem('currentEvolutionData');
+        return storedData ? JSON.parse(storedData) : null;
+    } catch (error) {
+        console.warn('Unable to read cached evolution state:', error);
+        return null;
+    }
+}
+
+function getCachedEvolutionId(evolutionState) {
+    return evolutionState?.evolution_id || evolutionState?.evolutionId || currentEvolutionId || null;
+}
+
+function getEvolutionGenerationCount(evolutionState) {
+    const explicitGeneration = evolutionState?.current_generation;
+    if (Number.isFinite(explicitGeneration)) {
+        return explicitGeneration;
+    }
+    const history = evolutionState?.history;
+    return Array.isArray(history) && history.length > 0 ? history.length - 1 : 0;
+}
+
+function getEvolutionTotalIdeas(history) {
+    if (!Array.isArray(history)) return 0;
+    return history.reduce((total, generation) => {
+        return total + (Array.isArray(generation) ? generation.length : 0);
+    }, 0);
+}
+
+function normalizeCachedEvolutionState(evolutionState, evolutionId = null) {
+    if (!evolutionState?.history?.length) return null;
+    const normalizedId = evolutionId || getCachedEvolutionId(evolutionState);
+    const currentGeneration = getEvolutionGenerationCount(evolutionState);
+    const totalGenerations = Number.isFinite(evolutionState.total_generations)
+        ? evolutionState.total_generations
+        : Math.max(currentGeneration, evolutionState.history.length - 1);
+    return {
+        ...evolutionState,
+        evolution_id: normalizedId,
+        current_generation: currentGeneration,
+        total_generations: totalGenerations,
+        status: evolutionState.status || (evolutionState.is_running ? 'in_progress' : 'complete')
+    };
+}
+
+function cachedEvolutionIsNewer(evolutionState, persistedData = null) {
+    if (!evolutionState?.history?.length) return false;
+    const persistedHistory = persistedData?.history;
+    const persistedLength = Array.isArray(persistedHistory) ? persistedHistory.length : 0;
+    const cachedLength = evolutionState.history.length;
+    if (cachedLength !== persistedLength) {
+        return cachedLength > persistedLength;
+    }
+    return getEvolutionGenerationCount(evolutionState) > getEvolutionGenerationCount(persistedData || {});
+}
+
+async function repairPersistedEvolutionFromClientCache(evolutionState) {
+    const normalized = normalizeCachedEvolutionState(evolutionState);
+    const evolutionId = normalized?.evolution_id;
+    if (!evolutionId || !normalized?.history?.length || repairedEvolutionCacheIds.has(evolutionId)) {
+        return;
+    }
+    repairedEvolutionCacheIds.add(evolutionId);
+    try {
+        const response = await fetch(`/api/evolution/${evolutionId}/repair`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data: normalized })
+        });
+        if (!response.ok) {
+            repairedEvolutionCacheIds.delete(evolutionId);
+        }
+    } catch (error) {
+        repairedEvolutionCacheIds.delete(evolutionId);
+        console.warn('Unable to repair persisted evolution from local cache:', error);
+    }
+}
+
+async function repairCurrentEvolutionIfNewer(evolutionId, persistedData = null) {
+    const rawCached = getCachedEvolutionState();
+    if (getCachedEvolutionId(rawCached) !== evolutionId) return null;
+    const cached = normalizeCachedEvolutionState(rawCached);
+    if (cachedEvolutionIsNewer(cached, persistedData)) {
+        await repairPersistedEvolutionFromClientCache(cached);
+        return cached;
+    }
+    return null;
+}
+
+function overlayHistoryItemsWithCachedEvolution(items) {
+    const cached = normalizeCachedEvolutionState(getCachedEvolutionState());
+    const cachedId = getCachedEvolutionId(cached);
+    if (!cachedId || !cached?.history?.length) return items;
+
+    let found = false;
+    const overlaid = items.map(item => {
+        if (item.id !== cachedId) return item;
+        found = true;
+        if (!cachedEvolutionIsNewer(cached, { history: new Array((item.generations || 0) + 1), current_generation: item.generations || 0 })) {
+            return item;
+        }
+        const status = cached.status || 'complete';
+        const nextItem = {
+            ...item,
+            status,
+            generations: cached.current_generation,
+            total_generations: Math.max(cached.total_generations || 0, item.total_generations || 0),
+            total_ideas: getEvolutionTotalIdeas(cached.history),
+            config: cached.config || item.config || {},
+            can_use_config: Boolean((cached.config && Object.keys(cached.config).length > 0) || item.can_use_config),
+            can_resume: ['paused', 'in_progress', 'force_stopped'].includes(status),
+            can_continue: status === 'complete',
+            can_rate: cached.current_generation > 0
+        };
+        repairPersistedEvolutionFromClientCache(cached);
+        return nextItem;
+    });
+
+    if (!found) {
+        const status = cached.status || 'complete';
+        overlaid.unshift({
+            id: cachedId,
+            type: 'evolution',
+            status,
+            timestamp: new Date().toISOString(),
+            display_name: cached.evolution_name || cached.name || cachedId,
+            generations: cached.current_generation,
+            total_generations: cached.total_generations,
+            pop_size: Array.isArray(cached.history.at(-1)) ? cached.history.at(-1).length : 0,
+            idea_type: 'Unknown',
+            model_type: 'Unknown',
+            total_ideas: getEvolutionTotalIdeas(cached.history),
+            config: cached.config || {},
+            can_use_config: Boolean(cached.config && Object.keys(cached.config).length > 0),
+            can_resume: ['paused', 'in_progress', 'force_stopped'].includes(status),
+            can_continue: status === 'complete',
+            can_rate: cached.current_generation > 0,
+            can_rename: true,
+            can_delete: true
+        });
+        repairPersistedEvolutionFromClientCache(cached);
+    }
+
+    return overlaid;
+}
 
 async function loadHistory() {
     try {
@@ -2828,7 +3532,7 @@ async function loadHistory() {
         const data = await response.json();
 
         if (data.status === 'success') {
-            historyItems = data.items || [];
+            historyItems = overlayHistoryItemsWithCachedEvolution(data.items || []);
             renderHistoryList(historyItems);
         } else {
             console.error('Error loading history:', data.message);
@@ -2844,6 +3548,116 @@ async function loadHistory() {
 
 async function refreshHistoryList() {
     await loadHistory();
+}
+
+function getModelDisplayName(modelId) {
+    const options = Array.from(document.querySelectorAll('#modelType option'));
+    const option = options.find(opt => opt.value === String(modelId || ''));
+    return option ? option.textContent.trim() : (modelId || 'Unknown');
+}
+
+function getTemplateDisplayName(templateId) {
+    const template = allTemplates.find(t => t.id === templateId);
+    return template?.name || templateId || 'Unknown';
+}
+
+function formatConfigNumber(value, digits = 2) {
+    if (value === null || value === undefined || value === '') return '-';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return String(value);
+    return numeric.toFixed(digits);
+}
+
+function formatConfigInteger(value) {
+    if (value === null || value === undefined || value === '') return '-';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return String(value);
+    return String(Math.trunc(numeric));
+}
+
+function formatConfigBoolean(value) {
+    return value === true ? 'Yes' : 'No';
+}
+
+function formatThinkingConfig(config) {
+    if (config.thinking_budget !== null && config.thinking_budget !== undefined) {
+        return `Budget ${Number(config.thinking_budget).toLocaleString()} tokens`;
+    }
+    if (config.thinking_level) {
+        return String(config.thinking_level).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+    return 'Provider default';
+}
+
+function renderConfigRow(label, value) {
+    return `
+        <div class="config-detail-row">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+        </div>
+    `;
+}
+
+function renderConfigSection(title, rows) {
+    return `
+        <div class="config-detail-section">
+            <div class="config-detail-section-title">${escapeHtml(title)}</div>
+            ${rows.map(([label, value]) => renderConfigRow(label, value)).join('')}
+        </div>
+    `;
+}
+
+function buildEvolutionConfigDetailsHtml(config = {}, item = {}) {
+    if (!config || Object.keys(config).length === 0) {
+        return `
+            <div class="history-config-details">
+                <div class="config-detail-empty">No saved config metadata available.</div>
+            </div>
+        `;
+    }
+
+    const generationCount = config.generations ?? item.total_generations;
+    const populationSize = config.pop_size ?? item.pop_size;
+    const sections = [
+        renderConfigSection('Basic', [
+            ['Template', getTemplateDisplayName(config.idea_type || item.idea_type)],
+            ['Model', getModelDisplayName(config.model_type || item.model_type)],
+            ['Population Size', formatConfigInteger(populationSize)],
+            ['Generations', formatConfigInteger(generationCount)],
+            ['Max Budget', config.max_budget === null || config.max_budget === undefined ? '-' : `$${formatConfigNumber(config.max_budget, 2)}`],
+        ]),
+        renderConfigSection('LLM', [
+            ['Creative Temperature', formatConfigNumber(config.creative_temp, 2)],
+            ['Top P', formatConfigNumber(config.top_p, 2)],
+            ['Seed Context Pool Size', formatConfigInteger(config.seed_context_pool_size)],
+            ['Thinking', formatThinkingConfig(config)],
+        ]),
+        renderConfigSection('Tournament', [
+            ['Tournament Count', formatConfigNumber(config.tournament_count, 2)],
+            ['Full Tournament Rounds', formatConfigInteger(config.full_tournament_rounds)],
+            ['Target Tournament Rounds', formatConfigInteger(config.tournament_rounds)],
+        ]),
+        renderConfigSection('Breeding and Selection', [
+            ['Mutation Rate', formatConfigNumber(config.mutation_rate, 2)],
+            ['Replacement Rate', formatConfigNumber(config.replacement_rate, 2)],
+            ['Fitness Alpha', formatConfigNumber(config.fitness_alpha, 2)],
+            ['Age Decay Rate', formatConfigNumber(config.age_decay_rate, 2)],
+            ['Age Decay Floor', formatConfigNumber(config.age_decay_floor, 2)],
+            ['Refine All Ideas', formatConfigBoolean(config.refine_all_ideas)],
+            ['Survivor Refinement', formatConfigNumber(config.survivor_refinement_rate, 2)],
+        ]),
+        renderConfigSection('Islands', [
+            ['Island Count', formatConfigInteger(config.island_count)],
+            ['Migration Probability', formatConfigNumber(config.migration_rate, 2)],
+            ['Migration Novelty Protection', formatConfigNumber(config.migration_novelty_protection_quantile, 2)],
+        ]),
+    ];
+
+    return `<div class="history-config-details">${sections.join('')}</div>`;
+}
+
+function hasSavedConfig(config) {
+    return Boolean(config && typeof config === 'object' && Object.keys(config).length > 0);
 }
 
 function renderHistoryList(items, updateGlobal = true) {
@@ -2866,6 +3680,7 @@ function renderHistoryList(items, updateGlobal = true) {
         const date = item.timestamp ? new Date(item.timestamp).toLocaleDateString() : '';
         const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
         const isSelected = selectedHistoryItem?.id === item.id;
+        const canUseConfig = item.can_use_config || hasSavedConfig(item.config);
 
         // Truncate display name (more room in expanded view)
         let displayName = item.display_name || item.id;
@@ -2879,6 +3694,11 @@ function renderHistoryList(items, updateGlobal = true) {
             if (item.can_resume) {
                 actionsHtml += `<button class="btn btn-sm btn-success" onclick="event.stopPropagation(); handleHistoryResume('${item.id}')">
                     <i class="fas fa-play me-1"></i>Resume
+                </button>`;
+            }
+            if (canUseConfig) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-success" onclick="event.stopPropagation(); handleUseHistoryConfig('${item.id}')">
+                    <i class="fas fa-sliders-h me-1"></i>Use Config
                 </button>`;
             }
             if (item.can_continue) {
@@ -2922,6 +3742,7 @@ function renderHistoryList(items, updateGlobal = true) {
                     <span class="badge ${statusClass}">${formatStatus(item.status)}</span>
                     ${isSelected ? `<span class="idea-type"><i class="fas fa-tag me-1"></i>${item.idea_type || 'Unknown'}</span>` : ''}
                 </div>
+                ${isSelected ? buildEvolutionConfigDetailsHtml(item.config || {}, item) : ''}
                 ${isSelected ? `<div class="item-actions">${actionsHtml}</div>` : ''}
             </div>
         `;
@@ -3083,6 +3904,163 @@ async function executeRenameInline(itemId) {
     }
 }
 
+function setFormControlValue(id, value, formatter = null) {
+    if (value === null || value === undefined) return;
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = String(value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+
+    if (formatter) {
+        const valueEl = document.getElementById(`${id}Value`);
+        if (valueEl) valueEl.textContent = formatter(value);
+    }
+}
+
+function setCheckboxValue(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.checked = value === true;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function applyThinkingConfigToForm(config) {
+    updateThinkingBudgetVisibility();
+
+    const thinkingBudget = config.thinking_budget;
+    const thinkingLevel = config.thinking_level;
+    const customRadio = document.getElementById('thinkingCustomBudget');
+    const offRadio = document.getElementById('thinkingOff');
+    const lowRadio = document.getElementById('thinkingLow');
+    const mediumRadio = document.getElementById('thinkingMedium');
+    const highRadio = document.getElementById('thinkingHigh');
+    const budgetSlider = document.getElementById('thinkingBudgetSlider');
+
+    if (thinkingBudget !== null && thinkingBudget !== undefined && customRadio && budgetSlider) {
+        customRadio.checked = true;
+        budgetSlider.value = String(thinkingBudget);
+        updateThinkingBudgetMode();
+        updateThinkingBudgetDisplay();
+        return;
+    }
+
+    const normalizedLevel = String(thinkingLevel || '').toLowerCase();
+    if (['off', 'minimal'].includes(normalizedLevel) && offRadio) {
+        offRadio.checked = true;
+    } else if (normalizedLevel === 'low' && lowRadio) {
+        lowRadio.checked = true;
+    } else if (normalizedLevel === 'medium' && mediumRadio) {
+        mediumRadio.checked = true;
+    } else if (normalizedLevel === 'high' && highRadio) {
+        highRadio.checked = true;
+    }
+    updateThinkingBudgetMode();
+}
+
+function applyEvolutionConfigToForm(config = {}, sourceName = '') {
+    if (!config || Object.keys(config).length === 0) {
+        alert('This evolution does not have saved config metadata.');
+        return false;
+    }
+
+    if (config.idea_type) {
+        const selected = typeof selectTemplate === 'function' ? selectTemplate(config.idea_type, false) : false;
+        if (!selected) {
+            const ideaTypeInput = document.getElementById('ideaType');
+            if (ideaTypeInput) ideaTypeInput.value = config.idea_type;
+            const display = document.getElementById('ideaTypeDisplay');
+            if (display) {
+                display.textContent = config.idea_type;
+                display.classList.remove('text-muted', 'fst-italic');
+            }
+        }
+    }
+
+    setFormControlValue('popSize', config.pop_size);
+    setFormControlValue('generations', config.generations);
+    setFormControlValue('modelType', config.model_type);
+    setFormControlValue('creativeTemp', config.creative_temp, value => String(value));
+    setFormControlValue('topP', config.top_p, value => Number(value).toFixed(2));
+    setFormControlValue('seedContextPoolSize', config.seed_context_pool_size, value => String(parseInt(value, 10)));
+    setFormControlValue('tournamentCount', config.tournament_count, value => Number(value).toFixed(2));
+    setFormControlValue('mutationRate', config.mutation_rate, value => Number(value).toFixed(2));
+    setFormControlValue('replacementRate', config.replacement_rate, value => Number(value).toFixed(2));
+    setFormControlValue('fitnessAlpha', config.fitness_alpha, value => Number(value).toFixed(2));
+    setFormControlValue('ageDecayRate', config.age_decay_rate, value => Number(value).toFixed(2));
+    setFormControlValue('ageDecayFloor', config.age_decay_floor, value => Number(value).toFixed(2));
+    setFormControlValue('survivorRefinementRate', config.survivor_refinement_rate, value => Number(value).toFixed(2));
+    setFormControlValue('islandCount', config.island_count, value => String(parseInt(value, 10)));
+    setFormControlValue('migrationRate', config.migration_rate, value => Number(value).toFixed(2));
+    setFormControlValue('migrationNoveltyProtectionQuantile', config.migration_novelty_protection_quantile, value => Number(value).toFixed(2));
+
+    const maxBudgetEl = document.getElementById('maxBudget');
+    if (maxBudgetEl) {
+        maxBudgetEl.value = config.max_budget === null || config.max_budget === undefined ? '' : String(config.max_budget);
+    }
+
+    setCheckboxValue('refineAllIdeas', config.refine_all_ideas);
+    updateSurvivorRefinementControls();
+    applyThinkingConfigToForm(config);
+    tournamentCountTouched = true;
+
+    const nameSection = document.getElementById('evolutionNameSection');
+    if (nameSection) nameSection.style.display = 'block';
+    const nameInput = document.getElementById('evolutionNameInput');
+    if (nameInput) {
+        nameInput.value = '';
+        if (sourceName) nameInput.placeholder = `New run from ${sourceName}`;
+    }
+
+    const templateEntry = document.getElementById('templateEntry');
+    if (templateEntry) templateEntry.style.display = 'block';
+
+    showSidebarView('main');
+    addActivityLogItem(`Loaded config from ${sourceName || 'saved evolution'}`, 'info');
+    return true;
+}
+
+async function getHistoryItemConfig(itemId) {
+    const item = historyItems.find(i => i.id === itemId);
+    if (!item) return null;
+    if (hasSavedConfig(item.config)) {
+        return item.config;
+    }
+    if (currentEvolutionData?.evolution_id === itemId && currentEvolutionData?.config) {
+        item.config = currentEvolutionData.config;
+        item.can_use_config = true;
+        return item.config;
+    }
+    if (item.type === 'evolution' || item.type === 'saved') {
+        const response = await fetch(`/api/evolution/${itemId}`);
+        if (response.ok) {
+            const data = await response.json();
+            const config = data?.data?.config;
+            if (config && Object.keys(config).length > 0) {
+                item.config = config;
+                item.can_use_config = true;
+                return config;
+            }
+        }
+    }
+    return null;
+}
+
+async function handleUseHistoryConfig(itemId) {
+    try {
+        const item = historyItems.find(i => i.id === itemId);
+        const config = await getHistoryItemConfig(itemId);
+        if (!config) {
+            alert('This evolution does not have saved config metadata.');
+            return;
+        }
+        applyEvolutionConfigToForm(config, item?.display_name || itemId);
+    } catch (error) {
+        console.error('Error applying saved config:', error);
+        alert('Unable to apply saved config: ' + error.message);
+    }
+}
+
 async function loadHistoryItemData(item) {
     try {
         if (item.type === 'saved' || item.type === 'evolution') {
@@ -3090,7 +4068,17 @@ async function loadHistoryItemData(item) {
             const response = await fetch(`/api/evolution/${item.id}`);
             if (response.ok) {
                 const data = await response.json();
-                if (data.data && data.data.history) {
+                let evolutionData = data.data;
+                const cachedEvolution = await repairCurrentEvolutionIfNewer(item.id, evolutionData);
+                if (cachedEvolution) {
+                    evolutionData = cachedEvolution;
+                }
+                if (evolutionData && evolutionData.history) {
+                    if (evolutionData.config) {
+                        item.config = evolutionData.config;
+                        item.can_use_config = true;
+                        renderHistoryList(historyItems, false);
+                    }
                     // Hide the template entry section
                     const templateEntry = document.getElementById('templateEntry');
                     if (templateEntry) templateEntry.style.display = 'none';
@@ -3108,29 +4096,37 @@ async function loadHistoryItemData(item) {
                     if (genContainer) genContainer.style.display = 'block';
 
                     document.getElementById('generations-container').innerHTML = '';
-                    renderGenerations(data.data.history);
+                    renderGenerations(evolutionData.history);
+                    currentEvolutionData = evolutionData;
 
-                    tournamentHistory = data.data.tournament_history || [];
+                    tournamentHistory = evolutionData.tournament_history || [];
                     renderTournamentDetails(tournamentHistory);
 
-                    if (data.data.diversity_history && data.data.diversity_history.length > 0) {
-                        updateDiversityChart(data.data.diversity_history);
-                        setTimeout(ensureDiversityChartSizing, 200);
+                    if ((evolutionData.diversity_history && evolutionData.diversity_history.length > 0)
+                        || (evolutionData.history && evolutionData.history.length > 0)) {
+                        const chartUpdated = updateDiversityChart(
+                            evolutionData.diversity_history || [],
+                            evolutionData.history,
+                            evolutionData.island_diversity_history || []
+                        );
+                        if (chartUpdated) {
+                            setTimeout(ensureDiversityChartSizing, 200);
+                        }
                     } else {
                         resetDiversityPlot();
                     }
 
-                    if (data.data.contexts) {
-                        contexts = data.data.contexts;
-                        specificPrompts = data.data.specific_prompts || [];
-                        breedingPrompts = data.data.breeding_prompts || [];
+                    if (evolutionData.contexts) {
+                        contexts = evolutionData.contexts;
+                        specificPrompts = evolutionData.specific_prompts || [];
+                        breedingPrompts = evolutionData.breeding_prompts || [];
                         currentContextIndex = 0;
                         updateContextDisplay();
                         document.querySelector('.context-navigation').style.display = 'block';
                     }
 
-                    if (data.data.token_counts) {
-                        displayTokenCounts(data.data.token_counts);
+                    if (evolutionData.token_counts) {
+                        displayTokenCounts(evolutionData.token_counts);
                     }
 
                     const downloadBtn = document.getElementById('downloadButton');
@@ -3147,13 +4143,21 @@ async function loadHistoryItemData(item) {
                 if (data.history) {
                     document.getElementById('generations-container').innerHTML = '';
                     renderGenerations(data.history);
+                    currentEvolutionData = data;
 
                     tournamentHistory = data.tournament_history || [];
                     renderTournamentDetails(tournamentHistory);
 
-                    if (data.diversity_history && data.diversity_history.length > 0) {
-                        updateDiversityChart(data.diversity_history);
-                        setTimeout(ensureDiversityChartSizing, 200);
+                    if ((data.diversity_history && data.diversity_history.length > 0)
+                        || (data.history && data.history.length > 0)) {
+                        const chartUpdated = updateDiversityChart(
+                            data.diversity_history || [],
+                            data.history,
+                            data.island_diversity_history || []
+                        );
+                        if (chartUpdated) {
+                            setTimeout(ensureDiversityChartSizing, 200);
+                        }
                     } else {
                         resetDiversityPlot();
                     }
@@ -3289,6 +4293,7 @@ async function handleHistoryContinue(itemId, itemType, additionalGens = 3) {
     }
 
     console.log("Continuing evolution for", additionalGens, "more generations");
+    await repairCurrentEvolutionIfNewer(itemId);
 
     // Update the inline action button to show starting state
     const group = document.getElementById(`continueActionGroup-${itemId}`);
@@ -3644,6 +4649,15 @@ async function pollProgress() {
         // Update UI only when there is a new history version (or when version is unavailable).
         if (data.history && data.history.length > 0) {
             const rendered = applyHistoryIfNew(data);
+            currentEvolutionData = {
+                ...(currentEvolutionData || {}),
+                ...data,
+                history: data.history,
+                diversity_history: data.diversity_history || currentEvolutionData?.diversity_history || [],
+                island_diversity_history: data.island_diversity_history || currentEvolutionData?.island_diversity_history || [],
+                migration_history: data.migration_history || currentEvolutionData?.migration_history || [],
+                tournament_history: data.tournament_history || currentEvolutionData?.tournament_history || tournamentHistory
+            };
             if (rendered) {
                 const historyVersionToStore = Number.isInteger(data.history_version) ? data.history_version : null;
                 const shouldStore =
@@ -3654,6 +4668,8 @@ async function pollProgress() {
                         history: data.history,
                         history_version: historyVersionToStore ?? lastRenderedHistoryVersion,
                         diversity_history: data.diversity_history || [],
+                        island_diversity_history: data.island_diversity_history || [],
+                        migration_history: data.migration_history || [],
                         contexts: data.contexts || contexts,
                         specific_prompts: data.specific_prompts || specificPrompts,
                         breeding_prompts: data.breeding_prompts || breedingPrompts,
@@ -3665,6 +4681,7 @@ async function pollProgress() {
                         lastStoredHistoryVersion = historyVersionToStore;
                     }
                 }
+                handleDiversityUpdate(data);
             }
         }
 
@@ -3769,11 +4786,14 @@ async function pollProgress() {
                     history: data.history,
                     history_version: Number.isInteger(data.history_version) ? data.history_version : lastRenderedHistoryVersion,
                     diversity_history: data.diversity_history || [],
+                    island_diversity_history: data.island_diversity_history || [],
+                    migration_history: data.migration_history || [],
                     contexts: data.contexts || contexts,
                     specific_prompts: data.specific_prompts || specificPrompts,
                     breeding_prompts: data.breeding_prompts || breedingPrompts,
                     tournament_history: data.tournament_history || tournamentHistory,
                     token_counts: data.token_counts || null,
+                    config: data.config || currentEvolutionData?.config || null,
                     checkpoint_id: data.checkpoint_id || null
                 };
                 schedulePersistEvolutionState(evolutionStateToStore);
@@ -5374,6 +6394,8 @@ function displayTokenCounts(tokenCounts) {
         total: tokenCounts.total,
         total_input: tokenCounts.total_input,
         total_output: tokenCounts.total_output,
+        total_thoughts: tokenCounts.total_thoughts,
+        total_cached_input: tokenCounts.total_cached_input,
         cost: tokenCounts.cost,
     });
     if (nextSignature === lastTokenCountsSignature) {
@@ -5479,12 +6501,16 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
     const totalTokens = tokenCounts.total.toLocaleString();
     const totalInputTokens = tokenCounts.total_input.toLocaleString();
     const totalOutputTokens = tokenCounts.total_output.toLocaleString();
+    const totalThoughtTokens = (tokenCounts.total_thoughts || 0).toLocaleString();
+    const totalCachedInputTokens = (tokenCounts.total_cached_input || 0).toLocaleString();
 
     // Get cost information
     const costInfo = tokenCounts.cost;
     const totalCost = costInfo.total_cost.toFixed(4);
     const inputCost = costInfo.input_cost.toFixed(4);
     const outputCost = costInfo.output_cost.toFixed(4);
+    const thoughtCost = (costInfo.thought_cost || 0).toFixed(4);
+    const cachedInputCost = (costInfo.cached_input_cost || 0).toFixed(4);
 
     // Prepare alternative model cost estimates
     let estimatesList = '';
@@ -5556,6 +6582,8 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
                 total: component.total.toLocaleString(),
                 input: component.input.toLocaleString(),
                 output: component.output.toLocaleString(),
+                thoughts: (component.thoughts || 0).toLocaleString(),
+                cachedInput: (component.cached_input || 0).toLocaleString(),
                 model: component.model,
                 cost: component.cost.toFixed(4),
                 totalValue: component.total,
@@ -5570,6 +6598,8 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
     // Build component breakdown HTML
     let componentBreakdownHtml = '';
     componentData.forEach(comp => {
+        const thoughtHtml = comp.thoughts !== '0' ? `<span>Thoughts: ${comp.thoughts}</span> |` : '';
+        const cachedHtml = comp.cachedInput !== '0' ? `<span>Cached input: ${comp.cachedInput}</span> |` : '';
         componentBreakdownHtml += `
             <li class="list-group-item">
                 <div class="d-flex justify-content-between align-items-center">
@@ -5579,6 +6609,8 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
                 <div class="small text-muted mt-1">
                     <span>Input: ${comp.input}</span> |
                     <span>Output: ${comp.output}</span> |
+                    ${thoughtHtml}
+                    ${cachedHtml}
                     <span>Cost: $${comp.cost}</span>
                 </div>
             </li>
@@ -5615,12 +6647,18 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
                                         <span>Input: <span class="text-info">${totalInputTokens}</span></span>
                                         <span>Output: <span class="text-success">${totalOutputTokens}</span></span>
                                     </div>
+                                    <div class="small text-muted mt-1">
+                                        <span>Thoughts: ${totalThoughtTokens}</span>
+                                        ${tokenCounts.total_cached_input ? `<span class="ms-2">Cached input: ${totalCachedInputTokens}</span>` : ''}
+                                    </div>
                                     <hr>
                                     <h6>Cost Breakdown:</h6>
                                     <p class="mb-1">Total cost: <strong>$${totalCost}</strong></p>
                                     <div class="small text-muted">
                                         <div>Input: $${inputCost}</div>
+                                        ${tokenCounts.total_cached_input ? `<div>Cached input read: $${cachedInputCost}</div>` : ''}
                                         <div>Output: $${outputCost}</div>
+                                        <div>Thoughts: $${thoughtCost}</div>
                                     </div>
                                     <hr>
                                     <h6>Other Model Estimates:</h6>
@@ -5810,21 +6848,22 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
             }
         });
 
-        // Create a third chart for input vs output cost breakdown
+        // Create a third chart for input/output/thinking cost breakdown
         const costCtx = document.getElementById('tokenCostChart').getContext('2d');
         new Chart(costCtx, {
             type: 'bar',
             data: {
-                labels: ['Input Cost', 'Output Cost', 'Total Cost'],
+                labels: ['Input Cost', 'Output Cost', 'Thinking Cost', 'Total Cost'],
                 datasets: [{
                     label: 'Cost (USD)',
                     data: [
                         parseFloat(inputCost),
                         parseFloat(outputCost),
+                        parseFloat(thoughtCost),
                         parseFloat(totalCost)
                     ],
-                    backgroundColor: ['#36a2eb', '#4bc0c0', '#ff9f40'],
-                    borderColor: ['#36a2eb', '#4bc0c0', '#ff9f40'],
+                    backgroundColor: ['#36a2eb', '#4bc0c0', '#9966ff', '#ff9f40'],
+                    borderColor: ['#36a2eb', '#4bc0c0', '#9966ff', '#ff9f40'],
                     borderWidth: 1
                 }]
             },
@@ -5833,7 +6872,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
                 plugins: {
                     title: {
                         display: true,
-                        text: 'Input vs Output Cost'
+                        text: 'Input vs Output vs Thinking Cost'
                     },
                     legend: {
                         position: 'bottom'
@@ -5860,13 +6899,9 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
 
 // Global variables for diversity plotting
 let diversityChart = null;
-let diversityData = {
-    labels: [],
-    overview: {},
-    islands: {},
-    latest: null
-};
-let diversityChartMode = 'overview';
+let diversityData = createEmptyFitnessPlotData();
+let fitnessPlotMetric = 'fitness';
+let fitnessPlotScope = 'population';
 
 function startPollingActiveEvolution(progressData = {}) {
     if (progressData.evolution_id) {
@@ -5889,6 +6924,7 @@ function startPollingActiveEvolution(progressData = {}) {
  * Get chart scales configuration based on current axis mode
  */
 function getDiversityChartScales() {
+    const metricConfig = getFitnessPlotMetricConfig(fitnessPlotMetric);
     return {
         x: {
             title: {
@@ -5918,9 +6954,7 @@ function getDiversityChartScales() {
         y: {
             title: {
                 display: true,
-                text: diversityChartMode === 'islands'
-                    ? 'Diversity / Separation'
-                    : 'Diversity Score',
+                text: metricConfig.axisLabel,
                 color: '#64748B',
                 font: {
                     size: 14,
@@ -5944,23 +6978,62 @@ function getDiversityChartScales() {
 }
 
 /**
- * Switch between population and island diversity views.
+ * Switch between population metric views.
  */
-function setDiversityChartMode(mode) {
-    const nextMode = mode === 'islands' ? 'islands' : 'overview';
-    const button = document.querySelector(`[data-diversity-mode="${nextMode}"]`);
+function setFitnessPlotMetric(metric) {
+    const nextMetric = normalizeFitnessPlotMetric(metric);
+    const button = document.querySelector(`[data-fitness-metric="${nextMetric}"]`);
     if (button?.disabled) return;
-    diversityChartMode = nextMode;
-    document.querySelectorAll('[data-diversity-mode]').forEach((button) => {
-        button.classList.toggle('active', button.dataset.diversityMode === nextMode);
+    fitnessPlotMetric = nextMetric;
+    if (fitnessPlotMetric !== 'diversity') {
+        fitnessPlotScope = 'population';
+    }
+    document.querySelectorAll('[data-fitness-metric]').forEach((button) => {
+        button.classList.toggle('active', button.dataset.fitnessMetric === nextMetric);
     });
+    updateFitnessScopeAvailability(diversityData);
 
     if (!diversityChart) {
         return;
     }
 
-    diversityChart.data.datasets = getDiversityChartDatasets(diversityData, nextMode);
+    diversityChart.data.datasets = getDiversityChartDatasets(diversityData, nextMetric, fitnessPlotScope);
     diversityChart.options.scales = getDiversityChartScales();
+    renderDiversitySummary(diversityData.latest, diversityData);
+    lastDiversityRenderSignature = buildDiversitySignature(diversityData);
+    diversityChart.update('none');
+}
+
+function setDiversityChartMode(mode) {
+    if (mode === 'islands') {
+        setFitnessPlotMetric('diversity');
+        setFitnessPlotScope('islands');
+        return;
+    }
+    if (mode === 'overview') {
+        setFitnessPlotMetric('diversity');
+        setFitnessPlotScope('population');
+        return;
+    }
+    setFitnessPlotMetric(mode);
+}
+
+function setFitnessPlotScope(scope) {
+    const nextScope = normalizeFitnessPlotScope(scope);
+    if (nextScope === 'islands' && (fitnessPlotMetric !== 'diversity' || !hasIslandDiversityData(diversityData))) {
+        return;
+    }
+    fitnessPlotScope = nextScope;
+    updateFitnessScopeAvailability(diversityData);
+
+    if (!diversityChart) {
+        return;
+    }
+
+    diversityChart.data.datasets = getDiversityChartDatasets(diversityData, fitnessPlotMetric, fitnessPlotScope);
+    diversityChart.options.scales = getDiversityChartScales();
+    renderDiversitySummary(diversityData.latest, diversityData);
+    lastDiversityRenderSignature = buildDiversitySignature(diversityData);
     diversityChart.update('none');
 }
 
@@ -5993,7 +7066,7 @@ function initializeDiversityChart() {
             type: 'line',
             data: {
                 labels: [],
-                datasets: getDiversityChartDatasets(diversityData, diversityChartMode)
+                datasets: getDiversityChartDatasets(diversityData, fitnessPlotMetric)
             },
             options: {
                 responsive: true,
@@ -6046,7 +7119,7 @@ function initializeDiversityChart() {
                             },
                             label: function (context) {
                                 const value = Number(context.parsed.y);
-                                return `${context.dataset.label}: ${Number.isFinite(value) ? value.toFixed(4) : '-'}`;
+                                return `${context.dataset.label}: ${formatFitnessPlotMetric(value, fitnessPlotMetric)}`;
                             }
                         }
                     }
@@ -6091,8 +7164,15 @@ function initializeDiversityChart() {
  * @returns {Object} Processed data for charting
  */
 function toFiniteDiversityNumber(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string' && value.trim() === '') return null;
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : null;
+}
+
+function toFiniteDiversityInteger(value) {
+    const numeric = toFiniteDiversityNumber(value);
+    return Number.isInteger(numeric) ? numeric : null;
 }
 
 function firstFiniteDiversityValue(...values) {
@@ -6104,153 +7184,387 @@ function firstFiniteDiversityValue(...values) {
 }
 
 function getSnapshotGeneration(diversityData, index) {
-    const generation = firstFiniteDiversityValue(
+    const generation = toFiniteDiversityInteger(firstFiniteDiversityValue(
         diversityData?.analytics?.current_generation,
         diversityData?.current_generation,
         diversityData?.generation
-    );
-    return Number.isInteger(generation) ? generation : index;
+    ));
+    return generation !== null ? generation : index;
 }
 
-function getCurrentGenerationDiversity(diversityData, generation) {
-    const explicit = firstFiniteDiversityValue(
-        diversityData?.analytics?.current_generation_diversity,
-        diversityData?.current_generation_diversity
-    );
-    if (explicit !== null) return explicit;
-
-    const generationRows = Array.isArray(diversityData?.generation_diversities)
-        ? diversityData.generation_diversities
-        : [];
-    const row = generationRows.find(genData => Number(genData?.generation) === generation);
-    return firstFiniteDiversityValue(row?.diversity_score, row?.score, diversityData?.diversity_score, 0);
+function normalizeIslandDiversityHistory(islandDiversityHistory) {
+    return Array.isArray(islandDiversityHistory) ? islandDiversityHistory : [];
 }
 
-function getSnapshotIslandRows(diversityData) {
-    const analyticsRows = diversityData?.analytics?.islands;
-    if (Array.isArray(analyticsRows) && analyticsRows.length > 0) {
-        return analyticsRows;
-    }
-    if (Array.isArray(diversityData?.current_island_diversities)) {
-        return diversityData.current_island_diversities;
-    }
-    if (Array.isArray(diversityData?.island_diversities)) {
-        return diversityData.island_diversities;
+function getIslandDiversityRows(snapshot) {
+    const candidates = [
+        snapshot?.current_islands,
+        snapshot?.current_island_diversities,
+        snapshot?.analytics?.islands,
+        snapshot?.islands
+    ];
+    for (const candidate of candidates) {
+        if (Array.isArray(candidate)) return candidate;
     }
     return [];
 }
 
-function processDiversityData(diversityHistory) {
-    if (!diversityHistory || diversityHistory.length === 0) {
-        return {
-            labels: [],
-            overview: { current: [], cumulative: [], drift: [] },
-            islands: { meanWithin: [], interIsland: [], separationRatio: [], perIsland: new Map() },
-            latest: null,
-            hasIslandData: false
-        };
+function snapshotHasIslandDiversity(snapshot) {
+    if (!snapshot || snapshot.enabled === false || snapshot.error) return false;
+    return (
+        toFiniteDiversityNumber(snapshot.mean_island_diversity) !== null ||
+        toFiniteDiversityNumber(snapshot.inter_island_diversity) !== null ||
+        toFiniteDiversityNumber(snapshot.island_separation_ratio) !== null ||
+        getIslandDiversityRows(snapshot).length > 0
+    );
+}
+
+function buildIslandDiversitySnapshotMap(diversityHistory, islandDiversityHistory) {
+    const snapshots = new Map();
+    (Array.isArray(diversityHistory) ? diversityHistory : []).forEach((snapshot, index) => {
+        if (!snapshotHasIslandDiversity(snapshot)) return;
+        snapshots.set(getSnapshotGeneration(snapshot, index), snapshot);
+    });
+    normalizeIslandDiversityHistory(islandDiversityHistory).forEach((snapshot, index) => {
+        if (!snapshotHasIslandDiversity(snapshot)) return;
+        snapshots.set(getSnapshotGeneration(snapshot, index), {
+            ...(snapshots.get(getSnapshotGeneration(snapshot, index)) || {}),
+            ...snapshot
+        });
+    });
+    return snapshots;
+}
+
+function getFitnessPlotMetricKeys() {
+    return ['fitness', 'elo', 'diversity'];
+}
+
+function normalizeFitnessPlotMetric(metric) {
+    return getFitnessPlotMetricKeys().includes(metric) ? metric : 'fitness';
+}
+
+function normalizeFitnessPlotScope(scope) {
+    return scope === 'islands' ? 'islands' : 'population';
+}
+
+function getFitnessPlotMetricConfig(metric) {
+    const configs = {
+        fitness: {
+            label: 'Fitness',
+            axisLabel: 'Fitness Score',
+            averageLabel: 'Average Fitness',
+            bestLabel: 'Best Fitness',
+            lowLabel: 'Lowest Fitness',
+            digits: 3,
+            colors: {
+                average: 'rgba(79, 70, 229, 1)',
+                best: 'rgba(16, 185, 129, 1)',
+                low: 'rgba(244, 63, 94, 1)'
+            }
+        },
+        elo: {
+            label: 'ELO',
+            axisLabel: 'ELO Rating',
+            averageLabel: 'Average ELO',
+            bestLabel: 'Highest ELO',
+            lowLabel: 'Lowest ELO',
+            digits: 0,
+            colors: {
+                average: 'rgba(14, 165, 233, 1)',
+                best: 'rgba(37, 99, 235, 1)',
+                low: 'rgba(217, 119, 6, 1)'
+            }
+        },
+        diversity: {
+            label: 'Diversity',
+            axisLabel: 'Diversity Score',
+            averageLabel: 'Average Diversity',
+            bestLabel: 'Highest Diversity',
+            lowLabel: 'Lowest Diversity',
+            digits: 3,
+            colors: {
+                average: 'rgba(124, 58, 237, 1)',
+                best: 'rgba(5, 150, 105, 1)',
+                low: 'rgba(148, 163, 184, 1)'
+            }
+        }
+    };
+    return configs[normalizeFitnessPlotMetric(metric)];
+}
+
+function createEmptyFitnessMetricSeries() {
+    return { average: [], best: [], low: [], spread: [], count: [] };
+}
+
+function createEmptyIslandDiversitySeries() {
+    return {
+        mean: [],
+        inter: [],
+        separation: [],
+        islandSeries: {},
+        latest: null
+    };
+}
+
+function createEmptyFitnessPlotData() {
+    return {
+        labels: [],
+        metrics: {
+            fitness: createEmptyFitnessMetricSeries(),
+            elo: createEmptyFitnessMetricSeries(),
+            diversity: createEmptyFitnessMetricSeries()
+        },
+        islandDiversity: createEmptyIslandDiversitySeries(),
+        latest: null
+    };
+}
+
+function normalizeGenerationHistory(generationHistory) {
+    if (Array.isArray(generationHistory)) return generationHistory;
+    if (Array.isArray(generationHistory?.history)) return generationHistory.history;
+    if (Array.isArray(generationHistory?.generations)) return generationHistory.generations;
+    return [];
+}
+
+function getGenerationPopulation(generationData) {
+    if (Array.isArray(generationData)) return generationData;
+    if (Array.isArray(generationData?.ideas)) return generationData.ideas;
+    if (Array.isArray(generationData?.population)) return generationData.population;
+    return [];
+}
+
+function getFitnessPlotSelectionGeneration(idea) {
+    return toFiniteDiversityInteger(idea?.selection_metrics?.evaluation_generation);
+}
+
+function getFitnessPlotGenerationMetricRecord(idea, generation) {
+    const requestedGeneration = toFiniteDiversityInteger(generation);
+    if (requestedGeneration === null) return null;
+
+    const generationMetrics = idea?.generation_metrics;
+    if (!generationMetrics) return null;
+
+    let record = null;
+    if (Array.isArray(generationMetrics)) {
+        record = generationMetrics.find((row) => {
+            const rowGeneration = firstFiniteDiversityValue(row?.evaluation_generation, row?.generation);
+            return rowGeneration === requestedGeneration;
+        }) || null;
+    } else if (typeof generationMetrics === 'object') {
+        record = generationMetrics[String(requestedGeneration)] || generationMetrics[requestedGeneration] || null;
     }
 
-    const labels = [];
-    const overview = {
-        current: [],
-        cumulative: [],
-        drift: []
+    if (!record || typeof record !== 'object') return null;
+    const recordGeneration = firstFiniteDiversityValue(record.evaluation_generation, record.generation);
+    if (recordGeneration !== null && recordGeneration !== requestedGeneration) return null;
+    return record;
+}
+
+function getFitnessPlotMetricValue(idea, metric, generation = null) {
+    const selection = idea?.selection_metrics || {};
+    const ratings = idea?.ratings || {};
+    const requestedGeneration = toFiniteDiversityInteger(generation);
+    const generationRecord = getFitnessPlotGenerationMetricRecord(idea, requestedGeneration);
+    if (generationRecord) {
+        const snapshotValue = firstFiniteDiversityValue(generationRecord[metric]);
+        if (snapshotValue !== null) return snapshotValue;
+    }
+
+    const selectionGeneration = getFitnessPlotSelectionGeneration(idea);
+    const hasGenerationStampedSelection = selectionGeneration !== null && requestedGeneration !== null;
+    const selectionMatchesGeneration = !hasGenerationStampedSelection || selectionGeneration === requestedGeneration;
+
+    if (!selectionMatchesGeneration) {
+        return null;
+    }
+
+    const selectionOnlyAliases = {
+        fitness: [selection.fitness],
+        elo: [selection.elo],
+        diversity: [selection.diversity]
     };
-    const islands = {
-        meanWithin: [],
-        interIsland: [],
-        separationRatio: [],
-        perIsland: new Map()
+    const fallbackAliases = {
+        fitness: [selection.fitness, idea?.fitness],
+        elo: [selection.elo, idea?.elo, ratings.auto, ratings.manual],
+        diversity: [selection.diversity, idea?.diversity_score, idea?.diversity]
     };
-    let latest = null;
-    let hasIslandData = false;
+    const aliases = hasGenerationStampedSelection
+        ? selectionOnlyAliases
+        : fallbackAliases;
+    const candidates = aliases[metric] || [];
+    for (const candidate of candidates) {
+        const numeric = toFiniteDiversityNumber(candidate);
+        if (numeric !== null) return numeric;
+    }
+    return null;
+}
 
-    diversityHistory.forEach((diversityData, index) => {
-        if (!diversityData) {
-            return;
+function summarizeFitnessPlotValues(values, fallbackValue = null) {
+    const finiteValues = (values || [])
+        .map(value => toFiniteDiversityNumber(value))
+        .filter(value => value !== null);
+    if (finiteValues.length === 0) {
+        const fallback = toFiniteDiversityNumber(fallbackValue);
+        if (fallback !== null) {
+            return {
+                average: fallback,
+                best: fallback,
+                low: fallback,
+                spread: 0,
+                count: 1
+            };
         }
+        return { average: null, best: null, low: null, spread: null, count: 0 };
+    }
 
-        if (diversityData.enabled === false || diversityData.error) {
-            return;
-        }
+    const total = finiteValues.reduce((sum, value) => sum + value, 0);
+    const best = Math.max(...finiteValues);
+    const low = Math.min(...finiteValues);
+    return {
+        average: total / finiteValues.length,
+        best,
+        low,
+        spread: best - low,
+        count: finiteValues.length
+    };
+}
 
-        const generation = getSnapshotGeneration(diversityData, index);
-        const label = String(generation);
-        const current = getCurrentGenerationDiversity(diversityData, generation);
-        const cumulative = firstFiniteDiversityValue(
-            diversityData?.analytics?.cumulative_diversity,
-            diversityData?.diversity_score,
-            diversityData?.overall_diversity,
-            diversityData?.score
+function buildFitnessPlotSummaries(population, generation) {
+    const summaries = {};
+    getFitnessPlotMetricKeys().forEach((metric) => {
+        const values = population.map(idea => getFitnessPlotMetricValue(idea, metric, generation));
+        summaries[metric] = summarizeFitnessPlotValues(values);
+    });
+    return summaries;
+}
+
+function appendFitnessPlotSummaries(processedData, generation, summaries, options = {}) {
+    const hasMetricData = getFitnessPlotMetricKeys().some(metric => summaries[metric]?.count > 0);
+    if (!hasMetricData && !options.includeEmpty) return false;
+
+    processedData.labels.push(String(generation));
+    getFitnessPlotMetricKeys().forEach((metric) => {
+        const summary = summaries[metric] || summarizeFitnessPlotValues([]);
+        processedData.metrics[metric].average.push(summary.average);
+        processedData.metrics[metric].best.push(summary.best);
+        processedData.metrics[metric].low.push(summary.low);
+        processedData.metrics[metric].spread.push(summary.spread);
+        processedData.metrics[metric].count.push(summary.count);
+    });
+
+    processedData.latest = {
+        generation,
+        ...summaries
+    };
+    return true;
+}
+
+function ensureFitnessPlotGeneration(processedData, generation) {
+    const label = String(generation);
+    if (processedData.labels.includes(label)) return;
+    const emptySummaries = buildFitnessPlotSummaries([], generation);
+    appendFitnessPlotSummaries(processedData, generation, emptySummaries, { includeEmpty: true });
+}
+
+function buildIslandDiversitySeries(labels, diversityHistory, islandDiversityHistory) {
+    const islandSnapshots = buildIslandDiversitySnapshotMap(diversityHistory, islandDiversityHistory);
+    const islandIds = new Set();
+    islandSnapshots.forEach((snapshot) => {
+        getIslandDiversityRows(snapshot).forEach((row) => {
+            const islandId = toFiniteDiversityInteger(row?.island_id);
+            if (islandId !== null) islandIds.add(islandId);
+        });
+    });
+
+    const sortedIslandIds = Array.from(islandIds).sort((a, b) => a - b);
+    const islandSeries = {};
+    sortedIslandIds.forEach((islandId) => {
+        islandSeries[String(islandId)] = labels.map(() => null);
+    });
+
+    const series = {
+        mean: [],
+        inter: [],
+        separation: [],
+        islandSeries,
+        latest: null
+    };
+
+    labels.forEach((label, index) => {
+        const generation = toFiniteDiversityInteger(label);
+        const snapshot = generation === null ? null : islandSnapshots.get(generation);
+        const mean = firstFiniteDiversityValue(
+            snapshot?.mean_island_diversity,
+            snapshot?.analytics?.mean_island_diversity
         );
-        const drift = firstFiniteDiversityValue(
-            diversityData?.analytics?.inter_generation_diversity,
-            diversityData?.inter_generation_diversity
+        const inter = firstFiniteDiversityValue(
+            snapshot?.inter_island_diversity,
+            snapshot?.analytics?.inter_island_diversity
         );
-        const meanWithin = firstFiniteDiversityValue(
-            diversityData?.analytics?.mean_island_diversity,
-            diversityData?.mean_island_diversity
-        );
-        const interIsland = firstFiniteDiversityValue(
-            diversityData?.analytics?.inter_island_diversity,
-            diversityData?.inter_island_diversity
-        );
-        const separationRatio = firstFiniteDiversityValue(
-            diversityData?.analytics?.island_separation_ratio,
-            diversityData?.island_separation_ratio
+        const separation = firstFiniteDiversityValue(
+            snapshot?.island_separation_ratio,
+            snapshot?.analytics?.island_separation_ratio
         );
 
-        labels.push(label);
-        overview.current.push(current);
-        overview.cumulative.push(cumulative);
-        overview.drift.push(drift);
-        islands.meanWithin.push(meanWithin);
-        islands.interIsland.push(interIsland);
-        islands.separationRatio.push(separationRatio);
+        series.mean.push(mean);
+        series.inter.push(inter);
+        series.separation.push(separation);
 
-        getSnapshotIslandRows(diversityData).forEach((row) => {
-            const islandId = Number(row?.island_id);
-            if (!Number.isInteger(islandId)) return;
-            const value = firstFiniteDiversityValue(
-                row.current_generation_diversity,
-                row.diversity_score,
-                row.score
-            );
-            if (!islands.perIsland.has(islandId)) {
-                islands.perIsland.set(islandId, []);
+        const islandRows = getIslandDiversityRows(snapshot);
+        islandRows.forEach((row) => {
+            const islandId = toFiniteDiversityInteger(row?.island_id);
+            if (islandId === null) return;
+            const key = String(islandId);
+            if (!series.islandSeries[key]) {
+                series.islandSeries[key] = labels.map(() => null);
             }
-            islands.perIsland.get(islandId)[labels.length - 1] = value;
-            hasIslandData = true;
+            series.islandSeries[key][index] = firstFiniteDiversityValue(row?.diversity_score);
         });
 
-        latest = {
-            generation,
-            current,
-            cumulative,
-            drift,
-            meanWithin,
-            interIsland,
-            separationRatio,
-            islandCount: Number(diversityData?.analytics?.island_count ?? diversityData?.island_count) || null
-        };
-    });
-
-    islands.perIsland.forEach((series) => {
-        for (let i = 0; i < labels.length; i += 1) {
-            if (series[i] === undefined) {
-                series[i] = null;
-            }
+        if (snapshot) {
+            series.latest = {
+                generation,
+                mean,
+                inter,
+                separation,
+                islandCount: islandRows.length
+            };
         }
     });
 
-    return {
-        labels,
-        overview,
-        islands,
-        latest,
-        hasIslandData
-    };
+    return series;
+}
+
+function processDiversityData(diversityHistory, generationHistory = null, islandDiversityHistory = []) {
+    const processedData = createEmptyFitnessPlotData();
+    const generationRows = normalizeGenerationHistory(generationHistory);
+
+    if (generationRows.length > 0) {
+        generationRows.forEach((generationData, index) => {
+            const generation = toFiniteDiversityInteger(generationData?.generation) ?? index;
+            const population = getGenerationPopulation(generationData);
+            const summaries = buildFitnessPlotSummaries(population, generation);
+            appendFitnessPlotSummaries(processedData, generation, summaries, { includeEmpty: population.length > 0 });
+        });
+    } else {
+        (Array.isArray(diversityHistory) ? diversityHistory : []).forEach((snapshot, index) => {
+            if (!snapshot || snapshot.enabled === false || snapshot.error) return;
+            const generation = getSnapshotGeneration(snapshot, index);
+            const summaries = buildFitnessPlotSummaries([], generation);
+            appendFitnessPlotSummaries(processedData, generation, summaries);
+        });
+    }
+
+    const islandSnapshots = buildIslandDiversitySnapshotMap(diversityHistory, islandDiversityHistory);
+    islandSnapshots.forEach((_snapshot, generation) => {
+        ensureFitnessPlotGeneration(processedData, generation);
+    });
+    processedData.islandDiversity = buildIslandDiversitySeries(
+        processedData.labels,
+        diversityHistory,
+        islandDiversityHistory
+    );
+    return processedData;
 }
 
 function getDiversityDatasetStyle(color, options = {}) {
@@ -6270,62 +7584,70 @@ function getDiversityDatasetStyle(color, options = {}) {
     };
 }
 
-function getDiversityIslandColor(islandId) {
+function getIslandDiversityColor(index) {
     const colors = [
-        'rgba(37, 99, 235, 1)',
-        'rgba(5, 150, 105, 1)',
-        'rgba(220, 38, 38, 1)',
-        'rgba(124, 58, 237, 1)',
-        'rgba(217, 119, 6, 1)'
+        'rgba(20, 184, 166, 1)',
+        'rgba(59, 130, 246, 1)',
+        'rgba(168, 85, 247, 1)',
+        'rgba(245, 158, 11, 1)',
+        'rgba(236, 72, 153, 1)'
     ];
-    return colors[Math.abs(Number(islandId) || 0) % colors.length];
+    return colors[index % colors.length];
 }
 
-function getDiversityChartDatasets(processedData, mode = diversityChartMode) {
-    if (mode === 'islands') {
-        const datasets = [
-            {
-                label: 'Mean Within-Island Diversity',
-                data: processedData?.islands?.meanWithin || [],
-                ...getDiversityDatasetStyle('rgba(5, 150, 105, 1)', { fill: true, borderWidth: 3 })
-            },
-            {
-                label: 'Inter-Island Separation',
-                data: processedData?.islands?.interIsland || [],
-                ...getDiversityDatasetStyle('rgba(217, 119, 6, 1)', { borderWidth: 3 })
-            }
-        ];
-        const perIsland = processedData?.islands?.perIsland;
-        if (perIsland instanceof Map) {
-            [...perIsland.keys()].sort((a, b) => a - b).forEach((islandId) => {
-                datasets.push({
-                    label: `Island ${islandId + 1}`,
-                    data: perIsland.get(islandId),
-                    ...getDiversityDatasetStyle(getDiversityIslandColor(islandId), {
-                        pointRadius: 3,
-                        borderDash: [4, 4]
-                    })
-                });
-            });
+function getIslandDiversityDatasets(processedData) {
+    const islandData = processedData?.islandDiversity || createEmptyIslandDiversitySeries();
+    const datasets = [
+        {
+            label: 'Mean Island Diversity',
+            data: islandData.mean || [],
+            ...getDiversityDatasetStyle('rgba(5, 150, 105, 1)', { fill: true, borderWidth: 3 })
+        },
+        {
+            label: 'Inter-Island Diversity',
+            data: islandData.inter || [],
+            ...getDiversityDatasetStyle('rgba(37, 99, 235, 1)', { borderWidth: 2.5, borderDash: [7, 4] })
         }
-        return datasets;
-    }
+    ];
 
+    Object.keys(islandData.islandSeries || {})
+        .sort((a, b) => Number(a) - Number(b))
+        .forEach((islandId, index) => {
+            datasets.push({
+                label: `Island ${Number(islandId) + 1}`,
+                data: islandData.islandSeries[islandId] || [],
+                ...getDiversityDatasetStyle(getIslandDiversityColor(index), {
+                    borderWidth: 2,
+                    pointRadius: 3
+                })
+            });
+        });
+
+    return datasets;
+}
+
+function getDiversityChartDatasets(processedData, mode = fitnessPlotMetric, scope = fitnessPlotScope) {
+    const metric = normalizeFitnessPlotMetric(mode);
+    if (metric === 'diversity' && normalizeFitnessPlotScope(scope) === 'islands') {
+        return getIslandDiversityDatasets(processedData);
+    }
+    const config = getFitnessPlotMetricConfig(metric);
+    const series = processedData?.metrics?.[metric] || createEmptyFitnessMetricSeries();
     return [
         {
-            label: 'Current Population Diversity',
-            data: processedData?.overview?.current || [],
-            ...getDiversityDatasetStyle('rgba(79, 70, 229, 1)', { fill: true, borderWidth: 3 })
+            label: config.averageLabel,
+            data: series.average || [],
+            ...getDiversityDatasetStyle(config.colors.average, { fill: true, borderWidth: 3 })
         },
         {
-            label: 'Cumulative Archive Diversity',
-            data: processedData?.overview?.cumulative || [],
-            ...getDiversityDatasetStyle('rgba(14, 165, 233, 1)', { borderWidth: 2 })
+            label: config.bestLabel,
+            data: series.best || [],
+            ...getDiversityDatasetStyle(config.colors.best, { borderWidth: 2.5 })
         },
         {
-            label: 'Generation Drift',
-            data: processedData?.overview?.drift || [],
-            ...getDiversityDatasetStyle('rgba(16, 185, 129, 1)', { borderDash: [6, 4] })
+            label: config.lowLabel,
+            data: series.low || [],
+            ...getDiversityDatasetStyle(config.colors.low, { borderDash: [6, 4] })
         }
     ];
 }
@@ -6335,36 +7657,48 @@ function formatDiversityMetric(value, digits = 3) {
     return Number.isFinite(numeric) ? numeric.toFixed(digits) : '-';
 }
 
-function renderDiversitySummary(latest) {
+function formatFitnessPlotMetric(value, metric = fitnessPlotMetric, digits = null) {
+    const config = getFitnessPlotMetricConfig(metric);
+    const resolvedDigits = Number.isInteger(digits) ? digits : config.digits;
+    return formatDiversityMetric(value, resolvedDigits);
+}
+
+function renderDiversitySummary(latest, processedData = diversityData) {
     const summary = document.getElementById('diversity-summary');
     if (!summary) return;
+    if (fitnessPlotMetric === 'diversity' && fitnessPlotScope === 'islands') {
+        renderIslandDiversitySummary(processedData?.islandDiversity?.latest || null);
+        return;
+    }
     if (!latest) {
         summary.innerHTML = '';
         return;
     }
 
+    const config = getFitnessPlotMetricConfig(fitnessPlotMetric);
+    const metricSummary = latest[fitnessPlotMetric] || {};
+    const count = Number(metricSummary.count) || 0;
+    const generationHint = latest.generation === 0 ? 'Initial generation' : `Generation ${latest.generation}`;
     const items = [
         {
-            label: 'Current population',
-            value: formatDiversityMetric(latest.current),
-            hint: latest.generation === 0 ? 'Initial generation' : `Generation ${latest.generation}`
+            label: `Average ${config.label}`,
+            value: formatFitnessPlotMetric(metricSummary.average, fitnessPlotMetric),
+            hint: count > 0 ? `${count} ideas in ${generationHint.toLowerCase()}` : generationHint
         },
         {
-            label: 'Cumulative archive',
-            value: formatDiversityMetric(latest.cumulative),
-            hint: 'All ideas seen so far'
+            label: config.bestLabel,
+            value: formatFitnessPlotMetric(metricSummary.best, fitnessPlotMetric),
+            hint: 'Top population value'
         },
         {
-            label: 'Inter-island',
-            value: formatDiversityMetric(latest.interIsland),
-            hint: latest.islandCount && latest.islandCount > 1
-                ? `${latest.islandCount} islands`
-                : 'Requires 2+ islands'
+            label: config.lowLabel,
+            value: formatFitnessPlotMetric(metricSummary.low, fitnessPlotMetric),
+            hint: 'Lowest population value'
         },
         {
-            label: 'Island separation',
-            value: formatDiversityMetric(latest.separationRatio, 2),
-            hint: 'Inter / within ratio'
+            label: 'Spread',
+            value: formatFitnessPlotMetric(metricSummary.spread, fitnessPlotMetric),
+            hint: 'Best minus lowest'
         }
     ];
 
@@ -6377,21 +7711,109 @@ function renderDiversitySummary(latest) {
     `).join('');
 }
 
-function updateDiversityModeAvailability(processedData) {
-    const islandsButton = document.querySelector('[data-diversity-mode="islands"]');
-    if (!islandsButton) return;
-    const hasIslandData = Boolean(processedData?.hasIslandData)
-        || (processedData?.latest?.islandCount && processedData.latest.islandCount > 1);
-    islandsButton.disabled = !hasIslandData;
-    islandsButton.title = hasIslandData
-        ? 'Show island-level diversity'
-        : 'Island diversity requires an island run';
-    if (!hasIslandData && diversityChartMode === 'islands') {
-        diversityChartMode = 'overview';
+function renderIslandDiversitySummary(latestIsland) {
+    const summary = document.getElementById('diversity-summary');
+    if (!summary) return;
+    if (!latestIsland) {
+        summary.innerHTML = '';
+        return;
     }
-    document.querySelectorAll('[data-diversity-mode]').forEach((button) => {
-        button.classList.toggle('active', button.dataset.diversityMode === diversityChartMode);
+
+    const generationHint = latestIsland.generation === 0
+        ? 'Initial generation'
+        : `Generation ${latestIsland.generation}`;
+    const items = [
+        {
+            label: 'Mean Island Diversity',
+            value: formatFitnessPlotMetric(latestIsland.mean, 'diversity'),
+            hint: generationHint
+        },
+        {
+            label: 'Inter-Island Diversity',
+            value: formatFitnessPlotMetric(latestIsland.inter, 'diversity'),
+            hint: 'Distance between island centroids'
+        },
+        {
+            label: 'Separation Ratio',
+            value: formatDiversityMetric(latestIsland.separation, 2),
+            hint: 'Inter-island divided by mean island diversity'
+        },
+        {
+            label: 'Islands',
+            value: Number.isFinite(Number(latestIsland.islandCount)) ? String(latestIsland.islandCount) : '-',
+            hint: 'Tracked island populations'
+        }
+    ];
+
+    summary.innerHTML = items.map(item => `
+        <div class="diversity-summary-item">
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(item.value)}</strong>
+            <small>${escapeHtml(item.hint)}</small>
+        </div>
+    `).join('');
+}
+
+function hasFitnessPlotMetricData(processedData, metric) {
+    const series = processedData?.metrics?.[metric];
+    return Boolean(series?.average?.some(value => toFiniteDiversityNumber(value) !== null));
+}
+
+function hasIslandDiversityData(processedData) {
+    const islandData = processedData?.islandDiversity;
+    if (!islandData) return false;
+    if ((islandData.mean || []).some(value => toFiniteDiversityNumber(value) !== null)) return true;
+    if ((islandData.inter || []).some(value => toFiniteDiversityNumber(value) !== null)) return true;
+    return Object.values(islandData.islandSeries || {}).some(series =>
+        (series || []).some(value => toFiniteDiversityNumber(value) !== null)
+    );
+}
+
+function updateFitnessScopeAvailability(processedData) {
+    const buttons = document.querySelectorAll('[data-fitness-scope]');
+    if (!buttons.length) return;
+
+    const islandAvailable = fitnessPlotMetric === 'diversity' && hasIslandDiversityData(processedData);
+    if (fitnessPlotScope === 'islands' && !islandAvailable) {
+        fitnessPlotScope = 'population';
+    }
+
+    buttons.forEach((button) => {
+        const scope = normalizeFitnessPlotScope(button.dataset.fitnessScope);
+        const enabled = scope === 'population' || islandAvailable;
+        button.disabled = !enabled;
+        button.title = enabled
+            ? (scope === 'population' ? 'Show population summary' : 'Show per-island diversity')
+            : 'Island diversity values are not available for this metric';
+        button.classList.toggle('active', scope === fitnessPlotScope);
     });
+}
+
+function updateFitnessMetricAvailability(processedData) {
+    const buttons = document.querySelectorAll('[data-fitness-metric]');
+    if (!buttons.length) {
+        updateFitnessScopeAvailability(processedData);
+        return;
+    }
+
+    const availableMetrics = getFitnessPlotMetricKeys()
+        .filter(metric => hasFitnessPlotMetricData(processedData, metric) || (
+            metric === 'diversity' && hasIslandDiversityData(processedData)
+        ));
+    if (availableMetrics.length > 0 && !availableMetrics.includes(fitnessPlotMetric)) {
+        fitnessPlotMetric = availableMetrics[0];
+    }
+
+    buttons.forEach((button) => {
+        const metric = normalizeFitnessPlotMetric(button.dataset.fitnessMetric);
+        const hasData = availableMetrics.includes(metric);
+        button.disabled = availableMetrics.length > 0 && !hasData;
+        button.title = hasData
+            ? `Show ${getFitnessPlotMetricConfig(metric).label}`
+            : `No ${getFitnessPlotMetricConfig(metric).label} values available yet`;
+        button.classList.toggle('active', metric === fitnessPlotMetric);
+    });
+    updateFitnessScopeAvailability(processedData);
 }
 
 function buildDiversitySignature(processedData) {
@@ -6401,16 +7823,10 @@ function buildDiversitySignature(processedData) {
 
     return JSON.stringify({
         labels: processedData.labels,
-        overview: processedData.overview,
-        islands: {
-            meanWithin: processedData.islands?.meanWithin || [],
-            interIsland: processedData.islands?.interIsland || [],
-            separationRatio: processedData.islands?.separationRatio || [],
-            perIsland: processedData.islands?.perIsland instanceof Map
-                ? [...processedData.islands.perIsland.entries()]
-                : []
-        },
-        mode: diversityChartMode
+        metrics: processedData.metrics,
+        islandDiversity: processedData.islandDiversity,
+        metric: fitnessPlotMetric,
+        scope: fitnessPlotScope
     });
 }
 
@@ -6448,8 +7864,10 @@ function scheduleDiversityChartResize(delay = 50) {
 /**
  * Update the diversity chart with new data
  * @param {Array} diversityHistory - Updated diversity history
+ * @param {Array} generationHistory - Population history with per-idea metrics
+ * @param {Array} islandDiversityHistory - Per-island diversity snapshots
  */
-function updateDiversityChart(diversityHistory) {
+function updateDiversityChart(diversityHistory, generationHistory = null, islandDiversityHistory = []) {
     if (!diversityChart) {
         initializeDiversityChart();
     }
@@ -6486,10 +7904,24 @@ function updateDiversityChart(diversityHistory) {
 
     try {
         // Process the data
-        const processedData = processDiversityData(diversityHistory);
-        updateDiversityModeAvailability(processedData);
+        const processedData = processDiversityData(diversityHistory, generationHistory, islandDiversityHistory);
+        updateFitnessMetricAvailability(processedData);
         const nextSignature = buildDiversitySignature(processedData);
-        renderDiversitySummary(processedData.latest);
+        if (processedData.labels.length === 0) {
+            diversityChart.data.labels = [];
+            diversityChart.data.datasets = getDiversityChartDatasets(processedData, fitnessPlotMetric, fitnessPlotScope);
+            diversityChart.options.scales = getDiversityChartScales();
+            diversityChart.update('none');
+            diversityData = processedData;
+            lastDiversityRenderSignature = nextSignature;
+            renderDiversitySummary(null, processedData);
+            const plotSection = document.getElementById('diversity-plot-section');
+            if (plotSection) {
+                plotSection.style.display = 'none';
+            }
+            return false;
+        }
+        renderDiversitySummary(processedData.latest, processedData);
         revealDiversityPlot(processedData);
 
         // Skip data replacement when unchanged, but still resize because Chart.js
@@ -6503,7 +7935,7 @@ function updateDiversityChart(diversityHistory) {
 
         // Update chart data
         diversityChart.data.labels = processedData.labels;
-        diversityChart.data.datasets = getDiversityChartDatasets(processedData, diversityChartMode);
+        diversityChart.data.datasets = getDiversityChartDatasets(processedData, fitnessPlotMetric, fitnessPlotScope);
         diversityChart.options.scales = getDiversityChartScales();
         diversityData = processedData;
         lastDiversityRenderSignature = nextSignature;
@@ -6567,7 +7999,7 @@ function showDiversityPlotLoading() {
             loadingDiv.className = 'diversity-loading';
             loadingDiv.innerHTML = `
                 <div class="loading-spinner"></div>
-                <span>Calculating diversity metrics...</span>
+                <span>Calculating population metrics...</span>
             `;
             plotContainer.appendChild(loadingDiv);
         }
@@ -6594,18 +8026,16 @@ function resetDiversityPlot() {
 
     if (diversityChart) {
         diversityChart.data.labels = [];
-        diversityChart.data.datasets = getDiversityChartDatasets(null, diversityChartMode);
+        diversityChart.data.datasets = getDiversityChartDatasets(null, fitnessPlotMetric, fitnessPlotScope);
         diversityChart.update();
     }
 
     // Reset global diversity data
-    diversityData = {
-        labels: [],
-        overview: {},
-        islands: {},
-        latest: null
-    };
-    renderDiversitySummary(null);
+    diversityData = createEmptyFitnessPlotData();
+    fitnessPlotMetric = 'fitness';
+    fitnessPlotScope = 'population';
+    updateFitnessMetricAvailability(diversityData);
+    renderDiversitySummary(null, diversityData);
     lastDiversityRenderSignature = '';
     diversityPlotSized = false;
 }
@@ -6653,8 +8083,22 @@ function ensureDiversityChartSizing() {
  * @param {Object} progressData - Progress update data containing diversity_history
  */
 function handleDiversityUpdate(progressData) {
-    if (progressData && progressData.diversity_history) {
-        updateDiversityChart(progressData.diversity_history);
+    if (progressData && (progressData.diversity_history || progressData.history)) {
+        const renderedHistory = Array.isArray(generations) && generations.length > 0 ? generations : null;
+        const generationHistory =
+            progressData.history ||
+            currentEvolutionData?.history ||
+            renderedHistory ||
+            null;
+        const islandDiversityHistory =
+            progressData.island_diversity_history ||
+            currentEvolutionData?.island_diversity_history ||
+            [];
+        updateDiversityChart(
+            progressData.diversity_history || currentEvolutionData?.diversity_history || [],
+            generationHistory,
+            islandDiversityHistory
+        );
     }
 }
 
@@ -6675,8 +8119,11 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    document.querySelectorAll('[data-diversity-mode]').forEach((button) => {
-        button.addEventListener('click', () => setDiversityChartMode(button.dataset.diversityMode));
+    document.querySelectorAll('[data-fitness-metric]').forEach((button) => {
+        button.addEventListener('click', () => setFitnessPlotMetric(button.dataset.fitnessMetric));
+    });
+    document.querySelectorAll('[data-fitness-scope]').forEach((button) => {
+        button.addEventListener('click', () => setFitnessPlotScope(button.dataset.fitnessScope));
     });
 });
 
@@ -6799,9 +8246,10 @@ function showPromptModal(ideaIndex, promptType, generationIndex = 0) {
     }
 }
 
-const THINKING_UI_CONFIGS = {
+const FALLBACK_THINKING_UI_CONFIGS = {
     'gemini-2.5-flash-lite': {
         supportsThinking: true,
+        supportsBudget: true,
         allowOff: true,
         allowMedium: true,
         defaultMode: 'off',
@@ -6813,31 +8261,34 @@ const THINKING_UI_CONFIGS = {
     },
     'gemini-2.5-flash': {
         supportsThinking: true,
+        supportsBudget: true,
         allowOff: true,
         allowMedium: true,
-        defaultMode: 'off',
-        min: 128,
+        defaultMode: 'high',
+        min: 0,
         max: 24576,
         step: 128,
         defaultBudget: 1024,
-        help: 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+        help: 'Default is High dynamic thinking. Use Off for speed/cost or set a custom token budget when needed.'
     },
     'gemini-2.5-pro': {
         supportsThinking: true,
+        supportsBudget: true,
         allowOff: false,
         allowMedium: true,
-        defaultMode: 'low',
+        defaultMode: 'high',
         min: 128,
         max: 32768,
         step: 128,
         defaultBudget: 1024,
-        help: 'Default is Low on Pro models. Increase to Medium/High or set a custom budget for deeper reasoning.'
+        help: 'Default is High dynamic thinking. Use Low/Medium or set a custom budget to tune latency and depth.'
     },
     'gemini-3-flash-preview': {
         supportsThinking: true,
+        supportsBudget: false,
         allowOff: true,
         allowMedium: true,
-        defaultMode: 'minimal',
+        defaultMode: 'low',
         offValue: 'minimal',
         offLabel: 'Minimal',
         offDescription: ' - Lowest Gemini 3 thinking level',
@@ -6845,13 +8296,14 @@ const THINKING_UI_CONFIGS = {
         max: 24576,
         step: 128,
         defaultBudget: 1024,
-        help: 'Default is Minimal for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+        help: 'Default is Low. Use Medium/High for deeper reasoning or Minimal to reduce latency and cost.'
     },
     'gemini-3.1-flash-lite-preview': {
         supportsThinking: true,
+        supportsBudget: false,
         allowOff: true,
         allowMedium: true,
-        defaultMode: 'minimal',
+        defaultMode: 'low',
         offValue: 'minimal',
         offLabel: 'Minimal',
         offDescription: ' - Lowest Gemini 3 thinking level',
@@ -6859,20 +8311,88 @@ const THINKING_UI_CONFIGS = {
         max: 24576,
         step: 128,
         defaultBudget: 1024,
-        help: 'Default is Minimal for speed/cost. Use Low/Medium/High or a custom token budget when needed.'
+        help: 'Default is Low. Use Medium/High for deeper reasoning or Minimal to reduce latency and cost.'
     },
     'gemini-3.1-pro-preview': {
         supportsThinking: true,
+        supportsBudget: false,
         allowOff: false,
-        allowMedium: false,
+        allowMedium: true,
         defaultMode: 'low',
         min: 128,
         max: 32768,
         step: 128,
         defaultBudget: 1024,
-        help: 'Default is Low on Pro models. Increase to Medium/High or set a custom budget for deeper reasoning.'
+        help: 'Default is Low. Use Medium/High for deeper reasoning.'
     }
 };
+
+function buildThinkingHelp(config, lowestLevel) {
+    if (config.supports_thinking_level && !config.supports_thinking_budget) {
+        if (lowestLevel === 'minimal') {
+            return 'Default is Low. Use Medium/High for deeper reasoning or Minimal to reduce latency and cost.';
+        }
+        return 'Default is Low. Use Medium/High for deeper reasoning.';
+    }
+
+    if (config.default_level === 'high') {
+        return 'Default is High dynamic thinking. Use lower presets or a custom token budget to tune latency and depth.';
+    }
+    if (config.allow_off) {
+        return 'Default is Off for speed/cost. Use Low/Medium/High or a custom token budget when needed.';
+    }
+    return 'Default is Low. Use Medium/High or a custom token budget for deeper reasoning.';
+}
+
+function buildThinkingUiConfig(config) {
+    if (!config || !config.supports_thinking) {
+        return { supportsThinking: false };
+    }
+
+    const allowedLevels = Array.isArray(config.allowed_levels) ? config.allowed_levels : [];
+    const lowestLevel = allowedLevels.includes('minimal')
+        ? 'minimal'
+        : (allowedLevels.includes('off') || config.allow_off ? 'off' : null);
+    const minBudget = Number(config.min_budget ?? 0);
+    const maxBudget = Number(config.max_budget ?? 0);
+    let defaultBudget = Number(config.default_budget);
+    if (!Number.isFinite(defaultBudget) || defaultBudget < minBudget) {
+        defaultBudget = Math.min(Math.max(1024, minBudget), maxBudget || 1024);
+    }
+
+    return {
+        supportsThinking: true,
+        supportsBudget: config.supports_thinking_budget === true,
+        allowOff: lowestLevel !== null,
+        allowMedium: allowedLevels.length === 0 || allowedLevels.includes('medium'),
+        defaultMode: config.default_level || (config.default_budget !== null && config.default_budget !== undefined ? 'custom' : 'low'),
+        offValue: lowestLevel || 'off',
+        offLabel: lowestLevel === 'minimal' ? 'Minimal' : 'Off',
+        offDescription: lowestLevel === 'minimal'
+            ? ' - Lowest Gemini 3 thinking level'
+            : ' - Prefer speed and lower cost',
+        min: Number.isFinite(minBudget) ? minBudget : 0,
+        max: Number.isFinite(maxBudget) ? maxBudget : 0,
+        step: 128,
+        defaultBudget,
+        help: buildThinkingHelp(config, lowestLevel)
+    };
+}
+
+function buildThinkingUiConfigs(serverConfigs) {
+    if (!serverConfigs || typeof serverConfigs !== 'object') {
+        return null;
+    }
+
+    return Object.fromEntries(
+        Object.entries(serverConfigs).map(([modelName, config]) => [
+            modelName,
+            buildThinkingUiConfig(config)
+        ])
+    );
+}
+
+const THINKING_UI_CONFIGS = buildThinkingUiConfigs(window.IDEA_THINKING_MODEL_CONFIG) || FALLBACK_THINKING_UI_CONFIGS;
 
 function getThinkingModelConfig(modelName) {
     return THINKING_UI_CONFIGS[modelName] || null;
@@ -6930,12 +8450,15 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
     const mediumRadio = document.getElementById('thinkingMedium');
     const highRadio = document.getElementById('thinkingHigh');
     const customRadio = document.getElementById('thinkingCustomBudget');
+    const customBudgetOption = document.getElementById('thinkingCustomBudgetOption') || customRadio?.closest('.form-check');
 
     if (!config || !thinkingBudgetSlider || !thinkingBudgetHelp || !customRadio) return;
 
     // Toggle option availability by model capability.
+    const supportsBudget = config.supportsBudget !== false;
     if (offOption) offOption.style.display = config.allowOff ? 'block' : 'none';
     if (mediumOption) mediumOption.style.display = config.allowMedium ? 'block' : 'none';
+    if (customBudgetOption) customBudgetOption.style.display = supportsBudget ? 'block' : 'none';
     if (offRadio) offRadio.value = config.offValue || 'off';
     if (offLabel) offLabel.textContent = config.offLabel || 'Off';
     if (offDescription) offDescription.textContent = config.offDescription || ' - Prefer speed and lower cost';
@@ -6953,6 +8476,9 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
     if (effectiveDefault === 'medium' && !config.allowMedium) {
         effectiveDefault = 'low';
     }
+    if (effectiveDefault === 'custom' && !supportsBudget) {
+        effectiveDefault = 'high';
+    }
 
     if (offRadio && effectiveDefault === offRadio.value) {
         offRadio.checked = true;
@@ -6962,8 +8488,10 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
         mediumRadio.checked = true;
     } else if (effectiveDefault === 'high' && highRadio) {
         highRadio.checked = true;
-    } else {
+    } else if (supportsBudget) {
         customRadio.checked = true;
+    } else if (highRadio) {
+        highRadio.checked = true;
     }
 
     thinkingBudgetSlider.min = String(config.min);
@@ -7028,7 +8556,7 @@ function getThinkingSettings() {
     const customRadio = document.getElementById('thinkingCustomBudget');
     const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
 
-    if (customRadio && customRadio.checked && thinkingBudgetSlider) {
+    if (config.supportsBudget !== false && customRadio && customRadio.checked && thinkingBudgetSlider) {
         const budget = parseInt(thinkingBudgetSlider.value || '0', 10);
         return {
             thinkingLevel: null,
@@ -7048,7 +8576,7 @@ function getThinkingSettings() {
         return { thinkingLevel: 'high', thinkingBudget: null };
     }
 
-    if (config.defaultMode === 'custom' && thinkingBudgetSlider) {
+    if (config.supportsBudget !== false && config.defaultMode === 'custom' && thinkingBudgetSlider) {
         const budget = parseInt(thinkingBudgetSlider.value || '0', 10);
         return {
             thinkingLevel: null,

@@ -1,4 +1,5 @@
 # viewer.py
+import logging
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +27,7 @@ from idea.config import (
     DEFAULT_CREATIVE_TEMP,
     DEFAULT_TOP_P,
     THINKING_MODEL_CONFIG,
+    estimate_generation_token_cost,
     SMTP_SERVER,
     SMTP_PORT,
     SMTP_USERNAME,
@@ -39,13 +41,15 @@ from idea.config import (
 from idea.template_manager import router as template_router
 from idea.prompts.loader import list_available_templates
 from idea.admin import router as admin_router
-from idea.auth import require_auth, UserInfo, get_current_user
+from idea.auth import require_auth, UserInfo, get_current_user, get_dev_auth_client_config
 from fastapi import Depends
 from idea import database as db
 from idea.user_state import user_states, UserEvolutionState
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+logger = logging.getLogger(__name__)
 
 # --- Initialize and configure FastAPI ---
 app = FastAPI()
@@ -274,8 +278,8 @@ async def _refresh_run_state(user_id: str, state: UserEvolutionState, update_dat
             await db.refresh_global_run_lock(state.run_owner_id, RUN_LEASE_SECONDS)
 
         state.run_last_write = now_monotonic
-    except Exception as e:
-        print(f"Warning: failed to persist run state: {e}")
+    except Exception:
+        logger.warning("Failed to persist run state", exc_info=True)
 
 
 def _merge_status_update(state: UserEvolutionState, update_data: Dict[str, Any]) -> None:
@@ -328,6 +332,149 @@ def _attach_live_engine_progress_fields(state: UserEvolutionState) -> None:
         state.status["token_counts"] = get_total_token_count()
 
 
+def _serialize_engine_history(engine: Any) -> List[List[Dict[str, Any]]]:
+    history = getattr(engine, "history", None)
+    if not isinstance(history, list):
+        return []
+    return [[idea_to_dict(idea) for idea in generation] for generation in history]
+
+
+def _get_live_evolution_payload(
+    state: UserEvolutionState,
+    evolution_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the in-memory evolution snapshot when it matches an evolution id."""
+    engine = state.engine
+    live_id = state.status.get("evolution_id") or getattr(engine, "evolution_id", None)
+    if not live_id:
+        return None
+    if evolution_id and live_id != evolution_id:
+        return None
+
+    latest_history = state.latest_data if isinstance(state.latest_data, list) else []
+    engine_history = _serialize_engine_history(engine) if engine is not None else []
+    history = engine_history if len(engine_history) > len(latest_history) else latest_history
+    if not history:
+        return None
+
+    if history is not state.latest_data:
+        state.latest_data = history
+
+    current_generation = state.status.get(
+        "current_generation",
+        getattr(engine, "current_generation", max(0, len(history) - 1)),
+    )
+    total_generations = state.status.get(
+        "total_generations",
+        getattr(engine, "generations", current_generation),
+    )
+
+    payload: Dict[str, Any] = {
+        "evolution_id": live_id,
+        "name": state.status.get("evolution_name")
+        or getattr(engine, "evolution_name", live_id),
+        "status": _derive_run_status(state.status),
+        "config": _engine_config_payload(engine) if engine is not None else {},
+        "current_generation": current_generation,
+        "total_generations": total_generations,
+        "history": history,
+        "history_version": state.history_version,
+        "contexts": state.status.get("contexts", getattr(engine, "contexts", [])),
+        "specific_prompts": state.status.get(
+            "specific_prompts",
+            getattr(engine, "specific_prompts", []),
+        ),
+        "breeding_prompts": state.status.get(
+            "breeding_prompts",
+            getattr(engine, "breeding_prompts", []),
+        ),
+        "tournament_history": state.status.get(
+            "tournament_history",
+            getattr(engine, "tournament_history", []),
+        ),
+        "diversity_history": state.status.get(
+            "diversity_history",
+            getattr(engine, "diversity_history", []),
+        ),
+        "island_diversity_history": state.status.get(
+            "island_diversity_history",
+            getattr(engine, "island_diversity_history", []),
+        ),
+        "migration_history": state.status.get(
+            "migration_history",
+            getattr(engine, "migration_history", []),
+        ),
+        "token_counts": state.status.get("token_counts"),
+    }
+
+    get_total_token_count = getattr(engine, "get_total_token_count", None)
+    if payload["token_counts"] is None and callable(get_total_token_count):
+        payload["token_counts"] = get_total_token_count()
+
+    return payload
+
+
+def _engine_config_payload(engine: EvolutionEngine) -> Dict[str, Any]:
+    return {
+        "idea_type": getattr(engine, "idea_type", get_default_template_id()),
+        "pop_size": getattr(engine, "pop_size", 5),
+        "generations": getattr(engine, "generations", 3),
+        "model_type": getattr(engine, "model_type", DEFAULT_MODEL),
+        "creative_temp": getattr(engine, "creative_temp", DEFAULT_CREATIVE_TEMP),
+        "top_p": getattr(engine, "top_p", DEFAULT_TOP_P),
+        "tournament_rounds": getattr(engine, "tournament_rounds", 1),
+        "tournament_count": getattr(engine, "tournament_count", None),
+        "full_tournament_rounds": getattr(engine, "full_tournament_rounds", None),
+        "thinking_budget": getattr(engine, "thinking_budget", None),
+        "thinking_level": getattr(engine, "thinking_level", None),
+        "max_budget": getattr(engine, "max_budget", None),
+        "mutation_rate": getattr(engine, "mutation_rate", 0.2),
+        "seed_context_pool_size": getattr(engine, "seed_context_pool_size", None),
+        "refine_all_ideas": getattr(engine, "refine_all_ideas", False),
+        "survivor_refinement_rate": getattr(engine, "survivor_refinement_rate", 0.1),
+        "island_count": getattr(engine, "island_count", 2),
+        "migration_rate": getattr(engine, "migration_rate", 0.05),
+        "migration_novelty_protection_quantile": getattr(
+            engine,
+            "migration_novelty_protection_quantile",
+            0.8,
+        ),
+        "replacement_rate": getattr(engine, "replacement_rate", 0.5),
+        "fitness_alpha": getattr(engine, "fitness_alpha", 0.7),
+        "age_decay_rate": getattr(engine, "age_decay_rate", 0.25),
+        "age_decay_floor": getattr(engine, "age_decay_floor", 0.35),
+    }
+
+
+def _get_live_engine_for_identifier(
+    state: UserEvolutionState,
+    identifier: Optional[str],
+) -> Optional[EvolutionEngine]:
+    engine = state.engine
+    if engine is None or not identifier:
+        return None
+    identifiers = {
+        getattr(engine, "evolution_id", None),
+        getattr(engine, "checkpoint_id", None),
+    }
+    if identifier in identifiers:
+        return engine
+    return None
+
+
+def _history_total_ideas(history: Any) -> int:
+    if not isinstance(history, list):
+        return 0
+    return sum(len(generation) for generation in history if isinstance(generation, list))
+
+
+def _apply_history_capabilities(item: Dict[str, Any]) -> None:
+    status = item.get("status")
+    item["can_resume"] = status in ["paused", "in_progress", "force_stopped"]
+    item["can_continue"] = status == "complete"
+    item["can_rate"] = item.get("generations", 0) > 0
+
+
 async def _heartbeat_loop(user_id: str, state: UserEvolutionState) -> None:
     """Background heartbeat to keep leases alive during long steps."""
     try:
@@ -371,8 +518,8 @@ async def _finalize_run_state(user_id: str, state: UserEvolutionState, update_da
         )
         if GLOBAL_MAX_ACTIVE_RUNS == 1:
             await db.release_global_run_lock(state.run_owner_id)
-    except Exception as e:
-        print(f"Warning: failed to finalize run state: {e}")
+    except Exception:
+        logger.warning("Failed to finalize run state", exc_info=True)
     finally:
         state.stop_heartbeat()
 
@@ -393,12 +540,25 @@ class ContactRequest(BaseModel):
 @app.get("/")
 def serve_viewer(request: Request):
     """Serves the viewer page"""
-    return templates.TemplateResponse("viewer.html", {"request": request})
+    return templates.TemplateResponse(
+        request,
+        "viewer.html",
+        {
+            "dev_auth_config": get_dev_auth_client_config(request),
+            "llm_models": LLM_MODELS,
+            "default_model": DEFAULT_MODEL,
+            "thinking_config": THINKING_MODEL_CONFIG,
+        },
+    )
 
 @app.get("/rate")
 def serve_rater(request: Request):
     """Serves the rater page"""
-    return templates.TemplateResponse("rater.html", {"request": request})
+    return templates.TemplateResponse(
+        request,
+        "rater.html",
+        {"dev_auth_config": get_dev_auth_client_config(request)},
+    )
 
 @app.get("/api/user/status")
 async def get_user_status(user: UserInfo = Depends(require_auth)):
@@ -458,9 +618,12 @@ async def send_contact_email(request: ContactRequest):
     """
     try:
         if not SMTP_USERNAME or not SMTP_PASSWORD or not ADMIN_EMAIL:
-            print("SMTP not configured. Message received but not sent.")
-            print(f"From: {request.name} <{request.email}>")
-            print(f"Message: {request.message}")
+            logger.info(
+                "SMTP not configured. Message received from %s <%s>: %s",
+                request.name,
+                request.email,
+                request.message,
+            )
             # Return success even if email not sent, as we logged it (simulated behavior for dev)
             return JSONResponse({
                 "status": "success",
@@ -485,7 +648,7 @@ async def send_contact_email(request: ContactRequest):
 
         return JSONResponse({"status": "success", "message": "Email sent successfully"})
     except Exception as e:
-        print(f"Error sending email: {e}")
+        logger.exception("Error sending contact email")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
@@ -643,6 +806,14 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             print(f"Error parsing age decay rate: {e}")
             age_decay_rate = 0.25
 
+        try:
+            age_decay_floor = float(data.get('ageDecayFloor', 0.35))
+            age_decay_floor = max(0.0, min(1.0, age_decay_floor))
+            print(f"Parsed age decay floor: {age_decay_floor}")
+        except (TypeError, ValueError) as e:
+            print(f"Error parsing age decay floor: {e}")
+            age_decay_floor = 0.35
+
         raw_refine_all_ideas = data.get('refineAllIdeas', False)
         if isinstance(raw_refine_all_ideas, bool):
             refine_all_ideas = raw_refine_all_ideas
@@ -714,6 +885,14 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             thinking_level = None
             thinking_budget = None
         else:
+            allowed_levels = set(model_thinking_cfg.get("allowed_levels") or [])
+            if thinking_level is not None and allowed_levels and thinking_level not in allowed_levels:
+                print(
+                    "Ignoring thinking level unsupported by model:",
+                    f"model={model_type}, thinking_level={thinking_level}",
+                )
+                thinking_level = None
+
             if thinking_budget is not None:
                 # Explicit custom budget takes precedence over level presets.
                 thinking_level = None
@@ -789,6 +968,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             replacement_rate=replacement_rate,
             fitness_alpha=fitness_alpha,
             age_decay_rate=age_decay_rate,
+            age_decay_floor=age_decay_floor,
             thinking_level=thinking_level,
             thinking_budget=thinking_budget,
             max_budget=max_budget,
@@ -846,6 +1026,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             "start_time": start_time,  # Track when evolution started
             "evolution_id": state.engine.evolution_id,
             "evolution_name": state.engine.evolution_name,
+            "config": _engine_config_payload(state.engine),
             "tournament_count": state.engine.tournament_count,
             "full_tournament_rounds": state.engine.full_tournament_rounds,
             "target_tournament_rounds": state.engine.tournament_rounds,
@@ -870,6 +1051,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             "message": "Evolution started",
             "evolution_id": state.engine.evolution_id,
             "evolution_name": state.engine.evolution_name,
+            "config": _engine_config_payload(state.engine),
             "contexts": [],
             "history_version": state.history_version,
             "history_changed": False,
@@ -1282,7 +1464,15 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
 
     # Load the engine from Firestore (works for both checkpoints and evolutions)
     evolution_or_checkpoint_id = checkpoint_id or evolution_id
-    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_or_checkpoint_id, api_key=api_key)
+    live_engine = _get_live_engine_for_identifier(state, evolution_or_checkpoint_id)
+    if live_engine is not None:
+        state.engine = live_engine
+        try:
+            await state.engine.save_checkpoint(status=_derive_run_status(state.status))
+        except Exception:
+            logger.warning("Failed to repair live evolution checkpoint before continue", exc_info=True)
+    else:
+        state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_or_checkpoint_id, api_key=api_key)
 
     if state.engine is None:
         return JSONResponse(
@@ -1415,7 +1605,15 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
     print(f"Continuing saved evolution '{evolution_id}' for {additional_generations} more generations")
 
     # Load evolution from Firestore
-    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_id, api_key=api_key)
+    live_engine = _get_live_engine_for_identifier(state, evolution_id)
+    if live_engine is not None:
+        state.engine = live_engine
+        try:
+            await state.engine.save_checkpoint(status=_derive_run_status(state.status))
+        except Exception:
+            logger.warning("Failed to repair live evolution checkpoint before continue", exc_info=True)
+    else:
+        state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_id, api_key=api_key)
 
     if state.engine is None:
         return JSONResponse(
@@ -1578,6 +1776,8 @@ async def load_engine_from_evolution(evolution_id: str, api_key: Optional[str] =
         engine.diversity_history = data.get('diversity_history', [])
         engine.island_diversity_history = data.get('island_diversity_history', [])
         engine.migration_history = data.get('migration_history', [])
+        comparison_cache = data.get('comparison_cache', {})
+        engine.comparison_cache = comparison_cache if isinstance(comparison_cache, dict) else {}
         engine.current_generation = len(history)
         engine.fitness_elo_stats = data.get("fitness_elo_stats", {"count": 0, "mean": 0.0, "m2": 0.0})
         engine.fitness_diversity_stats = data.get(
@@ -1822,6 +2022,8 @@ def idea_to_dict(idea) -> dict:
             "survivor_refinement_rate",
             "selection_metrics",
             "survival_metrics",
+            "generation_metrics",
+            "rating_evaluations",
         ):
             if key in source:
                 value = source.get(key)
@@ -2200,12 +2402,13 @@ async def get_unified_history(user: UserInfo = Depends(require_auth)):
     Loads from Firestore.
     """
     history_items = []
+    state = await user_states.get(user.uid)
 
     try:
         # 1. Load evolutions from Firestore (user-scoped)
         evolutions = await EvolutionEngine.list_evolutions_for_user(user.uid)
         for ev in evolutions:
-            history_items.append({
+            item = {
                 'id': ev.get('id'),
                 'type': 'evolution',
                 'status': ev.get('status', 'unknown'),
@@ -2218,12 +2421,53 @@ async def get_unified_history(user: UserInfo = Depends(require_auth)):
                 'idea_type': ev.get('idea_type', 'Unknown'),
                 'model_type': ev.get('model_type', 'Unknown'),
                 'total_ideas': ev.get('total_ideas', 0),
-                'can_resume': ev.get('status') in ['paused', 'in_progress', 'force_stopped'],
-                'can_continue': ev.get('status') == 'complete',
-                'can_rate': ev.get('generation', 0) > 0,
+                'config': ev.get('config') or {},
+                'can_use_config': bool(ev.get('config')),
+                'can_resume': False,
+                'can_continue': False,
+                'can_rate': False,
                 'can_rename': True,
                 'can_delete': True,
-            })
+            }
+            live_data = _get_live_evolution_payload(state, item['id'])
+            if live_data:
+                live_history = live_data.get("history", [])
+                item.update({
+                    'status': live_data.get('status', item['status']),
+                    'generations': live_data.get('current_generation', item['generations']),
+                    'total_generations': live_data.get('total_generations', item['total_generations']),
+                    'total_ideas': _history_total_ideas(live_history) or item.get('total_ideas', 0),
+                })
+            _apply_history_capabilities(item)
+            history_items.append(item)
+
+        live_data = _get_live_evolution_payload(state)
+        existing_ids = {item['id'] for item in history_items}
+        if live_data and live_data.get("evolution_id") not in existing_ids:
+            live_history = live_data.get("history", [])
+            item = {
+                'id': live_data.get('evolution_id'),
+                'type': 'evolution',
+                'status': live_data.get('status', 'unknown'),
+                'timestamp': datetime.now().isoformat(),
+                'created_at': getattr(state.engine, "created_at", None),
+                'display_name': live_data.get('name') or live_data.get('evolution_id'),
+                'generations': live_data.get('current_generation', 0),
+                'total_generations': live_data.get('total_generations', 0),
+                'pop_size': len(live_history[-1]) if live_history else 0,
+                'idea_type': getattr(state.engine, "idea_type", "Unknown"),
+                    'model_type': getattr(state.engine, "model_type", "Unknown"),
+                    'total_ideas': _history_total_ideas(live_history),
+                    'config': live_data.get('config') or {},
+                    'can_use_config': bool(live_data.get('config')),
+                    'can_resume': False,
+                'can_continue': False,
+                'can_rate': False,
+                'can_rename': True,
+                'can_delete': True,
+            }
+            _apply_history_capabilities(item)
+            history_items.append(item)
 
         # 2. Load legacy checkpoints from Firestore (for backwards compatibility)
         checkpoints = await EvolutionEngine.list_checkpoints_for_user(user.uid)
@@ -2245,6 +2489,8 @@ async def get_unified_history(user: UserInfo = Depends(require_auth)):
                 'pop_size': cp.get('pop_size', 0),
                 'idea_type': cp.get('idea_type', 'Unknown'),
                 'model_type': cp.get('model_type', 'Unknown'),
+                'config': cp.get('config') or {},
+                'can_use_config': bool(cp.get('config')),
                 'can_resume': cp.get('status') in ['paused', 'in_progress', 'force_stopped'],
                 'can_continue': cp.get('status') == 'complete',
                 'can_rate': cp.get('generation', 0) > 0,
@@ -2281,6 +2527,8 @@ async def get_unified_history(user: UserInfo = Depends(require_auth)):
                     'idea_type': config.get('idea_type') or data.get('idea_type', 'Unknown'),
                     'model_type': config.get('model_type', 'Unknown'),
                     'total_ideas': sum(len(gen) for gen in history),
+                    'config': config,
+                    'can_use_config': bool(config),
                     'can_continue': True,
                     'can_rate': True,
                     'can_rename': False,  # Legacy format
@@ -2360,14 +2608,135 @@ async def delete_evolution_endpoint(evolution_id: str, user: UserInfo = Depends(
             'message': str(e)
         }, status_code=500)
 
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+@app.post('/api/evolution/{evolution_id}/repair')
+async def repair_evolution_endpoint(request: Request, evolution_id: str, user: UserInfo = Depends(require_auth)):
+    """Repair a stale persisted evolution using the browser's cached complete state."""
+    try:
+        body = await request.json()
+        client_data = body.get("data", body) if isinstance(body, dict) else {}
+        if not isinstance(client_data, dict):
+            return JSONResponse({"status": "error", "message": "Invalid repair payload"}, status_code=400)
+
+        client_evolution_id = client_data.get("evolution_id") or client_data.get("evolutionId")
+        if client_evolution_id and client_evolution_id != evolution_id:
+            return JSONResponse({"status": "error", "message": "Evolution id mismatch"}, status_code=400)
+
+        client_history = client_data.get("history")
+        if not isinstance(client_history, list) or not client_history:
+            return JSONResponse({"status": "error", "message": "Repair payload must include history"}, status_code=400)
+
+        existing = await db.get_evolution(user.uid, evolution_id) or {}
+        existing_history = existing.get("history", [])
+        if not isinstance(existing_history, list):
+            existing_history = []
+
+        client_generation = _safe_int(
+            client_data.get("current_generation"),
+            max(0, len(client_history) - 1),
+        )
+        existing_generation = _safe_int(
+            existing.get("current_generation"),
+            max(0, len(existing_history) - 1),
+        )
+        if len(client_history) < len(existing_history) or (
+            len(client_history) == len(existing_history)
+            and client_generation <= existing_generation
+        ):
+            return JSONResponse({
+                "status": "skipped",
+                "message": "Persisted evolution is already at least as recent.",
+            })
+
+        config = dict(existing.get("config") or client_data.get("config") or {})
+        total_generations = _safe_int(
+            client_data.get("total_generations"),
+            _safe_int(config.get("generations"), client_generation),
+        )
+        config["generations"] = max(_safe_int(config.get("generations"), 0), total_generations)
+        if "pop_size" not in config and client_history and isinstance(client_history[-1], list):
+            config["pop_size"] = len(client_history[-1])
+
+        repaired = dict(existing)
+        repaired.update({
+            "evolution_id": evolution_id,
+            "name": (
+                existing.get("name")
+                or client_data.get("evolution_name")
+                or client_data.get("name")
+                or evolution_id
+            ),
+            "status": client_data.get("status") or (
+                "paused"
+                if client_data.get("is_stopped") or client_data.get("is_resumable")
+                else "complete"
+                if client_data.get("is_running") is False
+                else existing.get("status", "in_progress")
+            ),
+            "current_generation": client_generation,
+            "config": config,
+            "history": client_history,
+            "population": client_data.get("population") or client_history[-1],
+        })
+
+        for field_name in (
+            "contexts",
+            "specific_prompts",
+            "breeding_prompts",
+            "tournament_history",
+            "diversity_history",
+            "island_diversity_history",
+            "migration_history",
+            "token_counts",
+            "comparison_cache",
+            "fitness_elo_stats",
+            "fitness_diversity_stats",
+        ):
+            if client_data.get(field_name) is not None:
+                repaired[field_name] = client_data.get(field_name)
+
+        if not repaired.get("created_at"):
+            repaired["created_at"] = datetime.now().isoformat()
+
+        await db.save_evolution(user.uid, evolution_id, repaired)
+        return JSONResponse({
+            "status": "repaired",
+            "current_generation": repaired["current_generation"],
+            "history_length": len(client_history),
+        })
+    except Exception as e:
+        logger.exception("Failed to repair evolution from client cache")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
 @app.get('/api/evolution/{evolution_id}')
 async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth)):
     """Get evolution data from Firestore"""
     try:
+        state = await user_states.get(user.uid)
+        live_data = _get_live_evolution_payload(state, evolution_id)
         # Load from Firestore
         data = await db.get_evolution(user.uid, evolution_id)
         if data:
-            active_run = await db.get_active_run(user.uid)
+            # The durable evolution remains useful even when the optional
+            # active-run overlay is temporarily unavailable (for example,
+            # during local-file tests or a transient Firestore failure).
+            try:
+                active_run = await db.get_active_run(user.uid)
+            except Exception:
+                logger.warning(
+                    "Unable to load active-run overlay for evolution %s",
+                    evolution_id,
+                    exc_info=True,
+                )
+                active_run = None
             if active_run and active_run.get("evolution_id") == evolution_id:
                 for field_name in (
                     "token_counts",
@@ -2377,10 +2746,67 @@ async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth
                 ):
                     if active_run.get(field_name) is not None:
                         data[field_name] = active_run.get(field_name)
+            if live_data:
+                saved_history = data.get("history", [])
+                if not isinstance(saved_history, list):
+                    saved_history = []
+                live_history = live_data.get("history", [])
+                if not isinstance(live_history, list):
+                    live_history = []
+                if len(live_history) >= len(saved_history):
+                    data.update({
+                        "status": live_data.get("status", data.get("status")),
+                        "config": live_data.get("config", data.get("config", {})),
+                        "current_generation": live_data.get(
+                            "current_generation",
+                            data.get("current_generation"),
+                        ),
+                        "history": live_history,
+                        "history_version": live_data.get("history_version"),
+                        "contexts": live_data.get("contexts", data.get("contexts", [])),
+                        "specific_prompts": live_data.get(
+                            "specific_prompts",
+                            data.get("specific_prompts", []),
+                        ),
+                        "breeding_prompts": live_data.get(
+                            "breeding_prompts",
+                            data.get("breeding_prompts", []),
+                        ),
+                        "tournament_history": live_data.get(
+                            "tournament_history",
+                            data.get("tournament_history", []),
+                        ),
+                        "diversity_history": live_data.get(
+                            "diversity_history",
+                            data.get("diversity_history", []),
+                        ),
+                        "island_diversity_history": live_data.get(
+                            "island_diversity_history",
+                            data.get("island_diversity_history", []),
+                        ),
+                        "migration_history": live_data.get(
+                            "migration_history",
+                            data.get("migration_history", []),
+                        ),
+                        "token_counts": live_data.get(
+                            "token_counts",
+                            data.get("token_counts"),
+                        ),
+                    })
             return JSONResponse({
                 'id': evolution_id,
                 'name': data.get('name', evolution_id),
                 'timestamp': data.get('updated_at') or data.get('created_at'),
+                'data': data
+            })
+
+        if live_data:
+            data = dict(live_data)
+            data["evolution_id"] = evolution_id
+            return JSONResponse({
+                'id': evolution_id,
+                'name': data.get('name', evolution_id),
+                'timestamp': datetime.now().isoformat(),
                 'data': data
             })
 
@@ -2698,45 +3124,98 @@ def _get_default_thinking_settings(model_name: str) -> Tuple[Optional[str], Opti
 
 def _get_autorating_costs(critic_agent: Critic) -> Dict[str, Any]:
     """Build autorating token/cost payload for the frontend."""
-    critic_input = getattr(critic_agent, "input_token_count", 0)
-    critic_output = getattr(critic_agent, "output_token_count", 0)
-    critic_total = getattr(critic_agent, "total_token_count", 0)
-
-    from idea.config import model_prices_per_million_tokens
-
-    critic_model = getattr(critic_agent, "model_name", "gemini-2.0-flash")
-    default_price = {"input": 0.1, "output": 0.4}
-    critic_pricing = model_prices_per_million_tokens.get(critic_model, default_price)
-
-    critic_input_cost = (critic_pricing["input"] * critic_input) / 1_000_000
-    critic_output_cost = (critic_pricing["output"] * critic_output) / 1_000_000
-    total_cost = critic_input_cost + critic_output_cost
+    summary_func = getattr(critic_agent, "get_token_usage_summary", None)
+    if callable(summary_func):
+        critic_summary = summary_func()
+        critic_input = int(critic_summary.get("input", 0) or 0)
+        critic_output = int(critic_summary.get("output", 0) or 0)
+        critic_thoughts = int(critic_summary.get("thoughts", 0) or 0)
+        critic_cached_input = int(critic_summary.get("cached_input", 0) or 0)
+        critic_uncached_input = int(critic_summary.get("uncached_input", 0) or 0)
+        critic_tool_input = int(critic_summary.get("tool_input", 0) or 0)
+        critic_total = int(
+            critic_summary.get("total", critic_input + critic_output + critic_thoughts)
+            or 0
+        )
+        critic_model = critic_summary.get("model") or getattr(critic_agent, "model_name", "gemini-2.0-flash")
+        critic_input_cost = float(critic_summary.get("input_cost", 0.0) or 0.0)
+        critic_uncached_input_cost = float(critic_summary.get("uncached_input_cost", 0.0) or 0.0)
+        critic_cached_input_cost = float(critic_summary.get("cached_input_cost", 0.0) or 0.0)
+        critic_output_cost = float(critic_summary.get("output_cost", 0.0) or 0.0)
+        critic_thought_cost = float(critic_summary.get("thought_cost", 0.0) or 0.0)
+        total_cost = float(critic_summary.get("cost", 0.0) or 0.0)
+    else:
+        critic_input = int(getattr(critic_agent, "input_token_count", 0) or 0)
+        critic_output = int(getattr(critic_agent, "output_token_count", 0) or 0)
+        critic_thoughts = int(getattr(critic_agent, "thought_token_count", 0) or 0)
+        critic_cached_input = int(getattr(critic_agent, "cached_input_token_count", 0) or 0)
+        critic_tool_input = int(getattr(critic_agent, "tool_input_token_count", 0) or 0)
+        critic_model = getattr(critic_agent, "model_name", "gemini-2.0-flash")
+        cost_estimate = estimate_generation_token_cost(
+            critic_model,
+            input_tokens=critic_input,
+            output_tokens=critic_output,
+            thought_tokens=critic_thoughts,
+            cached_input_tokens=critic_cached_input,
+            tool_input_tokens=critic_tool_input,
+        )
+        critic_uncached_input = int(cost_estimate["uncached_input_tokens"])
+        critic_total = int(
+            getattr(
+                critic_agent,
+                "total_token_count",
+                critic_input + critic_output + critic_thoughts + critic_tool_input,
+            )
+            or 0
+        )
+        critic_input_cost = float(cost_estimate["input_cost"])
+        critic_uncached_input_cost = float(cost_estimate["uncached_input_cost"])
+        critic_cached_input_cost = float(cost_estimate["cached_input_cost"])
+        critic_output_cost = float(cost_estimate["output_cost"])
+        critic_thought_cost = float(cost_estimate["thought_cost"])
+        total_cost = float(cost_estimate["total_cost"])
 
     estimates = {}
     for model in LLM_MODELS:
         model_id = model["id"]
         model_name = model.get("name", model_id)
-        pricing = model_prices_per_million_tokens.get(model_id, default_price)
-        est_cost = (
-            pricing["input"] * critic_input / 1_000_000
-            + pricing["output"] * critic_output / 1_000_000
+        cost_estimate = estimate_generation_token_cost(
+            model_id,
+            input_tokens=critic_input,
+            output_tokens=critic_output,
+            thought_tokens=critic_thoughts,
+            cached_input_tokens=critic_cached_input,
+            tool_input_tokens=critic_tool_input,
         )
-        estimates[model_id] = {"name": model_name, "cost": est_cost}
+        estimates[model_id] = {"name": model_name, "cost": cost_estimate["total_cost"]}
 
     return {
         "critic": {
             "total": critic_total,
             "input": critic_input,
             "output": critic_output,
+            "thoughts": critic_thoughts,
+            "cached_input": critic_cached_input,
+            "uncached_input": critic_uncached_input,
+            "tool_input": critic_tool_input,
             "model": critic_model,
             "cost": total_cost,
         },
         "total": critic_total,
         "total_input": critic_input,
         "total_output": critic_output,
+        "total_thoughts": critic_thoughts,
+        "total_cached_input": critic_cached_input,
+        "total_uncached_input": critic_uncached_input,
+        "total_tool_input": critic_tool_input,
+        "total_billable_output": critic_output + critic_thoughts,
         "cost": {
             "input_cost": critic_input_cost,
+            "uncached_input_cost": critic_uncached_input_cost,
+            "cached_input_cost": critic_cached_input_cost,
             "output_cost": critic_output_cost,
+            "thought_cost": critic_thought_cost,
+            "billable_output_cost": critic_output_cost + critic_thought_cost,
             "total_cost": total_cost,
             "currency": "USD",
         },
@@ -3053,6 +3532,10 @@ async def auto_rate(
             )
 
         def _run_tournament() -> None:
+            comparison_cache = evolution_data.setdefault("comparison_cache", {})
+            if not isinstance(comparison_cache, dict):
+                comparison_cache = {}
+                evolution_data["comparison_cache"] = comparison_cache
             critic.get_tournament_ranks(
                 all_ideas,
                 idea_type,
@@ -3060,6 +3543,8 @@ async def auto_rate(
                 progress_callback=_progress_callback,
                 details=rounds_details,
                 full_tournament_rounds=full_tournament_rounds,
+                comparison_cache=comparison_cache,
+                evaluation_generation=evolution_data.get("current_generation"),
             )
 
         await asyncio.to_thread(_run_tournament)

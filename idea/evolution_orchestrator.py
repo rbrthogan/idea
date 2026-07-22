@@ -22,6 +22,51 @@ class EvolutionOrchestrator:
         self.progress_callback = progress_callback
         self.progress = ProgressEmitter(engine)
 
+    def _comparison_cache(self) -> Dict[str, Any]:
+        cache = getattr(self.engine, "comparison_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self.engine, "comparison_cache", cache)
+        return cache
+
+    def _get_tournament_ranks(
+        self,
+        population: List[Any],
+        *,
+        rounds: int,
+        progress_callback: Optional[Callable[[int, int], None]],
+        details: List[Dict[str, Any]],
+        full_tournament_rounds: int,
+        should_stop: Callable[[], bool],
+        evaluation_generation: int,
+        early_stop_top_n: Optional[int] = None,
+    ) -> Dict[int, float]:
+        try:
+            return self.engine.critic.get_tournament_ranks(
+                population,
+                self.engine.idea_type,
+                rounds=rounds,
+                progress_callback=progress_callback,
+                details=details,
+                full_tournament_rounds=full_tournament_rounds,
+                should_stop=should_stop,
+                comparison_cache=self._comparison_cache(),
+                evaluation_generation=evaluation_generation,
+                early_stop_top_n=early_stop_top_n,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            return self.engine.critic.get_tournament_ranks(
+                population,
+                self.engine.idea_type,
+                rounds,
+                progress_callback,
+                details,
+                full_tournament_rounds,
+                should_stop=should_stop,
+            )
+
     @staticmethod
     def _extract_context_terms(context_pool: str) -> set[str]:
         if not context_pool:
@@ -146,6 +191,7 @@ class EvolutionOrchestrator:
         evaluation_generation: int,
         target_generation: int,
     ) -> None:
+        generation_key = str(evaluation_generation)
         for idx, idea in enumerate(population):
             if not isinstance(idea, dict):
                 continue
@@ -171,6 +217,19 @@ class EvolutionOrchestrator:
                         idea["fitness"] = numeric
             idea["selection_metrics"] = selection_metrics
 
+            existing_generation_metrics = idea.get("generation_metrics")
+            if isinstance(existing_generation_metrics, dict):
+                generation_metrics = dict(existing_generation_metrics)
+            else:
+                generation_metrics = {}
+            if generation_key not in generation_metrics:
+                generation_metrics[generation_key] = {
+                    key: value
+                    for key, value in selection_metrics.items()
+                    if key in {"evaluation_generation", "elo", "diversity", "fitness"}
+                }
+            idea["generation_metrics"] = generation_metrics
+
             survival_metrics = {
                 "survived_to_generation": target_generation,
             }
@@ -189,6 +248,7 @@ class EvolutionOrchestrator:
         rounds: int,
         full_rounds: int,
         island_id: Optional[int] = None,
+        early_stop_top_n: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         if not population:
             return []
@@ -197,14 +257,15 @@ class EvolutionOrchestrator:
         tournament_rounds_details: List[Dict[str, Any]] = []
 
         def run_tournament():
-            return self.engine.critic.get_tournament_ranks(
+            return self._get_tournament_ranks(
                 population,
-                self.engine.idea_type,
-                max(1, int(rounds or 1)),
-                None,
-                tournament_rounds_details,
-                max(1, int(full_rounds or 1)),
+                rounds=max(1, int(rounds or 1)),
+                progress_callback=None,
+                details=tournament_rounds_details,
+                full_tournament_rounds=max(1, int(full_rounds or 1)),
                 should_stop=lambda: self.engine.stop_requested,
+                evaluation_generation=generation_index,
+                early_stop_top_n=early_stop_top_n,
             )
 
         global_ranks = await asyncio.to_thread(run_tournament)
@@ -1201,14 +1262,15 @@ class EvolutionOrchestrator:
             tournament_rounds_details: List[Dict[str, Any]] = []
 
             def run_tournament():
-                return self.engine.critic.get_tournament_ranks(
+                return self._get_tournament_ranks(
                     self.engine.population,
-                    self.engine.idea_type,
-                    self.engine.tournament_rounds,
-                    thread_safe_callback,
-                    tournament_rounds_details,
-                    self.engine.full_tournament_rounds,
+                    rounds=self.engine.tournament_rounds,
+                    progress_callback=thread_safe_callback,
+                    details=tournament_rounds_details,
+                    full_tournament_rounds=self.engine.full_tournament_rounds,
                     should_stop=lambda: self.engine.stop_requested,
+                    evaluation_generation=gen,
+                    early_stop_top_n=survivor_count,
                 )
 
             global_ranks = await asyncio.to_thread(run_tournament)
@@ -1625,14 +1687,15 @@ class EvolutionOrchestrator:
         tournament_rounds_details: List[Dict[str, Any]] = []
 
         def run_tournament():
-            return self.engine.critic.get_tournament_ranks(
+            return self._get_tournament_ranks(
                 island_population,
-                self.engine.idea_type,
-                local_rounds,
-                thread_safe_callback,
-                tournament_rounds_details,
-                local_full_rounds,
+                rounds=local_rounds,
+                progress_callback=thread_safe_callback,
+                details=tournament_rounds_details,
+                full_tournament_rounds=local_full_rounds,
                 should_stop=lambda: self.engine.stop_requested,
+                evaluation_generation=gen,
+                early_stop_top_n=survivor_count,
             )
 
         global_ranks = await asyncio.to_thread(run_tournament)

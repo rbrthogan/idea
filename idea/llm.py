@@ -15,6 +15,7 @@ from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception
 from idea.models import Idea
 from idea.prompts.loader import get_prompts, get_prompts_from_dict
+from idea.config import THINKING_MODEL_CONFIG, estimate_generation_token_cost
 import uuid
 from collections import OrderedDict
 from hashlib import sha256
@@ -62,6 +63,21 @@ THINKING_LEVEL_TO_BUDGET_FALLBACK = {
     "medium": 8192,
     "high": -1,  # Dynamic/high-think fallback
 }
+
+
+def _canonical_model_name(model_name: str) -> str:
+    name = str(model_name or "").strip()
+    if name.startswith("models/"):
+        return name.split("/", 1)[1]
+    return name
+
+
+def _model_to_dict(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "dict"):
+        return value.dict()
+    return value
 
 
 def _extract_http_status(exc: BaseException) -> Optional[int]:
@@ -163,6 +179,18 @@ class LLMWrapper(ABC):
         self.total_token_count = 0
         self.input_token_count = 0
         self.output_token_count = 0
+        self.thought_token_count = 0
+        self.cached_input_token_count = 0
+        self.uncached_input_token_count = 0
+        self.tool_input_token_count = 0
+        self.request_count = 0
+        self.large_prompt_request_count = 0
+        self.input_cost = 0.0
+        self.uncached_input_cost = 0.0
+        self.cached_input_cost = 0.0
+        self.output_cost = 0.0
+        self.thought_cost = 0.0
+        self.total_cost = 0.0
         self.agent_name = agent_name
         print(
             f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, "
@@ -253,6 +281,108 @@ class LLMWrapper(ABC):
         with self._diagnostics_lock:
             return [dict(event) for event in self._diagnostic_events]
 
+    @staticmethod
+    def _camel_case(name: str) -> str:
+        parts = str(name).split("_")
+        return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+    @classmethod
+    def _get_usage_token_count(cls, usage: Any, *keys: str) -> int:
+        if usage is None:
+            return 0
+        usage_dict = usage if isinstance(usage, dict) else None
+        if usage_dict is None and hasattr(usage, "model_dump"):
+            try:
+                usage_dict = usage.model_dump()
+            except Exception:
+                usage_dict = None
+        if usage_dict is None and hasattr(usage, "to_dict"):
+            try:
+                usage_dict = usage.to_dict()
+            except Exception:
+                usage_dict = None
+
+        expanded_keys: List[str] = []
+        for key in keys:
+            expanded_keys.append(key)
+            expanded_keys.append(cls._camel_case(key))
+
+        for key in expanded_keys:
+            value = usage_dict.get(key) if isinstance(usage_dict, dict) else getattr(usage, key, None)
+            if value is None:
+                continue
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError):
+                continue
+            if numeric >= 0:
+                return numeric
+        return 0
+
+    def _record_generation_usage(self, usage_metadata: Any) -> None:
+        prompt_tokens = self._get_usage_token_count(usage_metadata, "prompt_token_count")
+        candidate_tokens = self._get_usage_token_count(usage_metadata, "candidates_token_count")
+        thought_tokens = self._get_usage_token_count(usage_metadata, "thoughts_token_count")
+        cached_input_tokens = self._get_usage_token_count(usage_metadata, "cached_content_token_count")
+        tool_input_tokens = self._get_usage_token_count(usage_metadata, "tool_use_prompt_token_count")
+        total_tokens = self._get_usage_token_count(usage_metadata, "total_token_count")
+        if total_tokens == 0:
+            total_tokens = prompt_tokens + candidate_tokens + thought_tokens + tool_input_tokens
+
+        cost = estimate_generation_token_cost(
+            self.model_name,
+            input_tokens=prompt_tokens,
+            output_tokens=candidate_tokens,
+            thought_tokens=thought_tokens,
+            cached_input_tokens=cached_input_tokens,
+            tool_input_tokens=tool_input_tokens,
+        )
+
+        with self._token_lock:
+            self.total_token_count += total_tokens
+            self.input_token_count += prompt_tokens
+            self.output_token_count += candidate_tokens
+            self.thought_token_count += thought_tokens
+            self.cached_input_token_count += cost["cached_input_tokens"]
+            self.uncached_input_token_count += cost["uncached_input_tokens"]
+            self.tool_input_token_count += tool_input_tokens
+            self.request_count += 1
+            if cost.get("large_prompt_tier"):
+                self.large_prompt_request_count += 1
+            self.uncached_input_cost += cost["uncached_input_cost"]
+            self.cached_input_cost += cost["cached_input_cost"]
+            self.input_cost += cost["input_cost"]
+            self.output_cost += cost["output_cost"]
+            self.thought_cost += cost["thought_cost"]
+            self.total_cost += cost["total_cost"]
+
+    def get_token_usage_summary(self) -> Dict[str, Any]:
+        with self._token_lock:
+            total = self.total_token_count or (
+                self.input_token_count
+                + self.output_token_count
+                + self.thought_token_count
+                + self.tool_input_token_count
+            )
+            return {
+                "total": int(total),
+                "input": int(self.input_token_count),
+                "output": int(self.output_token_count),
+                "thoughts": int(self.thought_token_count),
+                "cached_input": int(self.cached_input_token_count),
+                "uncached_input": int(self.uncached_input_token_count),
+                "tool_input": int(self.tool_input_token_count),
+                "model": self.model_name,
+                "cost": float(self.total_cost),
+                "input_cost": float(self.input_cost),
+                "uncached_input_cost": float(self.uncached_input_cost),
+                "cached_input_cost": float(self.cached_input_cost),
+                "output_cost": float(self.output_cost),
+                "thought_cost": float(self.thought_cost),
+                "requests": int(self.request_count),
+                "large_prompt_requests": int(self.large_prompt_request_count),
+            }
+
     def _random_sample(self, population: List[Any], k: int) -> List[Any]:
         with self._rng_lock:
             return self._rng.sample(population, k)
@@ -335,10 +465,15 @@ class LLMWrapper(ABC):
                 "max_output_tokens": self.MAX_TOKENS,
             }
 
-            # Add thinking config when requested.
+            # Add thinking config when requested. Gemini 3 uses levels; Gemini 2.5 uses budgets.
             thinking_fields = getattr(types.ThinkingConfig, "model_fields", {}) or {}
             supports_thinking_level = "thinking_level" in thinking_fields
             supports_thinking_budget = "thinking_budget" in thinking_fields
+            model_thinking_cfg = THINKING_MODEL_CONFIG.get(_canonical_model_name(self.model_name), {})
+            model_supports_thinking = bool(model_thinking_cfg.get("supports_thinking", False))
+            model_supports_thinking_level = bool(model_thinking_cfg.get("supports_thinking_level", False))
+            model_supports_thinking_budget = bool(model_thinking_cfg.get("supports_thinking_budget", False))
+            allowed_model_levels = set(model_thinking_cfg.get("allowed_levels") or [])
             thinking_kwargs: Dict[str, Any] = {}
 
             normalized_level = self.thinking_level
@@ -349,36 +484,72 @@ class LLMWrapper(ABC):
                 )
                 normalized_level = None
 
-            if normalized_level is not None:
-                if supports_thinking_level:
-                    thinking_kwargs["thinking_level"] = normalized_level
-                elif supports_thinking_budget:
-                    mapped_budget = THINKING_LEVEL_TO_BUDGET_FALLBACK[normalized_level]
-                    thinking_kwargs["thinking_budget"] = mapped_budget
-                    self._increment_diagnostic(
-                        "thinking_level_budget_fallbacks",
-                        detail=f"SDK lacks thinking_level; mapped {normalized_level} -> {mapped_budget}",
-                    )
-                else:
-                    self._increment_diagnostic(
-                        "thinking_config_unsupported",
-                        detail="SDK exposes neither thinking_level nor thinking_budget.",
-                    )
+            if (
+                normalized_level is not None
+                and allowed_model_levels
+                and normalized_level not in allowed_model_levels
+            ):
+                self._increment_diagnostic(
+                    "invalid_model_thinking_level",
+                    detail=(
+                        f"model={self.model_name!r}, thinking_level={normalized_level!r}, "
+                        f"allowed={sorted(allowed_model_levels)!r}"
+                    ),
+                )
+                normalized_level = None
 
-            if self.thinking_budget is not None and "thinking_budget" not in thinking_kwargs:
-                if supports_thinking_budget:
-                    try:
-                        thinking_kwargs["thinking_budget"] = int(self.thinking_budget)
-                    except (TypeError, ValueError):
+            if model_supports_thinking:
+                if normalized_level is not None:
+                    if model_supports_thinking_level:
+                        if supports_thinking_level:
+                            thinking_kwargs["thinking_level"] = normalized_level
+                        else:
+                            self._increment_diagnostic(
+                                "thinking_level_sdk_unsupported",
+                                detail=(
+                                    "Installed google-genai SDK does not expose thinking_level; "
+                                    f"cannot send {normalized_level!r} for {self.model_name}."
+                                ),
+                            )
+                    elif model_supports_thinking_budget:
+                        if supports_thinking_budget:
+                            thinking_kwargs["thinking_budget"] = THINKING_LEVEL_TO_BUDGET_FALLBACK[normalized_level]
+                        else:
+                            self._increment_diagnostic(
+                                "thinking_budget_unsupported",
+                                detail="SDK does not expose thinking_budget.",
+                            )
+                    else:
                         self._increment_diagnostic(
-                            "invalid_thinking_budget",
-                            detail=f"thinking_budget={self.thinking_budget!r}",
+                            "thinking_config_unsupported",
+                            detail=f"Model {self.model_name} does not expose a supported thinking control.",
                         )
-                else:
-                    self._increment_diagnostic(
-                        "thinking_budget_unsupported",
-                        detail="SDK does not expose thinking_budget.",
-                    )
+
+                if self.thinking_budget is not None and "thinking_budget" not in thinking_kwargs:
+                    if model_supports_thinking_budget:
+                        if supports_thinking_budget:
+                            try:
+                                thinking_kwargs["thinking_budget"] = int(self.thinking_budget)
+                            except (TypeError, ValueError):
+                                self._increment_diagnostic(
+                                    "invalid_thinking_budget",
+                                    detail=f"thinking_budget={self.thinking_budget!r}",
+                                )
+                        else:
+                            self._increment_diagnostic(
+                                "thinking_budget_unsupported",
+                                detail="SDK does not expose thinking_budget.",
+                            )
+                    elif model_supports_thinking_level:
+                        self._increment_diagnostic(
+                            "thinking_budget_ignored_for_level_model",
+                            detail=f"Model {self.model_name} uses thinking_level; ignoring thinking_budget.",
+                        )
+            elif normalized_level is not None or self.thinking_budget is not None:
+                self._increment_diagnostic(
+                    "thinking_config_unsupported",
+                    detail=f"Model {self.model_name} is not configured for thinking controls.",
+                )
 
             if thinking_kwargs:
                 config_dict["thinking_config"] = types.ThinkingConfig(**thinking_kwargs)
@@ -400,12 +571,7 @@ class LLMWrapper(ABC):
 
             # Track tokens
             if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                with self._token_lock:
-                    self.total_token_count += response.usage_metadata.total_token_count
-                    if hasattr(response.usage_metadata, 'prompt_token_count'):
-                        self.input_token_count += response.usage_metadata.prompt_token_count
-                    if hasattr(response.usage_metadata, 'candidates_token_count'):
-                        self.output_token_count += response.usage_metadata.candidates_token_count
+                self._record_generation_usage(response.usage_metadata)
 
             print(
                 "Total tokens",
@@ -416,6 +582,8 @@ class LLMWrapper(ABC):
                 self.input_token_count,
                 ", Output:",
                 self.output_token_count,
+                ", Thoughts:",
+                self.thought_token_count,
                 ")",
             )
 
@@ -1087,15 +1255,170 @@ class Critic(LLMWrapper):
                 return rating
         return 1500.0
 
+    def _tournament_comparison_signature(self, idea_type: str) -> str:
+        """Build a cache namespace for pairwise judgments from judge + prompt settings."""
+        prompts = self._resolve_prompts(idea_type)
+        signature_payload = {
+            "provider": self.provider,
+            "model_name": self.model_name,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "thinking_budget": self.thinking_budget,
+            "thinking_level": self.thinking_level,
+            "idea_type": idea_type,
+            "item_type": getattr(prompts, "ITEM_TYPE", "ideas"),
+            "criteria": getattr(prompts, "COMPARISON_CRITERIA", []),
+            "comparison_prompt": getattr(prompts, "COMPARISON_PROMPT", ""),
+        }
+        serialized = json.dumps(signature_payload, sort_keys=True, default=str)
+        return sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _idea_payload_for_comparison(self, idea: Any) -> Any:
+        """Return the exact idea payload shown to the judge."""
+        idea_obj = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
+        return _model_to_dict(idea_obj)
+
+    def _idea_cache_key(self, idea: Any) -> str:
+        """Stable cache key for an idea, including content so refined ideas invalidate."""
+        raw_id = idea.get("id") if isinstance(idea, dict) else None
+        payload = self._idea_payload_for_comparison(idea)
+        serialized = json.dumps(payload, sort_keys=True, default=str)
+        digest = sha256(serialized.encode("utf-8")).hexdigest()
+        return f"{str(raw_id) if raw_id else 'no-id'}:{digest}"
+
+    def _comparison_cache_key(self, signature: str, key_a: str, key_b: str) -> str:
+        first, second = sorted((key_a, key_b))
+        pair_digest = sha256(f"{first}\n{second}".encode("utf-8")).hexdigest()
+        return f"{signature}:{pair_digest}"
+
+    def _get_cached_comparison(
+        self,
+        comparison_cache: Optional[Dict[str, Dict[str, Any]]],
+        signature: str,
+        key_a: str,
+        key_b: str,
+    ) -> Optional[str]:
+        if not isinstance(comparison_cache, dict):
+            return None
+
+        cache_key = self._comparison_cache_key(signature, key_a, key_b)
+        with self._cache_lock:
+            entry = comparison_cache.get(cache_key)
+            if not isinstance(entry, dict):
+                return None
+            if entry.get("signature") != signature:
+                return None
+            cached_keys = {entry.get("idea_a_key"), entry.get("idea_b_key")}
+            if cached_keys != {key_a, key_b}:
+                return None
+            winner_key = entry.get("winner_key")
+            if winner_key == "tie":
+                winner = "tie"
+            elif winner_key == key_a:
+                winner = "A"
+            elif winner_key == key_b:
+                winner = "B"
+            else:
+                return None
+            entry["cache_hit_count"] = int(entry.get("cache_hit_count", 0) or 0) + 1
+            entry["last_used_at"] = datetime.now(timezone.utc).isoformat()
+            return winner
+
+    def _store_comparison_cache_result(
+        self,
+        comparison_cache: Optional[Dict[str, Dict[str, Any]]],
+        signature: str,
+        key_a: str,
+        key_b: str,
+        winner: Optional[str],
+    ) -> None:
+        if not isinstance(comparison_cache, dict) or winner not in {"A", "B", "tie"}:
+            return
+
+        winner_key = "tie"
+        if winner == "A":
+            winner_key = key_a
+        elif winner == "B":
+            winner_key = key_b
+
+        now = datetime.now(timezone.utc).isoformat()
+        cache_key = self._comparison_cache_key(signature, key_a, key_b)
+        first, second = sorted((key_a, key_b))
+        with self._cache_lock:
+            existing = comparison_cache.get(cache_key)
+            comparison_count = 1
+            cache_hit_count = 0
+            if isinstance(existing, dict):
+                comparison_count = int(existing.get("comparison_count", 0) or 0) + 1
+                cache_hit_count = int(existing.get("cache_hit_count", 0) or 0)
+            comparison_cache[cache_key] = {
+                "signature": signature,
+                "idea_a_key": first,
+                "idea_b_key": second,
+                "winner_key": winner_key,
+                "comparison_count": comparison_count,
+                "cache_hit_count": cache_hit_count,
+                "created_at": existing.get("created_at", now) if isinstance(existing, dict) else now,
+                "last_judged_at": now,
+            }
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _record_tournament_evaluation(
+        self,
+        idea: Any,
+        *,
+        cached: bool,
+        evaluation_generation: Optional[int],
+    ) -> None:
+        """Track how much pairwise evidence contributed to an idea's current rating."""
+        if not isinstance(idea, dict):
+            return
+
+        metadata = idea.get("rating_evaluations")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        metadata["comparison_count"] = self._safe_int(metadata.get("comparison_count")) + 1
+        if cached:
+            metadata["cached_comparison_count"] = (
+                self._safe_int(metadata.get("cached_comparison_count")) + 1
+            )
+            metadata["llm_comparison_count"] = self._safe_int(
+                metadata.get("llm_comparison_count")
+            )
+        else:
+            metadata["llm_comparison_count"] = (
+                self._safe_int(metadata.get("llm_comparison_count")) + 1
+            )
+            metadata["cached_comparison_count"] = self._safe_int(
+                metadata.get("cached_comparison_count")
+            )
+        if evaluation_generation is not None:
+            metadata["last_evaluated_generation"] = int(evaluation_generation)
+        metadata["last_evaluated_at"] = datetime.now(timezone.utc).isoformat()
+
+        idea["rating_evaluations"] = metadata
+        idea["auto_match_count"] = self._safe_int(idea.get("auto_match_count")) + 1
+
     def get_tournament_ranks(
         self,
-        ideas: List[str],
+        ideas: List[Any],
         idea_type: str,
         rounds: int = 1,
         progress_callback: Callable[[int, int], None] = None,
         details: Optional[List[Dict[str, Any]]] = None,
         full_tournament_rounds: Optional[int] = None,
         should_stop: Optional[Callable[[], bool]] = None,
+        comparison_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+        evaluation_generation: Optional[int] = None,
+        early_stop_top_n: Optional[int] = None,
+        early_stop_min_rounds: int = 2,
     ) -> dict:
         """Get tournament ranks using a global Swiss-system tournament.
 
@@ -1110,6 +1433,8 @@ class Critic(LLMWrapper):
             rounds = 1
 
         ranks = {i: self._initial_tournament_rating(idea) for i, idea in enumerate(ideas)}
+        comparison_signature = self._tournament_comparison_signature(idea_type)
+        idea_cache_keys = [self._idea_cache_key(idea) for idea in ideas]
 
         # Decide whether to enable parallel evaluation
         enable_parallel = (
@@ -1129,6 +1454,15 @@ class Critic(LLMWrapper):
         expected_pairs_per_round = len(ideas) // 2
         total_pairs = expected_pairs_per_round * rounds
         completed_pairs = 0
+        previous_survivor_boundary: Optional[Tuple[int, ...]] = None
+        try:
+            early_stop_size = int(early_stop_top_n) if early_stop_top_n is not None else None
+        except (TypeError, ValueError):
+            early_stop_size = None
+        try:
+            min_rounds_before_stop = max(1, int(early_stop_min_rounds))
+        except (TypeError, ValueError):
+            min_rounds_before_stop = 2
 
         def report_progress():
             if progress_callback:
@@ -1147,6 +1481,7 @@ class Critic(LLMWrapper):
             if segment_rounds and _round > 0 and (_round % segment_rounds) == 0:
                 match_history = set()
                 bye_counts = {}
+                previous_survivor_boundary = None
 
             pairs, bye_idx = self._generate_swiss_round_pairs(ranks, match_history, bye_counts)
 
@@ -1161,6 +1496,8 @@ class Critic(LLMWrapper):
                     "b_id": b_meta["id"],
                     "a_title": a_meta["title"],
                     "b_title": b_meta["title"],
+                    "cached": False,
+                    "winner_source": "llm",
                 })
 
             round_record = {
@@ -1185,14 +1522,39 @@ class Critic(LLMWrapper):
             if not pairs:
                 continue
 
-            if enable_parallel:
+            results_map: Dict[Tuple[int, int], Optional[str]] = {}
+            cached_pair_flags: Dict[Tuple[int, int], bool] = {}
+            missing_pairs: List[Tuple[int, int, int]] = []
+
+            for pair_index, (idx_a, idx_b) in enumerate(pairs):
+                cached_winner = self._get_cached_comparison(
+                    comparison_cache,
+                    comparison_signature,
+                    idea_cache_keys[idx_a],
+                    idea_cache_keys[idx_b],
+                )
+                if cached_winner is None:
+                    missing_pairs.append((pair_index, idx_a, idx_b))
+                    continue
+
+                results_map[(idx_a, idx_b)] = cached_winner
+                cached_pair_flags[(idx_a, idx_b)] = True
+                if pair_index < len(round_pairs):
+                    round_pairs[pair_index]["winner"] = cached_winner
+                    round_pairs[pair_index]["cached"] = True
+                    round_pairs[pair_index]["winner_source"] = "cache"
+                completed_pairs += 1
+                report_progress()
+
+            if enable_parallel and missing_pairs:
                 def on_pair_complete(_c, _t):
                     nonlocal completed_pairs
                     completed_pairs += 1
                     report_progress()
 
+                pairs_to_evaluate = [(idx_a, idx_b) for _, idx_a, idx_b in missing_pairs]
                 results = parallel_evaluate_pairs(
-                    pairs=pairs,
+                    pairs=pairs_to_evaluate,
                     items=ideas,
                     compare_fn=self.compare_ideas,
                     idea_type=idea_type,
@@ -1202,33 +1564,76 @@ class Critic(LLMWrapper):
                     should_stop=should_stop,
                 )
 
-                # Update ranks in the deterministic order of generated pairs
-                results_map = {(a, b): w for a, b, w in results}
-                for pair_index, (idx_a, idx_b) in enumerate(pairs):
-                    winner = results_map.get((idx_a, idx_b))
-                    if details is not None and pair_index < len(round_pairs):
+                evaluated_map = {(a, b): w for a, b, w in results}
+                for pair_index, idx_a, idx_b in missing_pairs:
+                    winner = evaluated_map.get((idx_a, idx_b))
+                    results_map[(idx_a, idx_b)] = winner
+                    cached_pair_flags[(idx_a, idx_b)] = False
+                    self._store_comparison_cache_result(
+                        comparison_cache,
+                        comparison_signature,
+                        idea_cache_keys[idx_a],
+                        idea_cache_keys[idx_b],
+                        winner,
+                    )
+                    if pair_index < len(round_pairs):
                         round_pairs[pair_index]["winner"] = winner
-                    elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
-                    ranks[idx_a] = elo_a
-                    ranks[idx_b] = elo_b
             else:
-                for pair_index, (idx_a, idx_b) in enumerate(pairs):
+                for pair_index, idx_a, idx_b in missing_pairs:
                     idea_a = ideas[idx_a]
                     idea_b = ideas[idx_b]
-                    idea_a_obj = idea_a["idea"] if isinstance(idea_a, dict) and "idea" in idea_a else idea_a
-                    idea_b_obj = idea_b["idea"] if isinstance(idea_b, dict) and "idea" in idea_b else idea_b
-                    idea_a_dict = idea_a_obj.dict() if hasattr(idea_a_obj, 'dict') else idea_a_obj
-                    idea_b_dict = idea_b_obj.dict() if hasattr(idea_b_obj, 'dict') else idea_b_obj
+                    idea_a_dict = self._idea_payload_for_comparison(idea_a)
+                    idea_b_dict = self._idea_payload_for_comparison(idea_b)
 
                     # Deterministic orientation in sequential mode to keep tests stable
                     winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
-                    if details is not None and pair_index < len(round_pairs):
+                    results_map[(idx_a, idx_b)] = winner
+                    cached_pair_flags[(idx_a, idx_b)] = False
+                    self._store_comparison_cache_result(
+                        comparison_cache,
+                        comparison_signature,
+                        idea_cache_keys[idx_a],
+                        idea_cache_keys[idx_b],
+                        winner,
+                    )
+                    if pair_index < len(round_pairs):
                         round_pairs[pair_index]["winner"] = winner
-                    elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
-                    ranks[idx_a] = elo_a
-                    ranks[idx_b] = elo_b
                     completed_pairs += 1
                     report_progress()
+
+            # Update ranks in the deterministic order of generated pairs.
+            for idx_a, idx_b in pairs:
+                winner = results_map.get((idx_a, idx_b))
+                is_cached = bool(cached_pair_flags.get((idx_a, idx_b), False))
+                elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
+                ranks[idx_a] = elo_a
+                ranks[idx_b] = elo_b
+                self._record_tournament_evaluation(
+                    ideas[idx_a],
+                    cached=is_cached,
+                    evaluation_generation=evaluation_generation,
+                )
+                self._record_tournament_evaluation(
+                    ideas[idx_b],
+                    cached=is_cached,
+                    evaluation_generation=evaluation_generation,
+                )
+
+            if early_stop_size is not None and 0 < early_stop_size < len(ranks):
+                current_boundary = tuple(
+                    sorted(
+                        sorted(ranks.keys(), key=lambda i: (-ranks[i], i))[:early_stop_size]
+                    )
+                )
+                if (
+                    previous_survivor_boundary is not None
+                    and current_boundary == previous_survivor_boundary
+                    and (_round + 1) >= min_rounds_before_stop
+                ):
+                    round_record["early_stopped"] = True
+                    round_record["early_stop_reason"] = "stable_survivor_boundary"
+                    break
+                previous_survivor_boundary = current_boundary
 
         return ranks
 

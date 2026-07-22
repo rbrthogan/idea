@@ -89,6 +89,70 @@ def test_single_idea_tournament_preserves_persisted_global_elo():
     assert ranks == {0: 1712.0}
 
 
+def test_tournament_reuses_cached_pair_without_rejudging_reversed_order():
+    critic = create_critic()
+    idea_a = {"id": "a", "idea": {"title": "A", "content": "alpha"}}
+    idea_b = {"id": "b", "idea": {"title": "B", "content": "beta"}}
+    comparison_cache = {}
+    details = []
+
+    with patch.object(Critic, "compare_ideas", return_value="A") as compare:
+        first_ranks = critic.get_tournament_ranks(
+            [idea_a, idea_b],
+            "airesearch",
+            rounds=1,
+            comparison_cache=comparison_cache,
+            details=details,
+        )
+
+    assert compare.call_count == 1
+    assert first_ranks[0] > first_ranks[1]
+    assert comparison_cache
+    assert details[0]["pairs"][0]["cached"] is False
+    assert details[0]["pairs"][0]["winner_source"] == "llm"
+
+    reversed_details = []
+    with patch.object(Critic, "compare_ideas", side_effect=AssertionError("cache miss")) as compare:
+        reversed_ranks = critic.get_tournament_ranks(
+            [idea_b, idea_a],
+            "airesearch",
+            rounds=1,
+            comparison_cache=comparison_cache,
+            details=reversed_details,
+        )
+
+    assert compare.call_count == 0
+    assert reversed_ranks[1] > reversed_ranks[0]
+    assert reversed_details[0]["pairs"][0]["cached"] is True
+    assert reversed_details[0]["pairs"][0]["winner_source"] == "cache"
+    assert reversed_details[0]["pairs"][0]["winner"] == "B"
+
+
+def test_tournament_records_evaluation_metadata_on_ideas():
+    critic = create_critic()
+    ideas = [
+        {"id": "a", "idea": {"title": "A", "content": "alpha"}},
+        {"id": "b", "idea": {"title": "B", "content": "beta"}},
+    ]
+
+    with patch.object(Critic, "compare_ideas", return_value="tie"):
+        critic.get_tournament_ranks(
+            ideas,
+            "airesearch",
+            rounds=1,
+            comparison_cache={},
+            evaluation_generation=3,
+        )
+
+    for idea in ideas:
+        metadata = idea["rating_evaluations"]
+        assert metadata["comparison_count"] == 1
+        assert metadata["llm_comparison_count"] == 1
+        assert metadata["cached_comparison_count"] == 0
+        assert metadata["last_evaluated_generation"] == 3
+        assert idea["auto_match_count"] == 1
+
+
 def test_swiss_pairings_even_no_repeats():
     critic = create_critic()
     ranks = {i: 1500 for i in range(6)}
@@ -121,6 +185,18 @@ def test_swiss_pairings_odd_rotates_byes():
         bye_history.add(bye)
 
     assert len(bye_history) == 2
+
+
+def test_swiss_pairing_prefers_nearest_elo_unseen_partner():
+    critic = create_critic()
+    ranks = {0: 2000, 1: 1000, 2: 1500, 3: 1990}
+    match_history = {(0, 3)}
+    bye_counts = {}
+
+    pairs, bye = critic._generate_swiss_round_pairs(ranks, match_history, bye_counts)
+
+    assert bye is None
+    assert (0, 2) in {tuple(sorted(pair)) for pair in pairs}
 
 
 def test_compare_ideas_response_parsing():
@@ -180,6 +256,33 @@ def test_multi_tournament_segmentation_resets_pairing_state():
     assert observed_match_history_sizes[0] == 0
     assert observed_match_history_sizes[1] > 0
     assert observed_match_history_sizes[2] == 0
+
+
+def test_tournament_stops_early_when_survivor_boundary_is_stable():
+    critic = create_critic()
+    ideas = [
+        {"id": "a", "idea": "a", "selection_metrics": {"elo": 1800}},
+        {"id": "b", "idea": "b", "selection_metrics": {"elo": 1700}},
+        {"id": "c", "idea": "c", "selection_metrics": {"elo": 1300}},
+        {"id": "d", "idea": "d", "selection_metrics": {"elo": 1200}},
+    ]
+    details = []
+
+    with patch.dict("os.environ", {"ENABLE_PARALLEL_TOURNAMENT": "0"}), \
+         patch.object(Critic, "compare_ideas", return_value="A") as compare:
+        critic.get_tournament_ranks(
+            ideas,
+            "airesearch",
+            rounds=5,
+            details=details,
+            early_stop_top_n=2,
+            early_stop_min_rounds=2,
+        )
+
+    assert compare.call_count < 10
+    assert len(details) == 2
+    assert details[-1]["early_stopped"] is True
+    assert details[-1]["early_stop_reason"] == "stable_survivor_boundary"
 
 
 def test_breeder_keeps_mutation_context_per_child():
@@ -376,6 +479,110 @@ def test_generate_content_coerces_empty_text_to_no_response():
 
     assert result == "No response."
     assert ideator.get_diagnostics().get("blocked_or_empty_responses", 0) >= 1
+
+
+def test_gemini_25_level_preset_maps_to_budget_without_fallback_diagnostic():
+    ideator = create_ideator(model_name="gemini-2.5-flash", thinking_level="high")
+    captured = {}
+
+    class _FakeResponse:
+        text = "done"
+        usage_metadata = None
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**kwargs):
+                captured.update(kwargs)
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "done"
+    dumped_config = captured["config"].model_dump(by_alias=True, exclude_none=True)
+    assert dumped_config["thinkingConfig"]["thinkingBudget"] == -1
+    assert "thinking_level_budget_fallbacks" not in ideator.get_diagnostics()
+
+
+def test_gemini_31_pro_sends_explicit_thinking_level():
+    ideator = create_ideator(model_name="gemini-3.1-pro-preview", thinking_level="low")
+    captured = {}
+
+    class _FakeResponse:
+        text = "done"
+        usage_metadata = None
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**kwargs):
+                captured.update(kwargs)
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "done"
+    dumped_config = captured["config"].model_dump(by_alias=True, exclude_none=True, mode="json")
+    assert dumped_config["thinkingConfig"]["thinkingLevel"] == "LOW"
+    assert "thinking_level_budget_fallbacks" not in ideator.get_diagnostics()
+    assert "thinking_level_sdk_unsupported" not in ideator.get_diagnostics()
+
+
+def test_generate_content_tracks_thinking_cached_and_tiered_costs():
+    ideator = create_ideator(model_name="gemini-2.5-pro")
+
+    class _FakeResponse:
+        text = "done"
+        usage_metadata = SimpleNamespace(
+            prompt_token_count=210_000,
+            cached_content_token_count=50_000,
+            candidates_token_count=1_000,
+            thoughts_token_count=2_000,
+            total_token_count=213_000,
+        )
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**_kwargs):
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "done"
+    assert ideator.input_token_count == 210_000
+    assert ideator.cached_input_token_count == 50_000
+    assert ideator.uncached_input_token_count == 160_000
+    assert ideator.output_token_count == 1_000
+    assert ideator.thought_token_count == 2_000
+    assert ideator.total_token_count == 213_000
+
+    expected_uncached_input_cost = 160_000 * 2.50 / 1_000_000
+    expected_cached_input_cost = 50_000 * 0.25 / 1_000_000
+    expected_output_cost = 1_000 * 15.00 / 1_000_000
+    expected_thought_cost = 2_000 * 15.00 / 1_000_000
+    assert ideator.uncached_input_cost == expected_uncached_input_cost
+    assert ideator.cached_input_cost == expected_cached_input_cost
+    assert ideator.input_cost == expected_uncached_input_cost + expected_cached_input_cost
+    assert ideator.output_cost == expected_output_cost
+    assert ideator.thought_cost == expected_thought_cost
+    assert ideator.total_cost == (
+        expected_uncached_input_cost
+        + expected_cached_input_cost
+        + expected_output_cost
+        + expected_thought_cost
+    )
+
+    summary = ideator.get_token_usage_summary()
+    assert summary["thoughts"] == 2_000
+    assert summary["cached_input"] == 50_000
+    assert summary["uncached_input"] == 160_000
+    assert summary["requests"] == 1
+    assert summary["large_prompt_requests"] == 1
+    assert summary["cost"] == ideator.total_cost
 
 
 def test_formatter_recovers_empty_response_with_source_idea_text():

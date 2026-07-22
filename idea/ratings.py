@@ -10,14 +10,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 def extract_title_content(item: Any) -> Dict[str, str]:
     """Best-effort extraction of a dict with title/content from various shapes.
 
-    - If `item` has .dict(), use that
+    - If `item` has .model_dump()/.dict(), use that
     - If it's a dict with title/content, return as-is
     - If it's a dict with nested 'idea', unwrap
     - Otherwise, coerce to a string content with Untitled title
     """
-    if hasattr(item, "dict"):
+    if hasattr(item, "model_dump") or hasattr(item, "dict"):
         try:
-            d = item.dict()
+            d = item.model_dump() if hasattr(item, "model_dump") else item.dict()
             title = d.get("title", "Untitled")
             content = d.get("content", str(d))
             return {"title": title, "content": content}

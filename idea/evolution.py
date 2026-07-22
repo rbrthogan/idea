@@ -9,7 +9,12 @@ import math
 from pathlib import Path
 from datetime import datetime
 from idea.models import Idea
-from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P, PROGRESS_JITTER_MAX_SECONDS
+from idea.config import (
+    DEFAULT_CREATIVE_TEMP,
+    DEFAULT_TOP_P,
+    PROGRESS_JITTER_MAX_SECONDS,
+    estimate_generation_token_cost,
+)
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates, get_prompts, get_prompts_from_dict
 from idea.diversity import DiversityCalculator
@@ -122,8 +127,6 @@ class EvolutionEngine:
         self._py_rng_lock = threading.Lock()
         self._np_rng_lock = threading.Lock()
         self.population: List[Idea] = []
-        # TODO: make this configurable with a dropdown list for each LLM type using the following models:
-        # gemini-1.5-flash, gemini-2.0-flash-exp, gemini-2.0-flash-thinking-exp-01-21
 
         # Initialize LLM components with appropriate temperatures
         print(
@@ -242,6 +245,7 @@ class EvolutionEngine:
         # Running normalization state (persisted) to keep fitness scores comparable across generations.
         self.fitness_elo_stats = {"count": 0, "mean": 0.0, "m2": 0.0}
         self.fitness_diversity_stats = {"count": 0, "mean": 0.0, "m2": 0.0}
+        self.comparison_cache: Dict[str, Any] = {}
 
         # Evolution identity and tracking
         self.evolution_id = None  # Unique ID for this evolution (UUID)
@@ -462,6 +466,7 @@ class EvolutionEngine:
             diversity_history=self.diversity_history,
             island_diversity_history=self.island_diversity_history,
             migration_history=self.migration_history,
+            comparison_cache=self.comparison_cache,
             avg_idea_cost=self.avg_idea_cost,
             avg_tournament_cost=self.avg_tournament_cost,
             stop_requested=self.stop_requested,
@@ -1054,9 +1059,6 @@ class EvolutionEngine:
 
     def get_total_token_count(self):
         """Get the total token count from all LLM components with cost calculation"""
-        from idea.config import model_prices_per_million_tokens
-
-        default_price = {"input": 0.1, "output": 0.4}
         required_components = {"ideator", "formatter", "critic", "breeder", "oracle"}
 
         def safe_int(value: Any) -> int:
@@ -1080,10 +1082,25 @@ class EvolutionEngine:
                 summary = custom_summary() or {}
                 component_input = safe_int(summary.get("input"))
                 component_output = safe_int(summary.get("output"))
-                component_total = safe_int(summary.get("total")) or component_input + component_output
+                component_thoughts = safe_int(summary.get("thoughts"))
+                component_cached_input = safe_int(summary.get("cached_input"))
+                component_tool_input = safe_int(summary.get("tool_input"))
+                component_uncached_input = (
+                    safe_int(summary.get("uncached_input"))
+                    if "uncached_input" in summary
+                    else max(component_input + component_tool_input - component_cached_input, 0)
+                )
+                component_total = safe_int(summary.get("total")) or (
+                    component_input + component_output + component_thoughts + component_tool_input
+                )
                 component_cost = safe_float(summary.get("cost"))
-                component_input_cost = safe_float(summary.get("input_cost", component_cost))
+                component_input_cost = safe_float(summary.get("input_cost"))
+                if "input_cost" not in summary and component_cost:
+                    component_input_cost = component_cost
+                component_cached_input_cost = safe_float(summary.get("cached_input_cost"))
+                component_uncached_input_cost = safe_float(summary.get("uncached_input_cost"))
                 component_output_cost = safe_float(summary.get("output_cost"))
+                component_thought_cost = safe_float(summary.get("thought_cost"))
                 component_model = summary.get("model") or getattr(component, "model_name", "unknown")
                 if component_name not in required_components and component_total == 0 and component_cost == 0:
                     return None
@@ -1091,42 +1108,80 @@ class EvolutionEngine:
                     "total": component_total,
                     "input": component_input,
                     "output": component_output,
+                    "thoughts": component_thoughts,
+                    "cached_input": component_cached_input,
+                    "uncached_input": component_uncached_input,
+                    "tool_input": component_tool_input,
                     "model": component_model,
                     "cost": component_cost,
                     "_input_cost": component_input_cost,
+                    "_cached_input_cost": component_cached_input_cost,
+                    "_uncached_input_cost": component_uncached_input_cost,
                     "_output_cost": component_output_cost,
+                    "_thought_cost": component_thought_cost,
                 }
-                for optional_key in ("estimated_input", "requests", "per_model"):
+                for optional_key in (
+                    "estimated_input",
+                    "requests",
+                    "large_prompt_requests",
+                    "per_model",
+                ):
                     if optional_key in summary:
                         data[optional_key] = summary[optional_key]
                 return data
 
             component_input = safe_int(getattr(component, "input_token_count", 0))
             component_output = safe_int(getattr(component, "output_token_count", 0))
+            component_thoughts = safe_int(
+                getattr(component, "thought_token_count", getattr(component, "thinking_token_count", 0))
+            )
+            component_cached_input = safe_int(getattr(component, "cached_input_token_count", 0))
+            component_tool_input = safe_int(getattr(component, "tool_input_token_count", 0))
             component_total = safe_int(
-                getattr(component, "total_token_count", component_input + component_output)
+                getattr(
+                    component,
+                    "total_token_count",
+                    component_input + component_output + component_thoughts + component_tool_input,
+                )
             )
             if component_total == 0:
-                component_total = component_input + component_output
+                component_total = component_input + component_output + component_thoughts + component_tool_input
             component_model = getattr(component, "model_name", "gemini-2.0-flash")
-            pricing = model_prices_per_million_tokens.get(component_model, default_price)
-            component_input_cost = (
-                safe_float(pricing.get("input", default_price["input"])) * component_input
-            ) / 1_000_000
-            component_output_cost = (
-                safe_float(pricing.get("output", default_price["output"])) * component_output
-            ) / 1_000_000
-            component_cost = component_input_cost + component_output_cost
+            usage_cost = estimate_generation_token_cost(
+                component_model,
+                input_tokens=component_input,
+                output_tokens=component_output,
+                thought_tokens=component_thoughts,
+                cached_input_tokens=component_cached_input,
+                tool_input_tokens=component_tool_input,
+            )
+            component_uncached_input = safe_int(
+                getattr(component, "uncached_input_token_count", usage_cost["uncached_input_tokens"])
+            )
+            component_cached_input = safe_int(usage_cost["cached_input_tokens"])
+            component_input_cost = usage_cost["input_cost"]
+            component_uncached_input_cost = usage_cost["uncached_input_cost"]
+            component_cached_input_cost = usage_cost["cached_input_cost"]
+            component_output_cost = usage_cost["output_cost"]
+            component_thought_cost = usage_cost["thought_cost"]
+            component_cost = usage_cost["total_cost"]
             if component_name not in required_components and component_total == 0 and component_cost == 0:
                 return None
             return {
                 "total": component_total,
                 "input": component_input,
                 "output": component_output,
+                "thoughts": component_thoughts,
+                "cached_input": component_cached_input,
+                "uncached_input": component_uncached_input,
+                "tool_input": component_tool_input,
                 "model": component_model,
                 "cost": component_cost,
                 "_input_cost": component_input_cost,
+                "_cached_input_cost": component_cached_input_cost,
+                "_uncached_input_cost": component_uncached_input_cost,
                 "_output_cost": component_output_cost,
+                "_thought_cost": component_thought_cost,
             }
 
         component_specs = [
@@ -1145,18 +1200,34 @@ class EvolutionEngine:
         diagnostic_events_by_agent: Dict[str, Any] = {}
         total_input = 0
         total_output = 0
+        total_thoughts = 0
+        total_cached_input = 0
+        total_uncached_input = 0
+        total_tool_input = 0
+        total_provider_tokens = 0
         total_input_cost = 0.0
+        total_uncached_input_cost = 0.0
+        total_cached_input_cost = 0.0
         total_output_cost = 0.0
+        total_thought_cost = 0.0
 
         for component_name, component in component_specs:
             summary = summarize_component(component_name, component)
             if summary is None:
                 continue
 
+            total_provider_tokens += safe_int(summary.get("total"))
             total_input += safe_int(summary.get("input"))
             total_output += safe_int(summary.get("output"))
+            total_thoughts += safe_int(summary.get("thoughts"))
+            total_cached_input += safe_int(summary.get("cached_input"))
+            total_uncached_input += safe_int(summary.get("uncached_input"))
+            total_tool_input += safe_int(summary.get("tool_input"))
             total_input_cost += safe_float(summary.pop("_input_cost", 0.0))
+            total_uncached_input_cost += safe_float(summary.pop("_uncached_input_cost", 0.0))
+            total_cached_input_cost += safe_float(summary.pop("_cached_input_cost", 0.0))
             total_output_cost += safe_float(summary.pop("_output_cost", 0.0))
+            total_thought_cost += safe_float(summary.pop("_thought_cost", 0.0))
             models[component_name] = summary.get("model", "unknown")
             token_data[component_name] = summary
             diagnostics_by_agent[component_name] = getattr(component, "get_diagnostics", lambda: {})()
@@ -1164,17 +1235,26 @@ class EvolutionEngine:
                 component, "get_diagnostic_events", lambda: []
             )()
 
-        total = total_input + total_output
-        total_cost = total_input_cost + total_output_cost
+        total = total_provider_tokens or (total_input + total_output + total_thoughts + total_tool_input)
+        total_cost = total_input_cost + total_output_cost + total_thought_cost
 
         token_data.update(
             {
                 "total": total,
                 "total_input": total_input,
                 "total_output": total_output,
+                "total_thoughts": total_thoughts,
+                "total_cached_input": total_cached_input,
+                "total_uncached_input": total_uncached_input,
+                "total_tool_input": total_tool_input,
+                "total_billable_output": total_output + total_thoughts,
                 "cost": {
                     "input_cost": total_input_cost,
+                    "uncached_input_cost": total_uncached_input_cost,
+                    "cached_input_cost": total_cached_input_cost,
                     "output_cost": total_output_cost,
+                    "thought_cost": total_thought_cost,
+                    "billable_output_cost": total_output_cost + total_thought_cost,
                     "total_cost": total_cost,
                     "currency": "USD",
                 },
@@ -1201,12 +1281,15 @@ class EvolutionEngine:
         for model in LLM_MODELS:
             model_id = model['id']
             model_name = model.get('name', model_id)
-            pricing = model_prices_per_million_tokens.get(model_id, default_price)
-            est_cost = (
-                pricing['input'] * total_input / 1_000_000
-                + pricing['output'] * total_output / 1_000_000
+            cost_estimate = estimate_generation_token_cost(
+                model_id,
+                input_tokens=total_input,
+                output_tokens=total_output,
+                thought_tokens=total_thoughts,
+                cached_input_tokens=total_cached_input,
+                tool_input_tokens=total_tool_input,
             )
-            estimates[model_id] = {'name': model_name, 'cost': est_cost}
+            estimates[model_id] = {'name': model_name, 'cost': cost_estimate["total_cost"]}
 
         token_data['estimates'] = estimates
         return token_data

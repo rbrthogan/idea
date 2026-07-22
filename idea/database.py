@@ -5,6 +5,7 @@ import os
 import json
 import base64
 import time
+import uuid
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from cryptography.fernet import Fernet
@@ -271,39 +272,204 @@ async def delete_user_api_key(user_id: str) -> None:
 
 # --- Evolutions ---
 
-# Fields that may contain nested arrays and need JSON serialization
-# Firestore doesn't support arrays within arrays, so we serialize these to JSON strings
-EVOLUTION_NESTED_FIELDS = [
-    'history',           # [[ideas], [ideas], ...]
-    'population',        # [ideas]
-    'diversity_history', # [[diversity scores], ...]
-    'contexts',          # may contain nested structures
-    'specific_prompts',  # may contain nested structures
-    'breeding_prompts',  # may contain nested structures
-    'token_counts',      # dict with nested data
-    'config',            # dict with config values
+EVOLUTION_CHUNKS_COLLECTION = "chunks"
+EVOLUTION_FIELD_CHUNK_SIZE = 240_000
+
+# Fields that may contain nested arrays and need JSON serialization.
+# Firestore does not support arrays within arrays, so legacy records stored these
+# as JSON strings. Large fields now live in chunk documents to avoid the 1 MiB
+# document limit while preserving the same public API from get_evolution().
+EVOLUTION_JSON_FIELDS = [
+    'history',                    # [[ideas], [ideas], ...]
+    'population',                 # [ideas]
+    'diversity_history',          # nested diversity samples
+    'island_diversity_history',   # nested island diversity samples
+    'migration_history',          # migration event details
+    'contexts',                   # may contain nested structures
+    'specific_prompts',           # may contain nested structures
+    'breeding_prompts',           # may contain nested structures
+    'tournament_history',         # pairwise comparison details
+    'comparison_cache',           # comparison cache map
+    'token_counts',               # dict with nested diagnostics
+    'config',                     # dict with config values
+    'fitness_elo_stats',
+    'fitness_diversity_stats',
 ]
+
+EVOLUTION_NESTED_FIELDS = EVOLUTION_JSON_FIELDS
+
+EVOLUTION_EXTERNALIZED_FIELDS = {
+    'history',
+    'population',
+    'diversity_history',
+    'island_diversity_history',
+    'migration_history',
+    'contexts',
+    'specific_prompts',
+    'breeding_prompts',
+    'tournament_history',
+    'comparison_cache',
+    'token_counts',
+}
+
+
+def _chunk_text(value: str, chunk_size: Optional[int] = None) -> List[str]:
+    if chunk_size is None:
+        chunk_size = EVOLUTION_FIELD_CHUNK_SIZE
+    if chunk_size <= 0:
+        chunk_size = EVOLUTION_FIELD_CHUNK_SIZE
+    return [value[i:i + chunk_size] for i in range(0, len(value), chunk_size)] or [""]
+
+
+def _summarize_history(history: Any) -> Dict[str, int]:
+    if not isinstance(history, list):
+        return {"generation_count": 0, "total_ideas": 0, "last_generation_size": 0}
+    return {
+        "generation_count": len(history),
+        "total_ideas": sum(len(gen) for gen in history if isinstance(gen, list)),
+        "last_generation_size": len(history[-1]) if history and isinstance(history[-1], list) else 0,
+    }
+
+
+def _prepare_evolution_save_data(
+    data: Dict[str, Any],
+    user_id: str,
+    updated_at: str,
+) -> tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    save_data = dict(data)
+    save_data["updated_at"] = updated_at
+    save_data["user_id"] = user_id
+
+    if "history" in save_data:
+        save_data["_history_summary"] = _summarize_history(save_data.get("history"))
+    if "population" in save_data and isinstance(save_data.get("population"), list):
+        save_data["_population_summary"] = {"population_size": len(save_data["population"])}
+
+    chunk_payloads: Dict[str, Dict[str, Any]] = {}
+    externalized_fields: Dict[str, Dict[str, Any]] = {}
+    chunk_version = str(uuid.uuid4())
+
+    for field in EVOLUTION_JSON_FIELDS:
+        if field not in save_data or save_data[field] is None:
+            continue
+
+        serialized = json.dumps(save_data[field], default=str)
+        if field in EVOLUTION_EXTERNALIZED_FIELDS:
+            chunks = _chunk_text(serialized)
+            externalized_fields[field] = {
+                "encoding": "json",
+                "chunk_count": len(chunks),
+                "chunk_version": chunk_version,
+            }
+            for index, chunk in enumerate(chunks):
+                chunk_id = f"{field}__{chunk_version}__{index:04d}"
+                chunk_payloads[chunk_id] = {
+                    "field": field,
+                    "index": index,
+                    "chunk_version": chunk_version,
+                    "value": chunk,
+                    "updated_at": updated_at,
+                }
+            save_data.pop(field, None)
+        else:
+            save_data[field] = serialized
+
+    if externalized_fields:
+        save_data["_externalized_fields"] = externalized_fields
+    else:
+        save_data.pop("_externalized_fields", None)
+
+    return save_data, chunk_payloads
+
+
+def _deserialize_evolution_json_fields(data: Dict[str, Any]) -> None:
+    for field in EVOLUTION_JSON_FIELDS:
+        if field in data and isinstance(data[field], str):
+            try:
+                data[field] = json.loads(data[field])
+            except json.JSONDecodeError:
+                pass
+
+
+def _chunk_doc_id(field: str, chunk_version: str, index: int) -> str:
+    return f"{field}__{chunk_version}__{index:04d}"
+
+
+def _load_externalized_evolution_fields(doc_ref: Any, data: Dict[str, Any]) -> None:
+    externalized = data.get("_externalized_fields")
+    if not isinstance(externalized, dict):
+        return
+
+    chunk_collection = doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION)
+    for field, meta in externalized.items():
+        if not isinstance(meta, dict):
+            continue
+        try:
+            chunk_count = int(meta.get("chunk_count", 0))
+        except (TypeError, ValueError):
+            chunk_count = 0
+        chunk_version = str(meta.get("chunk_version") or "")
+        if chunk_count <= 0 or not chunk_version:
+            continue
+
+        chunks: List[str] = []
+        missing_chunk = False
+        for index in range(chunk_count):
+            chunk_doc = chunk_collection.document(_chunk_doc_id(field, chunk_version, index)).get()
+            if not chunk_doc.exists:
+                missing_chunk = True
+                break
+            chunk_data = chunk_doc.to_dict() or {}
+            chunks.append(str(chunk_data.get("value", "")))
+        if missing_chunk:
+            continue
+
+        raw_value = "".join(chunks)
+        if meta.get("encoding") == "json":
+            try:
+                data[field] = json.loads(raw_value)
+            except json.JSONDecodeError:
+                data[field] = raw_value
+        else:
+            data[field] = raw_value
+
+
+def _delete_evolution_chunks(doc_ref: Any) -> None:
+    for chunk_doc in doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION).stream():
+        doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION).document(chunk_doc.id).delete()
+
+
+def _delete_stale_evolution_chunks(doc_ref: Any, current_versions: set[str]) -> None:
+    chunk_collection = doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION)
+    for chunk_doc in chunk_collection.stream():
+        chunk_data = chunk_doc.to_dict() or {}
+        if not current_versions or chunk_data.get("chunk_version") not in current_versions:
+            chunk_collection.document(chunk_doc.id).delete()
 
 
 async def save_evolution(user_id: str, evolution_id: str, data: Dict[str, Any]) -> None:
     """Save an evolution for a user.
 
     Note: Firestore doesn't support nested arrays, so we serialize fields like
-    'history' (which is [[ideas], [ideas]]) to JSON strings.
+    'history' (which is [[ideas], [ideas]]) to JSON. Large fields are stored in
+    chunk documents so completed runs do not exceed Firestore's document limit.
     """
     db = get_db()
+    updated_at = datetime.utcnow().isoformat()
+    save_data, chunk_payloads = _prepare_evolution_save_data(data, user_id, updated_at)
 
-    # Make a copy to avoid modifying the original
-    save_data = dict(data)
-    save_data["updated_at"] = datetime.utcnow().isoformat()
-    save_data["user_id"] = user_id
+    doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
+    chunk_collection = doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION)
+    for chunk_id, chunk_data in chunk_payloads.items():
+        chunk_collection.document(chunk_id).set(chunk_data)
 
-    # Serialize nested array fields to JSON strings
-    for field in EVOLUTION_NESTED_FIELDS:
-        if field in save_data and save_data[field] is not None:
-            save_data[field] = json.dumps(save_data[field], default=str)
-
-    db.collection("users").document(user_id).collection("evolutions").document(evolution_id).set(save_data)
+    doc_ref.set(save_data)
+    current_versions = {
+        meta.get("chunk_version")
+        for meta in (save_data.get("_externalized_fields") or {}).values()
+        if isinstance(meta, dict) and meta.get("chunk_version")
+    }
+    _delete_stale_evolution_chunks(doc_ref, current_versions)
 
 
 async def get_evolution(user_id: str, evolution_id: str) -> Optional[Dict[str, Any]]:
@@ -313,13 +479,9 @@ async def get_evolution(user_id: str, evolution_id: str) -> Optional[Dict[str, A
 
     if doc.exists:
         data = doc.to_dict()
-        # Deserialize JSON string fields back to nested arrays
-        for field in EVOLUTION_NESTED_FIELDS:
-            if field in data and isinstance(data[field], str):
-                try:
-                    data[field] = json.loads(data[field])
-                except json.JSONDecodeError:
-                    pass  # Keep as string if not valid JSON
+        doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
+        _load_externalized_evolution_fields(doc_ref, data)
+        _deserialize_evolution_json_fields(data)
         return data
     return None
 
@@ -336,13 +498,9 @@ async def list_evolutions(user_id: str, limit: int = 50) -> List[Dict[str, Any]]
     for doc in docs:
         data = doc.to_dict()
         data["id"] = doc.id
-        # Deserialize JSON string fields back to native types
-        for field in EVOLUTION_NESTED_FIELDS:
-            if field in data and isinstance(data[field], str):
-                try:
-                    data[field] = json.loads(data[field])
-                except json.JSONDecodeError:
-                    pass  # Keep as string if not valid JSON
+        # Keep list queries cheap: deserialize fields present on the summary doc,
+        # but do not fetch externalized history chunks for every row.
+        _deserialize_evolution_json_fields(data)
         evolutions.append(data)
     return evolutions
 
@@ -353,6 +511,7 @@ async def delete_evolution(user_id: str, evolution_id: str) -> bool:
     doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
     doc = doc_ref.get()
     if doc.exists:
+        _delete_evolution_chunks(doc_ref)
         doc_ref.delete()
         return True
     return False

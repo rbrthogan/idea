@@ -48,7 +48,7 @@ def test_generate_unique_template_id_avoids_collisions():
     assert template_id == "my_template_4"
 
 
-def test_generate_template_uses_gemini_31_pro_with_near_max_thinking_budget():
+def test_generate_template_uses_gemini_31_pro_with_high_thinking_level():
     captured_kwargs = {}
 
     class FakeLLM:
@@ -87,8 +87,8 @@ Comparison Criteria: novelty, feasibility, scientific value
 
     assert response.status_code == 200
     assert captured_kwargs["model_name"] == "gemini-3.1-pro-preview"
-    assert captured_kwargs["thinking_budget"] == 24576
-    assert captured_kwargs["thinking_level"] is None
+    assert captured_kwargs["thinking_budget"] is None
+    assert captured_kwargs["thinking_level"] == "high"
 
 
 def test_generate_template_uploads_context_file_and_passes_it_to_gemini():

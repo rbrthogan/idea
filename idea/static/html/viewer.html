@@ -89,14 +89,9 @@
               <div class="mb-3">
                 <label for="modelType" class="form-label mb-1">Model</label>
                 <select class="form-select form-select-sm" id="modelType">
-                  <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite</option>
-                  <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                  <option value="gemini-2.5-flash-lite" selected>Gemini 2.5 Flash Lite</option>
-                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                  <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                  <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-                  <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash-Lite Preview</option>
-                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+                  {% for model in llm_models %}
+                  <option value="{{ model.id }}" {% if model.id == default_model %}selected{% endif %}>{{ model.name }}</option>
+                  {% endfor %}
                 </select>
               </div>
 
@@ -229,7 +224,7 @@
                       <strong id="thinkingOffLabel">Off</strong><span id="thinkingOffDescription"> - Prefer speed and lower cost</span>
                     </label>
                   </div>
-                  <div class="form-check">
+                  <div class="form-check" id="thinkingLowOption">
                     <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingLow"
                       value="low" onchange="updateThinkingBudgetMode()">
                     <label class="form-check-label" for="thinkingLow">
@@ -243,14 +238,14 @@
                       <strong>Medium</strong> - Balanced depth and latency
                     </label>
                   </div>
-                  <div class="form-check">
+                  <div class="form-check" id="thinkingHighOption">
                     <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingHigh"
                       value="high" onchange="updateThinkingBudgetMode()">
                     <label class="form-check-label" for="thinkingHigh">
                       <strong>High</strong> - Deeper reasoning
                     </label>
                   </div>
-                  <div class="form-check">
+                  <div class="form-check" id="thinkingCustomBudgetOption">
                     <input class="form-check-input" type="radio" name="thinkingBudgetMode" id="thinkingCustomBudget"
                       value="custom" onchange="updateThinkingBudgetMode()">
                     <label class="form-check-label" for="thinkingCustomBudget">
@@ -332,6 +327,16 @@
                 <input type="range" class="form-range" min="0" max="1.5" step="0.05" id="ageDecayRate" value="0.25"
                   oninput="document.getElementById('ageDecayRateValue').textContent = parseFloat(this.value).toFixed(2)">
                 <small class="text-muted">Higher values retire old ideas faster during survivor selection.</small>
+              </div>
+
+              <div class="mb-3">
+                <label for="ageDecayFloor" class="form-label d-flex justify-content-between">
+                  <span>Age Decay Floor</span>
+                  <span id="ageDecayFloorValue">0.35</span>
+                </label>
+                <input type="range" class="form-range" min="0" max="1" step="0.05" id="ageDecayFloor" value="0.35"
+                  oninput="document.getElementById('ageDecayFloorValue').textContent = parseFloat(this.value).toFixed(2)">
+                <small class="text-muted">Minimum survival multiplier for older ideas after age decay.</small>
               </div>
 
               <div class="mb-3">
@@ -722,6 +727,11 @@
               <i class="fas fa-sitemap"></i>
               <span>Tree</span>
             </button>
+            <button type="button" class="evolution-view-toggle-btn" data-view-mode="ranked"
+              aria-selected="false">
+              <i class="fas fa-list-ol"></i>
+              <span>Ranked</span>
+            </button>
           </div>
         </div>
 
@@ -734,17 +744,26 @@
           <!-- Evolution tree content will be dynamically added here -->
         </div>
 
+        <div id="evolution-ranked-container" class="evolution-ranked-container" hidden>
+          <!-- Ranked population content will be dynamically added here -->
+        </div>
+
         <!-- Diversity Plot Section -->
         <div id="diversity-plot-section" class="diversity-plot-section" style="display: none;">
           <div class="diversity-plot-header">
             <div>
-              <h3 class="diversity-plot-title">Diversity</h3>
-              <p class="diversity-plot-subtitle">Population spread, island separation, and drift over time.</p>
+              <h3 class="diversity-plot-title">Fitness</h3>
+              <p class="diversity-plot-subtitle">Track population fitness, ELO, and diversity over time.</p>
             </div>
             <div class="diversity-plot-controls">
-              <div class="diversity-mode-toggle" role="group" aria-label="Diversity chart mode">
-                <button type="button" class="active" data-diversity-mode="overview">Overview</button>
-                <button type="button" data-diversity-mode="islands">Islands</button>
+              <div class="diversity-mode-toggle" role="group" aria-label="Fitness chart metric">
+                <button type="button" class="active" data-fitness-metric="fitness">Fitness</button>
+                <button type="button" data-fitness-metric="elo">ELO</button>
+                <button type="button" data-fitness-metric="diversity">Diversity</button>
+              </div>
+              <div class="diversity-mode-toggle" role="group" aria-label="Diversity chart scope">
+                <button type="button" class="active" data-fitness-scope="population">Population</button>
+                <button type="button" data-fitness-scope="islands">Islands</button>
               </div>
               <button class="diversity-plot-toggle btn btn-outline-secondary" type="button" data-bs-toggle="collapse"
                 data-bs-target="#diversity-plot-content" aria-expanded="true" aria-controls="diversity-plot-content">
@@ -2278,6 +2297,11 @@ Output: condensed list of basic elements, separated by semicolons"></textarea>
 
   <!-- Include original viewer.js for evolution functionality -->
   <script src="/static/js/auth.js"></script>
+  <script>
+    window.IDEA_DEV_AUTH = {{ dev_auth_config | tojson }};
+    window.IDEA_DEFAULT_MODEL = {{ default_model | tojson }};
+    window.IDEA_THINKING_MODEL_CONFIG = {{ thinking_config | tojson }};
+  </script>
   <script src="/static/js/auth_logic.js?v=3"></script>
   <script src="/static/js/viewer.js?v=3"></script>
 </body>

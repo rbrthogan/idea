@@ -414,6 +414,8 @@ def test_generation_scoring_metadata_is_attached_for_tree_view():
     assert scored_parent["selection_metrics"]["elo"] in {1499.0, 1500.0}
     assert scored_parent["selection_metrics"]["diversity"] in {0.0, 0.1}
     assert scored_parent["selection_metrics"]["fitness"] > 0
+    assert scored_parent["generation_metrics"]["0"]["evaluation_generation"] == 0
+    assert scored_parent["generation_metrics"]["0"]["fitness"] > 0
     assert scored_parent["survival_metrics"]["survived_to_generation"] == 1
 
 
@@ -451,6 +453,10 @@ def test_final_generation_is_tournament_scored_for_continuation_and_tree_view():
         idea["selection_metrics"]["evaluation_generation"] == engine.generations
         for idea in final_generation
     )
+    assert all(
+        idea["generation_metrics"][str(engine.generations)]["evaluation_generation"] == engine.generations
+        for idea in final_generation
+    )
     assert [entry["generation"] for entry in engine.tournament_history] == [0, 1]
     assert engine.tournament_history[-1]["generation"] == engine.generations
     assert any(update.get("history") for update in updates)
@@ -481,6 +487,52 @@ def test_attach_tree_metrics_persists_global_elo_on_idea():
     assert idea["selection_metrics"]["elo"] == 1632.4
     assert idea["elo"] == 1632.4
     assert idea["ratings"]["auto"] == 1632.4
+    assert idea["generation_metrics"]["2"] == {
+        "evaluation_generation": 2,
+        "elo": 1632.4,
+        "diversity": 0.25,
+        "fitness": 0.68,
+    }
+
+
+def test_attach_tree_metrics_does_not_overwrite_generation_metric_snapshot():
+    engine = _FakeEngine()
+    orchestrator = EvolutionOrchestrator(engine, lambda _data: asyncio.sleep(0))
+    population = [
+        {
+            "id": uuid.uuid4(),
+            "idea": "A",
+            "parent_ids": [],
+            "generation_metrics": {
+                "2": {
+                    "evaluation_generation": 2,
+                    "elo": 1501.0,
+                    "diversity": 0.2,
+                    "fitness": 0.4,
+                }
+            },
+        }
+    ]
+
+    orchestrator._attach_tree_metrics(
+        population,
+        {
+            0: {
+                "elo": 1800.0,
+                "diversity": 0.9,
+                "elo_norm": 1.0,
+                "diversity_norm": 1.0,
+                "fitness": 0.95,
+            }
+        },
+        {0: {"age": 0.0, "age_decay": 1.0, "survival_score": 0.95}},
+        evaluation_generation=2,
+        target_generation=3,
+    )
+
+    assert population[0]["selection_metrics"]["elo"] == 1800.0
+    assert population[0]["generation_metrics"]["2"]["elo"] == 1501.0
+    assert population[0]["generation_metrics"]["2"]["fitness"] == 0.4
 
 
 def test_seed_novelty_guardrail_regenerates_similar_context():

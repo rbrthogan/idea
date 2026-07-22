@@ -82,6 +82,7 @@ class EvolutionSerializer:
             "diversity_history": engine.diversity_history,
             "island_diversity_history": getattr(engine, "island_diversity_history", []),
             "migration_history": getattr(engine, "migration_history", []),
+            "comparison_cache": getattr(engine, "comparison_cache", {}),
             "avg_idea_cost": engine.avg_idea_cost,
             "avg_tournament_cost": engine.avg_tournament_cost,
             "fitness_elo_stats": engine.fitness_elo_stats,
@@ -147,6 +148,8 @@ class EvolutionSerializer:
         engine.diversity_history = state.get("diversity_history", [])
         engine.island_diversity_history = state.get("island_diversity_history", [])
         engine.migration_history = state.get("migration_history", [])
+        comparison_cache = state.get("comparison_cache", {})
+        engine.comparison_cache = comparison_cache if isinstance(comparison_cache, dict) else {}
         engine.avg_idea_cost = state.get("avg_idea_cost", 0.0)
         engine.avg_tournament_cost = state.get("avg_tournament_cost", 0.0)
         engine.fitness_elo_stats = _coerce_stats(state.get("fitness_elo_stats"))
@@ -195,6 +198,20 @@ class EvolutionRepository:
             for data in evolutions:
                 config = data.get("config", {})
                 history = data.get("history", [])
+                history_summary = data.get("_history_summary") or {}
+                population_summary = data.get("_population_summary") or {}
+                if isinstance(history, list) and history:
+                    generation_count = len(history)
+                    total_ideas = sum(len(gen) for gen in history if isinstance(gen, list))
+                    inferred_pop_size = len(history[0]) if isinstance(history[0], list) else 0
+                else:
+                    generation_count = int(history_summary.get("generation_count") or 0)
+                    total_ideas = int(history_summary.get("total_ideas") or 0)
+                    inferred_pop_size = int(
+                        population_summary.get("population_size")
+                        or history_summary.get("last_generation_size")
+                        or 0
+                    )
                 result.append(
                     {
                         "id": data.get("evolution_id") or data.get("id"),
@@ -202,12 +219,13 @@ class EvolutionRepository:
                         "status": data.get("status", "unknown"),
                         "created_at": data.get("created_at"),
                         "updated_at": data.get("updated_at"),
-                        "generation": data.get("current_generation", len(history)),
-                        "total_generations": config.get("generations", len(history)),
+                        "generation": data.get("current_generation", generation_count),
+                        "total_generations": config.get("generations", generation_count),
                         "idea_type": config.get("idea_type", "unknown"),
                         "model_type": config.get("model_type", "unknown"),
-                        "pop_size": config.get("pop_size", len(history[0]) if history else 0),
-                        "total_ideas": sum(len(gen) for gen in history),
+                        "pop_size": config.get("pop_size", inferred_pop_size),
+                        "total_ideas": total_ideas,
+                        "config": config,
                     }
                 )
             return result
@@ -232,6 +250,7 @@ class EvolutionRepository:
                         "idea_type": config.get("idea_type", "unknown"),
                         "model_type": config.get("model_type", "unknown"),
                         "pop_size": config.get("pop_size", 0),
+                        "config": config,
                     }
                 )
             return result

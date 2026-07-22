@@ -22,8 +22,7 @@ Idea Evolution is a small web app that uses multiple LLM agents (Ideator, Critic
 1) Install dependencies
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+uv sync
 ```
 
 2) Configure your API key
@@ -35,7 +34,14 @@ export GEMINI_API_KEY=your_api_key_here
 3) Run the app
 
 ```bash
-uvicorn idea.viewer:app
+uv run uvicorn idea.viewer:app
+```
+
+For local Codex/browser testing where Google popups get in the way, you can
+enable the localhost-only development auth shim:
+
+```bash
+IDEA_DEV_AUTH=1 uv run uvicorn idea.viewer:app --host 127.0.0.1 --port 8000
 ```
 
 4) Open the UI
@@ -58,7 +64,7 @@ See the explainer: `docs/EvolutionOverview.md`.
 ## Running tests
 
 ```bash
-pytest -q
+uv run pytest -q
 ```
 
 ## Structure (high‑level)
@@ -82,7 +88,7 @@ Create new templates from the UI (on the main page) or by adding YAML files. See
 ## Configuration tips
 
 - Models and pricing are defined in `idea/config.py` and used to estimate token costs for evolution and auto‑rating.
-- Gemini 2.5 models support an optional “thinking budget”; the UI enables this when applicable.
+- Gemini 3 models use thinking levels; Gemini 2.5 models use thinking budgets. The UI exposes the supported control for each model.
 - Advanced evolution controls include:
   - `mutationRate` (breeding mutation on new children)
   - `replacementRate` (fraction of population replaced per generation)

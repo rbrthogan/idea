@@ -19,6 +19,11 @@ NC='\033[0m' # No Color
 
 echo -e "${GREEN}=== Idea Evolution Local Development ===${NC}"
 
+if ! command -v uv &> /dev/null; then
+    echo -e "${RED}uv is required for local development. Install it from https://docs.astral.sh/uv/getting-started/installation/${NC}"
+    exit 1
+fi
+
 # Check if using emulator
 USE_EMULATOR=true
 
@@ -72,4 +77,4 @@ echo -e "${GREEN}Application will be available at http://localhost:8000${NC}"
 echo ""
 
 # Run the application
-uvicorn idea.viewer:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn idea.viewer:app --reload --host 0.0.0.0 --port 8000

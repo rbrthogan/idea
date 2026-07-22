@@ -1727,11 +1727,15 @@ function showAutoratingCostModal(tokenCounts) {
     const totalTokens = tokenCounts.total.toLocaleString();
     const totalInputTokens = tokenCounts.total_input.toLocaleString();
     const totalOutputTokens = tokenCounts.total_output.toLocaleString();
+    const totalThoughtTokens = (tokenCounts.total_thoughts || 0).toLocaleString();
+    const totalCachedInputTokens = (tokenCounts.total_cached_input || 0).toLocaleString();
 
     // Component totals and details for critic
     const criticTotal = tokenCounts.critic.total.toLocaleString();
     const criticInput = tokenCounts.critic.input.toLocaleString();
     const criticOutput = tokenCounts.critic.output.toLocaleString();
+    const criticThoughts = (tokenCounts.critic.thoughts || 0).toLocaleString();
+    const criticCachedInput = (tokenCounts.critic.cached_input || 0).toLocaleString();
     const criticModel = tokenCounts.critic.model;
     const criticCost = tokenCounts.critic.cost.toFixed(4);
 
@@ -1740,6 +1744,8 @@ function showAutoratingCostModal(tokenCounts) {
     const totalCost = costInfo.total_cost.toFixed(4);
     const inputCost = costInfo.input_cost.toFixed(4);
     const outputCost = costInfo.output_cost.toFixed(4);
+    const thoughtCost = (costInfo.thought_cost || 0).toFixed(4);
+    const cachedInputCost = (costInfo.cached_input_cost || 0).toFixed(4);
 
     // Prepare alternative cost estimates using the critic token counts
     let estimatesList = '';
@@ -1779,12 +1785,18 @@ function showAutoratingCostModal(tokenCounts) {
                                         <span>Input: <span class="text-info">${totalInputTokens}</span></span>
                                         <span>Output: <span class="text-success">${totalOutputTokens}</span></span>
                                     </div>
+                                    <div class="small text-muted mt-1">
+                                        <span>Thoughts: ${totalThoughtTokens}</span>
+                                        ${tokenCounts.total_cached_input ? `<span class="ms-2">Cached input: ${totalCachedInputTokens}</span>` : ''}
+                                    </div>
                                     <hr>
                                     <h6>Cost Breakdown:</h6>
                                     <p class="mb-1">Total cost: <strong>$${totalCost}</strong></p>
                                     <div class="small text-muted">
                                         <div>Input: $${inputCost}</div>
+                                        ${tokenCounts.total_cached_input ? `<div>Cached input read: $${cachedInputCost}</div>` : ''}
                                         <div>Output: $${outputCost}</div>
+                                        <div>Thoughts: $${thoughtCost}</div>
                                     </div>
                                     <hr>
                                     <h6>Other Model Estimates:</h6>
@@ -1804,6 +1816,8 @@ function showAutoratingCostModal(tokenCounts) {
                                     <div class="small text-muted mt-1">
                                         <span>Input: ${criticInput}</span> |
                                         <span>Output: ${criticOutput}</span> |
+                                        ${tokenCounts.critic.thoughts ? `<span>Thoughts: ${criticThoughts}</span> |` : ''}
+                                        ${tokenCounts.critic.cached_input ? `<span>Cached input: ${criticCachedInput}</span> |` : ''}
                                         <span>Cost: $${criticCost}</span>
                                     </div>
                                 </li>
@@ -1834,20 +1848,22 @@ function showAutoratingCostModal(tokenCounts) {
     modalContainer.addEventListener('shown.bs.modal', function () {
         // For autorating, we only have the critic component, so create simpler charts
 
-        // Create a pie chart for input vs output tokens
+        // Create a pie chart for input vs output/thinking tokens
         const pieCtx = document.getElementById('autoratingTokenPieChart').getContext('2d');
         new Chart(pieCtx, {
             type: 'pie',
             data: {
-                labels: ['Input Tokens', 'Output Tokens'],
+                labels: ['Input Tokens', 'Output Tokens', 'Thinking Tokens'],
                 datasets: [{
                     data: [
                         tokenCounts.total_input,
-                        tokenCounts.total_output
+                        tokenCounts.total_output,
+                        tokenCounts.total_thoughts || 0
                     ],
                     backgroundColor: [
                         '#36a2eb',
-                        '#4bc0c0'
+                        '#4bc0c0',
+                        '#9966ff'
                     ]
                 }]
             },
@@ -1856,7 +1872,7 @@ function showAutoratingCostModal(tokenCounts) {
                 plugins: {
                     title: {
                         display: true,
-                        text: 'Token Distribution (Input vs Output)'
+                        text: 'Token Distribution'
                     },
                     legend: {
                         position: 'bottom'
@@ -1870,15 +1886,16 @@ function showAutoratingCostModal(tokenCounts) {
         new Chart(barCtx, {
             type: 'bar',
             data: {
-                labels: ['Input Cost', 'Output Cost', 'Total Cost'],
+                labels: ['Input Cost', 'Output Cost', 'Thinking Cost', 'Total Cost'],
                 datasets: [{
                     label: 'Cost (USD)',
                     data: [
                         parseFloat(inputCost),
                         parseFloat(outputCost),
+                        parseFloat(thoughtCost),
                         parseFloat(totalCost)
                     ],
-                    backgroundColor: ['#36a2eb', '#4bc0c0', '#ff9f40']
+                    backgroundColor: ['#36a2eb', '#4bc0c0', '#9966ff', '#ff9f40']
                 }]
             },
             options: {

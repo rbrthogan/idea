@@ -1,12 +1,16 @@
 # Admin module for monitoring user activity
 # Protected routes for administrators only
 
+import logging
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from idea.auth import require_admin, UserInfo
+from idea.auth import require_admin, UserInfo, get_dev_auth_client_config
 from idea import database as db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -14,12 +18,13 @@ templates = Jinja2Templates(directory="idea/static/html")
 
 
 @router.get("/")
-@router.get("/")
 async def admin_dashboard(request: Request):
     """Serve the admin dashboard page."""
-    return templates.TemplateResponse("admin.html", {
-        "request": request
-    })
+    return templates.TemplateResponse(
+        request,
+        "admin.html",
+        {"dev_auth_config": get_dev_auth_client_config(request)},
+    )
 
 
 @router.get("/api/users")
@@ -33,6 +38,7 @@ async def list_users(user: UserInfo = Depends(require_admin)):
             "total": len(users)
         })
     except Exception as e:
+        logger.exception("Failed to list admin users")
         return JSONResponse({
             "status": "error",
             "message": str(e)
@@ -59,6 +65,7 @@ async def get_stats(user: UserInfo = Depends(require_admin)):
             }
         })
     except Exception as e:
+        logger.exception("Failed to calculate admin stats")
         return JSONResponse({
             "status": "error",
             "message": str(e)
@@ -76,6 +83,7 @@ async def get_user_evolutions(user_id: str, admin: UserInfo = Depends(require_ad
             "user_id": user_id
         })
     except Exception as e:
+        logger.exception("Failed to list evolutions for user %s", user_id)
         return JSONResponse({
             "status": "error",
             "message": str(e)

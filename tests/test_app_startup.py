@@ -15,3 +15,14 @@ def test_app_startup():
     client = TestClient(app)
     response = client.get("/")
     assert response.status_code == 200
+
+
+def test_viewer_injects_model_aware_thinking_config():
+    client = TestClient(app)
+    response = client.get("/")
+    html = response.text
+
+    assert "window.IDEA_THINKING_MODEL_CONFIG" in html
+    assert '"gemini-3.1-pro-preview"' in html
+    assert '"default_level": "low"' in html
+    assert '"supports_thinking_budget": false' in html

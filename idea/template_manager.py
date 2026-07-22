@@ -32,7 +32,6 @@ TEMPLATES_DIR = Path(__file__).parent / "prompts" / "templates"
 TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
 TEMPLATE_GENERATION_MODEL = "gemini-3.1-pro-preview"
-TEMPLATE_GENERATION_THINKING_BUDGET = 24576
 TEMPLATE_CONTEXT_MAX_BYTES = 50 * 1024 * 1024
 TEMPLATE_CONTEXT_EXACT_MIME_TYPES = {
     "application/pdf",
@@ -717,14 +716,14 @@ async def _generate_template_from_inputs(
             context_filename=context_file.filename if context_file else None,
         )
 
-        # Use Gemini 3.1 Pro with a high, near-max thinking budget for template design.
+        # Use Gemini 3.1 Pro with high thinking for template design.
         llm = LLMWrapper(
             provider="google_generative_ai",
             model_name=TEMPLATE_GENERATION_MODEL,
             temperature=0.7,  # Balanced creativity and consistency
             top_p=0.9,
-            thinking_level=None,
-            thinking_budget=TEMPLATE_GENERATION_THINKING_BUDGET,
+            thinking_level="high",
+            thinking_budget=None,
             api_key=api_key
         )
 

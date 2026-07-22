@@ -6,7 +6,6 @@
 - For slower models with high latency it seems like nothing is happening for a while. Add more verbosity to the UI, e.g. one line of grey text under the progress bar that reports the current log activity: "Generating initial context for idea x of y ... ", "rated limited, backing off for X seconds", etc. This will whizz by quickly for fast models, but be more visible for slow models.
 - Add download button for charts (diversity and ELO ratings) to allow easy use later.
 - Add file upload for e.g. pdf to provide context to idea template generation 
-- update default template generator to 3.1
 
 ## Research Ideas
 - Have an evolution variant to take human ratings as input during evolution
@@ -20,9 +19,11 @@
 - Reject bred or Oracle-generated ideas that are too similar to previous ones.
 - Is critique and refine really worth it? Maybe the idea and its critique should be kept together without mandatory refinement. Another parent and its critique could breed with it, especially if genotype compression loses the refinement anyway.
 - Investigate cheaper evals (e.g. each new idea is rated just vs a ~ median ELO idea)
+- Investigate an explicit Gemini context-cache mode for autorating: cache a stable, sorted population plus judging criteria per generation, then run dense pairwise comparisons by idea ID to reduce repeated input-token cost.
 
 
 ## Bugs
+- Fix empty diversity chart when viewing the current evolution without first saving and reopening it from the history list.
 
 ## UX Improvements
 - Rater page should reuse the same history sidebar as the main viewer page instead of having a separate dropdown

@@ -868,6 +868,316 @@ small {
   display: none;
 }
 
+.evolution-ranked-container {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-alt) 64%, white), var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.evolution-ranked-container[hidden] {
+  display: none;
+}
+
+.evolution-ranked-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-alt) 74%, white);
+}
+
+.evolution-ranked-header h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.evolution-ranked-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.evolution-ranked-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.18rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 82%, var(--surface-alt));
+}
+
+.evolution-ranked-segment button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 800;
+  line-height: 1;
+  padding: 0.48rem 0.62rem;
+}
+
+.evolution-ranked-segment button.active {
+  color: var(--primary);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.evolution-ranked-kicker,
+.evolution-ranked-count {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.evolution-ranked-count {
+  padding: 0.48rem 0.62rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.evolution-ranked-list {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.9rem;
+}
+
+.evolution-rank-row {
+  --rank-accent: var(--island-color, var(--primary));
+  width: 100%;
+  display: grid;
+  grid-template-columns: 74px minmax(280px, 1fr) 112px minmax(300px, 0.9fr);
+  gap: 0.9rem;
+  align-items: stretch;
+  padding: 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--rank-accent) 18%, var(--border));
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--rank-accent) 9%, transparent), transparent 28%),
+    var(--surface);
+  color: var(--text-secondary);
+  text-align: left;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--rank-accent) 11%, transparent);
+}
+
+.evolution-rank-row:hover,
+.evolution-rank-row:focus-visible {
+  border-color: color-mix(in srgb, var(--rank-accent) 46%, var(--border));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--rank-accent) 14%, transparent), transparent 32%),
+    var(--surface);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.evolution-rank-number {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  min-height: 4.7rem;
+  border-radius: 8px;
+  color: var(--rank-accent);
+  background: color-mix(in srgb, var(--rank-accent) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--rank-accent) 28%, transparent);
+}
+
+.evolution-rank-number strong {
+  color: var(--text-primary);
+  font-size: 1.12rem;
+  font-weight: 900;
+}
+
+.evolution-rank-number small {
+  color: var(--rank-accent);
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.evolution-rank-main {
+  min-width: 0;
+}
+
+.evolution-rank-title,
+.evolution-rank-preview {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evolution-rank-title {
+  color: var(--text-primary);
+  font-size: 0.98rem;
+  font-weight: 900;
+}
+
+.evolution-rank-preview {
+  margin-top: 0.22rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.evolution-rank-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.58rem;
+}
+
+.evolution-rank-chip,
+.evolution-rank-island {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  min-height: 1.45rem;
+  padding: 0.18rem 0.48rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 850;
+  line-height: 1;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-alt) 72%, white);
+}
+
+.evolution-rank-island {
+  color: var(--island-color, var(--primary));
+  border-color: color-mix(in srgb, var(--island-color, var(--primary)) 26%, var(--border));
+  background: var(--island-bg, rgba(0, 0, 0, 0.05));
+}
+
+.evolution-rank-island-empty {
+  color: var(--text-muted);
+}
+
+.evolution-rank-island-dot {
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.evolution-rank-chip.rank-current {
+  color: var(--success, #059669);
+  border-color: color-mix(in srgb, var(--success, #059669) 30%, var(--border));
+  background: color-mix(in srgb, var(--success, #059669) 10%, var(--surface));
+}
+
+.evolution-rank-chip.rank-historical {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+
+.evolution-rank-score {
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  min-width: 0;
+  border-radius: 8px;
+  padding: 0.65rem;
+  background: color-mix(in srgb, var(--rank-accent) 7%, var(--surface-alt));
+  border: 1px solid color-mix(in srgb, var(--rank-accent) 16%, var(--border));
+}
+
+.evolution-rank-score span,
+.evolution-rank-score small {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.evolution-rank-score strong {
+  color: var(--text-primary);
+  font-size: 1.08rem;
+  font-weight: 900;
+}
+
+.evolution-rank-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+  align-items: stretch;
+}
+
+.evolution-rank-metric {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0.55rem 0.62rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-alt) 52%, white);
+}
+
+.evolution-rank-metric.active {
+  border-color: color-mix(in srgb, var(--rank-accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--rank-accent) 10%, var(--surface));
+}
+
+.evolution-rank-metric span,
+.evolution-rank-metric small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.evolution-rank-metric strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.92rem;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evolution-ranked-empty {
+  padding: 1.5rem;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+@media (max-width: 980px) {
+  .evolution-ranked-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .evolution-ranked-controls {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .evolution-rank-row {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .evolution-rank-score,
+  .evolution-rank-metrics {
+    grid-column: 2;
+  }
+}
+
 .evolution-tree-shell {
   position: relative;
   display: grid;
@@ -954,6 +1264,9 @@ small {
 
 .evolution-tree-node {
   --tree-fitness-strength: 12%;
+  --tree-historical-fitness-strength: 14%;
+  --tree-historical-border-strength: 54%;
+  --tree-historical-text-strength: 60%;
   width: min(100%, 142px);
   min-height: 58px;
   padding: 0.52rem 0.58rem;
@@ -973,6 +1286,40 @@ small {
 
 .evolution-tree-node[data-has-fitness="false"] {
   --tree-fitness-strength: 10%;
+}
+
+.evolution-tree-node.tree-current-population {
+  border-style: solid;
+  border-width: 1.5px;
+}
+
+.evolution-tree-node.tree-historical {
+  border-style: dashed;
+  border-color: color-mix(
+    in srgb,
+    var(--island-color, var(--primary)) var(--tree-historical-border-strength),
+    var(--border)
+  );
+  background: color-mix(
+    in srgb,
+    var(--island-color, var(--primary)) var(--tree-historical-fitness-strength),
+    rgba(255, 255, 255, 0.58)
+  );
+  color: color-mix(in srgb, var(--text-primary) var(--tree-historical-text-strength), transparent);
+  box-shadow: none;
+}
+
+.evolution-tree-node.tree-historical .tree-node-title,
+.evolution-tree-node.tree-historical .tree-node-abbrev {
+  color: color-mix(in srgb, var(--text-primary) var(--tree-historical-text-strength), transparent);
+}
+
+.evolution-tree-node.tree-historical:hover {
+  box-shadow: var(--shadow-sm);
+}
+
+.evolution-tree-node.tree-survivor-step {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, #059669 18%, transparent);
 }
 
 .evolution-tree-node.tree-oracle,
@@ -1088,6 +1435,14 @@ small {
 .tree-connector-survivor_refinement {
   stroke: #7c3aed;
   stroke-dasharray: 3 4;
+}
+
+.tree-connector-continuation {
+  stroke: #059669;
+  stroke-width: 2.2;
+  stroke-linecap: butt;
+  stroke-dasharray: 3 5;
+  opacity: 0.66;
 }
 
 .tree-connector-lineage-ancestor {
@@ -3077,6 +3432,47 @@ small {
 .history-item .item-actions .btn-sm {
   font-size: 0.7rem;
   padding: 0.3rem 0.5rem;
+}
+
+.history-config-details {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.config-detail-section-title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.25rem;
+}
+
+.config-detail-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.25;
+}
+
+.config-detail-row strong {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+  max-width: 11rem;
+  overflow-wrap: anywhere;
+}
+
+.config-detail-empty {
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .history-item .rename-inline-group {

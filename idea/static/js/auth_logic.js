@@ -4,8 +4,11 @@
 
 console.log("Loading Auth Logic...");
 
+const devAuthConfig = window.IDEA_DEV_AUTH || { enabled: false };
+const isDevAuthEnabled = Boolean(devAuthConfig.enabled);
+
 // 1. Config Loading Logic
-if (typeof FIREBASE_CONFIG === 'undefined' && typeof firebaseConfigObj === 'undefined') {
+if (!isDevAuthEnabled && typeof FIREBASE_CONFIG === 'undefined' && typeof firebaseConfigObj === 'undefined') {
     console.warn("FIREBASE_CONFIG is missing. Auth may fail.");
 } else if (typeof FIREBASE_CONFIG === 'string') {
     // If it's a string (from the deploy script), parse it.
@@ -19,10 +22,10 @@ if (typeof FIREBASE_CONFIG === 'undefined' && typeof firebaseConfigObj === 'unde
 }
 
 // 2. Initialize Firebase
-if (window.firebaseConfigObj && (!firebase.apps || !firebase.apps.length)) {
+if (!isDevAuthEnabled && window.firebaseConfigObj && typeof firebase !== 'undefined' && (!firebase.apps || !firebase.apps.length)) {
     console.log("Initializing Firebase with config:", window.firebaseConfigObj.projectId);
     firebase.initializeApp(window.firebaseConfigObj);
-} else if (!window.firebaseConfigObj) {
+} else if (!isDevAuthEnabled && !window.firebaseConfigObj) {
     console.error("Firebase config not found! Authentication will fail.");
 }
 
@@ -68,6 +71,11 @@ if (!loginOverlay) {
 
 // 4. Auth Functions
 async function signInWithGoogle() {
+    if (isDevAuthEnabled) {
+        await activateDevAuth();
+        return;
+    }
+
     console.log("Starting Google Sign-In...");
     const provider = new firebase.auth.GoogleAuthProvider();
     try {
@@ -80,6 +88,10 @@ async function signInWithGoogle() {
 
 async function signOut() {
     try {
+        if (isDevAuthEnabled) {
+            window.location.reload();
+            return;
+        }
         await firebase.auth().signOut();
         // Force reload to clear state
         window.location.reload();
@@ -89,54 +101,80 @@ async function signOut() {
 }
 
 // 5. Auth Observer
-if (firebase.auth) {
+async function completeSignIn(user) {
+    console.log("User signed in:", user.email);
+    window.currentUser = user;
+    try {
+        idToken = await user.getIdToken();
+    } catch (e) {
+        console.error("Failed to get ID token", e);
+    }
+
+    // Hide overlay
+    loginOverlay.style.display = 'none';
+    document.body.style.overflow = 'auto';
+
+    // Check API Key Status
+    checkApiKeyStatus();
+
+    // Check if there's a running evolution and show banner
+    if (typeof checkRunningEvolution === 'function') {
+        checkRunningEvolution();
+    }
+
+    // Render Header UI
+    renderUserUI(user);
+
+    // Refresh template lists now that we have auth
+    if (typeof loadExistingTemplates === 'function') {
+        loadExistingTemplates();
+    }
+    if (typeof loadTemplateTypes === 'function') {
+        loadTemplateTypes({ preserveSelection: true, suppressDefaultSelection: false });
+    } else {
+        window.__refreshTemplatesOnViewerReady = true;
+    }
+    window.dispatchEvent(new CustomEvent('idea-auth-ready'));
+}
+
+function completeSignOut() {
+    console.log("User signed out");
+    window.currentUser = null;
+    idToken = null;
+    window.__refreshTemplatesOnViewerReady = false;
+
+    // Show overlay
+    loginOverlay.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Clear Header UI
+    if (authContainer) authContainer.innerHTML = '';
+}
+
+function buildDevUser() {
+    return {
+        uid: devAuthConfig.uid || 'local-dev-user',
+        email: devAuthConfig.email || 'local-dev@example.local',
+        displayName: devAuthConfig.displayName || 'Local Dev',
+        photoURL: '',
+        isAdmin: Boolean(devAuthConfig.isAdmin),
+        getIdToken: async () => devAuthConfig.token || 'local-dev-token',
+    };
+}
+
+async function activateDevAuth() {
+    console.log("Using local-dev-auth");
+    await completeSignIn(buildDevUser());
+}
+
+if (isDevAuthEnabled) {
+    activateDevAuth();
+} else if (typeof firebase !== 'undefined' && firebase.auth) {
     firebase.auth().onAuthStateChanged(async (user) => {
         if (user) {
-            console.log("User signed in:", user.email);
-            window.currentUser = user;
-            try {
-                idToken = await user.getIdToken();
-            } catch (e) {
-                console.error("Failed to get ID token", e);
-            }
-
-            // Hide overlay
-            loginOverlay.style.display = 'none';
-            document.body.style.overflow = 'auto';
-
-            // Check API Key Status
-            checkApiKeyStatus();
-
-            // Check if there's a running evolution and show banner
-            if (typeof checkRunningEvolution === 'function') {
-                checkRunningEvolution();
-            }
-
-            // Render Header UI
-            renderUserUI(user);
-
-            // Refresh template lists now that we have auth
-            if (typeof loadExistingTemplates === 'function') {
-                loadExistingTemplates();
-            }
-            if (typeof loadTemplateTypes === 'function') {
-                loadTemplateTypes({ preserveSelection: true, suppressDefaultSelection: false });
-            } else {
-                window.__refreshTemplatesOnViewerReady = true;
-            }
-            window.dispatchEvent(new CustomEvent('idea-auth-ready'));
+            await completeSignIn(user);
         } else {
-            console.log("User signed out");
-            currentUser = null;
-            idToken = null;
-            window.__refreshTemplatesOnViewerReady = false;
-
-            // Show overlay
-            loginOverlay.style.display = 'flex';
-            document.body.style.overflow = 'hidden';
-
-            // Clear Header UI
-            if (authContainer) authContainer.innerHTML = '';
+            completeSignOut();
         }
     });
 } else {
@@ -175,12 +213,12 @@ window.fetch = async function (url, options = {}) {
     // (Assuming relative URLs or same domain)
     const isInternal = url.toString().startsWith('/') || url.toString().includes(window.location.origin);
 
-    if (isInternal && currentUser) {
+    if (isInternal && window.currentUser) {
         // Refresh token if potentially expired? (Firebase SDK handles internal caching, getIdToken() manages refresh)
         try {
             // true = force refresh, false = use cached.
             // We use cached unless we get 401? For now, just getting it ensures validity.
-            idToken = await currentUser.getIdToken();
+            idToken = await window.currentUser.getIdToken();
         } catch (e) {
             console.warn("Token fetch error:", e);
         }

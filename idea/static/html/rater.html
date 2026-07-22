@@ -421,6 +421,9 @@
 
   <!-- Firebase Auth -->
   <script src="/static/js/auth.js"></script>
+  <script>
+    window.IDEA_DEV_AUTH = {{ dev_auth_config | tojson }};
+  </script>
   <script src="/static/js/auth_logic.js"></script>
 
   <script src="/static/js/rater.js"></script>

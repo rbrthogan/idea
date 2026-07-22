@@ -3,7 +3,7 @@ Validation for YAML prompt templates
 """
 
 from typing import Dict, List, Any, Optional
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 import yaml
 from datetime import datetime
 
@@ -44,7 +44,8 @@ class PromptTemplate(BaseModel):
     # Special requirements for this template type
     special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")
 
-    @validator('version')
+    @field_validator('version')
+    @classmethod
     def validate_version(cls, v):
         """Validate semantic versioning format"""
         parts = v.split('.')
@@ -55,7 +56,8 @@ class PromptTemplate(BaseModel):
                 raise ValueError('Version parts must be numeric')
         return v
 
-    @validator('created_date')
+    @field_validator('created_date')
+    @classmethod
     def validate_date(cls, v):
         """Validate date format"""
         try:
@@ -64,7 +66,8 @@ class PromptTemplate(BaseModel):
         except ValueError:
             raise ValueError('Date must be in YYYY-MM-DD format')
 
-    @validator('comparison_criteria')
+    @field_validator('comparison_criteria')
+    @classmethod
     def validate_criteria(cls, v):
         """Ensure at least one comparison criterion"""
         if not v or len(v) == 0:
@@ -105,7 +108,7 @@ class TemplateValidator:
         warnings = []
 
         # Check for missing format placeholders
-        prompts_dict = template.prompts.dict()
+        prompts_dict = template.prompts.model_dump()
 
         # Check format prompt for {input_text}
         if '{input_text}' not in prompts_dict['format']:

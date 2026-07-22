@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from unittest.mock import patch
 
@@ -50,6 +51,7 @@ def test_repository_restore_from_state():
             "island_count": 3,
             "migration_rate": 0.05,
             "migration_novelty_protection_quantile": 0.75,
+            "age_decay_floor": 0.22,
         },
         "evolution_id": "evo-1",
         "name": "Test Evolution",
@@ -80,6 +82,12 @@ def test_repository_restore_from_state():
         "diversity_history": [{"enabled": True, "diversity_score": 0.5}],
         "island_diversity_history": [{"generation": 1, "islands": []}],
         "migration_history": [{"generation": 1, "from_island_id": 0, "to_island_id": 1}],
+        "comparison_cache": {
+            "model|template|pair": {
+                "winner_key": "idea-a",
+                "comparison_count": 1,
+            }
+        },
         "avg_idea_cost": 0.1,
         "avg_tournament_cost": 0.2,
         "template_data": {"name": "Custom"},
@@ -106,7 +114,88 @@ def test_repository_restore_from_state():
     assert engine.island_count == 3
     assert engine.migration_rate == 0.05
     assert engine.migration_novelty_protection_quantile == 0.75
+    assert engine.age_decay_floor == 0.22
     assert engine.island_diversity_history == [{"generation": 1, "islands": []}]
     assert engine.migration_history == [{"generation": 1, "from_island_id": 0, "to_island_id": 1}]
+    assert engine.comparison_cache == state["comparison_cache"]
     assert isinstance(engine.population[0]["idea"], Idea)
     assert engine.population[0]["idea"].title == "A"
+
+
+def test_serializer_persists_comparison_cache():
+    with patch("idea.llm.LLMWrapper._setup_provider", return_value=None):
+        engine = EvolutionEngine(
+            idea_type="airesearch",
+            pop_size=2,
+            generations=1,
+            api_key=None,
+            user_id="user-1",
+        )
+
+    engine.comparison_cache = {
+        "signature|pair": {
+            "winner_key": "idea-a",
+            "comparison_count": 1,
+        }
+    }
+
+    state = EvolutionSerializer.to_checkpoint_state(engine)
+
+    assert state["comparison_cache"] == engine.comparison_cache
+
+
+def test_serializer_persists_age_decay_floor():
+    with patch("idea.llm.LLMWrapper._setup_provider", return_value=None):
+        engine = EvolutionEngine(
+            idea_type="airesearch",
+            pop_size=2,
+            generations=1,
+            age_decay_floor=0.18,
+            api_key=None,
+            user_id="user-1",
+        )
+
+    state = EvolutionSerializer.to_checkpoint_state(engine)
+
+    assert state["config"]["age_decay_floor"] == 0.18
+
+
+def test_list_evolutions_includes_saved_config_metadata():
+    saved_config = {
+        "idea_type": "game_design",
+        "pop_size": 4,
+        "generations": 2,
+        "model_type": "gemini-3.1-pro-preview",
+        "thinking_level": "high",
+        "creative_temp": 1.4,
+        "top_p": 0.9,
+        "tournament_count": 1.5,
+        "mutation_rate": 0.35,
+        "seed_context_pool_size": 5,
+        "replacement_rate": 0.6,
+        "fitness_alpha": 0.8,
+        "age_decay_rate": 0.3,
+        "age_decay_floor": 0.2,
+        "refine_all_ideas": False,
+        "survivor_refinement_rate": 0.15,
+        "island_count": 3,
+        "migration_rate": 0.07,
+        "migration_novelty_protection_quantile": 0.85,
+    }
+
+    async def fake_list_evolutions(_user_id):
+        return [
+            {
+                "evolution_id": "evo-1",
+                "name": "Games 3.1 Pro High",
+                "status": "complete",
+                "config": saved_config,
+                "_history_summary": {"generation_count": 2, "total_ideas": 8},
+                "_population_summary": {"population_size": 4},
+            }
+        ]
+
+    with patch("idea.evolution_persistence.db.list_evolutions", side_effect=fake_list_evolutions):
+        result = asyncio.run(EvolutionRepository.list_evolutions_for_user("user-1"))
+
+    assert result[0]["config"] == saved_config

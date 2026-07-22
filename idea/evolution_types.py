@@ -50,6 +50,7 @@ class EvolutionRuntimeState:
     diversity_history: List[Dict[str, Any]] = field(default_factory=list)
     island_diversity_history: List[Dict[str, Any]] = field(default_factory=list)
     migration_history: List[Dict[str, Any]] = field(default_factory=list)
+    comparison_cache: Dict[str, Any] = field(default_factory=dict)
     avg_idea_cost: float = 0.0
     avg_tournament_cost: float = 0.0
     stop_requested: bool = False
