@@ -24,7 +24,7 @@ show_help() {
     echo "Usage: ./run_local.sh [--visual-artifacts]"
     echo ""
     echo "Options:"
-    echo "  --visual-artifacts  Enable the opt-in Gemini visualization-artifact workflow."
+    echo "  --visual-artifacts  Enable and preselect the Gemini visualization-artifact workflow."
     echo "                      Uses IDEA_ARTIFACT_STORE_ROOT when set, otherwise"
     echo "                      stores artifacts under \$PWD/data/artifacts."
     echo "  -h, --help          Show this help message."

@@ -419,6 +419,87 @@ def test_generation_scoring_metadata_is_attached_for_tree_view():
     assert scored_parent["survival_metrics"]["survived_to_generation"] == 1
 
 
+def test_generation_prepares_artifact_evidence_before_pairwise_tournament():
+    engine = _FakeEngine()
+    engine.oracle = None
+    events = []
+
+    async def prepare(population, *, evaluation_generation):
+        events.append(("prepare", evaluation_generation))
+        for idea in population:
+            idea["artifact_refs"] = [{"id": f"artifact-{idea['id']}"}]
+
+    def evaluate(_critic, population, _idea_type, **kwargs):
+        events.append(("judge", kwargs["evaluation_generation"]))
+        assert all(idea.get("artifact_refs") for idea in population)
+        return SimpleNamespace(
+            scores={idx: 1500.0 - idx for idx in range(len(population))},
+            batch=SimpleNamespace(),
+        )
+
+    engine._prepare_population_for_judging = prepare
+    engine.quality_evaluator = SimpleNamespace(evaluate_population=evaluate)
+    orchestrator = EvolutionOrchestrator(engine, lambda _data: asyncio.sleep(0))
+    state = GenerationWorkState(
+        generation_index=0,
+        start_generation=0,
+        total_generations=1,
+        total_steps=4,
+        steps_per_generation=4,
+    )
+
+    asyncio.run(
+        orchestrator._evolve_generations(
+            start_generation=0,
+            total_steps=4,
+            step_offset=0,
+            work_state=state,
+            resuming=False,
+        )
+    )
+
+    assert events[:2] == [("prepare", 0), ("judge", 0)]
+
+
+def test_island_generation_prepares_artifact_evidence_before_pairwise_tournament():
+    engine = _FakeEngine()
+    events = []
+
+    async def prepare(population, *, evaluation_generation):
+        events.append(("prepare", evaluation_generation))
+        for idea in population:
+            idea["artifact_refs"] = [{"id": f"artifact-{idea['id']}"}]
+
+    def evaluate(_critic, population, _idea_type, **kwargs):
+        events.append(("judge", kwargs["evaluation_generation"]))
+        assert all(idea.get("artifact_refs") for idea in population)
+        return SimpleNamespace(
+            scores={idx: 1500.0 - idx for idx in range(len(population))},
+            batch=SimpleNamespace(),
+        )
+
+    engine._prepare_population_for_judging = prepare
+    engine.quality_evaluator = SimpleNamespace(evaluate_population=evaluate)
+    orchestrator = EvolutionOrchestrator(engine, lambda _data: asyncio.sleep(0))
+
+    asyncio.run(
+        orchestrator._evolve_single_island_generation(
+            gen=0,
+            island_id=0,
+            island_population=engine.population,
+            current_gen_start_step=0,
+            total_steps=4,
+            gen_base_progress_info={
+                "current_generation": 1,
+                "total_generations": 1,
+                "is_running": True,
+            },
+        )
+    )
+
+    assert events[:2] == [("prepare", 0), ("judge", 0)]
+
+
 def test_final_generation_is_tournament_scored_for_continuation_and_tree_view():
     engine = _FakeEngine()
     engine.oracle = None

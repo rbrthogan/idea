@@ -25,3 +25,4 @@ idea/static/js/auth.js
 
 # Firebase
 .firebase/
+firestore-debug.log

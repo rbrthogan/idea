@@ -157,6 +157,7 @@ def test_viewer_exposes_server_gated_artifact_opt_in(monkeypatch):
         'id="enableVisualizationArtifacts"', 1
     )[1].split(">", 1)[0]
     assert "disabled" in artifact_switch
+    assert "checked" not in artifact_switch
 
     monkeypatch.setenv(ENABLE_GEMINI_CODE_ARTIFACTS_ENV, "true")
     enabled = client.get("/")
@@ -164,6 +165,7 @@ def test_viewer_exposes_server_gated_artifact_opt_in(monkeypatch):
         'id="enableVisualizationArtifacts"', 1
     )[1].split(">", 1)[0]
     assert "disabled" not in artifact_switch
+    assert "checked" in artifact_switch
 
     viewer_js = Path("idea/static/js/viewer.js").read_text()
     assert "buildVisualizationArtifactEvaluation" in viewer_js

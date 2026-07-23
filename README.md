@@ -141,18 +141,20 @@ disabled by default. For a local opt-in Gemini Code Execution workflow, run:
 ```
 
 The flag enables `IDEA_ENABLE_GEMINI_CODE_ARTIFACTS` and defaults
-`IDEA_ARTIFACT_STORE_ROOT` to `$PWD/data/artifacts`. Set that environment
-variable first if you want a different location.
+`IDEA_ARTIFACT_STORE_ROOT` to `$PWD/data/artifacts`. It also preselects
+**Generate visualization artifacts** for new runs; turn the switch off in
+Advanced Config when you want a text-only run. Set the environment variable
+first if you want a different artifact location.
 
 An evaluation suite must still explicitly set
 `allow_generated_code_execution: true` and declare an `llm_code_artifact`
 component. The web app then creates a private per-user/per-evolution store,
 uses only Gemini 3.6 Flash's remote Code Execution tool, caps the request at 30
 seconds and 8,192 output tokens, and never executes returned Python locally.
-After the server opt-in, the browser exposes a still-off-by-default **Generate
-visualization artifacts** switch under Advanced Config. It submits the bundled
-render → ordinary pairwise judge → diversity suite; callers can instead send a
-custom typed `evaluation` suite to `/api/start-evolution`.
+After the server opt-in, the browser exposes a **Generate visualization
+artifacts** switch under Advanced Config. It submits the bundled render →
+ordinary pairwise judge → diversity suite; callers can instead send a custom
+typed `evaluation` suite to `/api/start-evolution`.
 Artifact-runner token usage is included in saved usage totals and the run's
 `maxBudget`; resumed runs retain the previously spent amount.
 Generated images are served only through an authenticated ownership-checked

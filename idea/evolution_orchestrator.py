@@ -267,6 +267,25 @@ class EvolutionOrchestrator:
                     survival_metrics[key] = numeric
             idea["survival_metrics"] = survival_metrics
 
+    async def _prepare_tournament_evidence(
+        self,
+        population: List[Any],
+        *,
+        evaluation_generation: int,
+    ) -> None:
+        """Run artifact/computed producers before a judge consumes their evidence."""
+
+        prepare_for_judging = getattr(
+            self.engine,
+            "_prepare_population_for_judging",
+            None,
+        )
+        if callable(prepare_for_judging):
+            await prepare_for_judging(
+                population,
+                evaluation_generation=evaluation_generation,
+            )
+
     async def _run_tournament_and_attach_tree_metrics(
         self,
         population: List[Any],
@@ -281,16 +300,10 @@ class EvolutionOrchestrator:
         if not population:
             return []
 
-        prepare_for_judging = getattr(
-            self.engine,
-            "_prepare_population_for_judging",
-            None,
+        await self._prepare_tournament_evidence(
+            population,
+            evaluation_generation=generation_index,
         )
-        if callable(prepare_for_judging):
-            await prepare_for_judging(
-                population,
-                evaluation_generation=generation_index,
-            )
 
         tournament_start_cost = self.engine.get_total_token_count()["cost"]["total_cost"]
         tournament_rounds_details: List[Dict[str, Any]] = []
@@ -1302,6 +1315,11 @@ class EvolutionOrchestrator:
 
             tournament_rounds_details: List[Dict[str, Any]] = []
 
+            await self._prepare_tournament_evidence(
+                self.engine.population,
+                evaluation_generation=gen,
+            )
+
             def run_tournament():
                 return self._get_tournament_ranks(
                     self.engine.population,
@@ -1726,6 +1744,11 @@ class EvolutionOrchestrator:
             asyncio.run_coroutine_threadsafe(send_update(), loop)
 
         tournament_rounds_details: List[Dict[str, Any]] = []
+
+        await self._prepare_tournament_evidence(
+            island_population,
+            evaluation_generation=gen,
+        )
 
         def run_tournament():
             return self._get_tournament_ranks(

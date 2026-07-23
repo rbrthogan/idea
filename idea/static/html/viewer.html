@@ -292,15 +292,16 @@
                   <input class="form-check-input" type="checkbox" role="switch"
                     id="enableVisualizationArtifacts"
                     aria-describedby="visualizationArtifactsHelp"
-                    {% if not gemini_code_artifacts_enabled %}disabled{% endif %}>
+                    {% if gemini_code_artifacts_enabled %}checked{% else %}disabled{% endif %}>
                   <label class="form-check-label" for="enableVisualizationArtifacts">
                     Generate visualization artifacts
                   </label>
                 </div>
                 <small class="text-muted" id="visualizationArtifactsHelp">
                   {% if gemini_code_artifacts_enabled %}
-                  Uses Gemini 3.6 Flash remote Code Execution to attach one PNG and its source to each idea,
-                  then gives the matching images to the ordinary pairwise judge. This adds model cost.
+                  Enabled for new runs because the server was started with artifact generation. Uses Gemini
+                  3.6 Flash remote Code Execution to attach one PNG and its source to each idea, then gives
+                  the matching images to the ordinary pairwise judge. Turn this off for text-only runs.
                   {% else %}
                   Disabled by the server. Set IDEA_ENABLE_GEMINI_CODE_ARTIFACTS=true and restart to opt in.
                   {% endif %}
