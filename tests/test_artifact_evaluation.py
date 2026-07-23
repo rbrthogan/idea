@@ -268,17 +268,58 @@ def test_interaction_parser_preserves_code_order_for_documented_steps_shape():
                     }
                 ],
             },
-            "exactly one",
+            "ambiguous PNG outputs",
         ),
     ],
 )
-def test_interaction_parser_rejects_wrong_type_and_multiple_images(interaction, error):
+def test_interaction_parser_rejects_wrong_type_and_ambiguous_images(interaction, error):
     with pytest.raises(ArtifactOutputError, match=error):
         parse_gemini_code_execution_interaction(
             interaction,
             max_png_bytes=1024,
             max_source_bytes=1024,
         )
+
+
+def test_interaction_parser_selects_final_image_from_multiple_code_attempts():
+    final_png = PNG_BYTES + b"\x00"
+    interaction = {
+        "id": "multi-attempt",
+        "status": "completed",
+        "outputs": [
+            {
+                "type": "code_execution_call",
+                "arguments": {"code": "first = 1"},
+            },
+            {"type": "code_execution_result", "result": "<Figure>", "is_error": False},
+            {
+                "type": "image",
+                "mime_type": "image/png",
+                "data": base64.b64encode(PNG_BYTES).decode("ascii"),
+            },
+            {
+                "type": "code_execution_call",
+                "arguments": {"code": "second = first + 1"},
+            },
+            {"type": "code_execution_result", "result": "<Figure>", "is_error": False},
+            {
+                "type": "image",
+                "mime_type": "image/png",
+                "data": base64.b64encode(final_png).decode("ascii"),
+            },
+        ],
+    }
+
+    parsed = parse_gemini_code_execution_interaction(
+        interaction,
+        max_png_bytes=1024,
+        max_source_bytes=1024,
+    )
+
+    assert parsed.png_bytes == final_png
+    assert parsed.provenance["code_attempt_count"] == 2
+    assert parsed.provenance["image_output_count"] == 2
+    assert parsed.provenance["selected_image_index"] == 1
 
 
 def test_interaction_parser_rejects_oversized_decoded_png_before_accepting_it():

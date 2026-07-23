@@ -250,10 +250,22 @@ def parse_gemini_code_execution_interaction(
     if not code_blocks:
         detail = f"; execution errors: {' | '.join(execution_errors)}" if execution_errors else ""
         raise ArtifactOutputError("Gemini returned no generated Python source" + detail)
-    if len(images) != 1:
+    if not images:
         raise ArtifactOutputError(
-            f"Gemini must return exactly one PNG image; received {len(images)}"
+            "Gemini must return at least one PNG image; received 0"
         )
+
+    # Gemini may make several provider-managed code-execution attempts inside
+    # one interaction. Each successful attempt can emit a preview image, so the
+    # ordered response can legitimately contain one image per attempt. In that
+    # shape the final image is the renderer's final answer. Multiple images
+    # from a single code block remain ambiguous and are rejected.
+    if len(images) > 1 and len(code_blocks) < len(images):
+        raise ArtifactOutputError(
+            "Gemini returned ambiguous PNG outputs: "
+            f"{len(images)} images from {len(code_blocks)} code attempt(s)"
+        )
+    selected_image_index = len(images) - 1
 
     if len(code_blocks) == 1:
         source_code = code_blocks[0] + "\n"
@@ -282,10 +294,12 @@ def parse_gemini_code_execution_interaction(
         "tool": "code_execution",
         "interaction_id": str(interaction_id) if interaction_id is not None else None,
         "code_attempt_count": len(code_blocks),
+        "image_output_count": len(images),
+        "selected_image_index": selected_image_index,
     }
     return CodeArtifactRunnerResult(
         source_code=source_code,
-        png_bytes=images[0],
+        png_bytes=images[selected_image_index],
         provenance=provenance,
         usage=usage,
         metadata={"execution_error_count": len(execution_errors)},
