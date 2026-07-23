@@ -322,6 +322,11 @@ class _ComputedAfterArtifactRunner:
         return ComputedResultManifest(status="ok", metrics={"score": 0.75})
 
 
+class _FailingProducerRunner:
+    async def run(self, candidate, **kwargs):
+        raise RuntimeError("provider rejected the artifact request")
+
+
 def _artifact_engine(tmp_path: Path, *, events=None):
     events = events if events is not None else []
     return EvolutionEngine(
@@ -399,6 +404,43 @@ def test_pre_judge_pipeline_runs_in_declared_order_and_attaches_typed_refs(tmp_p
     wire = EvolutionSerializer.serialize_idea(population[0])
     restored = EvolutionSerializer.deserialize_idea(wire)
     assert restored["artifact_refs"] == population[0]["artifact_refs"]
+
+
+def test_fail_run_artifact_error_is_reported_before_pairwise_judging(tmp_path):
+    engine = EvolutionEngine(
+        pop_size=1,
+        generations=1,
+        evaluation_config={
+            "allow_generated_code_execution": True,
+            "components": [_artifact_config()],
+            "fitness": {"enabled": False, "metrics": []},
+        },
+        evaluation_runners={"render": _FailingProducerRunner()},
+        artifact_store=ArtifactStore(tmp_path / "artifact-store"),
+    )
+    population = [
+        {"id": "candidate-a", "idea": {"title": "A", "content": "alpha"}},
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "pre-judge evaluator 'render' failed for candidate 'candidate-a': "
+            "provider rejected the artifact request"
+        ),
+    ):
+        asyncio.run(
+            engine._prepare_population_for_judging(
+                population,
+                evaluation_generation=0,
+            )
+        )
+
+    assert population[0]["evaluations"]["render"]["status"] == "failed"
+    assert (
+        population[0]["evaluations"]["render"]["error"]
+        == "provider rejected the artifact request"
+    )
 
 
 def test_rerunning_producer_replaces_same_producer_refs_and_ids(tmp_path):

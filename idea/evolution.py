@@ -26,6 +26,7 @@ from idea.evaluation import (
     EvaluationBatch,
     EvaluationRecord,
     EvaluationStatus,
+    FailurePolicy,
     FitnessAggregator,
     LLMCodeArtifactProducer,
     LLMPairwiseEvaluator,
@@ -1839,6 +1840,25 @@ class EvolutionEngine:
                         f"pre-judge artifact id collision for {artifact.id!r}"
                     )
                 artifacts_by_id[artifact.id] = artifact
+            failed_records = [
+                record
+                for record in result.batch.records
+                if record.status == EvaluationStatus.FAILED
+            ]
+            if (
+                failed_records
+                and evaluator.config.failure_policy == FailurePolicy.FAIL_RUN
+            ):
+                first = failed_records[0]
+                detail = (
+                    first.error
+                    or first.metadata.get("reason")
+                    or first.status.value
+                )
+                raise RuntimeError(
+                    f"pre-judge evaluator {evaluator.config.id!r} failed for "
+                    f"candidate {first.candidate_id!r}: {detail}"
+                )
 
         batch = EvaluationBatch(
             generation=generation,
