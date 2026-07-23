@@ -131,12 +131,15 @@ evaluator consumes the strict result contract documented in
 runner; a checked-in Python function or isolated script is only one possible
 implementation. Runners convert costs, latency, and other minimize-only
 measurements into scores where larger is fitter. Generated code execution is
-disabled by default. For a local opt-in Gemini Code Execution workflow, set:
+disabled by default. For a local opt-in Gemini Code Execution workflow, run:
 
 ```bash
-export IDEA_ENABLE_GEMINI_CODE_ARTIFACTS=true
-export IDEA_ARTIFACT_STORE_ROOT="$PWD/data/artifacts"
+./run_local.sh --visual-artifacts
 ```
+
+The flag enables `IDEA_ENABLE_GEMINI_CODE_ARTIFACTS` and defaults
+`IDEA_ARTIFACT_STORE_ROOT` to `$PWD/data/artifacts`. Set that environment
+variable first if you want a different location.
 
 An evaluation suite must still explicitly set
 `allow_generated_code_execution: true` and declare an `llm_code_artifact`

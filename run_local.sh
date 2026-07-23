@@ -17,6 +17,36 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+ENABLE_VISUAL_ARTIFACTS=false
+
+show_help() {
+    echo "Usage: ./run_local.sh [--visual-artifacts]"
+    echo ""
+    echo "Options:"
+    echo "  --visual-artifacts  Enable the opt-in Gemini visualization-artifact workflow."
+    echo "                      Uses IDEA_ARTIFACT_STORE_ROOT when set, otherwise"
+    echo "                      stores artifacts under \$PWD/data/artifacts."
+    echo "  -h, --help          Show this help message."
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --visual-artifacts)
+            ENABLE_VISUAL_ARTIFACTS=true
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}" >&2
+            show_help >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
 echo -e "${GREEN}=== Idea Evolution Local Development ===${NC}"
 
 if ! command -v uv &> /dev/null; then
@@ -37,6 +67,13 @@ fi
 # only after we know whether storage is the disposable local emulator.
 export ENCRYPTION_SALT="${ENCRYPTION_SALT:-idea-evolution-salt}"
 export ADMIN_EMAILS="${ADMIN_EMAILS:-}"
+
+if [ "$ENABLE_VISUAL_ARTIFACTS" = true ]; then
+    export IDEA_ENABLE_GEMINI_CODE_ARTIFACTS=true
+    export IDEA_ARTIFACT_STORE_ROOT="${IDEA_ARTIFACT_STORE_ROOT:-${PWD}/data/artifacts}"
+    echo -e "${GREEN}Visualization artifacts enabled.${NC}"
+    echo -e "${GREEN}Artifact store: ${IDEA_ARTIFACT_STORE_ROOT}${NC}"
+fi
 
 # If using emulator, start it
 if [ "$USE_EMULATOR" = true ]; then
