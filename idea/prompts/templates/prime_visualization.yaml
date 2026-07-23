@@ -1,6 +1,6 @@
 name: "Prime Visualization Experiments"
 description: "Generate mathematically explicit, artifact-ready experiments for discovering visual structure in the prime numbers"
-version: "1.1.0"
+version: "1.2.0"
 author: "Original Idea App"
 created_date: "2026-07-22"
 
@@ -9,6 +9,9 @@ metadata:
 
 special_requirements: |
   Prime-visualization proposal constraints:
+  - Prefer conceptual simplicity. The core idea should be explainable in one or two plain-language sentences, like a classic integer spiral's simple placement rule. Rigor belongs in the test and controls; it does not require a complicated mapping.
+  - Use one central mapping and one primary encoded quantity. Add a mathematical transform, secondary encoding, or extra panel only when it is essential to the hypothesis and cannot be replaced by a simpler direct view.
+  - Treat simplicity as a design objective: when two experiments could test the same question, choose the one with fewer rules, parameters, transforms, and visual channels.
   - Known representations are an optional precedent palette, not a required starting point. A proposal may use zero, one, or two precedents, but it must extract a general structural principle and create a materially different mapping or test.
   - A rotation, recoloring, animation, projection, parameter change, or other cosmetic restyling of any precedent is not a new proposal. Combining two complete existing pictures side by side is not new either.
   - Define the integer sample and every mathematical mapping explicitly. State the domain bound, whether the inputs are integers n or indexed primes p_k, the coordinate or graph map, adjacency/order, and every mark, size, opacity, and color quantity as a formula or unambiguous algorithm.
@@ -69,6 +72,7 @@ prompts:
     Diversity requirements:
     - At least 48 of the 60 ingredients must avoid spiral or path-winding geometry.
     - At least 30 must be independent constructions rather than direct variants of a named precedent.
+    - At least 40 must use a single mapping rule and a single encoded quantity that can be explained in one sentence.
     - Distribute the set across spatial maps, graphs, small multiples, matrices, timelines, distributions, and multiscale summaries.
 
     Draw from varied mathematical families, including:
@@ -90,14 +94,17 @@ prompts:
     - ...
 
   specific_prompt: |
-    From the following pool, select two or three complementary ingredients and turn them into one coherent prime-visualization experiment direction:
+    From the following pool, select exactly one primary ingredient and turn it into one coherent prime-visualization experiment direction. You may borrow a second ingredient only as a minimal control, never as another mapping or visual layer:
 
     {context_pool}
 
     Selection rules:
+    - The concept must be explainable in one or two plain-language sentences before any notation is introduced.
+    - Use one central mapping, one primary encoded quantity, and one falsifiable question. Prefer a single main plot plus the smallest control view needed for comparison.
+    - Reject avoidable machinery. Do not add Fourier analysis, dimensionality reduction, graph construction, dynamical systems, multiple coordinate transforms, or multi-panel diagnostics unless that machinery is the subject of the hypothesis itself.
     - Use zero, one, or two precedent seeds; choosing none is valid. If a precedent is used, identify the abstract principle borrowed and the material mathematical departure.
     - The central mapping must be mathematically explicit and substantively different from every cited precedent.
-    - Prefer a simple mapping with a strong test over a complicated collage of encodings.
+    - Prefer a simple generative rule with a strong test over a complicated collage of encodings. If a simpler candidate can test the same claim, choose it.
     - Name the finite domain, the position/edge rule, the encoded arithmetic quantity, the hypothesis, and the null comparison.
     - Ensure a deterministic Python/PNG implementation is plausible inside the bounded template requirements.
     - Do not claim that the experiment has been run or that the predicted structure exists.
@@ -111,6 +118,7 @@ prompts:
     You are a formatting assistant. Convert the input prime-visualization proposal into a JSON object with "title" and "content" fields.
 
     Preserve equations, algorithm details, hypotheses, controls, implementation bounds, and the artifact manifest specification. The content must be markdown and must not imply that the proposed script has run or that any result has been observed.
+    Preserve real line breaks. Put every Markdown heading on its own line with a blank line before and after it. Never concatenate a heading marker, heading text, or following paragraph.
 
     If the input has a clear title, use it. Otherwise, generate a concise title that names the mathematical mapping rather than an aesthetic style.
 
@@ -124,6 +132,7 @@ prompts:
     {idea}
 
     Audit the proposal for:
+    - Whether the core concept is simple enough to explain in one or two plain-language sentences, with every added transform or visual channel justified by the hypothesis
     - Mathematical completeness and correctness of the domain, mapping, and encodings
     - Substantive novelty beyond restyling, reparameterizing, or collaging known precedents
     - Whether any precedent contributes an abstract principle rather than dictating the finished representation
@@ -145,7 +154,7 @@ prompts:
     Critique:
     {critique}
 
-    Produce an improved prime-visualization experiment proposal. Repair mathematical ambiguity before adding complexity, strengthen the null and falsification conditions, and keep the implementation deterministic and bounded. If the concept merely restyles or reparameterizes a known precedent, replace its central mapping or abstract only one principle into a materially different test.
+    Produce an improved prime-visualization experiment proposal. Simplify the central mapping before adding machinery: preserve one primary rule and one encoded quantity, remove transforms and panels that are not essential to the hypothesis, repair mathematical ambiguity, strengthen the null and falsification conditions, and keep the implementation deterministic and bounded. If the concept merely restyles or reparameterizes a known precedent, replace its central mapping or abstract only one principle into a materially different test.
 
     Do not claim execution or observed results.
 
@@ -181,6 +190,7 @@ prompts:
     Genotype:
 
 comparison_criteria:
+  - "conceptual simplicity and elegance: one explainable core rule, minimal parameters and transforms, and no visual or mathematical machinery that does not directly serve the hypothesis"
   - mathematical correctness and explicitness of the domain, mapping, and visual encodings
   - strength and falsifiability of the hypothesis, null comparison, metric, and disconfirming outcome
   - substantive novelty beyond cited precedents rather than cosmetic restyling, reparameterization, or collage

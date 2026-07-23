@@ -210,7 +210,7 @@ class TestPrimeVisualizationTemplate:
 
         prompts = get_prompts('prime_visualization', use_yaml=True)
         assert prompts.ITEM_TYPE == 'prime visualization experiment proposals'
-        assert prompts.get_info()['version'] == '1.1.0'
+        assert prompts.get_info()['version'] == '1.2.0'
 
         required_prompts = [
             'CONTEXT_PROMPT',
@@ -252,6 +252,13 @@ class TestPrimeVisualizationTemplate:
         assert 'Do not claim that the experiment has been run' in all_prompts
         assert 'seeds, not recipes' in requirements
         assert 'At least 48 of the 60' in data['prompts']['context']
+        assert 'At least 40 must use a single mapping rule' in data['prompts']['context']
+        assert 'select exactly one primary ingredient' in data['prompts']['specific_prompt']
+        assert 'one or two plain-language sentences' in requirements
+        assert any(
+            'conceptual simplicity and elegance' in criterion
+            for criterion in data['comparison_criteria']
+        )
         complete_template_text = '\n'.join([
             requirements,
             all_prompts,

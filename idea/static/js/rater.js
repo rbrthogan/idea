@@ -390,12 +390,87 @@ function sanitizeMarkdownUrl(value) {
     return null;
 }
 
+function normalizeMarkdownStructure(text) {
+    if (!text) return '';
+
+    const commonSectionHeadings = [
+        'Concept & Precedent Departure',
+        'Precedent Palette Analysis',
+        'Departure and Abstracted Principle',
+        'Mathematical Mapping',
+        'Finite Domain Definition',
+        'Domain and Sequence Definition',
+        'Core Mapping Functions',
+        'Hypothesis, Null & Falsification',
+        'Statement of Falsifiable Hypothesis',
+        'Confirmatory Hypothesis',
+        'Baseline / Null Model',
+        'Quantitative Signal Definition',
+        'Falsification Criterion',
+        'Visual Encoding',
+        'Detailed Encoding Rules',
+        'Deterministic Implementation Plan',
+        'Algorithmic Sequence',
+        'Resource Bounds',
+        'Artifact & Metric Contract',
+        'Produced Files',
+        'Interpretation Limits',
+        'Confounders and Artifact Mitigation',
+        'Overview',
+        'Summary',
+        'Implementation',
+        'Constraints',
+        'Description'
+    ].sort((a, b) => b.length - a.length);
+    const headingPattern = commonSectionHeadings
+        .map(heading => heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|');
+    const numberedHeadingPattern = `(?:\\d+\\.\\s*)?(?:${headingPattern})`;
+    const inlineKnownHeadingPattern = new RegExp(`(?<=[^#\\n])\\s*(#{1,6})\\s*(${numberedHeadingPattern})(?=\\s|[#*:_\\-0-9A-Z("]|$)`, 'g');
+
+    const normalizeSegment = (segment) => {
+        let normalized = segment;
+        normalized = normalized.replace(inlineKnownHeadingPattern, '\n$1 $2');
+        normalized = normalized.replace(/^(#{1,6})(?!#)(?=\S)/gm, '$1 ');
+        normalized = normalized.replace(/([:.!?])\s*(\d+\.\s+)/g, '$1\n$2');
+        normalized = normalized.replace(/([.!?])\s*([*-]\s+)/g, '$1\n$2');
+        normalized = normalized.replace(/^(#{1,6})\s+(.+)$/gm, (match, hashes, content) => {
+            const trimmedContent = content.trim();
+            const numberMatch = trimmedContent.match(/^(\d+\.\s*)/);
+            const numberPrefix = numberMatch ? numberMatch[1] : '';
+            const unnumberedContent = numberMatch
+                ? trimmedContent.slice(numberMatch[0].length)
+                : trimmedContent;
+            for (const heading of commonSectionHeadings) {
+                if (unnumberedContent === heading) {
+                    return `${hashes} ${numberPrefix}${heading}`;
+                }
+                if (unnumberedContent.startsWith(heading)) {
+                    const body = unnumberedContent.slice(heading.length).trim();
+                    if (!body || !/^(?:\s|[*:_\-0-9A-Z("])/.test(body)) {
+                        continue;
+                    }
+                    return `${hashes} ${numberPrefix}${heading}\n${body}`;
+                }
+            }
+            return `${hashes} ${trimmedContent}`;
+        });
+        return normalized;
+    };
+
+    return String(text)
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split(/(```[\s\S]*?```)/g)
+        .map(part => part.startsWith('```') ? part : normalizeSegment(part))
+        .join('');
+}
+
 // Add the small allow-list markdown rendering function from viewer.js.
 function renderMarkdown(text) {
     if (!text) return '';
 
-    // Normalize line endings
-    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    text = normalizeMarkdownStructure(text);
 
     // Escape HTML to prevent XSS
     text = text.replace(/&/g, '&amp;')

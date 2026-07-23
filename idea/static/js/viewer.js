@@ -1087,6 +1087,28 @@ function normalizeMarkdownStructure(text) {
         'Technical Notes',
         'Minimum Prototype',
         'Emergent Complexity',
+        'Concept & Precedent Departure',
+        'Precedent Palette Analysis',
+        'Departure and Abstracted Principle',
+        'Mathematical Mapping',
+        'Finite Domain Definition',
+        'Domain and Sequence Definition',
+        'Core Mapping Functions',
+        'Hypothesis, Null & Falsification',
+        'Statement of Falsifiable Hypothesis',
+        'Confirmatory Hypothesis',
+        'Baseline / Null Model',
+        'Quantitative Signal Definition',
+        'Falsification Criterion',
+        'Visual Encoding',
+        'Detailed Encoding Rules',
+        'Deterministic Implementation Plan',
+        'Algorithmic Sequence',
+        'Resource Bounds',
+        'Artifact & Metric Contract',
+        'Produced Files',
+        'Interpretation Limits',
+        'Confounders and Artifact Mitigation',
         'Win Condition',
         'Stretch Ideas',
         'Core Loop',
@@ -1105,13 +1127,14 @@ function normalizeMarkdownStructure(text) {
     const headingPattern = commonSectionHeadings
         .map(heading => heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
         .join('|');
-    const inlineKnownHeadingPattern = new RegExp(`([^#\\n])\\s*(#{1,6})\\s*(${headingPattern})(?=\\s|[*:_\\-0-9A-Z("]|$)`, 'g');
+    const numberedHeadingPattern = `(?:\\d+\\.\\s*)?(?:${headingPattern})`;
+    const inlineKnownHeadingPattern = new RegExp(`(?<=[^#\\n])\\s*(#{1,6})\\s*(${numberedHeadingPattern})(?=\\s|[#*:_\\-0-9A-Z("]|$)`, 'g');
 
     const normalizeSegment = (segment) => {
         let normalized = segment;
 
         // Repair heading markers that were emitted inline after a sentence.
-        normalized = normalized.replace(inlineKnownHeadingPattern, '$1\n$2 $3');
+        normalized = normalized.replace(inlineKnownHeadingPattern, '\n$1 $2');
         normalized = normalized.replace(/^(#{1,6})(?!#)(?=\S)/gm, '$1 ');
 
         // Repair common inline list markers emitted without line breaks.
@@ -1121,16 +1144,21 @@ function normalizeMarkdownStructure(text) {
         // Repair common section headings where the heading body follows on the same line.
         normalized = normalized.replace(/^(#{1,6})\s+(.+)$/gm, (match, hashes, content) => {
             const trimmedContent = content.trim();
+            const numberMatch = trimmedContent.match(/^(\d+\.\s*)/);
+            const numberPrefix = numberMatch ? numberMatch[1] : '';
+            const unnumberedContent = numberMatch
+                ? trimmedContent.slice(numberMatch[0].length)
+                : trimmedContent;
             for (const heading of commonSectionHeadings) {
-                if (trimmedContent === heading) {
-                    return `${hashes} ${heading}`;
+                if (unnumberedContent === heading) {
+                    return `${hashes} ${numberPrefix}${heading}`;
                 }
-                if (trimmedContent.startsWith(heading)) {
-                    const body = trimmedContent.slice(heading.length).trim();
+                if (unnumberedContent.startsWith(heading)) {
+                    const body = unnumberedContent.slice(heading.length).trim();
                     if (!body || !/^(?:\s|[*:_\-0-9A-Z("])/.test(body)) {
                         continue;
                     }
-                    return `${hashes} ${heading}\n${body}`;
+                    return `${hashes} ${numberPrefix}${heading}\n${body}`;
                 }
             }
             return `${hashes} ${trimmedContent}`;

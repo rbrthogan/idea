@@ -114,6 +114,37 @@ def test_render_markdown_repairs_headings_glued_to_body_and_lists():
     assert ".###" not in html
 
 
+def test_render_markdown_repairs_collapsed_prime_visualization_sections(
+    markdown_renderer,
+):
+    html = markdown_renderer(
+        "# Spatial Factor Fields"
+        "## 1. Concept & Precedent Departure"
+        "### Precedent Palette Analysis"
+        "Classical prime visualizations map integer order to geometry."
+        "### Departure and Abstracted Principle"
+        "This proposal uses one arithmetic field."
+        "## 2. Mathematical Mapping"
+        "### Finite Domain Definition"
+        "Let $N=1000$."
+        "## 3. Hypothesis, Null & Falsification"
+        "### Falsification Criterion"
+        "Reject when $S \\le 1$."
+    )
+
+    assert "<h1>Spatial Factor Fields</h1>" in html
+    assert "<h2>1. Concept &amp; Precedent Departure</h2>" in html
+    assert "<h3>Precedent Palette Analysis</h3>" in html
+    assert "<p>Classical prime visualizations map integer order to geometry.</p>" in html
+    assert "<h3>Departure and Abstracted Principle</h3>" in html
+    assert "<h2>2. Mathematical Mapping</h2>" in html
+    assert "<h3>Finite Domain Definition</h3>" in html
+    assert "<h2>3. Hypothesis, Null &amp; Falsification</h2>" in html
+    assert "<h3>Falsification Criterion</h3>" in html
+    assert "Fields##" not in html
+    assert "AnalysisClassical" not in html
+
+
 @pytest.mark.parametrize(
     "destination",
     [
