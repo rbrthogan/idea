@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from idea.evolution_progress import ProgressEmitter
 from idea.evolution_types import GenerationWorkState
+from idea.models import merge_candidate_records
 
 
 class EvolutionOrchestrator:
@@ -280,6 +281,17 @@ class EvolutionOrchestrator:
         if not population:
             return []
 
+        prepare_for_judging = getattr(
+            self.engine,
+            "_prepare_population_for_judging",
+            None,
+        )
+        if callable(prepare_for_judging):
+            await prepare_for_judging(
+                population,
+                evaluation_generation=generation_index,
+            )
+
         tournament_start_cost = self.engine.get_total_token_count()["cost"]["total_cost"]
         tournament_rounds_details: List[Dict[str, Any]] = []
 
@@ -523,12 +535,14 @@ class EvolutionOrchestrator:
     async def _prepare_idea_for_population(self, idea: Any, *, refine: bool) -> Any:
         candidate = idea
         if refine:
-            candidate = await asyncio.to_thread(
+            refined = await asyncio.to_thread(
                 self.engine.critic.refine, candidate, self.engine.idea_type
             )
-        return await asyncio.to_thread(
+            candidate = merge_candidate_records(candidate, refined)
+        formatted = await asyncio.to_thread(
             self.engine.formatter.format_idea, candidate, self.engine.idea_type
         )
+        return merge_candidate_records(candidate, formatted)
 
     async def _maybe_refine_survivor(
         self,

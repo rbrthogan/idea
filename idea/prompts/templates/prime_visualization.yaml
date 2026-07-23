@@ -1,6 +1,6 @@
 name: "Prime Visualization Experiments"
 description: "Generate mathematically explicit, artifact-ready experiments for discovering visual structure in the prime numbers"
-version: "1.0.0"
+version: "1.1.0"
 author: "Original Idea App"
 created_date: "2026-07-22"
 
@@ -9,15 +9,24 @@ metadata:
 
 special_requirements: |
   Prime-visualization proposal constraints:
-  - Treat the Ulam spiral (integers placed on a square spiral, with primes marked to reveal diagonal concentrations) as a baseline and anti-copy reference. A rotation, recoloring, animation, projection, or other cosmetic restyling of the same mapping is not a new proposal.
+  - Known representations are an optional precedent palette, not a required starting point. A proposal may use zero, one, or two precedents, but it must extract a general structural principle and create a materially different mapping or test.
+  - A rotation, recoloring, animation, projection, parameter change, or other cosmetic restyling of any precedent is not a new proposal. Combining two complete existing pictures side by side is not new either.
   - Define the integer sample and every mathematical mapping explicitly. State the domain bound, whether the inputs are integers n or indexed primes p_k, the coordinate or graph map, adjacency/order, and every mark, size, opacity, and color quantity as a formula or unambiguous algorithm.
   - State one falsifiable hypothesis about prime structure, one baseline or null comparison, a quantitative signal or predeclared visual signature, and an outcome that would count against the hypothesis. Distinguish exploratory pattern-finding from confirmatory evidence and guard against visual apophenia.
   - Supply a deterministic, bounded implementation specification for a future isolated Python runner. It is a plan and artifact contract only: never claim that code was executed, a PNG was rendered, or a pattern was observed.
 
+  Optional precedent palette — seeds, not recipes:
+  - Integer paths: the Ulam square spiral, the Sacks number spiral that aligns perfect squares on a ray, and other number-spiral or lattice orderings. Abstractable principles include sequence order mapped to geometry and alignment of a reference subsequence.
+  - Modular structure: residue grids, residue wheels, and Chinese-remainder coordinates; cyclic multiplication maps r -> a*r mod m shown as tables or chords. Abstractable principles include quotient/remainder coordinates, periodicity, and orbit structure.
+  - Sequence dynamics: prime-gap series g_k = p_(k+1) - p_k, constellation spacings, and prime-race curves pi(x; m, a) for reduced residue classes a mod m. Abstractable principles include increments, cumulative lead changes, crossings, and scale dependence.
+  - Combinatorial divisibility: Pascal/binomial arrays colored by C(n,k) mod p, divisibility, or p-adic valuation. Abstractable principles include local recurrences, arithmetic texture, and multiscale self-similarity.
+  - Factor structure and natural-number geometry: factor-pair rectangles, divisor lattices, and recursive dot or polygon groupings that encode prime factorization. Abstractable principles include product structure, hierarchy, and symmetry.
+  These precedents supply questions and encoding principles only. Do not copy their full construction, treat their visible patterns as unexplained evidence, or assume that a familiar picture is the best control.
+
   Mathematical and experimental requirements:
   - Use exact notation and define all symbols. Explain why the mapping might expose arithmetic structure rather than merely create an attractive picture.
   - Compute primality with a deterministic sieve for the declared finite range. Do not use an external prime list or network data.
-  - Include at least one control, such as shuffled prime labels, density-matched random integers, residue-preserving surrogates, or a conventional Ulam-spiral rendering over the same range.
+  - Include at least one control, such as shuffled prime labels, density-matched random integers, residue-preserving surrogates, a parameter holdout, or a matched rendering from a cited precedent over the same range.
   - Name likely confounders, including changing prime density, aspect-ratio distortion, overplotting, interpolation, color normalization, and arbitrary parameter tuning when relevant.
   - Do not present an unproved visual pattern as a theorem or imply that a finite plot proves an asymptotic claim.
 
@@ -30,7 +39,7 @@ special_requirements: |
   - A successful manifest is structurally equivalent to {"schema_version": 1, "status": "ok", "metrics": {"structure_signal": 0.0}, "artifacts": [{"path": "visualization.png", "role": "primary", "media_type": "image/png"}, {"path": "metadata.json", "role": "metadata", "media_type": "application/json"}], "summary": "...", "error": null}. Define structure_signal mathematically in the proposal; do not invent its value. A failed manifest uses empty metrics/artifacts and a non-empty error.
 
   Required proposal sections:
-  - Concept & Ulam Departure
+  - Concept & Precedent Departure
   - Mathematical Mapping
   - Hypothesis, Null & Falsification
   - Visual Encoding
@@ -48,6 +57,20 @@ prompts:
   context: |
     Generate 60 technically distinct ingredients for prime-number visualization experiments. Seek mappings that could expose arithmetic relationships, not visual styles.
 
+    The following compact precedent palette is optional and non-exhaustive. It contains seeds, not recipes:
+    - Integer paths: Ulam and Sacks spirals, plus other number-spiral or lattice orderings. Abstract sequence-to-geometry or reference-subsequence alignment; do not reuse a whole layout.
+    - Modular structure: residue grids/wheels, Chinese-remainder coordinates, and cyclic multiplication tables or chord maps. Abstract periodic coordinates and orbit structure.
+    - Sequence dynamics: prime gaps, constellation spacings, and cumulative races between reduced residue classes. Abstract increments, crossings, and scale dependence.
+    - Combinatorial divisibility: Pascal/binomial arrays modulo a prime or colored by divisibility/valuation. Abstract recurrence-driven arithmetic texture.
+    - Factor geometry: factor-pair rectangles, divisor lattices, and recursive prime-factor dot groupings. Abstract product hierarchy and symmetry.
+
+    Sample principles across this palette rather than sampling finished pictures. A concept may cite zero, one, or two palette families. If it cites one, name the abstracted principle and then change the mathematical object, coordinate rule, encoded quantity, or experimental test substantially. Never merely restyle a precedent or splice two precedents together.
+
+    Diversity requirements:
+    - At least 48 of the 60 ingredients must avoid spiral or path-winding geometry.
+    - At least 30 must be independent constructions rather than direct variants of a named precedent.
+    - Distribute the set across spatial maps, graphs, small multiples, matrices, timelines, distributions, and multiscale summaries.
+
     Draw from varied mathematical families, including:
     - Residue classes, quotient/remainder coordinates, modular tori, and Chinese-remainder coordinates
     - Prime gaps, constellations, indexed-prime sequences, and local density
@@ -57,10 +80,8 @@ prompts:
     - Multiscale bins, transforms, and projections with invertible or well-explained information loss
     - Comparisons against density-matched, shuffled, or residue-preserving controls
 
-    The Ulam spiral is an established baseline: integers follow a square spiral and prime marks form diagonal concentrations. Do not propose rotated, recolored, animated, or otherwise cosmetically transformed Ulam spirals as new mappings.
-
     Make each ingredient concrete enough to combine later. Use exactly one line per ingredient with this schema:
-    Domain=<finite integer or indexed-prime domain> | Mapping=<explicit coordinate/graph rule> | Candidate signal=<measurable pattern> | Control=<null or baseline>
+    Domain=<finite integer or indexed-prime domain> | Precedent principle=<independent or abstract principle only> | Mapping=<explicit coordinate/graph rule> | Candidate signal=<measurable pattern> | Control=<null or baseline>
 
     Return as:
     CONCEPTS:
@@ -74,7 +95,8 @@ prompts:
     {context_pool}
 
     Selection rules:
-    - The central mapping must be mathematically explicit and substantively different from the Ulam spiral.
+    - Use zero, one, or two precedent seeds; choosing none is valid. If a precedent is used, identify the abstract principle borrowed and the material mathematical departure.
+    - The central mapping must be mathematically explicit and substantively different from every cited precedent.
     - Prefer a simple mapping with a strong test over a complicated collage of encodings.
     - Name the finite domain, the position/edge rule, the encoded arithmetic quantity, the hypothesis, and the null comparison.
     - Ensure a deterministic Python/PNG implementation is plausible inside the bounded template requirements.
@@ -103,7 +125,8 @@ prompts:
 
     Audit the proposal for:
     - Mathematical completeness and correctness of the domain, mapping, and encodings
-    - Substantive novelty beyond a restyled Ulam spiral
+    - Substantive novelty beyond restyling, reparameterizing, or collaging known precedents
+    - Whether any precedent contributes an abstract principle rather than dictating the finished representation
     - A falsifiable hypothesis, appropriate null/control, and a predeclared signal
     - Confounders, multiple-comparison risk, and safeguards against visual apophenia
     - Deterministic feasibility within the Python, range, dependency, resource, and PNG bounds
@@ -122,7 +145,7 @@ prompts:
     Critique:
     {critique}
 
-    Produce an improved prime-visualization experiment proposal. Repair mathematical ambiguity before adding complexity, strengthen the null and falsification conditions, and keep the implementation deterministic and bounded. If the concept is only a cosmetic Ulam variant, replace its central mapping.
+    Produce an improved prime-visualization experiment proposal. Repair mathematical ambiguity before adding complexity, strengthen the null and falsification conditions, and keep the implementation deterministic and bounded. If the concept merely restyles or reparameterizes a known precedent, replace its central mapping or abstract only one principle into a materially different test.
 
     Do not claim execution or observed results.
 
@@ -132,7 +155,7 @@ prompts:
     Candidate proposals:
     {ideas}
 
-    Generate one new proposal by combining only mathematically complementary elements. Preserve the clearest mapping and strongest falsifiable test; do not accumulate unrelated panels, encodings, or hypotheses. The result must be substantively different from the Ulam spiral and must not claim execution.
+    Generate one new proposal by combining only mathematically complementary elements. Preserve the clearest mapping and strongest falsifiable test; do not accumulate unrelated panels, encodings, hypotheses, or complete precedent constructions. The result must be substantively different from every cited precedent and must not claim execution.
 
     {requirements}
 
@@ -150,7 +173,7 @@ prompts:
     - Artifact set
     - Key interpretation limitation
 
-    Explicitly tag whether the mapping is independent of the Ulam spiral or how it departs from it. Strip away names and decorative styling. Format as a condensed semicolon-separated list.
+    Explicitly tag the mapping as independent or name each abstracted precedent principle and the material departure from it. Strip away names and decorative styling. Format as a condensed semicolon-separated list.
 
     Prime-visualization proposal to encode:
     {idea_content}
@@ -160,7 +183,8 @@ prompts:
 comparison_criteria:
   - mathematical correctness and explicitness of the domain, mapping, and visual encodings
   - strength and falsifiability of the hypothesis, null comparison, metric, and disconfirming outcome
-  - substantive novelty beyond the Ulam spiral rather than cosmetic restyling
+  - substantive novelty beyond cited precedents rather than cosmetic restyling, reparameterization, or collage
+  - quality of any abstracted precedent principle and clarity of the resulting mathematical departure
   - likelihood of producing an interpretable view that helps investigate prime structure without overstating finite visual evidence
   - deterministic implementation feasibility within the declared Python, resource, and artifact constraints
   - completeness of the PNG, metadata, and result-manifest contract

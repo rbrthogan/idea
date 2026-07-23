@@ -10,7 +10,6 @@ from .models import (
     FitnessAggregationConfig,
     LLMPairwiseComponentConfig,
     MetricConfig,
-    MetricDirection,
     MetricNormalization,
 )
 
@@ -45,7 +44,6 @@ def resolve_legacy_evaluation_suite(fitness_alpha: Any = 0.7) -> EvaluationSuite
                     component_id="quality_elo",
                     metric_name="quality_elo",
                     weight=alpha,
-                    direction=MetricDirection.MAXIMIZE,
                     normalization=MetricNormalization.RUNNING_ZSCORE,
                     penalty_score=0.5,
                 ),
@@ -53,7 +51,6 @@ def resolve_legacy_evaluation_suite(fitness_alpha: Any = 0.7) -> EvaluationSuite
                     component_id="diversity",
                     metric_name="diversity",
                     weight=1.0 - alpha,
-                    direction=MetricDirection.MAXIMIZE,
                     normalization=MetricNormalization.RUNNING_ZSCORE,
                     penalty_score=0.5,
                 ),

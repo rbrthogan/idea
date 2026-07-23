@@ -45,10 +45,25 @@
       cursor: pointer;
       position: relative;
       user-select: none;
+      width: 100%;
+      min-height: 2.75rem;
+      padding: 0.5rem 1.5rem 0.5rem 0.5rem;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-weight: inherit;
+      text-align: left;
     }
 
     .sortable-header:hover {
       background-color: #f8f9fa;
+    }
+
+    .sortable-header:focus-visible,
+    .idea-details-trigger:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
     }
 
     .sort-arrow {
@@ -74,6 +89,23 @@
 
     .sort-arrow.inactive::after {
       content: "⇅";
+    }
+
+    .idea-details-trigger {
+      border: 0;
+      padding: 0.25rem 0;
+      background: transparent;
+      color: var(--primary);
+      font: inherit;
+      font-weight: 600;
+      text-align: left;
+      text-decoration: underline;
+      text-decoration-color: transparent;
+      text-underline-offset: 0.18em;
+    }
+
+    .idea-details-trigger:hover {
+      text-decoration-color: currentColor;
     }
 
     .charts-grid {
@@ -199,7 +231,8 @@
                     <small class="form-text text-muted" style="font-size: 0.75rem;">
                       Pairs are generated using Swiss rounds based on current manual ratings and prior manual matches.
                     </small>
-                    <div id="manualSwissStatus" class="small text-muted mt-2">Round 0 · Waiting for pair</div>
+                    <div id="manualSwissStatus" class="small text-muted mt-2" role="status" aria-live="polite"
+                      aria-atomic="true">Round 0 · Waiting for pair</div>
                   </div>
                   <label class="form-label">Vote</label>
                   <button onclick="vote('A')" class="btn btn-sm btn-primary w-100 mb-2 vote-btn">Vote for A</button>
@@ -310,45 +343,64 @@
               <div class="progress mb-2" style="height: 20px; background-color: #e9ecef;">
                 <div class="progress-bar bg-primary" id="ratingProgress" role="progressbar"
                   style="width: 0%; transition: width 0.3s ease; height: 100%;" aria-valuenow="0" aria-valuemin="0"
-                  aria-valuemax="100"></div>
+                  aria-valuemax="100" aria-label="Automated rating progress" aria-valuetext="0% complete"></div>
               </div>
               <div id="ratingStats"></div>
+              <div id="ratingStatusAnnouncement" class="visually-hidden" role="status" aria-live="polite"
+                aria-atomic="true"></div>
 
               <h6 class="mt-3">Idea Rankings:</h6>
               <table class="table table-striped">
+                <caption class="visually-hidden">Idea rankings. Activate a column header to change the sort order.</caption>
                 <thead>
                   <tr>
-                    <th class="sortable-header" data-sort="rank">
-                      Rank
-                      <span class="sort-arrow inactive"></span>
+                    <th scope="col" aria-sort="none">
+                      <button type="button" class="sortable-header" data-sort="rank">
+                        Rank
+                        <span class="sort-arrow inactive" aria-hidden="true"></span>
+                      </button>
                     </th>
-                    <th class="sortable-header" data-sort="title">
-                      Idea
-                      <span class="sort-arrow inactive"></span>
+                    <th scope="col" aria-sort="none">
+                      <button type="button" class="sortable-header" data-sort="title">
+                        Idea
+                        <span class="sort-arrow inactive" aria-hidden="true"></span>
+                      </button>
                     </th>
-                    <th class="sortable-header" data-sort="rating">
-                      Elo
-                      <span class="sort-arrow inactive"></span>
+                    <th scope="col" aria-sort="none">
+                      <button type="button" class="sortable-header" data-sort="rating">
+                        Elo
+                        <span class="sort-arrow inactive" aria-hidden="true"></span>
+                      </button>
                     </th>
-                    <th class="sortable-header" data-sort="matches">
-                      Matches
-                      <span class="sort-arrow inactive"></span>
+                    <th scope="col" aria-sort="none">
+                      <button type="button" class="sortable-header" data-sort="matches">
+                        Matches
+                        <span class="sort-arrow inactive" aria-hidden="true"></span>
+                      </button>
                     </th>
-                    <th class="sortable-header" data-sort="diversity">
-                      Diversity
-                      <span class="sort-arrow inactive"></span>
+                    <th scope="col" aria-sort="none">
+                      <button type="button" class="sortable-header" data-sort="diversity">
+                        Diversity
+                        <span class="sort-arrow inactive" aria-hidden="true"></span>
+                      </button>
                     </th>
-                    <th class="sortable-header" data-sort="fitness">
-                      Overall Fitness
-                      <span class="sort-arrow inactive"></span>
+                    <th scope="col" aria-sort="none">
+                      <button type="button" class="sortable-header" data-sort="fitness">
+                        Overall Fitness
+                        <span class="sort-arrow inactive" aria-hidden="true"></span>
+                      </button>
                     </th>
-                    <th class="sortable-header" data-sort="birth_generation">
-                      Birth Gen
-                      <span class="sort-arrow inactive"></span>
+                    <th scope="col" aria-sort="none">
+                      <button type="button" class="sortable-header" data-sort="birth_generation">
+                        Birth Gen
+                        <span class="sort-arrow inactive" aria-hidden="true"></span>
+                      </button>
                     </th>
-                    <th class="sortable-header" data-sort="death_generation">
-                      Death/Final Gen
-                      <span class="sort-arrow inactive"></span>
+                    <th scope="col" aria-sort="none">
+                      <button type="button" class="sortable-header" data-sort="death_generation">
+                        Death/Final Gen
+                        <span class="sort-arrow inactive" aria-hidden="true"></span>
+                      </button>
                     </th>
                   </tr>
                 </thead>
@@ -491,7 +543,7 @@
           <h5 class="modal-title" id="ideaModalLabel">Idea Details</h5>
           <div class="d-flex align-items-start ms-auto">
             <button type="button" id="copyIdeaButton" class="btn btn-outline-secondary btn-sm me-2"
-              title="Copy raw markdown">
+              title="Copy raw markdown" aria-label="Copy raw idea markdown">
               <i class="fa-regular fa-copy"></i>
             </button>
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>

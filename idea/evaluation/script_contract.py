@@ -41,8 +41,8 @@ class ScriptArtifactOutput(BaseModel):
         return normalized
 
 
-class ScriptResultManifest(BaseModel):
-    """Strict JSON file written by a metric evaluator or artifact producer."""
+class ComputedResultManifest(BaseModel):
+    """Strict result returned by a computed evaluator or artifact producer."""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
@@ -64,7 +64,7 @@ class ScriptResultManifest(BaseModel):
         return metrics
 
     @model_validator(mode="after")
-    def validate_status(self) -> "ScriptResultManifest":
+    def validate_status(self) -> "ComputedResultManifest":
         if self.status == "ok" and self.error:
             raise ValueError("successful script results cannot include an error")
         if self.status == "failed" and not self.error:
@@ -78,7 +78,7 @@ def parse_script_result(
     payload: Union[bytes, bytearray, str, Mapping[str, Any]],
     *,
     max_bytes: int = MAX_SCRIPT_RESULT_BYTES,
-) -> ScriptResultManifest:
+) -> ComputedResultManifest:
     """Parse a bounded script result payload with strict JSON semantics."""
 
     if isinstance(payload, Mapping):
@@ -120,12 +120,17 @@ def parse_script_result(
         raise ScriptResultError("script result is not valid JSON") from exc
     if not isinstance(data, dict):
         raise ScriptResultError("script result root must be an object")
-    return ScriptResultManifest.model_validate(data)
+    return ComputedResultManifest.model_validate(data)
+
+
+# Compatibility name for checked-in and isolated Python script integrations.
+ScriptResultManifest = ComputedResultManifest
 
 
 __all__ = [
     "MAX_SCRIPT_RESULT_BYTES",
     "SCRIPT_RESULT_SCHEMA_VERSION",
+    "ComputedResultManifest",
     "ScriptArtifactOutput",
     "ScriptResultError",
     "ScriptResultManifest",

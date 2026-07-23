@@ -118,6 +118,36 @@ def test_get_total_token_count_includes_auxiliary_components():
     assert result["models"]["diversity_embeddings"] == "gemini-embedding-2"
 
 
+def test_restored_token_usage_remains_in_budget_totals():
+    engine = EvolutionEngine(pop_size=1, generations=1, max_budget=0.01)
+    for name in ("ideator", "formatter", "critic", "breeder", "oracle"):
+        setattr(engine, name, DummyAgent("gemini-2.0-flash", 0, 0))
+    engine._persisted_token_counts = {
+        "total": 3_000,
+        "total_input": 2_000,
+        "total_output": 1_000,
+        "total_thoughts": 0,
+        "total_cached_input": 0,
+        "total_uncached_input": 2_000,
+        "total_tool_input": 0,
+        "cost": {
+            "input_cost": 0.005,
+            "uncached_input_cost": 0.005,
+            "cached_input_cost": 0.0,
+            "output_cost": 0.015,
+            "thought_cost": 0.0,
+            "total_cost": 0.02,
+        },
+    }
+
+    result = engine.get_total_token_count()
+
+    assert result["restored_usage"]["total"] == 3_000
+    assert result["total"] == 3_000
+    assert result["cost"]["total_cost"] == pytest.approx(0.02)
+    assert engine.check_budget() is True
+
+
 def test_get_total_token_count_includes_thinking_cached_and_tiered_costs():
     engine = EvolutionEngine(pop_size=1, generations=1)
     engine.ideator = DummyAgent(
@@ -316,7 +346,7 @@ def test_disabled_evaluation_suite_uses_uniform_selection_fitness():
     assert all("evaluations" not in candidate for candidate in population)
 
 
-def test_python_metric_runner_can_drive_selection_without_llm_judging():
+def test_computed_runner_can_drive_selection_without_llm_judging():
     class Runner:
         async def run(self, candidate, **_kwargs):
             from idea.evaluation import ScriptResultManifest
@@ -333,8 +363,8 @@ def test_python_metric_runner_can_drive_selection_without_llm_judging():
             "components": [
                 {
                     "id": "numeric",
-                    "kind": "python_metric",
-                    "script_ref": "evaluators/score.py",
+                    "kind": "computed",
+                    "runner_ref": "python-script-v1",
                     "metric_names": ["score"],
                 }
             ],
@@ -406,7 +436,7 @@ def test_explicit_bounds_normalization_is_not_overridden_by_legacy_running_stats
     assert population[0]["evaluations"]["quality"]["normalized_metrics"] == {}
 
 
-def test_python_metric_supports_persistable_running_normalization_state():
+def test_computed_metric_supports_persistable_running_normalization_state():
     class Runner:
         async def run(self, candidate, **_kwargs):
             from idea.evaluation import ScriptResultManifest
@@ -423,8 +453,8 @@ def test_python_metric_supports_persistable_running_normalization_state():
             "components": [
                 {
                     "id": "numeric",
-                    "kind": "python_metric",
-                    "script_ref": "evaluators/score.py",
+                    "kind": "computed",
+                    "runner_ref": "python-script-v1",
                     "metric_names": ["score"],
                 }
             ],
@@ -453,3 +483,77 @@ def test_python_metric_supports_persistable_running_normalization_state():
     assert fitness[1]["fitness"] > 0.5
     assert engine.fitness_metric_stats["numeric.score"]["count"] == 2
     assert population[0]["evaluations"]["numeric"]["normalized_metrics"]["score"] < 0.5
+
+
+def test_computed_artifacts_enrich_candidates_before_pairwise_judging():
+    from idea.evaluation import ScriptResultManifest
+    from idea.evolution_orchestrator import EvolutionOrchestrator
+
+    class Runner:
+        async def run(self, _candidate, **_kwargs):
+            return ScriptResultManifest(
+                status="ok",
+                metrics={"structure_signal": 0.6},
+                artifacts=[
+                    {
+                        "path": "visualization.png",
+                        "role": "primary",
+                        "media_type": "image/png",
+                    }
+                ],
+            )
+
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        evaluation_config={
+            "components": [
+                {
+                    "id": "render-and-score",
+                    "kind": "computed",
+                    "runner_ref": "isolated-prime-v1",
+                    "metric_names": ["structure_signal"],
+                },
+                {
+                    "id": "quality",
+                    "kind": "llm_pairwise",
+                },
+            ],
+            "fitness": {
+                "metrics": [
+                    {
+                        "component_id": "quality",
+                        "metric_name": "quality_elo",
+                    }
+                ]
+            },
+        },
+        evaluation_runners={"render-and-score": Runner()},
+    )
+    population = [
+        {"id": "idea-a", "idea": "A"},
+        {"id": "idea-b", "idea": "B"},
+    ]
+
+    def tournament_ranks(ideas, _idea_type, **kwargs):
+        assert all("render-and-score" in idea["artifact_outputs"] for idea in ideas)
+        kwargs["details"].append({"round": 1, "pairs": []})
+        return {index: 1500.0 for index, _idea in enumerate(ideas)}
+
+    engine.critic.get_tournament_ranks = tournament_ranks
+
+    async def scenario():
+        orchestrator = EvolutionOrchestrator(engine, lambda _payload: None)
+        await orchestrator._run_tournament_and_attach_tree_metrics(
+            population,
+            generation_index=0,
+            target_generation=1,
+            rounds=1,
+            full_rounds=1,
+        )
+
+    asyncio.run(scenario())
+
+    assert population[0]["evaluations"]["render-and-score"]["metrics"] == {
+        "structure_signal": 0.6
+    }

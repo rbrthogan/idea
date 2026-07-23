@@ -9,7 +9,7 @@ def _slow_compare(_a, _b, _idea_type):
     return "A"
 
 
-def test_parallel_evaluate_pairs_timeout_marks_pending_as_ties():
+def test_parallel_evaluate_pairs_timeout_marks_pending_as_failures():
     pairs = [(0, 1)]
     items = [{"title": "A"}, {"title": "B"}]
 
@@ -23,10 +23,10 @@ def test_parallel_evaluate_pairs_timeout_marks_pending_as_ties():
             randomize_presentation=False,
         )
 
-    assert results == [(0, 1, "tie")]
+    assert results == [(0, 1, None)]
 
 
-def test_parallel_evaluate_pairs_stop_request_marks_pending_as_ties():
+def test_parallel_evaluate_pairs_stop_request_marks_pending_as_failures():
     pairs = [(0, 1), (2, 3)]
     items = [
         {"title": "A"},
@@ -47,4 +47,40 @@ def test_parallel_evaluate_pairs_stop_request_marks_pending_as_ties():
         )
 
     assert len(results) == len(pairs)
-    assert all(winner == "tie" for _, _, winner in results)
+    assert all(winner is None for _, _, winner in results)
+
+
+def test_parallel_evaluate_pairs_preserves_exception_as_failed_evidence():
+    failure_details = {}
+
+    def explode(_a, _b, _idea_type):
+        raise RuntimeError("judge unavailable")
+
+    results = parallel_evaluate_pairs(
+        pairs=[(0, 1)],
+        items=[{"title": "A"}, {"title": "B"}],
+        compare_fn=explode,
+        idea_type="airesearch",
+        concurrency=1,
+        randomize_presentation=False,
+        failure_details=failure_details,
+    )
+
+    assert results == [(0, 1, None)]
+    assert failure_details == {(0, 1): "RuntimeError: judge unavailable"}
+
+
+def test_parallel_evaluate_pairs_rejects_invalid_winner_instead_of_tie():
+    failure_details = {}
+    results = parallel_evaluate_pairs(
+        pairs=[(0, 1)],
+        items=[{"title": "A"}, {"title": "B"}],
+        compare_fn=lambda _a, _b, _idea_type: "candidate-a",
+        idea_type="airesearch",
+        concurrency=1,
+        randomize_presentation=False,
+        failure_details=failure_details,
+    )
+
+    assert results == [(0, 1, None)]
+    assert "invalid comparison winner" in failure_details[(0, 1)]

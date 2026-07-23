@@ -12,7 +12,6 @@ from idea.evaluation import (
     FitnessContributionStatus,
     LLMPairwiseComponentConfig,
     MetricConfig,
-    MetricDirection,
     MetricNormalization,
     RequiredMetricError,
 )
@@ -49,7 +48,7 @@ def suite(*metrics, quality_policy=FailurePolicy.FAIL_RUN, diversity_policy=Fail
     )
 
 
-def test_weighted_bounds_normalization_respects_maximize_and_minimize():
+def test_weighted_bounds_normalization_consumes_maximize_only_scores():
     config = suite(
         MetricConfig(
             component_id="quality",
@@ -60,9 +59,8 @@ def test_weighted_bounds_normalization_respects_maximize_and_minimize():
         ),
         MetricConfig(
             component_id="diversity",
-            metric_name="latency",
+            metric_name="throughput",
             weight=1,
-            direction=MetricDirection.MINIMIZE,
             normalization=MetricNormalization.BOUNDS,
             bounds=(0, 100),
         ),
@@ -70,7 +68,7 @@ def test_weighted_bounds_normalization_respects_maximize_and_minimize():
     batch = EvaluationBatch(
         records=[
             record("a", "quality", {"quality_elo": 0.8}),
-            record("a", "diversity", {"latency": 20}),
+            record("a", "diversity", {"throughput": 80}),
         ]
     )
 
@@ -78,7 +76,7 @@ def test_weighted_bounds_normalization_respects_maximize_and_minimize():
 
     assert result.score == pytest.approx(0.8)
     assert result.used_weight == 4
-    assert result.components["diversity.latency"].score_value == pytest.approx(0.8)
+    assert result.components["diversity.throughput"].score_value == pytest.approx(0.8)
 
 
 def test_population_min_max_normalization_and_constant_values():
@@ -90,17 +88,16 @@ def test_population_min_max_normalization_and_constant_values():
         ),
         MetricConfig(
             component_id="diversity",
-            metric_name="cost",
-            direction=MetricDirection.MINIMIZE,
+            metric_name="efficiency",
             normalization=MetricNormalization.MIN_MAX,
         ),
     )
     batch = EvaluationBatch(
         records=[
             record("a", "quality", {"quality_elo": 10}),
-            record("a", "diversity", {"cost": 2}),
+            record("a", "diversity", {"efficiency": 4}),
             record("b", "quality", {"quality_elo": 20}),
-            record("b", "diversity", {"cost": 4}),
+            record("b", "diversity", {"efficiency": 2}),
         ]
     )
 
@@ -112,13 +109,13 @@ def test_population_min_max_normalization_and_constant_values():
     constant_batch = EvaluationBatch(
         records=[
             record("a", "quality", {"quality_elo": 7}),
-            record("a", "diversity", {"cost": 7}),
+            record("a", "diversity", {"efficiency": 7}),
         ]
     )
     assert FitnessAggregator(config).aggregate(constant_batch)["a"].score == pytest.approx(0.5)
 
 
-def test_none_normalization_leaves_maximize_raw_and_negates_minimize_raw():
+def test_none_normalization_preserves_maximize_only_raw_scores():
     config = suite(
         MetricConfig(
             component_id="quality",
@@ -127,23 +124,22 @@ def test_none_normalization_leaves_maximize_raw_and_negates_minimize_raw():
         ),
         MetricConfig(
             component_id="diversity",
-            metric_name="cost",
-            direction=MetricDirection.MINIMIZE,
+            metric_name="usefulness",
             normalization=MetricNormalization.NONE,
         ),
     )
     batch = EvaluationBatch(
         records=[
             record("a", "quality", {"quality_elo": 4}),
-            record("a", "diversity", {"cost": 3}),
+            record("a", "diversity", {"usefulness": 3}),
         ]
     )
 
     result = FitnessAggregator(config).aggregate(batch)["a"]
 
-    assert result.score == pytest.approx(0.5)
+    assert result.score == pytest.approx(3.5)
     assert result.components["quality.quality_elo"].score_value == 4
-    assert result.components["diversity.cost"].score_value == -3
+    assert result.components["diversity.usefulness"].score_value == 3
 
 
 def test_optional_omission_renormalizes_remaining_weight_per_candidate():

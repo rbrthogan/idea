@@ -194,22 +194,67 @@
                     return;
                 }
 
-                tbody.innerHTML = data.users.map(user => `
-          <tr>
-            <td><code class="small">${user.user_id.substring(0, 12)}...</code></td>
-            <td><span class="badge bg-primary">${user.evolution_count}</span></td>
-            <td><span class="badge bg-info text-dark">${user.template_count}</span></td>
-            <td>
-              ${user.has_api_key
-                        ? '<span class="badge badge-active"><i class="fas fa-check"></i> Set</span>'
-                        : '<span class="badge badge-inactive">Not set</span>'}
-            </td>
-            <td class="text-muted small">${user.last_activity ? new Date(user.last_activity).toLocaleDateString() : '--'}</td>
-          </tr>
-        `).join('');
+                tbody.replaceChildren(...data.users.map(createAdminUserRow));
             } catch (e) {
                 console.error('Failed to load users:', e);
             }
+        }
+
+        function normalizeAdminUserDisplay(user) {
+            const userId = String(user?.user_id ?? '');
+            const parsedActivity = user?.last_activity ? new Date(user.last_activity) : null;
+            const lastActivity = parsedActivity && !Number.isNaN(parsedActivity.getTime())
+                ? parsedActivity.toLocaleDateString()
+                : '--';
+            return {
+                userId: `${userId.slice(0, 12)}${userId.length > 12 ? '...' : ''}`,
+                evolutionCount: String(user?.evolution_count ?? 0),
+                templateCount: String(user?.template_count ?? 0),
+                hasApiKey: user?.has_api_key === true,
+                lastActivity,
+            };
+        }
+
+        function createAdminUserRow(user) {
+            const display = normalizeAdminUserDisplay(user);
+            const row = document.createElement('tr');
+
+            const userIdCell = document.createElement('td');
+            const userIdCode = document.createElement('code');
+            userIdCode.className = 'small';
+            userIdCode.textContent = display.userId;
+            userIdCell.appendChild(userIdCode);
+
+            const evolutionCell = document.createElement('td');
+            const evolutionBadge = document.createElement('span');
+            evolutionBadge.className = 'badge bg-primary';
+            evolutionBadge.textContent = display.evolutionCount;
+            evolutionCell.appendChild(evolutionBadge);
+
+            const templateCell = document.createElement('td');
+            const templateBadge = document.createElement('span');
+            templateBadge.className = 'badge bg-info text-dark';
+            templateBadge.textContent = display.templateCount;
+            templateCell.appendChild(templateBadge);
+
+            const apiKeyCell = document.createElement('td');
+            const apiKeyBadge = document.createElement('span');
+            apiKeyBadge.className = `badge ${display.hasApiKey ? 'badge-active' : 'badge-inactive'}`;
+            if (display.hasApiKey) {
+                const icon = document.createElement('i');
+                icon.className = 'fas fa-check';
+                apiKeyBadge.append(icon, document.createTextNode(' Set'));
+            } else {
+                apiKeyBadge.textContent = 'Not set';
+            }
+            apiKeyCell.appendChild(apiKeyBadge);
+
+            const activityCell = document.createElement('td');
+            activityCell.className = 'text-muted small';
+            activityCell.textContent = display.lastActivity;
+
+            row.append(userIdCell, evolutionCell, templateCell, apiKeyCell, activityCell);
+            return row;
         }
 
         // Initialize when auth is ready (handled by auth_logic.js observer or timeout fallback)

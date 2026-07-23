@@ -223,21 +223,25 @@ function renderTemplateList(templates) {
     templates.forEach(template => {
         const div = document.createElement('div');
         div.className = `template-list-item ${template.id === currentType ? 'active' : ''}`;
-        div.onclick = (e) => {
-            // Prevent triggering if clicking action buttons
-            if (e.target.closest('.btn')) return;
-            selectTemplate(template.id);
-        };
 
         div.innerHTML = `
-            <h6>${escapeHtml(template.name)} ${template.is_system ? '<span class="badge bg-light text-dark border ms-1">System</span>' : '<span class="badge bg-primary ms-1">Custom</span>'}</h6>
-            <p>${escapeHtml(template.description || 'No description')}</p>
+            <button type="button" class="template-list-select" aria-current="${template.id === currentType ? 'true' : 'false'}">
+                <span class="template-list-title">${escapeHtml(template.name)} ${template.is_system ? '<span class="badge bg-light text-dark border ms-1">System</span>' : '<span class="badge bg-primary ms-1">Custom</span>'}</span>
+                <span class="template-list-description">${escapeHtml(template.description || 'No description')}</span>
+            </button>
             <div class="template-actions">
-                <button class="btn btn-xs btn-outline-secondary" onclick="editTemplateMainPage('${template.id}')">
+                <button type="button" class="btn btn-xs btn-outline-secondary template-edit-button">
                     <i class="fas fa-edit"></i> ${template.is_system ? 'Customize' : 'Edit'}
                 </button>
             </div>
         `;
+        div.querySelector('.template-list-select')?.addEventListener('click', () => {
+            selectTemplate(template.id);
+        });
+        div.querySelector('.template-edit-button')?.addEventListener('click', event => {
+            event.stopPropagation();
+            editTemplateMainPage(template.id);
+        });
 
         container.appendChild(div);
     });
@@ -386,10 +390,65 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
         button.addEventListener('click', () => setEvolutionViewMode(button.dataset.viewMode));
+        button.addEventListener('keydown', handleEvolutionViewTabKeydown);
     });
     setupModelChangeListener();
 
     // --- Evolution Controls ---
+
+    function buildVisualizationArtifactEvaluation(fitnessAlpha) {
+        const qualityWeight = Number.isFinite(Number(fitnessAlpha))
+            ? Math.max(0, Math.min(1, Number(fitnessAlpha)))
+            : 0.7;
+        return {
+            enabled: true,
+            allow_generated_code_execution: true,
+            components: [
+                {
+                    id: 'render',
+                    kind: 'llm_code_artifact',
+                    execution_profile: 'gemini-visualization-v1',
+                    artifact_role: 'primary',
+                    source_role: 'source',
+                    metadata_role: 'metadata',
+                    provides: ['artifact.primary', 'artifact.source', 'artifact.metadata']
+                },
+                {
+                    id: 'quality',
+                    kind: 'llm_pairwise',
+                    requires: ['artifact.primary'],
+                    metric_name: 'quality_elo',
+                    failure_policy: 'fail_run'
+                },
+                {
+                    id: 'diversity',
+                    kind: 'embedding_diversity',
+                    metric_name: 'diversity',
+                    failure_policy: 'penalize'
+                }
+            ],
+            fitness: {
+                enabled: true,
+                strategy: 'weighted_sum',
+                metrics: [
+                    {
+                        component_id: 'quality',
+                        metric_name: 'quality_elo',
+                        weight: qualityWeight,
+                        normalization: 'running_zscore'
+                    },
+                    {
+                        component_id: 'diversity',
+                        metric_name: 'diversity',
+                        weight: 1 - qualityWeight,
+                        normalization: 'running_zscore',
+                        penalty_score: 0.5
+                    }
+                ]
+            },
+            metadata: { preset: 'visual-artifacts-v1' }
+        };
+    }
 
     addListener('startButton', 'click', async function () {
         console.log("Starting evolution...");
@@ -445,6 +504,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Get evolution name (optional)
         const evolutionNameInput = document.getElementById('evolutionNameInput');
         const evolutionName = evolutionNameInput?.value?.trim() || null;
+        const enableVisualizationArtifacts = document.getElementById('enableVisualizationArtifacts')?.checked ?? false;
 
         const requestBody = {
             popSize,
@@ -470,6 +530,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             maxBudget,
             evolutionName
         };
+        if (enableVisualizationArtifacts) {
+            requestBody.evaluation = buildVisualizationArtifactEvaluation(fitnessAlpha);
+        }
 
         console.log("Request body JSON:", JSON.stringify(requestBody));
 
@@ -669,7 +732,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     addListener('saveSettingsBtn', 'click', saveSettings);
     addListener('deleteApiKeyBtn', 'click', deleteApiKey);
     addListener('confirmDeleteKeyBtn', 'click', confirmDeleteApiKey);
-    addListener('copyApiKeyBtn', 'click', copyApiKey);
 
     // Setup button in alert (if present)
     const setupBtn = document.getElementById('setupApiKeyBtn');
@@ -1074,7 +1136,50 @@ function normalizeMarkdownStructure(text) {
         .join('');
 }
 
-// Improve the markdown rendering function with better newline handling
+// Markdown links are deliberately limited to web URLs and same-origin/relative
+// navigation. Generated text must never be able to opt into an active protocol.
+function decodeMarkdownCodePoint(value, radix) {
+    const codePoint = parseInt(value, radix);
+    if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        return '\ufffd';
+    }
+    return String.fromCodePoint(codePoint);
+}
+
+function decodeMarkdownUrlForPolicy(value) {
+    let decoded = String(value || '');
+    for (let index = 0; index < 3; index++) {
+        decoded = decoded
+            .replace(/&amp;/gi, '&')
+            .replace(/&colon;/gi, ':')
+            .replace(/&tab;/gi, '\t')
+            .replace(/&newline;/gi, '\n')
+            .replace(/&#x([0-9a-f]+);?/gi, (match, hex) => decodeMarkdownCodePoint(hex, 16))
+            .replace(/&#([0-9]+);?/g, (match, decimal) => decodeMarkdownCodePoint(decimal, 10));
+    }
+    return decoded;
+}
+
+function sanitizeMarkdownUrl(value) {
+    const renderedValue = String(value || '').trim();
+    const policyValue = decodeMarkdownUrlForPolicy(renderedValue).trim();
+    if (!policyValue || /[\s\u0000-\u001f\u007f]/.test(policyValue) || /[\\"'<>]/.test(policyValue)) {
+        return null;
+    }
+    if (/^https?:\/\//i.test(policyValue)) {
+        return renderedValue;
+    }
+    if (/^(?:\/(?!\/)|\.\.?\/|#|\?)/.test(policyValue)) {
+        return renderedValue;
+    }
+    if (!policyValue.includes(':') && !policyValue.startsWith('//')) {
+        return renderedValue;
+    }
+    return null;
+}
+
+// Improve the markdown rendering function with better newline handling.
+// This is intentionally a small allow-list renderer, not an HTML passthrough.
 function renderMarkdown(text) {
     if (!text) return '';
 
@@ -1083,7 +1188,8 @@ function renderMarkdown(text) {
     // Escape HTML to prevent XSS
     text = text.replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 
     // Process code blocks first
     const codeBlocks = [];
@@ -1155,8 +1261,13 @@ function renderMarkdown(text) {
     // Process blockquotes
     text = text.replace(/^>\s+(.*?)$/gm, '<blockquote>$1</blockquote>');
 
-    // Process links
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+    // Process links. Unsafe destinations degrade to their inert label.
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, destination) => {
+        const safeDestination = sanitizeMarkdownUrl(destination);
+        return safeDestination
+            ? `<a href="${safeDestination}" target="_blank" rel="noopener noreferrer">${label}</a>`
+            : label;
+    });
 
     // Process paragraphs - any line that's not already a block element
     lines = text.split('\n');
@@ -1312,6 +1423,70 @@ function getIdeaData(idea) {
         // Preserve other properties
         ...idea
     };
+}
+
+function getIdeaArtifactRefs(idea) {
+    const refs = idea?.artifact_refs ?? idea?.idea?.artifact_refs;
+    if (!Array.isArray(refs)) return [];
+    return refs.filter(ref => (
+        ref
+        && typeof ref === 'object'
+        && typeof ref.id === 'string'
+        && typeof ref.role === 'string'
+        && typeof ref.media_type === 'string'
+    ));
+}
+
+function getPrimaryImageArtifact(idea) {
+    const imageRefs = getIdeaArtifactRefs(idea).filter(ref => ref.media_type === 'image/png');
+    return imageRefs.find(ref => ref.role === 'primary') || imageRefs[0] || null;
+}
+
+function getIdeaArtifactSignature(idea) {
+    return getIdeaArtifactRefs(idea)
+        .map(ref => `${ref.id}:${ref.sha256 || ''}:${ref.content_digest || ''}`)
+        .join('|');
+}
+
+function getEvolutionArtifactUrl(ref) {
+    if (!currentEvolutionId || !ref?.id) return null;
+    return `/api/evolution/${encodeURIComponent(currentEvolutionId)}/artifacts/${encodeURIComponent(ref.id)}`;
+}
+
+async function hydrateAuthenticatedArtifactImages(container) {
+    if (!container) return;
+    const images = container.querySelectorAll('img[data-artifact-url]');
+    images.forEach(async image => {
+        const artifactUrl = image.dataset.artifactUrl;
+        image.removeAttribute('data-artifact-url');
+        if (!artifactUrl) return;
+        try {
+            const response = await fetch(artifactUrl, { headers: { Accept: 'image/png' } });
+            if (!response.ok) throw new Error(`artifact request failed (${response.status})`);
+            const blob = await response.blob();
+            if (blob.type && blob.type !== 'image/png') throw new Error('artifact is not a PNG');
+            const objectUrl = URL.createObjectURL(blob);
+            const revoke = () => URL.revokeObjectURL(objectUrl);
+            image.addEventListener('load', revoke, { once: true });
+            image.addEventListener('error', revoke, { once: true });
+            image.src = objectUrl;
+        } catch (error) {
+            image.hidden = true;
+            image.closest('figure, .idea-card-artifact')?.classList.add('artifact-unavailable');
+            console.warn('Artifact preview unavailable:', error);
+        }
+    });
+}
+
+function renderCardArtifactPreview(idea) {
+    const primary = getPrimaryImageArtifact(idea);
+    const artifactUrl = getEvolutionArtifactUrl(primary);
+    if (!primary || !artifactUrl) return '';
+    return `
+        <div class="idea-card-artifact">
+            <img data-artifact-url="${escapeHtml(artifactUrl)}" alt="Generated visualization" loading="lazy">
+        </div>
+    `;
 }
 
 function getIdeaIslandId(idea) {
@@ -2227,7 +2402,9 @@ function renderEvolutionTree(gens) {
 
         const label = document.createElement('div');
         label.className = 'evolution-tree-generation-label';
-        label.innerHTML = `<span>Gen ${generationRow.generation}</span>`;
+        const generationText = document.createElement('span');
+        generationText.textContent = `Gen ${generationRow.generation}`;
+        label.appendChild(generationText);
         row.appendChild(label);
 
         const lanes = document.createElement('div');
@@ -2773,6 +2950,29 @@ function renderEvolutionRankedList(gens) {
     });
 }
 
+function getRovingTabIndex(currentIndex, key, tabCount) {
+    const count = Math.max(0, Math.trunc(Number(tabCount) || 0));
+    if (count === 0 || currentIndex < 0 || currentIndex >= count) {
+        return null;
+    }
+    if (key === 'Home') return 0;
+    if (key === 'End') return count - 1;
+    if (key === 'ArrowRight' || key === 'ArrowDown') return (currentIndex + 1) % count;
+    if (key === 'ArrowLeft' || key === 'ArrowUp') return (currentIndex - 1 + count) % count;
+    return null;
+}
+
+function handleEvolutionViewTabKeydown(event) {
+    const tabs = Array.from(document.querySelectorAll('.evolution-view-toggle-btn[role="tab"]'));
+    const targetIndex = getRovingTabIndex(tabs.indexOf(event.currentTarget), event.key, tabs.length);
+    if (targetIndex === null) return;
+
+    event.preventDefault();
+    const targetTab = tabs[targetIndex];
+    setEvolutionViewMode(targetTab.dataset.viewMode);
+    targetTab.focus();
+}
+
 function setEvolutionViewMode(mode) {
     evolutionViewMode = mode === 'tree' || mode === 'ranked' ? mode : 'cards';
     const cardsContainer = document.getElementById('generations-container');
@@ -2795,6 +2995,7 @@ function setEvolutionViewMode(mode) {
         const isActive = button.dataset.viewMode === evolutionViewMode;
         button.classList.toggle('active', isActive);
         button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        button.tabIndex = isActive ? 0 : -1;
     });
     if (evolutionViewMode === 'tree') {
         renderEvolutionTree(generations);
@@ -2947,6 +3148,7 @@ function renderGenerations(gens) {
             const genotypeEntries = getBreedingGenotypeEntries(idea);
             const islandId = getIdeaIslandId(idea);
             const isOracleGenerated = idea.oracle_generated === true;
+            const artifactSignature = getIdeaArtifactSignature(idea);
             let insertBeforeNode = null;
 
             // Check if this idea card already exists
@@ -2963,13 +3165,14 @@ function renderGenerations(gens) {
                     idea.migration_event === true
                 );
                 const oracleChanged = (existingCard.dataset.oracle === 'true') !== isOracleGenerated;
+                const artifactsChanged = (existingCard.dataset.artifactSignature || '') !== artifactSignature;
 
                 // We also check if the existing card in the DOM reflects this.
                 // A simple way is to check the button's inner HTML for the icon.
                 const lineageButton = existingCard.querySelector('.view-lineage');
                 const cardIsAlreadyOracle = lineageButton && lineageButton.innerHTML.includes('fa-eye');
 
-                if ((isOracleGenerated && !cardIsAlreadyOracle) || genotypeCountChanged || islandChanged || migrationChanged || oracleChanged) {
+                if ((isOracleGenerated && !cardIsAlreadyOracle) || genotypeCountChanged || islandChanged || migrationChanged || oracleChanged || artifactsChanged) {
                     // The data is now an Oracle idea, but the card isn't.
                     // This means a replacement happened, or metadata was added after the card rendered.
                     console.log(`Card refresh needed for idea ${ideaIndex} in generation ${index}. Re-rendering card.`);
@@ -2986,6 +3189,7 @@ function renderGenerations(gens) {
             card.className = 'card gen-card';
             card.id = `idea-${index}-${ideaIndex}`;
             card.dataset.genotypeCount = String(genotypeEntries.length);
+            card.dataset.artifactSignature = artifactSignature;
             if (islandId !== null) {
                 card.dataset.islandId = String(islandId);
                 card.classList.add(`island-${islandId % 5}`);
@@ -3018,6 +3222,11 @@ function renderGenerations(gens) {
             const oracleBadgeHtml = isOracleGenerated
                 ? '<span class="oracle-badge">Oracle</span>'
                 : '';
+            const artifactCount = getIdeaArtifactRefs(ideaData).length;
+            const artifactBadgeHtml = artifactCount > 0
+                ? `<span class="artifact-badge"><i class="fas fa-image" aria-hidden="true"></i>${artifactCount} artifact${artifactCount === 1 ? '' : 's'}</span>`
+                : '';
+            const artifactPreviewHtml = renderCardArtifactPreview(ideaData);
 
             // Add "Prompt" button for initial generation cards
             const viewPromptButton = index === 0 ?
@@ -3074,10 +3283,12 @@ function renderGenerations(gens) {
                         ${islandBadgeHtml}
                         ${migrationBadgeHtml}
                         ${oracleBadgeHtml}
+                        ${artifactBadgeHtml}
                     </div>
-                    <h5 class="card-title">${ideaData.title || 'Untitled'}</h5>
+                    <h5 class="card-title"></h5>
+                    ${artifactPreviewHtml}
                     <div class="card-text">
-                        <p>${plainPreview}</p>
+                        <p class="idea-preview-text"></p>
                     </div>
                     ${genotypeSummaryHtml}
                     <div class="card-actions">
@@ -3090,6 +3301,8 @@ function renderGenerations(gens) {
                     </div>
                 </div>
             `;
+            card.querySelector('.card-title').textContent = ideaData.title || 'Untitled';
+            card.querySelector('.idea-preview-text').textContent = plainPreview;
 
             // Add click handler for view button
             const viewButton = card.querySelector('.view-idea');
@@ -3128,6 +3341,7 @@ function renderGenerations(gens) {
             } else {
                 scrollContainer.appendChild(card);
             }
+            hydrateAuthenticatedArtifactImages(card);
 
             // Log that we've added a new card
             console.log(`Added new idea card: Generation ${index}, Idea ${ideaIndex + 1}`);
@@ -3175,6 +3389,210 @@ function toggleGeneration(generationId) {
     }
 }
 
+function rememberModalFocusOrigin(modalElement) {
+    if (!modalElement) return;
+    const activeElement = document.activeElement;
+    modalElement._focusReturnTarget = activeElement && activeElement !== document.body
+        ? activeElement
+        : null;
+    if (modalElement.dataset.focusReturnBound === 'true') return;
+
+    modalElement.dataset.focusReturnBound = 'true';
+    modalElement.addEventListener('hidden.bs.modal', () => {
+        const target = modalElement._focusReturnTarget;
+        modalElement._focusReturnTarget = null;
+        if (!target?.isConnected || target.disabled || typeof target.focus !== 'function') return;
+        target.focus({ preventScroll: true });
+    });
+}
+
+function clearIdeaDetailElement(element) {
+    if (element) element.replaceChildren();
+}
+
+function formatArtifactBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return 'size unknown';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function buildArtifactFigure(ref, ideaTitle) {
+    const artifactUrl = getEvolutionArtifactUrl(ref);
+    if (!artifactUrl) return null;
+    const figure = document.createElement('figure');
+    figure.className = 'idea-artifact-figure';
+    const image = document.createElement('img');
+    image.dataset.artifactUrl = artifactUrl;
+    image.alt = `Visualization for ${ideaTitle || 'idea'}`;
+    image.loading = 'lazy';
+    const caption = document.createElement('figcaption');
+    caption.textContent = `${ref.role} · PNG · ${formatArtifactBytes(ref.size_bytes)}`;
+    figure.append(image, caption);
+    return figure;
+}
+
+function activateIdeaModalTab(tabName) {
+    const modal = document.getElementById('ideaModal');
+    if (!modal) return;
+    modal.querySelectorAll('[data-idea-modal-tab]').forEach(button => {
+        const selected = !button.hidden && button.dataset.ideaModalTab === tabName;
+        button.setAttribute('aria-selected', selected ? 'true' : 'false');
+        button.tabIndex = selected ? 0 : -1;
+    });
+    modal.querySelectorAll('[data-idea-modal-panel]').forEach(panel => {
+        panel.hidden = panel.dataset.ideaModalPanel !== tabName;
+    });
+}
+
+function configureIdeaModalTabs(availableTabs) {
+    const tabList = document.getElementById('ideaModalTabs');
+    if (!tabList) return;
+    const available = new Set(availableTabs);
+    const buttons = [...tabList.querySelectorAll('[data-idea-modal-tab]')];
+    buttons.forEach(button => {
+        button.hidden = !available.has(button.dataset.ideaModalTab);
+        button.onclick = () => activateIdeaModalTab(button.dataset.ideaModalTab);
+        button.onkeydown = event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            const visible = buttons.filter(candidate => !candidate.hidden);
+            const currentIndex = visible.indexOf(button);
+            let nextIndex = currentIndex;
+            if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % visible.length;
+            if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + visible.length) % visible.length;
+            if (event.key === 'Home') nextIndex = 0;
+            if (event.key === 'End') nextIndex = visible.length - 1;
+            event.preventDefault();
+            const next = visible[nextIndex];
+            activateIdeaModalTab(next.dataset.ideaModalTab);
+            next.focus();
+        };
+    });
+    tabList.hidden = available.size <= 1;
+    activateIdeaModalTab('overview');
+}
+
+function renderIdeaModalArtifacts(idea) {
+    const refs = getIdeaArtifactRefs(idea);
+    const images = refs.filter(ref => ref.media_type === 'image/png');
+    const primary = getPrimaryImageArtifact(idea);
+    const primaryContainer = document.getElementById('ideaModalPrimaryArtifact');
+    const gallery = document.getElementById('ideaModalArtifacts');
+    clearIdeaDetailElement(primaryContainer);
+    clearIdeaDetailElement(gallery);
+
+    if (primary) {
+        const figure = buildArtifactFigure(primary, idea.title);
+        if (figure) {
+            primaryContainer.appendChild(figure);
+            primaryContainer.hidden = false;
+        } else {
+            primaryContainer.hidden = true;
+        }
+    } else {
+        primaryContainer.hidden = true;
+    }
+
+    images.forEach(ref => {
+        const figure = buildArtifactFigure(ref, idea.title);
+        if (figure) gallery.appendChild(figure);
+    });
+    refs.filter(ref => ref.media_type !== 'image/png').forEach(ref => {
+        const row = document.createElement('div');
+        row.className = 'idea-artifact-row';
+        row.textContent = `${ref.role} · ${ref.media_type} · ${formatArtifactBytes(ref.size_bytes)}`;
+        gallery.appendChild(row);
+    });
+
+    hydrateAuthenticatedArtifactImages(primaryContainer);
+    hydrateAuthenticatedArtifactImages(gallery);
+    return refs.length > 0;
+}
+
+function renderIdeaModalCode(idea) {
+    const panel = document.getElementById('ideaModalCode');
+    clearIdeaDetailElement(panel);
+    const sourceRef = getIdeaArtifactRefs(idea).find(ref => (
+        ref.role === 'source' || ref.media_type === 'text/x-python'
+    ));
+    const artifactUrl = getEvolutionArtifactUrl(sourceRef);
+    if (!sourceRef || !artifactUrl) return false;
+
+    const output = document.createElement('pre');
+    output.className = 'idea-code-output';
+    output.setAttribute('aria-label', 'Generated Python source');
+    output.textContent = 'Loading generated source…';
+    panel.dataset.artifactId = sourceRef.id;
+    panel.appendChild(output);
+    fetch(artifactUrl, { headers: { Accept: 'text/plain' } })
+        .then(response => {
+            if (!response.ok) throw new Error(`source request failed (${response.status})`);
+            return response.text();
+        })
+        .then(source => {
+            if (panel.dataset.artifactId === sourceRef.id) output.textContent = source;
+        })
+        .catch(error => {
+            if (panel.dataset.artifactId === sourceRef.id) {
+                output.textContent = `Generated source is unavailable: ${error.message}`;
+            }
+        });
+    return true;
+}
+
+function appendEvaluationDetail(list, label, value) {
+    if (value === undefined || value === null || value === '') return;
+    const term = document.createElement('dt');
+    term.textContent = label;
+    const detail = document.createElement('dd');
+    detail.textContent = String(value);
+    list.append(term, detail);
+}
+
+function renderIdeaModalEvaluations(idea) {
+    const panel = document.getElementById('ideaModalEvaluations');
+    clearIdeaDetailElement(panel);
+    const evaluations = idea?.evaluations && typeof idea.evaluations === 'object'
+        ? idea.evaluations
+        : {};
+    const entries = Object.entries(evaluations);
+    const selection = idea?.selection_metrics && typeof idea.selection_metrics === 'object'
+        ? idea.selection_metrics
+        : null;
+    if (entries.length === 0 && !selection) return false;
+
+    if (selection) {
+        const summary = document.createElement('div');
+        summary.className = 'idea-evaluation-summary';
+        const fitness = Number(selection.fitness);
+        summary.textContent = Number.isFinite(fitness)
+            ? `Aggregate fitness: ${fitness.toFixed(4)}`
+            : 'Aggregate selection evidence';
+        panel.appendChild(summary);
+    }
+
+    entries.forEach(([componentId, record]) => {
+        const card = document.createElement('article');
+        card.className = 'idea-evaluation-card';
+        const heading = document.createElement('h3');
+        heading.textContent = componentId;
+        const details = document.createElement('dl');
+        appendEvaluationDetail(details, 'Status', record?.status || 'unknown');
+        const metrics = record?.metrics && typeof record.metrics === 'object'
+            ? Object.entries(record.metrics).map(([name, value]) => `${name}: ${value}`).join(', ')
+            : '';
+        appendEvaluationDetail(details, 'Metrics', metrics);
+        appendEvaluationDetail(details, 'Duration', Number.isFinite(Number(record?.duration_ms))
+            ? `${Number(record.duration_ms)} ms`
+            : null);
+        appendEvaluationDetail(details, 'Error', record?.error);
+        card.append(heading, details);
+        panel.appendChild(card);
+    });
+    return true;
+}
+
 // Update the showIdeaModal function to ensure the modal is properly initialized
 function showIdeaModal(idea) {
     // Get the modal element
@@ -3189,13 +3607,23 @@ function showIdeaModal(idea) {
     // Render the markdown content
     const modalContent = document.getElementById('ideaModalContent');
 
-    // Set the content
+    // Set the content and reveal only detail tabs backed by candidate data.
     const renderedContent = renderMarkdown(idea.content || '');
     modalContent.innerHTML = renderedContent;
+    const hasArtifacts = renderIdeaModalArtifacts(idea);
+    const hasCode = renderIdeaModalCode(idea);
+    const hasEvaluations = renderIdeaModalEvaluations(idea);
+    configureIdeaModalTabs([
+        'overview',
+        ...(hasArtifacts ? ['artifacts'] : []),
+        ...(hasCode ? ['code'] : []),
+        ...(hasEvaluations ? ['evaluations'] : []),
+    ]);
 
     // Initialize the modal if it hasn't been already
     let modal;
     if (window.bootstrap) {
+        rememberModalFocusOrigin(modalElement);
         modal = new bootstrap.Modal(modalElement);
 
         // Add event listener to clean up when modal is hidden
@@ -3248,7 +3676,7 @@ function updateContextDisplay() {
         const contentItems = displayContent
             .split('\n')
             .filter(item => item.trim())
-            .map(item => `<div class="context-item">${item.trim()}</div>`)
+            .map(item => `<div class="context-item">${escapeHtml(item.trim())}</div>`)
             .join('');
 
         contextDisplay.innerHTML = `
@@ -3660,6 +4088,16 @@ function hasSavedConfig(config) {
     return Boolean(config && typeof config === 'object' && Object.keys(config).length > 0);
 }
 
+function toSafeCssToken(value, fallback = 'unknown') {
+    const token = String(value || fallback).toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+    return token || fallback;
+}
+
+function findHistoryItemElement(itemId) {
+    return Array.from(document.querySelectorAll('#historyList .history-item'))
+        .find(element => element.dataset.itemId === String(itemId)) || null;
+}
+
 function renderHistoryList(items, updateGlobal = true) {
     const container = document.getElementById('historyList');
     if (!container) return;
@@ -3675,15 +4113,15 @@ function renderHistoryList(items, updateGlobal = true) {
     }
 
     container.innerHTML = items.map(item => {
-        const statusClass = `badge-status-${item.status}`;
-        const typeClass = `item-type-${item.type}`;
+        const statusClass = `badge-status-${toSafeCssToken(item.status)}`;
+        const typeClass = `item-type-${toSafeCssToken(item.type)}`;
         const date = item.timestamp ? new Date(item.timestamp).toLocaleDateString() : '';
         const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-        const isSelected = selectedHistoryItem?.id === item.id;
+        const isSelected = String(selectedHistoryItem?.id ?? '') === String(item.id ?? '');
         const canUseConfig = item.can_use_config || hasSavedConfig(item.config);
 
         // Truncate display name (more room in expanded view)
-        let displayName = item.display_name || item.id;
+        let displayName = String(item.display_name || item.id || 'Untitled');
         if (displayName.length > 35) {
             displayName = displayName.substring(0, 32) + '...';
         }
@@ -3692,35 +4130,35 @@ function renderHistoryList(items, updateGlobal = true) {
         let actionsHtml = '';
         if (isSelected) {
             if (item.can_resume) {
-                actionsHtml += `<button class="btn btn-sm btn-success" onclick="event.stopPropagation(); handleHistoryResume('${item.id}')">
+                actionsHtml += `<button class="btn btn-sm btn-success" data-history-action="resume">
                     <i class="fas fa-play me-1"></i>Resume
                 </button>`;
             }
             if (canUseConfig) {
-                actionsHtml += `<button class="btn btn-sm btn-outline-success" onclick="event.stopPropagation(); handleUseHistoryConfig('${item.id}')">
+                actionsHtml += `<button class="btn btn-sm btn-outline-success" data-history-action="use-config">
                     <i class="fas fa-sliders-h me-1"></i>Use Config
                 </button>`;
             }
             if (item.can_continue) {
                 actionsHtml += `
-                    <div class="continue-action-group d-flex gap-1" id="continueActionGroup-${item.id}">
-                        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); showContinueInputInline('${item.id}', '${item.type}')">
+                    <div class="continue-action-group d-flex gap-1">
+                        <button class="btn btn-sm btn-info" data-history-action="continue">
                             <i class="fas fa-forward me-1"></i>Continue
                         </button>
                     </div>`;
             }
             if (item.can_rate) {
-                actionsHtml += `<button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); navigateToRatePage('${item.type === 'legacy_saved' ? item.id : ''}')">
+                actionsHtml += `<button class="btn btn-sm btn-outline-primary" data-history-action="rate">
                     <i class="fas fa-star me-1"></i>Rate
                 </button>`;
             }
             if (item.can_rename) {
-                actionsHtml += `<button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); showRenameInputInline('${item.id}')" title="Rename">
+                actionsHtml += `<button class="btn btn-sm btn-outline-secondary" data-history-action="rename" title="Rename">
                     <i class="fas fa-edit"></i>
                 </button>`;
             }
             if (item.can_delete) {
-                actionsHtml += `<button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); confirmDeleteEvolution('${item.id}')" title="Delete">
+                actionsHtml += `<button class="btn btn-sm btn-outline-danger" data-history-action="delete" title="Delete">
                     <i class="fas fa-trash"></i>
                 </button>`;
             }
@@ -3728,25 +4166,52 @@ function renderHistoryList(items, updateGlobal = true) {
 
         return `
             <div class="history-item ${isSelected ? 'selected expanded' : ''}"
-                 onclick="selectHistoryItem('${item.id}')"
-                 data-item-id="${item.id}">
-                <div class="item-header">
-                    <span class="item-title" id="itemTitle-${item.id}" title="${item.display_name || item.id}">${displayName}</span>
-                    <span class="item-type-badge ${typeClass}">${item.type}</span>
-                </div>
-                <div class="item-meta">
-                    <span><i class="fas fa-calendar"></i> ${date} ${time}</span>
-                    <span><i class="fas fa-layer-group"></i> Gen ${item.generations}${item.total_generations ? '/' + item.total_generations : ''}</span>
-                </div>
-                <div class="item-footer">
-                    <span class="badge ${statusClass}">${formatStatus(item.status)}</span>
-                    ${isSelected ? `<span class="idea-type"><i class="fas fa-tag me-1"></i>${item.idea_type || 'Unknown'}</span>` : ''}
-                </div>
+                 data-item-id="${escapeHtml(item.id)}">
+                <button type="button" class="history-item-select" aria-expanded="${isSelected ? 'true' : 'false'}">
+                    <span class="item-header">
+                        <span class="item-title" title="${escapeHtml(item.display_name || item.id)}">${escapeHtml(displayName)}</span>
+                        <span class="item-type-badge ${typeClass}">${escapeHtml(item.type)}</span>
+                    </span>
+                    <span class="item-meta">
+                        <span><i class="fas fa-calendar"></i> ${escapeHtml(date)} ${escapeHtml(time)}</span>
+                        <span><i class="fas fa-layer-group"></i> Gen ${escapeHtml(item.generations)}${item.total_generations ? '/' + escapeHtml(item.total_generations) : ''}</span>
+                    </span>
+                    <span class="item-footer">
+                        <span class="badge ${statusClass}">${escapeHtml(formatStatus(item.status))}</span>
+                        ${isSelected ? `<span class="idea-type"><i class="fas fa-tag me-1"></i>${escapeHtml(item.idea_type || 'Unknown')}</span>` : ''}
+                    </span>
+                </button>
                 ${isSelected ? buildEvolutionConfigDetailsHtml(item.config || {}, item) : ''}
                 ${isSelected ? `<div class="item-actions">${actionsHtml}</div>` : ''}
             </div>
         `;
     }).join('');
+
+    container.querySelectorAll('.history-item-select').forEach(button => {
+        button.addEventListener('click', () => {
+            const element = button.closest('.history-item');
+            if (element) selectHistoryItem(element.dataset.itemId);
+        });
+    });
+    container.querySelectorAll('[data-history-action]').forEach(button => {
+        button.addEventListener('click', event => {
+            event.stopPropagation();
+            const element = button.closest('.history-item');
+            const itemId = element?.dataset.itemId;
+            const item = historyItems.find(candidate => String(candidate.id) === itemId);
+            if (!item) return;
+
+            const actions = {
+                resume: () => handleHistoryResume(item.id),
+                'use-config': () => handleUseHistoryConfig(item.id),
+                continue: () => showContinueInputInline(item.id, item.type),
+                rate: () => navigateToRatePage(item.type === 'legacy_saved' ? item.id : ''),
+                rename: () => showRenameInputInline(item.id),
+                delete: () => confirmDeleteEvolution(item.id),
+            };
+            actions[button.dataset.historyAction]?.();
+        });
+    });
 }
 
 function formatStatus(status) {
@@ -3761,11 +4226,11 @@ function formatStatus(status) {
 }
 
 async function selectHistoryItem(itemId) {
-    const item = historyItems.find(i => i.id === itemId);
+    const item = historyItems.find(i => String(i.id) === String(itemId));
     if (!item) return;
 
     // Toggle selection - clicking same item deselects
-    if (selectedHistoryItem?.id === itemId) {
+    if (String(selectedHistoryItem?.id ?? '') === String(itemId)) {
         selectedHistoryItem = null;
     } else {
         selectedHistoryItem = item;
@@ -3773,6 +4238,7 @@ async function selectHistoryItem(itemId) {
 
     // Re-render list with new selection state (expands/collapses in place)
     renderHistoryList(historyItems, false);
+    findHistoryItemElement(itemId)?.querySelector('.history-item-select')?.focus();
 
     // Load the evolution data into the main content area if selected
     if (selectedHistoryItem) {
@@ -3782,43 +4248,64 @@ async function selectHistoryItem(itemId) {
 
 // Show inline continue input (for history list items)
 function showContinueInputInline(itemId, itemType) {
-    const group = document.getElementById(`continueActionGroup-${itemId}`);
+    const group = findHistoryItemElement(itemId)?.querySelector('.continue-action-group');
     if (!group) return;
 
-    group.innerHTML = `
-        <input type="number" class="form-control form-control-sm" id="continueGensInput-${itemId}"
-               value="3" min="1" max="20" style="width: 55px; text-align: center;"
-               onclick="event.stopPropagation()">
-        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); executeContinueInline('${itemId}', '${itemType}')">
-            <i class="fas fa-play"></i>
-        </button>
-        <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); cancelContinueInputInline('${itemId}', '${itemType}')">
-            <i class="fas fa-times"></i>
-        </button>
-    `;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'form-control form-control-sm continue-generations-input';
+    input.value = '3';
+    input.min = '1';
+    input.max = '20';
+    input.style.width = '55px';
+    input.style.textAlign = 'center';
+    input.addEventListener('click', event => event.stopPropagation());
+
+    const confirmButton = document.createElement('button');
+    confirmButton.type = 'button';
+    confirmButton.className = 'btn btn-sm btn-info';
+    confirmButton.setAttribute('aria-label', 'Continue evolution');
+    confirmButton.innerHTML = '<i class="fas fa-play"></i>';
+    confirmButton.addEventListener('click', event => {
+        event.stopPropagation();
+        executeContinueInline(itemId, itemType);
+    });
+
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'btn btn-sm btn-outline-secondary';
+    cancelButton.setAttribute('aria-label', 'Cancel');
+    cancelButton.innerHTML = '<i class="fas fa-times"></i>';
+    cancelButton.addEventListener('click', event => {
+        event.stopPropagation();
+        cancelContinueInputInline(itemId, itemType);
+    });
+
+    group.replaceChildren(input, confirmButton, cancelButton);
 
     setTimeout(() => {
-        const input = document.getElementById(`continueGensInput-${itemId}`);
-        if (input) {
-            input.focus();
-            input.select();
-        }
+        input.focus();
+        input.select();
     }, 50);
 }
 
 function cancelContinueInputInline(itemId, itemType) {
-    const group = document.getElementById(`continueActionGroup-${itemId}`);
+    const group = findHistoryItemElement(itemId)?.querySelector('.continue-action-group');
     if (!group) return;
 
-    group.innerHTML = `
-        <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); showContinueInputInline('${itemId}', '${itemType}')">
-            <i class="fas fa-forward me-1"></i>Continue
-        </button>
-    `;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm btn-info';
+    button.innerHTML = '<i class="fas fa-forward me-1"></i>Continue';
+    button.addEventListener('click', event => {
+        event.stopPropagation();
+        showContinueInputInline(itemId, itemType);
+    });
+    group.replaceChildren(button);
 }
 
 async function executeContinueInline(itemId, itemType) {
-    const input = document.getElementById(`continueGensInput-${itemId}`);
+    const input = findHistoryItemElement(itemId)?.querySelector('.continue-generations-input');
     const additionalGens = parseInt(input?.value || '3');
 
     if (isNaN(additionalGens) || additionalGens < 1) {
@@ -3831,44 +4318,62 @@ async function executeContinueInline(itemId, itemType) {
 
 // Show inline rename input (for history list items)
 function showRenameInputInline(itemId) {
-    const titleEl = document.getElementById(`itemTitle-${itemId}`);
+    const titleEl = findHistoryItemElement(itemId)?.querySelector('.item-title');
     if (!titleEl) return;
 
     const currentName = titleEl.textContent;
     const parent = titleEl.parentNode;
 
-    titleEl.outerHTML = `
-        <div class="rename-inline-group d-flex gap-1 flex-grow-1" id="renameGroup-${itemId}">
-            <input type="text" class="form-control form-control-sm" id="renameInput-${itemId}"
-                   value="${selectedHistoryItem?.display_name || currentName}"
-                   onclick="event.stopPropagation()">
-            <button class="btn btn-sm btn-success" onclick="event.stopPropagation(); executeRenameInline('${itemId}')">
-                <i class="fas fa-check"></i>
-            </button>
-            <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); cancelRenameInline('${itemId}', '${currentName}')">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-    `;
+    const group = document.createElement('div');
+    group.className = 'rename-inline-group d-flex gap-1 flex-grow-1';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control form-control-sm rename-input';
+    input.value = selectedHistoryItem?.display_name || currentName;
+    input.addEventListener('click', event => event.stopPropagation());
+
+    const confirmButton = document.createElement('button');
+    confirmButton.type = 'button';
+    confirmButton.className = 'btn btn-sm btn-success';
+    confirmButton.setAttribute('aria-label', 'Save name');
+    confirmButton.innerHTML = '<i class="fas fa-check"></i>';
+    confirmButton.addEventListener('click', event => {
+        event.stopPropagation();
+        executeRenameInline(itemId);
+    });
+
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'btn btn-sm btn-outline-secondary';
+    cancelButton.setAttribute('aria-label', 'Cancel rename');
+    cancelButton.innerHTML = '<i class="fas fa-times"></i>';
+    cancelButton.addEventListener('click', event => {
+        event.stopPropagation();
+        cancelRenameInline(itemId, currentName);
+    });
+
+    group.append(input, confirmButton, cancelButton);
+    parent.replaceChild(group, titleEl);
 
     setTimeout(() => {
-        const input = document.getElementById(`renameInput-${itemId}`);
-        if (input) {
-            input.focus();
-            input.select();
-        }
+        input.focus();
+        input.select();
     }, 50);
 }
 
 function cancelRenameInline(itemId, originalName) {
-    const group = document.getElementById(`renameGroup-${itemId}`);
+    const group = findHistoryItemElement(itemId)?.querySelector('.rename-inline-group');
     if (group) {
-        group.outerHTML = `<span class="item-title" id="itemTitle-${itemId}" title="${originalName}">${originalName}</span>`;
+        const title = document.createElement('span');
+        title.className = 'item-title';
+        title.title = originalName;
+        title.textContent = originalName;
+        group.replaceWith(title);
     }
 }
 
 async function executeRenameInline(itemId) {
-    const input = document.getElementById(`renameInput-${itemId}`);
+    const input = findHistoryItemElement(itemId)?.querySelector('.rename-input');
     const newName = input?.value?.trim();
 
     if (!newName) {
@@ -3877,7 +4382,7 @@ async function executeRenameInline(itemId) {
     }
 
     try {
-        const response = await fetch(`/api/evolution/${itemId}/rename`, {
+        const response = await fetch(`/api/evolution/${encodeURIComponent(itemId)}/rename`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: newName })
@@ -4000,6 +4505,16 @@ function applyEvolutionConfigToForm(config = {}, sourceName = '') {
     }
 
     setCheckboxValue('refineAllIdeas', config.refine_all_ideas);
+    const artifactSwitch = document.getElementById('enableVisualizationArtifacts');
+    if (artifactSwitch) {
+        const components = Array.isArray(config.evaluation?.components)
+            ? config.evaluation.components
+            : [];
+        const hasArtifactProducer = components.some(component => (
+            component?.enabled !== false && component?.kind === 'llm_code_artifact'
+        ));
+        artifactSwitch.checked = !artifactSwitch.disabled && hasArtifactProducer;
+    }
     updateSurvivorRefinementControls();
     applyThinkingConfigToForm(config);
     tournamentCountTouched = true;
@@ -4296,7 +4811,7 @@ async function handleHistoryContinue(itemId, itemType, additionalGens = 3) {
     await repairCurrentEvolutionIfNewer(itemId);
 
     // Update the inline action button to show starting state
-    const group = document.getElementById(`continueActionGroup-${itemId}`);
+    const group = findHistoryItemElement(itemId)?.querySelector('.continue-action-group');
     if (group) {
         group.innerHTML = '<span class="text-muted small"><i class="fas fa-spinner fa-spin me-1"></i>Starting...</span>';
     }
@@ -4425,6 +4940,7 @@ function clearSelectedEvolution() {
     // Clear selection highlighting in history list
     document.querySelectorAll('.history-item').forEach(el => {
         el.classList.remove('selected');
+        el.querySelector('.history-item-select')?.setAttribute('aria-expanded', 'false');
     });
 
     // Hide history detail panel
@@ -4599,6 +5115,7 @@ async function pollProgress() {
             if (roundedProgress !== lastProgressBarValue) {
                 progressBar.style.width = `${progress}%`;
                 progressBar.setAttribute('aria-valuenow', progress);
+                progressBar.setAttribute('aria-valuetext', `${Math.round(progress)}% complete`);
                 lastProgressBarValue = roundedProgress;
             }
 
@@ -4954,18 +5471,21 @@ function showAlreadyRunningMessage() {
         modal.id = 'alreadyRunningModal';
         modal.className = 'modal fade';
         modal.tabIndex = -1;
+        modal.setAttribute('aria-labelledby', 'alreadyRunningModalLabel');
+        modal.setAttribute('aria-describedby', 'alreadyRunningModalDescription');
+        modal.setAttribute('aria-hidden', 'true');
         modal.innerHTML = `
             <div class="modal-dialog modal-dialog-centered">
                 <div class="modal-content">
                     <div class="modal-header bg-warning text-dark">
-                        <h5 class="modal-title">
+                        <h5 class="modal-title" id="alreadyRunningModalLabel">
                             <i class="fas fa-exclamation-triangle me-2"></i>
                             Evolution Already Running
                         </h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                     </div>
                     <div class="modal-body">
-                        <p>You already have an evolution in progress. You can only run one evolution at a time.</p>
+                        <p id="alreadyRunningModalDescription">You already have an evolution in progress. You can only run one evolution at a time.</p>
                         <p class="mb-0 text-muted">Click below to view your current evolution, or wait for it to complete before starting a new one.</p>
                     </div>
                     <div class="modal-footer">
@@ -5009,6 +5529,7 @@ function showAlreadyRunningMessage() {
     }
 
     // Show the modal
+    rememberModalFocusOrigin(modal);
     const bsModal = new bootstrap.Modal(modal);
     bsModal.show();
 }
@@ -5365,12 +5886,12 @@ function createProgressBar(evolutionName = null) {
     progressContainer.innerHTML = `
         <div class="evolution-progress-header">
             <div class="evolution-name-section">
-                <h4 class="evolution-name" id="evolution-name">${evolutionName || 'Evolution'}</h4>
+                <h4 class="evolution-name" id="evolution-name"></h4>
             </div>
             <div class="evolution-status-section">
             <div class="evolution-status-indicator">
                 <div class="evolution-spinner" id="evolution-spinner"></div>
-                <span id="evolution-status-text">Initializing...</span>
+                <span id="evolution-status-text" role="status" aria-live="polite" aria-atomic="true">Initializing...</span>
             </div>
             <div class="evolution-timing" id="evolution-timing">
                 <span class="timing-item" id="elapsed-time">
@@ -5382,10 +5903,11 @@ function createProgressBar(evolutionName = null) {
         <div class="progress-container-inner">
             <div class="progress evolution-progress-bar">
                 <div id="evolution-progress" class="progress-bar" role="progressbar"
-                     style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                     style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                     aria-label="Evolution progress" aria-valuetext="0% complete"></div>
                 <div class="progress-bar-activity" id="progress-bar-activity"></div>
             </div>
-            <div class="progress-percentage" id="progress-percentage">0%</div>
+            <div class="progress-percentage" id="progress-percentage" aria-hidden="true">0%</div>
         </div>
         <div class="evolution-activity-log" id="evolution-activity-log">
             <div class="activity-log-header">
@@ -5396,6 +5918,7 @@ function createProgressBar(evolutionName = null) {
             </div>
         </div>
     `;
+    progressContainer.querySelector('#evolution-name').textContent = evolutionName || 'Evolution';
 
     // Insert progress bar before generations container
     const generationsContainer = document.getElementById('generations-container');
@@ -5456,7 +5979,7 @@ function buildTournamentRoundsHtml(rounds) {
 
         return `
             <div class="tournament-round-column">
-                <div class="tournament-round-title">Round ${round.round || ''}</div>
+                <div class="tournament-round-title">Round ${escapeHtml(round.round || '')}</div>
                 ${bye}
                 ${pairs || '<div class="text-muted">No matches recorded.</div>'}
             </div>
@@ -5721,9 +6244,9 @@ function addActivityLogItem(message, type = 'info', options = {}) {
         }
 
         logContainer.innerHTML = activityLog.map(item => `
-            <div class="activity-item activity-${item.type}">
-                <span class="activity-time">${item.timestamp}</span>
-                <span class="activity-message">${item.message}</span>
+            <div class="activity-item activity-${toSafeCssToken(item.type, 'info')}">
+                <span class="activity-time">${escapeHtml(item.timestamp)}</span>
+                <span class="activity-message">${escapeHtml(item.message)}</span>
                 ${item.action ? `<button type="button" class="btn btn-link btn-sm activity-action-btn ms-2 p-0 align-baseline" data-action="${escapeHtml(item.action)}">${escapeHtml(item.actionLabel)}</button>` : ''}
             </div>
         `).join('');
@@ -5881,7 +6404,7 @@ function showContextModal(ideaIndex) {
         const contextItems = displayContent
             .split('\n')
             .filter(item => item.trim())
-            .map(item => `<div class="context-item">${item.trim()}</div>`)
+            .map(item => `<div class="context-item">${escapeHtml(item.trim())}</div>`)
             .join('');
 
         contextModalContent.innerHTML = `
@@ -5982,7 +6505,10 @@ function showLineageModal(idea, generationIndex) {
             // This is a SOURCE idea that was selected to be elite
             document.getElementById('lineageModalLabel').textContent = `Selected as Most Creative: ${idea.title || 'Untitled'}`;
 
-            const targetGeneration = idea.elite_target_generation;
+            const parsedTargetGeneration = Number(idea.elite_target_generation);
+            const targetGeneration = Number.isInteger(parsedTargetGeneration)
+                ? parsedTargetGeneration
+                : generationIndex;
             const originHtml = `
                 <div class="elite-origin-section">
                     <div class="alert alert-success mb-3">
@@ -6001,11 +6527,14 @@ function showLineageModal(idea, generationIndex) {
             document.getElementById('lineageModalLabel').textContent = `Creative Origin: ${idea.title || 'Untitled'}`;
 
             // Find the source idea from the previous generation
-            const sourceGenerationIndex = idea.elite_source_generation;
+            const parsedSourceGeneration = Number(idea.elite_source_generation);
+            const sourceGenerationIndex = Number.isInteger(parsedSourceGeneration) && parsedSourceGeneration >= 0
+                ? parsedSourceGeneration
+                : null;
             const sourceIdeaId = idea.elite_source_id;
 
             let sourceIdea = null;
-            if (sourceGenerationIndex !== undefined && sourceIdeaId && generations[sourceGenerationIndex]) {
+            if (sourceGenerationIndex !== null && sourceIdeaId && generations[sourceGenerationIndex]) {
                 sourceIdea = generations[sourceGenerationIndex].find(sourceCandidate => sourceCandidate.id === sourceIdeaId);
             }
 
@@ -6022,9 +6551,9 @@ function showLineageModal(idea, generationIndex) {
                         <h6>Original Source (Generation ${sourceGenerationIndex + 1}):</h6>
                         <div class="card elite-source-card">
                             <div class="card-body">
-                                <h6 class="card-title">${sourceIdea.title || 'Untitled'}</h6>
+                                <h6 class="card-title">${escapeHtml(sourceIdea.title || 'Untitled')}</h6>
                                 <div class="card-preview">
-                                    <p>${sourcePreview}</p>
+                                    <p>${escapeHtml(sourcePreview)}</p>
                                 </div>
                                 <button class="btn btn-sm btn-primary view-source-idea">
                                     View Full Original Idea
@@ -6108,14 +6637,13 @@ function showLineageModal(idea, generationIndex) {
                 </div>
                 <div class="oracle-analysis-content">
                     <h6>Analysis & Recommendations:</h6>
-                    <div class="analysis-text" style="white-space: pre-wrap; line-height: 1.6; background-color: #f8f9fa; padding: 1rem; border-radius: 0.375rem; border-left: 4px solid #0d6efd;">
-                        ${idea.oracle_analysis}
-                    </div>
+                    <div class="analysis-text" style="white-space: pre-wrap; line-height: 1.6; background-color: #f8f9fa; padding: 1rem; border-radius: 0.375rem; border-left: 4px solid #0d6efd;"></div>
                 </div>
             </div>
         `;
 
         lineageModalContent.innerHTML = analysisHtml;
+        lineageModalContent.querySelector('.analysis-text').textContent = idea.oracle_analysis;
 
         // Show the modal
         let modal;
@@ -6372,9 +6900,9 @@ function createAncestorCard(ancestor, index, ancestorType) {
     return `
         <div class="card lineage-parent-card mb-3">
             <div class="card-body">
-                <h6 class="card-title">${ancestor.title || 'Untitled'}</h6>
+                <h6 class="card-title">${escapeHtml(ancestor.title || 'Untitled')}</h6>
                 <div class="card-preview">
-                    <p>${preview}</p>
+                    <p>${escapeHtml(preview)}</p>
                 </div>
                 <button class="btn btn-sm btn-primary view-ancestor-idea"
                     data-idea-index="${index}"
@@ -6516,7 +7044,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
     let estimatesList = '';
     if (tokenCounts.estimates) {
         estimatesList = Object.values(tokenCounts.estimates).map(e => {
-            return `<li class="list-group-item d-flex justify-content-between align-items-center">${e.name}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
+            return `<li class="list-group-item d-flex justify-content-between align-items-center">${escapeHtml(e.name)}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
         }).join('');
     }
 
@@ -6603,7 +7131,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
         componentBreakdownHtml += `
             <li class="list-group-item">
                 <div class="d-flex justify-content-between align-items-center">
-                    <span>${comp.displayName} <span class="badge bg-secondary">${comp.model}</span></span>
+                    <span>${escapeHtml(comp.displayName)} <span class="badge bg-secondary">${escapeHtml(comp.model)}</span></span>
                     <span class="badge bg-primary rounded-pill">${comp.total}</span>
                 </div>
                 <div class="small text-muted mt-1">
@@ -8666,9 +9194,6 @@ async function checkSettingsStatus() {
             if (configuredContainer) configuredContainer.style.display = 'block';
             if (maskedDisplay) maskedDisplay.textContent = data.masked_key;
 
-            // Store masked key for copy function
-            window.maskedApiKey = data.masked_key;
-            window.fullApiKey = data.api_key;
         } else {
             // No key set
             if (inputContainer) inputContainer.style.display = 'block';
@@ -8775,30 +9300,6 @@ async function confirmDeleteApiKey() {
         btn.disabled = false;
         btn.innerHTML = originalText;
     }
-}
-
-/**
- * Copy API Key (Masked)
- */
-function copyApiKey() {
-    const textToCopy = window.fullApiKey || window.maskedApiKey || "";
-    navigator.clipboard.writeText(textToCopy).then(() => {
-        const btn = document.getElementById('copyApiKeyBtn');
-        const originalHTML = btn.innerHTML;
-
-        btn.innerHTML = '<i class="fas fa-check me-2"></i>Copied!';
-        btn.classList.remove('btn-outline-secondary');
-        btn.classList.add('btn-success');
-
-        setTimeout(() => {
-            btn.innerHTML = originalHTML;
-            btn.classList.remove('btn-success');
-            btn.classList.add('btn-outline-secondary');
-        }, 2000);
-    }).catch(err => {
-        console.error('Failed to copy: ', err);
-        showStatusInSettings('Failed to copy to clipboard', 'danger');
-    });
 }
 
 // Note: handleTemplateGeneration is defined in viewer.html with proper DOM elements

@@ -10,7 +10,7 @@ from google.genai import types
 import json
 from datetime import datetime, timezone
 from pydantic import BaseModel
-from typing import Type, Optional, Dict, List, Callable, Tuple, Set, Any
+from typing import Type, Optional, Dict, List, Callable, Tuple, Set, Any, Mapping
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception
 from idea.models import Idea
@@ -20,7 +20,12 @@ import uuid
 from collections import OrderedDict
 from hashlib import sha256
 import threading
-from idea.ratings import parallel_evaluate_pairs
+from idea.ratings import (
+    PairEvaluationError,
+    PairEvaluationInputError,
+    parallel_evaluate_pairs,
+)
+from idea.evaluation.models import ArtifactRef
 from idea.swiss_tournament import (
     elo_update,
     generate_swiss_round_pairs,
@@ -459,17 +464,22 @@ class LLMWrapper(ABC):
             actual_temp = temperature if temperature is not None else self.temperature
             actual_top_p = top_p if top_p is not None else self.top_p
 
-            config_dict = {
-                "temperature": actual_temp,
-                "top_p": actual_top_p,
-                "max_output_tokens": self.MAX_TOKENS,
-            }
+            model_thinking_cfg = THINKING_MODEL_CONFIG.get(
+                _canonical_model_name(self.model_name), {}
+            )
+            config_dict = {"max_output_tokens": self.MAX_TOKENS}
+            if model_thinking_cfg.get("supports_sampling_parameters", True):
+                config_dict.update(
+                    {
+                        "temperature": actual_temp,
+                        "top_p": actual_top_p,
+                    }
+                )
 
             # Add thinking config when requested. Gemini 3 uses levels; Gemini 2.5 uses budgets.
             thinking_fields = getattr(types.ThinkingConfig, "model_fields", {}) or {}
             supports_thinking_level = "thinking_level" in thinking_fields
             supports_thinking_budget = "thinking_budget" in thinking_fields
-            model_thinking_cfg = THINKING_MODEL_CONFIG.get(_canonical_model_name(self.model_name), {})
             model_supports_thinking = bool(model_thinking_cfg.get("supports_thinking", False))
             model_supports_thinking_level = bool(model_thinking_cfg.get("supports_thinking_level", False))
             model_supports_thinking_budget = bool(model_thinking_cfg.get("supports_thinking_budget", False))
@@ -1150,6 +1160,19 @@ class Critic(LLMWrapper):
         self._max_workers = int(os.environ.get("COMPARISON_CONCURRENCY", "8"))
         # Lock for thread-safe cache access
         self._cache_lock = threading.Lock()
+        self._artifact_loader: Any = None
+        self._required_artifact_roles: Tuple[str, ...] = ()
+
+    def configure_artifact_evidence(
+        self,
+        *,
+        loader: Any,
+        required_roles: List[str],
+    ) -> None:
+        """Configure immutable artifact loading for the current judge policy."""
+
+        self._artifact_loader = loader
+        self._required_artifact_roles = tuple(dict.fromkeys(required_roles))
 
     def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
@@ -1274,14 +1297,178 @@ class Critic(LLMWrapper):
         return sha256(serialized.encode("utf-8")).hexdigest()
 
     def _idea_payload_for_comparison(self, idea: Any) -> Any:
-        """Return the exact idea payload shown to the judge."""
+        """Load and validate the exact text-and-image payload shown to the judge."""
+
         idea_obj = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
-        return _model_to_dict(idea_obj)
+        idea_payload = _model_to_dict(idea_obj)
+        if isinstance(idea_payload, Mapping):
+            payload: Dict[str, Any] = {
+                "title": str(idea_payload.get("title") or "Untitled"),
+                "content": str(idea_payload.get("content") or ""),
+            }
+        else:
+            payload = {"title": "Untitled", "content": str(idea_payload)}
+
+        # Artifact evidence is opt-in per pairwise component. Legacy/text-only
+        # judges must not be influenced by unrelated refs merely present on a
+        # candidate.
+        if not self._required_artifact_roles:
+            return payload
+
+        raw_refs = idea.get("artifact_refs", []) if isinstance(idea, dict) else []
+        if raw_refs is None:
+            raw_refs = []
+        if not isinstance(raw_refs, list):
+            raise PairEvaluationInputError("candidate artifact_refs must be a list")
+
+        refs: List[ArtifactRef] = []
+        for raw_ref in raw_refs:
+            if not isinstance(raw_ref, Mapping):
+                continue
+            if raw_ref.get("role") not in self._required_artifact_roles:
+                continue
+            try:
+                refs.append(ArtifactRef.model_validate(raw_ref))
+            except Exception as exc:
+                raise PairEvaluationInputError(
+                    "candidate contains an invalid artifact reference"
+                ) from exc
+
+        refs_by_role: Dict[str, List[ArtifactRef]] = {}
+        for ref in refs:
+            refs_by_role.setdefault(ref.role, []).append(ref)
+        missing_roles = [
+            role for role in self._required_artifact_roles if role not in refs_by_role
+        ]
+        if missing_roles:
+            raise PairEvaluationInputError(
+                "candidate is missing required artifacts: " + ", ".join(missing_roles)
+            )
+        content_digest = sha256(
+            json.dumps(
+                {"title": payload["title"], "content": payload["content"]},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        for role in self._required_artifact_roles:
+            role_refs = refs_by_role.get(role, [])
+            if len(role_refs) != 1:
+                raise PairEvaluationInputError(
+                    f"candidate must contain exactly one required {role!r} artifact"
+                )
+            if (role_refs[0].content_digest or "").lower() != content_digest:
+                raise PairEvaluationInputError(
+                    f"required artifact {role_refs[0].id!r} is stale for the current candidate text"
+                )
+
+        refs_to_load = list(refs)
+        if refs_to_load and self._artifact_loader is None:
+            raise PairEvaluationInputError(
+                "candidate artifacts require an injected artifact loader"
+            )
+
+        loaded: Dict[str, bytes] = {}
+        load_artifact = getattr(self._artifact_loader, "load", None)
+        if not callable(load_artifact) and callable(self._artifact_loader):
+            load_artifact = self._artifact_loader
+        for ref in refs_to_load:
+            if not callable(load_artifact):
+                raise PairEvaluationInputError("artifact loader has no load operation")
+            try:
+                contents = load_artifact(ref)
+            except PairEvaluationInputError:
+                raise
+            except Exception as exc:
+                raise PairEvaluationInputError(
+                    f"artifact {ref.id!r} could not be loaded"
+                ) from exc
+            if not isinstance(contents, (bytes, bytearray)):
+                raise PairEvaluationInputError(
+                    f"artifact loader returned non-byte data for {ref.id!r}"
+                )
+            immutable_contents = bytes(contents)
+            if len(immutable_contents) != ref.size_bytes:
+                raise PairEvaluationInputError(
+                    f"artifact {ref.id!r} has an invalid byte size"
+                )
+            if sha256(immutable_contents).hexdigest().lower() != ref.sha256.lower():
+                raise PairEvaluationInputError(
+                    f"artifact {ref.id!r} failed digest validation"
+                )
+            loaded[ref.id] = immutable_contents
+
+        images: List[Dict[str, Any]] = []
+        for ref in refs:
+            if not ref.media_type.lower().startswith("image/"):
+                continue
+            if ref.media_type.lower() != "image/png":
+                raise PairEvaluationInputError(
+                    f"pairwise image artifact {ref.id!r} must be image/png"
+                )
+            image_bytes = loaded.get(ref.id)
+            if image_bytes is None:
+                raise PairEvaluationInputError(
+                    f"pairwise image artifact {ref.id!r} was not loaded"
+                )
+            images.append(
+                {
+                    "artifact_id": ref.id,
+                    "role": ref.role,
+                    "media_type": ref.media_type,
+                    "sha256": ref.sha256.lower(),
+                    "data": image_bytes,
+                }
+            )
+        if images:
+            payload["images"] = images
+        return payload
+
+    @staticmethod
+    def _artifact_cache_identity(
+        idea: Any,
+        required_roles: Tuple[str, ...],
+    ) -> List[Dict[str, str]]:
+        if not required_roles:
+            return []
+        if not isinstance(idea, dict) or not isinstance(idea.get("artifact_refs"), list):
+            return []
+        identities: List[Dict[str, str]] = []
+        for raw_ref in idea["artifact_refs"]:
+            if not isinstance(raw_ref, Mapping):
+                continue
+            if raw_ref.get("role") not in required_roles:
+                continue
+            digest = raw_ref.get("sha256")
+            if not isinstance(digest, str):
+                continue
+            identities.append(
+                {
+                    "id": str(raw_ref.get("id") or ""),
+                    "role": str(raw_ref.get("role") or ""),
+                    "media_type": str(raw_ref.get("media_type") or ""),
+                    "sha256": digest.lower(),
+                }
+            )
+        return sorted(
+            identities,
+            key=lambda item: (
+                item["role"], item["media_type"], item["sha256"], item["id"]
+            ),
+        )
 
     def _idea_cache_key(self, idea: Any) -> str:
         """Stable cache key for an idea, including content so refined ideas invalidate."""
         raw_id = idea.get("id") if isinstance(idea, dict) else None
-        payload = self._idea_payload_for_comparison(idea)
+        idea_obj = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
+        payload = {
+            "idea": _model_to_dict(idea_obj),
+            "artifacts": self._artifact_cache_identity(
+                idea,
+                self._required_artifact_roles,
+            ),
+        }
         serialized = json.dumps(payload, sort_keys=True, default=str)
         digest = sha256(serialized.encode("utf-8")).hexdigest()
         return f"{str(raw_id) if raw_id else 'no-id'}:{digest}"
@@ -1425,6 +1612,13 @@ class Critic(LLMWrapper):
         Falls back to sequential evaluation for tiny populations to keep behavior deterministic.
         """
 
+        # Resolve every candidate's evidence before consulting the comparison
+        # cache. Missing or corrupt required artifacts are evaluation failures,
+        # never permission to reuse a text-only judgment.
+        comparison_items = [
+            self._idea_payload_for_comparison(idea) for idea in ideas
+        ]
+
         # Handle edge case: if there's only one idea or no ideas, return appropriate ranking
         if len(ideas) <= 1:
             return {0: self._initial_tournament_rating(ideas[0])} if len(ideas) == 1 else {}
@@ -1555,13 +1749,14 @@ class Critic(LLMWrapper):
                 pairs_to_evaluate = [(idx_a, idx_b) for _, idx_a, idx_b in missing_pairs]
                 results = parallel_evaluate_pairs(
                     pairs=pairs_to_evaluate,
-                    items=ideas,
+                    items=comparison_items,
                     compare_fn=self.compare_ideas,
                     idea_type=idea_type,
                     concurrency=self._max_workers,
                     randomize_presentation=True,
                     progress_callback=on_pair_complete,
                     should_stop=should_stop,
+                    failure_details=(pair_failure_details := {}),
                 )
 
                 evaluated_map = {(a, b): w for a, b, w in results}
@@ -1578,12 +1773,17 @@ class Critic(LLMWrapper):
                     )
                     if pair_index < len(round_pairs):
                         round_pairs[pair_index]["winner"] = winner
+                        if winner is None:
+                            round_pairs[pair_index]["winner_source"] = "failed"
+                            round_pairs[pair_index]["error"] = pair_failure_details.get(
+                                (idx_a, idx_b),
+                                "comparison did not produce a valid winner",
+                            )
             else:
+                pair_failure_details = {}
                 for pair_index, idx_a, idx_b in missing_pairs:
-                    idea_a = ideas[idx_a]
-                    idea_b = ideas[idx_b]
-                    idea_a_dict = self._idea_payload_for_comparison(idea_a)
-                    idea_b_dict = self._idea_payload_for_comparison(idea_b)
+                    idea_a_dict = comparison_items[idx_a]
+                    idea_b_dict = comparison_items[idx_b]
 
                     # Deterministic orientation in sequential mode to keep tests stable
                     winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
@@ -1598,8 +1798,39 @@ class Critic(LLMWrapper):
                     )
                     if pair_index < len(round_pairs):
                         round_pairs[pair_index]["winner"] = winner
+                        if winner not in {"A", "B", "tie"}:
+                            round_pairs[pair_index]["winner_source"] = "failed"
+                            round_pairs[pair_index]["error"] = (
+                                "comparison did not produce a valid winner"
+                            )
+                    if winner not in {"A", "B", "tie"}:
+                        pair_failure_details[(idx_a, idx_b)] = (
+                            f"invalid comparison winner: {winner!r}"
+                        )
                     completed_pairs += 1
                     report_progress()
+
+            if callable(should_stop) and should_stop():
+                round_record["cancelled"] = True
+                round_record["cancellation_reason"] = "stop_requested"
+                # Preserve ratings from fully completed earlier rounds only.
+                # No Elo or cache entry is created for unfinished comparisons.
+                return ranks
+
+            failed_pairs = [
+                (idx_a, idx_b)
+                for idx_a, idx_b in pairs
+                if results_map.get((idx_a, idx_b)) not in {"A", "B", "tie"}
+            ]
+            if failed_pairs:
+                failure_summary = "; ".join(
+                    f"{idx_a}-{idx_b}: "
+                    f"{pair_failure_details.get((idx_a, idx_b), 'comparison failed')}"
+                    for idx_a, idx_b in failed_pairs
+                )
+                raise PairEvaluationError(
+                    "pairwise judge failed to produce valid evidence: " + failure_summary
+                )
 
             # Update ranks in the deterministic order of generated pairs.
             for idx_a, idx_b in pairs:
@@ -1662,8 +1893,30 @@ class Critic(LLMWrapper):
             idea_b_content=idea_b.get('content', '')
         )
 
-        # Cache by model, temperature, and prompt hash to avoid duplicate calls
-        cache_key = f"{self.model_name}|{self.temperature}|{sha256(prompt.encode('utf-8')).hexdigest()}"
+        images_a = idea_a.get("images", []) if isinstance(idea_a, dict) else []
+        images_b = idea_b.get("images", []) if isinstance(idea_b, dict) else []
+        image_identity = [
+            {
+                "candidate": candidate_label,
+                "role": str(image.get("role") or ""),
+                "sha256": str(image.get("sha256") or ""),
+            }
+            for candidate_label, images in (("A", images_a), ("B", images_b))
+            for image in images
+            if isinstance(image, dict)
+        ]
+
+        # Include artifact digests so visually different implementations with
+        # identical prose can never share a text-only cache entry.
+        cache_payload = json.dumps(
+            {"prompt": prompt, "images": image_identity},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        cache_key = (
+            f"{self.model_name}|{self.temperature}|"
+            f"{sha256(cache_payload.encode('utf-8')).hexdigest()}"
+        )
         with self._cache_lock:
             if cache_key in self._compare_cache:
                 result_cached = self._compare_cache.pop(cache_key)
@@ -1671,25 +1924,59 @@ class Critic(LLMWrapper):
                 return result_cached
 
         try:
-            # Use the configured temperature for comparisons
-            response = self.generate_text(prompt)
-            result = response.strip().upper()
+            # A single model call receives the comparison text and both
+            # candidates' images, with explicit labels preserving ownership.
+            contents: Any = prompt
+            if images_a or images_b:
+                contents = [types.Part.from_text(text=prompt)]
+                for candidate_label, images in (("A", images_a), ("B", images_b)):
+                    for image_index, image in enumerate(images, start=1):
+                        if not isinstance(image, dict):
+                            raise PairEvaluationInputError(
+                                "prepared comparison image must be a mapping"
+                            )
+                        data = image.get("data")
+                        media_type = image.get("media_type")
+                        if not isinstance(data, bytes) or media_type != "image/png":
+                            raise PairEvaluationInputError(
+                                "prepared comparison image must contain PNG bytes"
+                            )
+                        contents.append(
+                            types.Part.from_text(
+                                text=(
+                                    f"Candidate {candidate_label} visualization "
+                                    f"{image_index}:"
+                                )
+                            )
+                        )
+                        contents.append(
+                            types.Part.from_bytes(data=data, mime_type=media_type)
+                        )
+
+            # Use the configured temperature for comparisons.
+            response = self.generate_text(contents)
+            result = response.strip()
 
             print(f"LLM comparison response: {result}")
 
-            # More robust parsing
-            if "RESULT: A" in result or "Result: A" in result:
-                return "A"
-            elif "RESULT: B" in result or "Result: B" in result:
-                return "B"
-            elif "RESULT: TIE" in result or "Result: tie" in result:
-                return "tie"
-            elif "A" in result and "B" not in result:
-                return "A"
-            elif "B" in result and "A" not in result:
-                return "B"
-            else:
-                winner = "tie"
+            # A vague prose response is not neutral evidence.  Require one
+            # explicit standalone directive so malformed output follows the
+            # typed evaluation-failure path instead of mutating Elo as a tie.
+            directive_pattern = r"(?i)\bRESULT\s*:\s*(A|B|TIE)\b"
+            directives = re.findall(directive_pattern, result)
+            last_nonempty_line = next(
+                (line for line in reversed(result.splitlines()) if line.strip()),
+                "",
+            )
+            final_directives = re.findall(directive_pattern, last_nonempty_line)
+            if len(directives) != 1 or len(final_directives) != 1:
+                self._increment_diagnostic(
+                    "invalid_comparison_responses",
+                    detail=result[:400],
+                )
+                return None
+            directive = final_directives[0].upper()
+            winner = "tie" if directive == "TIE" else directive
 
             # Update cache (LRU eviction)
             with self._cache_lock:
@@ -1698,6 +1985,8 @@ class Critic(LLMWrapper):
                     # pop oldest
                     self._compare_cache.popitem(last=False)
             return winner
+        except PairEvaluationInputError:
+            raise
         except Exception as e:
             self._increment_diagnostic("compare_ideas_errors", detail=str(e))
             print(f"Error in compare_ideas: {e}")

@@ -210,7 +210,7 @@ class TestPrimeVisualizationTemplate:
 
         prompts = get_prompts('prime_visualization', use_yaml=True)
         assert prompts.ITEM_TYPE == 'prime visualization experiment proposals'
-        assert prompts.get_info()['version'] == '1.0.0'
+        assert prompts.get_info()['version'] == '1.1.0'
 
         required_prompts = [
             'CONTEXT_PROMPT',
@@ -231,7 +231,13 @@ class TestPrimeVisualizationTemplate:
         all_prompts = '\n'.join(data['prompts'].values())
 
         for contract_term in [
-            'Ulam spiral',
+            'Ulam square spiral',
+            'Sacks number spiral',
+            'residue grids',
+            'cyclic multiplication maps',
+            'prime-race curves',
+            'Pascal/binomial arrays',
+            'recursive dot or polygon groupings',
             'falsifiable hypothesis',
             'deterministic sieve',
             'fixed seed of 0',
@@ -244,6 +250,14 @@ class TestPrimeVisualizationTemplate:
 
         assert 'never claim that code was executed' in requirements
         assert 'Do not claim that the experiment has been run' in all_prompts
+        assert 'seeds, not recipes' in requirements
+        assert 'At least 48 of the 60' in data['prompts']['context']
+        complete_template_text = '\n'.join([
+            requirements,
+            all_prompts,
+            *data['comparison_criteria'],
+        ])
+        assert complete_template_text.count('Ulam') <= 2
         assert '{context_pool}' in data['prompts']['specific_prompt']
         assert '{input_text}' in data['prompts']['format']
 
@@ -256,5 +270,6 @@ class TestPrimeVisualizationTemplate:
 
         prompts = get_prompts('prime_visualization', use_yaml=True)
         assert len(prompts.COMPARISON_CRITERIA) >= 5
-        assert any('Ulam spiral' in criterion for criterion in prompts.COMPARISON_CRITERIA)
+        assert any('cited precedents' in criterion for criterion in prompts.COMPARISON_CRITERIA)
+        assert any('abstracted precedent principle' in criterion for criterion in prompts.COMPARISON_CRITERIA)
         assert any('fabricated' in criterion for criterion in prompts.COMPARISON_CRITERIA)

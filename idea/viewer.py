@@ -4,7 +4,7 @@ import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import os
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
@@ -21,7 +21,19 @@ import uuid
 from typing import Dict, List, Tuple, Optional, Any, Set
 
 from idea.evolution import EvolutionEngine, get_default_template_id
-from idea.evaluation import resolve_evaluation_suite
+from idea.evolution_types import EvolutionRunConfig
+from idea.evaluation import (
+    ArtifactEvidenceError,
+    ArtifactRef,
+    ArtifactStoreLoader,
+    ComponentKind,
+    EvaluationStatus,
+    GeminiCodeExecutionRunner,
+    LLMPairwiseEvaluator,
+    is_builtin_computed_runner,
+    resolve_evaluation_suite,
+)
+from idea.artifact_store import ArtifactStore, ArtifactStoreError
 from idea.llm import Critic
 from idea.swiss_tournament import elo_update, generate_swiss_round_pairs
 from idea.config import (
@@ -88,6 +100,8 @@ DATA_DIR.mkdir(exist_ok=True)
 
 LOCAL_EVOLUTION_USERS_DIR = "local-users"
 ALLOW_UNSCOPED_LEGACY_LOCAL_FILES_ENV = "IDEA_ALLOW_UNSCOPED_LEGACY_LOCAL_FILES"
+ENABLE_GEMINI_CODE_ARTIFACTS_ENV = "IDEA_ENABLE_GEMINI_CODE_ARTIFACTS"
+ARTIFACT_STORE_ROOT_ENV = "IDEA_ARTIFACT_STORE_ROOT"
 
 # Unified evolutions directory
 EVOLUTIONS_DIR = Path("data/evolutions")
@@ -428,38 +442,129 @@ def _get_live_evolution_payload(
 
 
 def _engine_config_payload(engine: EvolutionEngine) -> Dict[str, Any]:
+    return EvolutionRunConfig.from_engine(engine).to_persistence_dict()
+
+
+def _env_enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _artifact_store_path(user_id: str, evolution_id: str) -> Path:
+    root = Path(os.getenv(ARTIFACT_STORE_ROOT_ENV, "data/artifacts"))
+    user_partition = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
+    evolution_partition = hashlib.sha256(evolution_id.encode("utf-8")).hexdigest()[:32]
+    return root / user_partition / evolution_partition
+
+
+def _artifact_store_for_evolution(
+    user_id: str,
+    evolution_id: str,
+    *,
+    create: bool,
+) -> Optional[ArtifactStore]:
+    store_path = _artifact_store_path(user_id, evolution_id)
+    if not create and not store_path.is_dir():
+        return None
+    return ArtifactStore(store_path)
+
+
+def _web_artifact_runtime(
+    *,
+    user_id: str,
+    evolution_id: str,
+    api_key: str,
+) -> tuple[Dict[str, Any], Optional[ArtifactStore]]:
+    if not _env_enabled(ENABLE_GEMINI_CODE_ARTIFACTS_ENV):
+        return {}, None
+    store = _artifact_store_for_evolution(user_id, evolution_id, create=True)
     return {
-        "idea_type": getattr(engine, "idea_type", get_default_template_id()),
-        "pop_size": getattr(engine, "pop_size", 5),
-        "generations": getattr(engine, "generations", 3),
-        "model_type": getattr(engine, "model_type", DEFAULT_MODEL),
-        "creative_temp": getattr(engine, "creative_temp", DEFAULT_CREATIVE_TEMP),
-        "top_p": getattr(engine, "top_p", DEFAULT_TOP_P),
-        "tournament_rounds": getattr(engine, "tournament_rounds", 1),
-        "tournament_count": getattr(engine, "tournament_count", None),
-        "full_tournament_rounds": getattr(engine, "full_tournament_rounds", None),
-        "thinking_budget": getattr(engine, "thinking_budget", None),
-        "thinking_level": getattr(engine, "thinking_level", None),
-        "max_budget": getattr(engine, "max_budget", None),
-        "mutation_rate": getattr(engine, "mutation_rate", 0.2),
-        "seed_context_pool_size": getattr(engine, "seed_context_pool_size", None),
-        "refine_all_ideas": getattr(engine, "refine_all_ideas", False),
-        "survivor_refinement_rate": getattr(engine, "survivor_refinement_rate", 0.1),
-        "island_count": getattr(engine, "island_count", 2),
-        "migration_rate": getattr(engine, "migration_rate", 0.05),
-        "migration_novelty_protection_quantile": getattr(
-            engine,
-            "migration_novelty_protection_quantile",
-            0.8,
+        "llm_code_artifact": GeminiCodeExecutionRunner(
+            enabled=True,
+            api_key=api_key,
+        )
+    }, store
+
+
+def _live_or_persisted_artifact_store(
+    state: Optional[UserEvolutionState],
+    *,
+    user_id: str,
+    evolution_id: str,
+) -> Optional[Any]:
+    engine = getattr(state, "engine", None) if state is not None else None
+    if (
+        engine is not None
+        and getattr(engine, "evolution_id", None) == evolution_id
+        and getattr(engine, "artifact_store", None) is not None
+    ):
+        return engine.artifact_store
+    return _artifact_store_for_evolution(user_id, evolution_id, create=False)
+
+
+def _web_evaluation_component_available(component: Any) -> bool:
+    """Return whether the web process has a deliberately safe runner boundary."""
+
+    if not getattr(component, "enabled", False):
+        return True
+    kind = getattr(getattr(component, "kind", None), "value", None)
+    if kind in {"llm_pairwise", "embedding_diversity"}:
+        return True
+    if kind == "llm_code_artifact":
+        return _env_enabled(ENABLE_GEMINI_CODE_ARTIFACTS_ENV)
+    return kind == "computed" and is_builtin_computed_runner(
+        getattr(component, "runner_ref", "")
+    )
+
+
+def _autorating_pairwise_evaluator(
+    evolution_data: Dict[str, Any],
+    *,
+    artifact_loader: Optional[ArtifactStoreLoader] = None,
+) -> LLMPairwiseEvaluator:
+    """Resolve the saved run's canonical pairwise evaluation policy."""
+
+    config = evolution_data.get("config")
+    if not isinstance(config, dict):
+        config = {}
+    try:
+        fitness_alpha = float(config.get("fitness_alpha", 0.7))
+    except (TypeError, ValueError):
+        fitness_alpha = 0.7
+    suite = resolve_evaluation_suite(
+        config.get("evaluation"),
+        fitness_alpha=fitness_alpha,
+    )
+    if not suite.enabled:
+        raise ValueError("this evolution has evaluation disabled")
+    component = next(
+        (
+            candidate
+            for candidate in suite.components
+            if candidate.enabled and candidate.kind == ComponentKind.LLM_PAIRWISE
         ),
-        "replacement_rate": getattr(engine, "replacement_rate", 0.5),
-        "fitness_alpha": getattr(engine, "fitness_alpha", 0.7),
-        "age_decay_rate": getattr(engine, "age_decay_rate", 0.25),
-        "age_decay_floor": getattr(engine, "age_decay_floor", 0.35),
-        "evaluation": getattr(engine, "evaluation_config", None).model_dump(mode="json")
-        if getattr(engine, "evaluation_config", None) is not None
-        else None,
-    }
+        None,
+    )
+    if component is None:
+        raise ValueError("this evolution does not configure pairwise LLM evaluation")
+    artifact_requirements = [
+        requirement
+        for requirement in component.requires
+        if requirement.startswith("artifact.")
+    ]
+    if artifact_requirements:
+        if artifact_loader is None:
+            raise ValueError(
+                "artifact-dependent auto-rating needs the evolution's authenticated "
+                "artifact store, but it is unavailable"
+            )
+
+    # The auto-rate request owns its number of Swiss rounds.  Everything else
+    # (component identity, evidence requirements, metric and failure policy)
+    # comes from the saved run configuration.
+    return LLMPairwiseEvaluator(
+        component.model_copy(update={"rounds": None}),
+        artifact_loader=artifact_loader,
+    )
 
 
 def _get_live_engine_for_identifier(
@@ -564,6 +669,9 @@ def serve_viewer(request: Request):
             "llm_models": LLM_MODELS,
             "default_model": DEFAULT_MODEL,
             "thinking_config": THINKING_MODEL_CONFIG,
+            "gemini_code_artifacts_enabled": _env_enabled(
+                ENABLE_GEMINI_CODE_ARTIFACTS_ENV
+            ),
         },
     )
 
@@ -613,7 +721,6 @@ async def get_settings_status(user: UserInfo = Depends(require_auth)):
         return JSONResponse({
             "api_key_missing": is_missing,
             "masked_key": masked_key,
-            "api_key": api_key,
             "is_admin": user.is_admin,
         })
     except Exception as e:
@@ -988,9 +1095,7 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
         unavailable_components = [
             component.id
             for component in evaluation_config.components
-            if component.enabled
-            and component.kind.value
-            not in {"llm_pairwise", "embedding_diversity"}
+            if not _web_evaluation_component_available(component)
         ]
         if unavailable_components:
             return JSONResponse(
@@ -1003,6 +1108,31 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
                 },
                 status_code=400,
             )
+
+        planned_evolution_id = str(uuid.uuid4())
+        has_artifact_producer = any(
+            component.enabled
+            and component.kind == ComponentKind.LLM_CODE_ARTIFACT
+            for component in evaluation_config.components
+        )
+        evaluation_runners: Dict[str, Any] = {}
+        artifact_store: Optional[ArtifactStore] = None
+        if has_artifact_producer:
+            try:
+                evaluation_runners, artifact_store = _web_artifact_runtime(
+                    user_id=user.uid,
+                    evolution_id=planned_evolution_id,
+                    api_key=api_key,
+                )
+            except ArtifactStoreError as exc:
+                logger.exception("Artifact store setup failed")
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "message": f"Artifact store is unavailable: {exc}",
+                    },
+                    status_code=500,
+                )
 
         # Create the evolution engine (assigned after run claim)
         engine = EvolutionEngine(
@@ -1033,11 +1163,16 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             user_id=user.uid,  # Store user_id for Firestore scoping
             template_data=template_data,
             evaluation_config=evaluation_config,
+            evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
         )
 
         # Initialize evolution with name (auto-generates if not provided)
         evolution_name = (data.get('evolutionName') or '').strip() or None
-        engine.initialize_evolution(name=evolution_name)
+        engine.initialize_evolution(
+            name=evolution_name,
+            evolution_id=planned_evolution_id,
+        )
         print(f"Evolution initialized: '{engine.evolution_name}' (ID: {engine.evolution_id})")
 
         # Claim run slot (and global lock if enabled)
@@ -1123,13 +1258,11 @@ async def start_evolution(request: Request, user: UserInfo = Depends(require_aut
             "migration_novelty_protection_quantile": state.engine.migration_novelty_protection_quantile,
             "specific_prompts": []  # Will be populated as evolution progresses
         })
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        logger.exception("Failed to start evolution")
         return JSONResponse({
             "status": "error",
-            "message": str(e),
-            "traceback": traceback.format_exc()
+            "message": "Failed to start evolution",
         }, status_code=500)
 
 @app.post("/api/stop-evolution")
@@ -1389,11 +1522,32 @@ async def resume_evolution(request: Request, user: UserInfo = Depends(require_au
     print(f"Resuming evolution from checkpoint: {checkpoint_id}")
 
     # Load the engine from Firestore
-    state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, checkpoint_id, api_key=api_key)
+    evaluation_runners, artifact_store = _web_artifact_runtime(
+        user_id=user.uid,
+        evolution_id=checkpoint_id,
+        api_key=api_key,
+    )
+    state.engine = await EvolutionEngine.load_evolution_for_user(
+        user.uid,
+        checkpoint_id,
+        api_key=api_key,
+        evaluation_runners=evaluation_runners,
+        artifact_store=artifact_store,
+    )
     if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": "Failed to load evolution or checkpoint"},
             status_code=500,
+        )
+    if state.engine.unsupported_evaluation_components:
+        unavailable = ", ".join(state.engine.unsupported_evaluation_components)
+        state.engine = None
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": f"Evaluation execution backend is not configured for: {unavailable}",
+            },
+            status_code=400,
         )
 
     # Claim run slot (and global lock if enabled)
@@ -1531,12 +1685,33 @@ async def continue_evolution(request: Request, user: UserInfo = Depends(require_
         except Exception:
             logger.warning("Failed to repair live evolution checkpoint before continue", exc_info=True)
     else:
-        state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_or_checkpoint_id, api_key=api_key)
+        evaluation_runners, artifact_store = _web_artifact_runtime(
+            user_id=user.uid,
+            evolution_id=evolution_or_checkpoint_id,
+            api_key=api_key,
+        )
+        state.engine = await EvolutionEngine.load_evolution_for_user(
+            user.uid,
+            evolution_or_checkpoint_id,
+            api_key=api_key,
+            evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
+        )
 
     if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": "Failed to load evolution state"},
             status_code=500,
+        )
+    if state.engine.unsupported_evaluation_components:
+        unavailable = ", ".join(state.engine.unsupported_evaluation_components)
+        state.engine = None
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": f"Evaluation execution backend is not configured for: {unavailable}",
+            },
+            status_code=400,
         )
 
     # Claim run slot (and global lock if enabled)
@@ -1672,12 +1847,33 @@ async def continue_saved_evolution(request: Request, user: UserInfo = Depends(re
         except Exception:
             logger.warning("Failed to repair live evolution checkpoint before continue", exc_info=True)
     else:
-        state.engine = await EvolutionEngine.load_evolution_for_user(user.uid, evolution_id, api_key=api_key)
+        evaluation_runners, artifact_store = _web_artifact_runtime(
+            user_id=user.uid,
+            evolution_id=evolution_id,
+            api_key=api_key,
+        )
+        state.engine = await EvolutionEngine.load_evolution_for_user(
+            user.uid,
+            evolution_id,
+            api_key=api_key,
+            evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
+        )
 
     if state.engine is None:
         return JSONResponse(
             {"status": "error", "message": f"Failed to load evolution '{evolution_id}'"},
             status_code=500,
+        )
+    if state.engine.unsupported_evaluation_components:
+        unavailable = ", ".join(state.engine.unsupported_evaluation_components)
+        state.engine = None
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": f"Evaluation execution backend is not configured for: {unavailable}",
+            },
+            status_code=400,
         )
 
     # Claim run slot (and global lock if enabled)
@@ -1971,6 +2167,9 @@ def idea_to_dict(idea) -> dict:
             "survival_metrics",
             "generation_metrics",
             "rating_evaluations",
+            "artifact_ids",
+            "artifact_refs",
+            "evaluations",
         ):
             if key in source:
                 value = source.get(key)
@@ -2093,6 +2292,131 @@ def idea_to_dict(idea) -> dict:
 
     # Last resort: return the idea as is if it's a dict, or an empty dict
     return idea if isinstance(idea, dict) else {}
+
+
+def _candidate_artifact_refs(evolution_data: Dict[str, Any]):
+    """Yield raw artifact refs from candidate collections without trusting ids."""
+
+    collections: List[Any] = []
+    history = evolution_data.get("history")
+    if isinstance(history, list):
+        collections.extend(history)
+    population = evolution_data.get("population")
+    if isinstance(population, list):
+        collections.append(population)
+
+    for candidate_collection in collections:
+        if not isinstance(candidate_collection, list):
+            continue
+        for candidate in candidate_collection:
+            if not isinstance(candidate, dict):
+                continue
+            refs = candidate.get("artifact_refs")
+            if not isinstance(refs, list):
+                continue
+            for raw_ref in refs:
+                if isinstance(raw_ref, dict):
+                    yield raw_ref
+
+
+def _owned_artifact_ref(
+    evolution_data: Dict[str, Any],
+    artifact_id: str,
+) -> Optional[ArtifactRef]:
+    matches: List[ArtifactRef] = []
+    for raw_ref in _candidate_artifact_refs(evolution_data):
+        if raw_ref.get("id") != artifact_id:
+            continue
+        try:
+            matches.append(ArtifactRef.model_validate(raw_ref))
+        except Exception as exc:
+            raise ArtifactEvidenceError(
+                "the evolution contains an invalid matching artifact reference"
+            ) from exc
+    if not matches:
+        return None
+    first = matches[0]
+    if any(match != first for match in matches[1:]):
+        raise ArtifactEvidenceError(
+            "the evolution contains ambiguous matching artifact references"
+        )
+    return first
+
+
+def _delete_owned_artifact_objects(
+    evolution_data: Dict[str, Any],
+    store: Any,
+) -> None:
+    storage_keys: Set[str] = set()
+    for raw_ref in _candidate_artifact_refs(evolution_data):
+        try:
+            storage_keys.add(ArtifactRef.model_validate(raw_ref).storage_key)
+        except Exception:
+            logger.warning("Skipping invalid artifact reference during cleanup")
+    for storage_key in storage_keys:
+        try:
+            store.delete(storage_key)
+        except Exception:
+            logger.exception("Failed to delete evolution artifact %s", storage_key)
+
+
+@app.get("/api/evolution/{evolution_id}/artifacts/{artifact_id}")
+async def get_evolution_artifact(
+    evolution_id: str,
+    artifact_id: str,
+    user: UserInfo = Depends(require_auth),
+):
+    """Return one owned, digest-verified artifact using a non-executable type."""
+
+    state = await user_states.get(user.uid)
+    engine = getattr(state, "engine", None)
+    if engine is not None and getattr(engine, "evolution_id", None) == evolution_id:
+        evolution_data = {
+            "history": getattr(engine, "history", []),
+            "population": getattr(engine, "population", []),
+        }
+    else:
+        evolution_data = await db.get_evolution(user.uid, evolution_id)
+    if not evolution_data:
+        raise HTTPException(status_code=404, detail="Evolution not found")
+
+    try:
+        artifact_ref = _owned_artifact_ref(evolution_data, artifact_id)
+    except ArtifactEvidenceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if artifact_ref is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    store = _live_or_persisted_artifact_store(
+        state,
+        user_id=user.uid,
+        evolution_id=evolution_id,
+    )
+    if store is None:
+        raise HTTPException(status_code=404, detail="Artifact store is unavailable")
+    try:
+        contents = ArtifactStoreLoader(store).load(artifact_ref)
+    except ArtifactEvidenceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    response_types = {
+        "image/png": "image/png",
+        "text/x-python": "text/plain; charset=utf-8",
+        "application/json": "application/json; charset=utf-8",
+        "text/plain": "text/plain; charset=utf-8",
+    }
+    media_type = response_types.get(artifact_ref.media_type)
+    if media_type is None:
+        raise HTTPException(status_code=415, detail="Artifact media type is not displayable")
+    return Response(
+        content=contents,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 @app.get("/api/generations")
 async def api_get_generations(user: UserInfo = Depends(require_auth)):
@@ -2775,8 +3099,24 @@ async def rename_evolution_endpoint(request: Request, evolution_id: str, user: U
 async def delete_evolution_endpoint(evolution_id: str, user: UserInfo = Depends(require_auth)):
     """Delete an evolution"""
     try:
+        state = await user_states.get(user.uid)
+        engine = getattr(state, "engine", None)
+        if engine is not None and getattr(engine, "evolution_id", None) == evolution_id:
+            evolution_data = {
+                "history": getattr(engine, "history", []),
+                "population": getattr(engine, "population", []),
+            }
+        else:
+            evolution_data = await db.get_evolution(user.uid, evolution_id) or {}
+        artifact_store = _live_or_persisted_artifact_store(
+            state,
+            user_id=user.uid,
+            evolution_id=evolution_id,
+        )
         # Delete from Firestore
         if await EvolutionEngine.delete_evolution_for_user(user.uid, evolution_id):
+            if artifact_store is not None and evolution_data:
+                _delete_owned_artifact_objects(evolution_data, artifact_store)
             return JSONResponse({'status': 'success', 'message': 'Evolution deleted'})
 
         return JSONResponse({
@@ -3525,7 +3865,18 @@ async def auto_rate(
     state: Optional[UserEvolutionState] = None
     try:
         data = await request.json()
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="Auto-rating request body must be a JSON object",
+            )
         evolution_id = data.get("evolutionId")
+        if not isinstance(evolution_id, str) or not evolution_id.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Evolution ID is required",
+            )
+        evolution_id = evolution_id.strip()
         model_id = data.get("modelId", DEFAULT_MODEL)
         skip_save = bool(data.get("skipSave", False))
         idea_type = data.get("ideaType")
@@ -3535,7 +3886,35 @@ async def auto_rate(
 
         _file_path, evolution_data, source = await _load_rating_evolution(evolution_id, user=user)
         if not idea_type:
-            idea_type = evolution_data.get("idea_type", get_default_template_id())
+            stored_config = evolution_data.get("config")
+            if not isinstance(stored_config, dict):
+                stored_config = {}
+            idea_type = (
+                stored_config.get("idea_type")
+                or evolution_data.get("idea_type")
+                or get_default_template_id()
+            )
+
+        artifact_store = _live_or_persisted_artifact_store(
+            state,
+            user_id=user.uid,
+            evolution_id=evolution_id,
+        )
+        artifact_loader = (
+            ArtifactStoreLoader(artifact_store)
+            if artifact_store is not None
+            else None
+        )
+        try:
+            pairwise_evaluator = _autorating_pairwise_evaluator(
+                evolution_data,
+                artifact_loader=artifact_loader,
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Auto-rating is unavailable: {exc}",
+            ) from exc
 
         all_ideas, _ = _collect_latest_ideas_for_rating(evolution_data)
 
@@ -3647,8 +4026,6 @@ async def auto_rate(
 
                     idea_a["match_count"] += 1
                     idea_b["match_count"] += 1
-                    idea_a["auto_match_count"] += 1
-                    idea_b["auto_match_count"] += 1
 
                     next_a, next_b = elo_update(
                         replay_ranks[idx_a],
@@ -3732,16 +4109,31 @@ async def auto_rate(
             if not isinstance(comparison_cache, dict):
                 comparison_cache = {}
                 evolution_data["comparison_cache"] = comparison_cache
-            critic.get_tournament_ranks(
+            evaluation_result = pairwise_evaluator.evaluate_population(
+                critic,
                 all_ideas,
                 idea_type,
                 rounds=num_rounds,
                 progress_callback=_progress_callback,
                 details=rounds_details,
                 full_tournament_rounds=full_tournament_rounds,
+                should_stop=lambda: False,
                 comparison_cache=comparison_cache,
                 evaluation_generation=evolution_data.get("current_generation"),
             )
+            failed_records = [
+                record
+                for record in evaluation_result.batch.records
+                if record.status == EvaluationStatus.FAILED
+            ]
+            if failed_records:
+                errors = sorted(
+                    {
+                        record.error or "pairwise evaluation failed"
+                        for record in failed_records
+                    }
+                )
+                raise RuntimeError("; ".join(errors))
 
         await asyncio.to_thread(_run_tournament)
         _apply_resolved_pairs()
@@ -3810,23 +4202,20 @@ async def auto_rate(
             "status": "error",
             "message": str(e.detail),
         }, status_code=e.status_code)
-    except Exception as e:
-        error_details = traceback.format_exc()
-        print(f"Error in auto-rate: {e}")
-        print(error_details)
+    except Exception:
+        logger.exception("Auto-rating failed")
         _update_autorating_state(
             state,
             {
                 "is_running": False,
                 "status": "error",
                 "status_message": "Auto-rating failed.",
-                "error": str(e),
+                "error": "Auto-rating failed",
             },
         )
         return JSONResponse({
             "status": "error",
-            "message": str(e),
-            "details": error_details,
+            "message": "Auto-rating failed",
         }, status_code=500)
 
 

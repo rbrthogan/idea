@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from idea.evaluation import (
     ArtifactRef,
     ComponentKind,
+    ComputedComponentConfig,
     EvaluationBatch,
     EvaluationRecord,
     EvaluationStatus,
@@ -14,7 +15,6 @@ from idea.evaluation import (
     LLMCodeArtifactComponentConfig,
     MetricConfig,
     MetricNormalization,
-    PythonMetricComponentConfig,
     resolve_evaluation_suite,
     resolve_legacy_evaluation_suite,
 )
@@ -26,13 +26,13 @@ DIGEST = "a" * 64
 def test_suite_config_round_trips_discriminated_components():
     suite = EvaluationSuiteConfig(
         components=[
-            LLMPairwiseComponentConfig(id="quality"),
-            PythonMetricComponentConfig(
+            ComputedComponentConfig(
                 id="numeric",
-                script_ref="scripts/score.py",
+                runner_ref="python-script-v1",
                 metric_names=["score"],
                 failure_policy=FailurePolicy.OMIT,
             ),
+            LLMPairwiseComponentConfig(id="quality"),
         ],
         fitness=FitnessAggregationConfig(
             metrics=[
@@ -57,8 +57,8 @@ def test_suite_config_round_trips_discriminated_components():
     )
 
     assert restored.schema_version == 1
-    assert restored.components[0].kind == ComponentKind.LLM_PAIRWISE
-    assert isinstance(restored.components[1], PythonMetricComponentConfig)
+    assert isinstance(restored.components[0], ComputedComponentConfig)
+    assert restored.components[1].kind == ComponentKind.LLM_PAIRWISE
     assert restored.fitness.metrics[1].bounds == (0.0, 100.0)
 
 
@@ -192,16 +192,124 @@ def test_pairwise_component_rejects_unimplemented_model_override():
         )
 
 
-@pytest.mark.parametrize(
-    "script_ref",
-    ["../score.py", "/tmp/score.py", r"C:\\score.py", "scripts/../score.py", "score.sh"],
-)
-def test_python_metric_rejects_unsafe_script_references(script_ref):
-    with pytest.raises(ValidationError, match="traversal-free"):
-        PythonMetricComponentConfig(
+def test_computed_component_requires_a_safe_runner_identifier():
+    with pytest.raises(ValidationError, match="string_pattern_mismatch"):
+        ComputedComponentConfig(
             id="numeric",
-            script_ref=script_ref,
+            runner_ref="unsafe/runner",
             metric_names=["score"],
+        )
+
+
+def test_fitness_rejects_minimize_direction_at_the_schema_boundary():
+    with pytest.raises(ValidationError, match="maximize"):
+        MetricConfig(
+            component_id="numeric",
+            metric_name="latency",
+            direction="minimize",
+        )
+
+
+def test_artifact_producer_must_precede_pairwise_judging():
+    producer = LLMCodeArtifactComponentConfig(
+        id="render",
+        execution_profile="matplotlib-v1",
+    )
+    judge = LLMPairwiseComponentConfig(id="quality")
+
+    with pytest.raises(ValidationError, match="must precede"):
+        EvaluationSuiteConfig(
+            allow_generated_code_execution=True,
+            components=[judge, producer],
+            fitness=FitnessAggregationConfig(
+                metrics=[
+                    MetricConfig(
+                        component_id="quality",
+                        metric_name="quality_elo",
+                    )
+                ]
+            ),
+        )
+
+    suite = EvaluationSuiteConfig(
+        allow_generated_code_execution=True,
+        components=[producer, judge],
+        fitness=FitnessAggregationConfig(
+            metrics=[
+                MetricConfig(
+                    component_id="quality",
+                    metric_name="quality_elo",
+                )
+            ]
+        ),
+    )
+    assert [component.id for component in suite.components] == ["render", "quality"]
+
+
+def test_artifact_dependencies_must_be_provided_in_declared_order():
+    producer = LLMCodeArtifactComponentConfig(
+        id="render",
+        execution_profile="gemini-code-execution-v1",
+        provides=["artifact.primary"],
+    )
+    computed = ComputedComponentConfig(
+        id="structure",
+        runner_ref="structure-v1",
+        requires=["artifact.primary"],
+        metric_names=["score"],
+    )
+
+    with pytest.raises(ValidationError, match="before it is produced"):
+        EvaluationSuiteConfig(
+            allow_generated_code_execution=True,
+            components=[computed, producer],
+            fitness=FitnessAggregationConfig(enabled=False),
+        )
+
+    suite = EvaluationSuiteConfig(
+        allow_generated_code_execution=True,
+        components=[producer, computed],
+        fitness=FitnessAggregationConfig(enabled=False),
+    )
+    assert [component.id for component in suite.components] == ["render", "structure"]
+
+
+def test_code_artifact_schema_fixes_model_and_distinct_roles():
+    with pytest.raises(ValidationError, match="gemini-3.6-flash"):
+        LLMCodeArtifactComponentConfig(
+            id="render",
+            execution_profile="gemini-code-execution-v1",
+            model="gemini-other",
+        )
+
+    with pytest.raises(ValidationError, match="roles must be distinct"):
+        LLMCodeArtifactComponentConfig(
+            id="render",
+            execution_profile="gemini-code-execution-v1",
+            artifact_role="source",
+            source_role="source",
+        )
+
+    with pytest.raises(ValidationError, match="configured output roles"):
+        LLMCodeArtifactComponentConfig(
+            id="render",
+            execution_profile="gemini-code-execution-v1",
+            provides=["artifact.unrelated"],
+        )
+
+
+def test_removed_artifact_score_kind_is_rejected():
+    with pytest.raises(ValidationError, match="union_tag_invalid"):
+        EvaluationSuiteConfig.model_validate(
+            {
+                "components": [
+                    {
+                        "id": "visual-judge",
+                        "kind": "llm_artifact_score",
+                    }
+                ],
+                "fitness": {"enabled": False, "metrics": []},
+            }
         )
 
 

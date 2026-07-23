@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -8,14 +9,14 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
 
 from .models import (
+    ComputedComponentConfig,
     EmbeddingDiversityComponentConfig,
     EvaluationBatch,
     EvaluationRecord,
     EvaluationStatus,
     LLMPairwiseComponentConfig,
-    PythonMetricComponentConfig,
 )
-from .script_contract import ScriptResultManifest
+from .script_contract import ComputedResultManifest
 
 
 _VALID_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -23,6 +24,8 @@ _FALLBACK_IDENTIFIER_FIELD = "_evaluation_candidate_id"
 _TRANSIENT_CANDIDATE_IDENTITY_KEYS = frozenset(
     {
         _FALLBACK_IDENTIFIER_FIELD,
+        "artifact_outputs",
+        "artifact_refs",
         "artifact_ids",
         "auto_match_count",
         "diversity_score",
@@ -142,8 +145,14 @@ def _failed_population_result(
 class LLMPairwiseEvaluator:
     """Adapter that exposes the current Critic/Swiss judge as an evaluator."""
 
-    def __init__(self, config: LLMPairwiseComponentConfig):
+    def __init__(
+        self,
+        config: LLMPairwiseComponentConfig,
+        *,
+        artifact_loader: Any = None,
+    ):
         self.config = config
+        self.artifact_loader = artifact_loader
 
     def evaluate_population(
         self,
@@ -162,6 +171,25 @@ class LLMPairwiseEvaluator:
     ) -> PopulationEvaluationResult:
         resolved_rounds = self.config.rounds or rounds
         try:
+            required_artifact_roles = [
+                requirement.split(".", 1)[1]
+                for requirement in self.config.requires
+                if requirement.startswith("artifact.")
+            ]
+            configure_artifacts = getattr(
+                critic,
+                "configure_artifact_evidence",
+                None,
+            )
+            if callable(configure_artifacts):
+                configure_artifacts(
+                    loader=self.artifact_loader,
+                    required_roles=required_artifact_roles,
+                )
+            elif required_artifact_roles:
+                raise RuntimeError(
+                    "pairwise critic does not support required artifact evidence"
+                )
             try:
                 raw_scores = critic.get_tournament_ranks(
                     population,
@@ -313,7 +341,7 @@ class EmbeddingDiversityEvaluator:
         return PopulationEvaluationResult(scores=scores, batch=batch, details=[])
 
 
-class PythonMetricRunner(Protocol):
+class ComputedEvaluatorRunner(Protocol):
     """Execution boundary supplied by a trusted or isolated backend."""
 
     async def run(
@@ -322,27 +350,29 @@ class PythonMetricRunner(Protocol):
         *,
         candidate_id: str,
         generation: Optional[int],
-        config: PythonMetricComponentConfig,
-    ) -> ScriptResultManifest: ...
+        config: ComputedComponentConfig,
+    ) -> ComputedResultManifest: ...
 
 
-class PythonMetricEvaluator:
-    """Turn a strict script result into typed candidate measurements.
+class ComputedEvaluator:
+    """Turn a strict runner result into maximize-only candidate measurements.
 
-    This class deliberately does not launch a subprocess. A caller must supply
-    a runner backed by a trusted checked-in function or the future isolated
-    container backend.
+    This class deliberately does not prescribe how evaluation happens. A caller
+    supplies a trusted in-process runner or an isolated backend, which may also
+    enrich the candidate with artifacts before pairwise judging. All declared
+    numeric outputs must already follow the convention that larger is fitter.
     """
 
-    def __init__(self, config: PythonMetricComponentConfig):
+    def __init__(self, config: ComputedComponentConfig):
         self.config = config
 
     async def evaluate_population(
         self,
         population: List[Any],
-        runner: PythonMetricRunner,
+        runner: ComputedEvaluatorRunner,
         *,
         evaluation_generation: Optional[int] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> PopulationEvaluationResult:
         records: List[EvaluationRecord] = []
         primary_scores: Dict[int, float] = {}
@@ -350,18 +380,43 @@ class PythonMetricEvaluator:
 
         for index, candidate in enumerate(population):
             candidate_id = candidate_identifier(candidate, index)
-            try:
-                result = await runner.run(
-                    candidate,
+            if should_stop is not None and should_stop():
+                record = EvaluationRecord(
                     candidate_id=candidate_id,
-                    generation=evaluation_generation,
-                    config=self.config,
+                    component_id=self.config.id,
+                    **_record_provenance(self.config, evaluation_generation),
+                    status=EvaluationStatus.SKIPPED,
+                    metadata={
+                        "kind": self.config.kind.value,
+                        "generation": evaluation_generation,
+                        "runner_ref": self.config.runner_ref,
+                        "reason": "run stop or budget limit reached",
+                    },
                 )
+                attach_evaluation_record(candidate, record)
+                records.append(record)
+                continue
+            try:
+                try:
+                    result = await asyncio.wait_for(
+                        runner.run(
+                            candidate,
+                            candidate_id=candidate_id,
+                            generation=evaluation_generation,
+                            config=self.config,
+                        ),
+                        timeout=self.config.timeout_seconds,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError(
+                        "computed evaluator exceeded "
+                        f"its {self.config.timeout_seconds:g}-second timeout"
+                    ) from exc
                 missing = [
                     name for name in self.config.metric_names if name not in result.metrics
                 ]
                 if result.status != "ok":
-                    raise ValueError(result.error or "script evaluator failed")
+                    raise ValueError(result.error or "computed evaluator failed")
                 if missing:
                     raise ValueError(
                         "script result omitted configured metrics: " + ", ".join(missing)
@@ -370,6 +425,18 @@ class PythonMetricEvaluator:
                     name: float(result.metrics[name])
                     for name in self.config.metric_names
                 }
+                if result.artifacts and isinstance(candidate, dict):
+                    existing_outputs = candidate.get("artifact_outputs")
+                    artifact_outputs = (
+                        dict(existing_outputs)
+                        if isinstance(existing_outputs, dict)
+                        else {}
+                    )
+                    artifact_outputs[self.config.id] = [
+                        artifact.model_dump(mode="json")
+                        for artifact in result.artifacts
+                    ]
+                    candidate["artifact_outputs"] = artifact_outputs
                 primary_scores[index] = metrics[primary_metric]
                 record = EvaluationRecord(
                     candidate_id=candidate_id,
@@ -382,7 +449,7 @@ class PythonMetricEvaluator:
                         "kind": self.config.kind.value,
                         "generation": evaluation_generation,
                         "artifact_outputs": len(result.artifacts),
-                        "execution_profile": self.config.execution_profile,
+                        "runner_ref": self.config.runner_ref,
                     },
                 )
             except Exception as exc:
@@ -395,7 +462,7 @@ class PythonMetricEvaluator:
                     metadata={
                         "kind": self.config.kind.value,
                         "generation": evaluation_generation,
-                        "execution_profile": self.config.execution_profile,
+                        "runner_ref": self.config.runner_ref,
                     },
                 )
 

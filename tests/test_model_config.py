@@ -46,6 +46,27 @@ def test_gemini_31_pro_uses_current_level_defaults():
     assert _get_default_thinking_settings(model_id) == ("low", None)
 
 
+def test_gemini_36_flash_is_available_with_current_pricing_and_thinking_defaults():
+    model_id = "gemini-3.6-flash"
+    model_ids = [model["id"] for model in LLM_MODELS]
+
+    assert model_id in model_ids
+    assert model_prices_per_million_tokens[model_id] == {
+        "input": 1.50,
+        "output": 7.50,
+        "cached_input": 0.15,
+    }
+
+    thinking_config = THINKING_MODEL_CONFIG[model_id]
+    assert thinking_config["supports_thinking"] is True
+    assert thinking_config["supports_thinking_level"] is True
+    assert thinking_config["supports_thinking_budget"] is False
+    assert thinking_config["supports_sampling_parameters"] is False
+    assert thinking_config["allowed_levels"] == ["low", "medium", "high"]
+    assert thinking_config["default_level"] == "medium"
+    assert _get_default_thinking_settings(model_id) == ("medium", None)
+
+
 def test_pro_pricing_tips_to_large_prompt_regime_and_prices_thinking_as_output():
     cost = estimate_generation_token_cost(
         "gemini-2.5-pro",
@@ -103,6 +124,10 @@ def test_gemini_3_models_default_to_low_thinking_level():
     )
     assert _get_default_thinking_settings("gemini-3.1-pro-preview") == (
         "low",
+        None,
+    )
+    assert _get_default_thinking_settings("gemini-3.6-flash") == (
+        "medium",
         None,
     )
 

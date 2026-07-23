@@ -1,9 +1,11 @@
 import asyncio
 import uuid
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from idea import database
 from idea.evolution import EvolutionEngine
 from idea.evolution_persistence import EvolutionRepository, EvolutionSerializer
 from idea.models import Idea
@@ -66,6 +68,7 @@ def test_repository_restore_from_state():
             "age_decay_floor": 0.22,
         },
         "evolution_id": "evo-1",
+        "_save_revision": "revision-1",
         "name": "Test Evolution",
         "created_at": "2025-01-01T00:00:00",
         "updated_at": "2025-01-01T00:10:00",
@@ -102,6 +105,12 @@ def test_repository_restore_from_state():
         },
         "avg_idea_cost": 0.1,
         "avg_tournament_cost": 0.2,
+        "token_counts": {
+            "total": 10,
+            "total_input": 8,
+            "total_output": 2,
+            "cost": {"total_cost": 0.01, "input_cost": 0.004, "output_cost": 0.006},
+        },
         "template_data": {"name": "Custom"},
     }
 
@@ -114,6 +123,7 @@ def test_repository_restore_from_state():
         )
 
     assert engine.evolution_id == "evo-1"
+    assert engine.persistence_revision == "revision-1"
     assert engine.evolution_name == "Test Evolution"
     assert engine.current_generation == 1
     assert engine.contexts == ["ctx"]
@@ -130,6 +140,7 @@ def test_repository_restore_from_state():
     assert engine.island_diversity_history == [{"generation": 1, "islands": []}]
     assert engine.migration_history == [{"generation": 1, "from_island_id": 0, "to_island_id": 1}]
     assert engine.comparison_cache == state["comparison_cache"]
+    assert engine._persisted_token_counts == state["token_counts"]
     assert isinstance(engine.population[0]["idea"], Idea)
     assert engine.population[0]["idea"].title == "A"
 
@@ -200,13 +211,13 @@ def test_serializer_persists_resolved_evaluation_suite():
     ] == [0.6, 0.4]
 
 
-def test_python_evaluator_checkpoint_restores_with_injected_runner_and_stats():
+def test_computed_evaluator_checkpoint_restores_with_injected_runner_and_stats():
     evaluation = {
         "components": [
             {
                 "id": "numeric",
-                "kind": "python_metric",
-                "script_ref": "evaluators/score.py",
+                "kind": "computed",
+                "runner_ref": "python-script-v1",
                 "metric_names": ["score"],
             }
         ],
@@ -303,3 +314,43 @@ def test_list_evolutions_includes_saved_config_metadata():
         result = asyncio.run(EvolutionRepository.list_evolutions_for_user("user-1"))
 
     assert result[0]["config"] == saved_config
+
+
+def test_repository_save_uses_loaded_revision_and_advances_it():
+    engine = SimpleNamespace(
+        user_id="user-1",
+        evolution_id="evo-1",
+        evolution_name="Name",
+        created_at="created",
+        updated_at="updated",
+        persistence_revision="revision-1",
+    )
+    save = AsyncMock(return_value="revision-2")
+
+    with patch.object(EvolutionSerializer, "to_checkpoint_state", return_value={}), patch(
+        "idea.evolution_persistence.db.save_evolution", save
+    ):
+        result = asyncio.run(EvolutionRepository.save_checkpoint(engine))
+
+    assert result == "evo-1"
+    assert engine.persistence_revision == "revision-2"
+    assert save.await_args.kwargs["expected_revision"] == "revision-1"
+
+
+def test_repository_does_not_swallow_stale_save_conflict():
+    engine = SimpleNamespace(
+        user_id="user-1",
+        evolution_id="evo-1",
+        evolution_name="Name",
+        created_at="created",
+        updated_at="updated",
+        persistence_revision="revision-1",
+    )
+    save = AsyncMock(side_effect=database.EvolutionSaveConflict("stale"))
+
+    with patch.object(EvolutionSerializer, "to_checkpoint_state", return_value={}), patch(
+        "idea.evolution_persistence.db.save_evolution", save
+    ), pytest.raises(database.EvolutionSaveConflict):
+        asyncio.run(EvolutionRepository.save_checkpoint(engine))
+
+    assert engine.persistence_revision == "revision-1"

@@ -33,8 +33,8 @@ if ! command -v firebase &> /dev/null; then
     USE_EMULATOR=false
 fi
 
-# Set default environment variables
-export ENCRYPTION_KEY="${ENCRYPTION_KEY:-local-dev-encryption-key}"
+# Set non-secret default environment variables. The encryption key is resolved
+# only after we know whether storage is the disposable local emulator.
 export ENCRYPTION_SALT="${ENCRYPTION_SALT:-idea-evolution-salt}"
 export ADMIN_EMAILS="${ADMIN_EMAILS:-}"
 
@@ -67,8 +67,18 @@ if [ "$USE_EMULATOR" = true ]; then
 fi
 
 if [ "$USE_EMULATOR" = false ]; then
+    if [ -z "${ENCRYPTION_KEY:-}" ]; then
+        echo -e "${RED}ENCRYPTION_KEY must be set when using remote Firestore.${NC}"
+        exit 1
+    fi
+    if [ "${#ENCRYPTION_KEY}" -lt 32 ]; then
+        echo -e "${RED}ENCRYPTION_KEY must contain at least 32 bytes.${NC}"
+        exit 1
+    fi
     echo -e "${YELLOW}Using remote Firestore.${NC}"
     echo -e "${YELLOW}Make sure GOOGLE_APPLICATION_CREDENTIALS is set to your service account key.${NC}"
+else
+    export ENCRYPTION_KEY="${ENCRYPTION_KEY:-local-dev-only-encryption-key-32-bytes-minimum}"
 fi
 
 echo ""

@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 from contextlib import contextmanager
 from fastapi.testclient import TestClient
@@ -16,7 +17,7 @@ import pytest
 # Add the project root to the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from idea.viewer import app, require_auth
+from idea.viewer import _autorating_pairwise_evaluator, app, require_auth
 from idea.auth import UserInfo
 
 
@@ -196,6 +197,16 @@ class TestRatePageAPI:
 
         assert response.status_code == 401
 
+    def test_auto_rate_rejects_missing_evolution_id_before_store_lookup(self):
+        with authenticated_user(), patch(
+            "idea.viewer._artifact_store_for_evolution",
+        ) as mock_store_lookup:
+            response = self.client.post("/api/auto-rate", json={})
+
+        assert response.status_code == 400
+        assert response.json()["message"] == "Evolution ID is required"
+        mock_store_lookup.assert_not_called()
+
     def test_auto_rate_progress_defaults_when_unauthenticated(self):
         response = self.client.get("/api/auto-rate/progress")
         assert response.status_code == 200
@@ -239,6 +250,210 @@ class TestRatePageAPI:
                 assert data["version"] == 3
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+
+    def test_autorating_uses_saved_pairwise_component_and_canonical_idea_type(self):
+        evaluator = _autorating_pairwise_evaluator(
+            {
+                "config": {
+                    "idea_type": "prime_visualization",
+                    "fitness_alpha": 0.6,
+                    "evaluation": {
+                        "components": [
+                            {
+                                "id": "quality",
+                                "kind": "llm_pairwise",
+                                "rounds": 7,
+                                "metric_name": "quality_elo",
+                            }
+                        ],
+                        "fitness": {
+                            "metrics": [
+                                {
+                                    "component_id": "quality",
+                                    "metric_name": "quality_elo",
+                                }
+                            ]
+                        },
+                    },
+                }
+            }
+        )
+
+        assert evaluator.config.id == "quality"
+        assert evaluator.config.metric_name == "quality_elo"
+        assert evaluator.config.rounds is None
+
+    def test_autorating_rejects_runs_without_a_pairwise_component(self):
+        with pytest.raises(ValueError, match="does not configure pairwise"):
+            _autorating_pairwise_evaluator(
+                {
+                    "config": {
+                        "evaluation": {
+                            "enabled": True,
+                            "components": [
+                                {
+                                    "id": "length",
+                                    "kind": "computed",
+                                    "runner_ref": "builtin.character_count",
+                                    "metric_names": ["character_count"],
+                                }
+                            ],
+                            "fitness": {"enabled": False, "metrics": []},
+                        }
+                    }
+                }
+            )
+
+    def test_autorating_rejects_disabled_or_artifact_dependent_policies(self):
+        with pytest.raises(ValueError, match="evaluation disabled"):
+            _autorating_pairwise_evaluator(
+                {
+                    "config": {
+                        "evaluation": {
+                            "enabled": False,
+                            "components": [
+                                {"id": "quality", "kind": "llm_pairwise"}
+                            ],
+                            "fitness": {"enabled": False, "metrics": []},
+                        }
+                    }
+                }
+            )
+
+    def test_auto_rate_endpoint_passes_explicit_stop_policy_to_evaluator(self):
+        from idea.user_state import UserEvolutionState
+
+        captured = {}
+
+        class _FakePairwiseEvaluator:
+            def evaluate_population(self, _critic, ideas, _idea_type, **kwargs):
+                captured.update(kwargs)
+                assert len(ideas) == 2
+                kwargs["details"].append(
+                    {
+                        "round": 1,
+                        "pairs": [
+                            {"a_idx": 0, "b_idx": 1, "winner": "A"}
+                        ],
+                    }
+                )
+                kwargs["progress_callback"](1, 1)
+                return SimpleNamespace(batch=SimpleNamespace(records=[]))
+
+        evolution_data = {
+            "config": {"idea_type": "prime_visualization"},
+            "current_generation": 1,
+            "history": [
+                [
+                    {
+                        "id": "idea-a",
+                        "idea": {"title": "A", "content": "alpha"},
+                    },
+                    {
+                        "id": "idea-b",
+                        "idea": {"title": "B", "content": "beta"},
+                    },
+                ]
+            ],
+        }
+
+        with authenticated_user(), \
+            patch(
+                "idea.viewer.user_states.get",
+                new=AsyncMock(return_value=UserEvolutionState()),
+            ), \
+            patch(
+                "idea.viewer._load_rating_evolution",
+                new=AsyncMock(return_value=(None, evolution_data, "firestore")),
+            ), \
+            patch(
+                "idea.viewer.db.get_user_api_key",
+                new=AsyncMock(return_value="test-api-key"),
+            ), \
+            patch(
+                "idea.viewer._autorating_pairwise_evaluator",
+                return_value=_FakePairwiseEvaluator(),
+            ), \
+            patch("idea.viewer.Critic", return_value=object()), \
+            patch("idea.viewer._get_autorating_costs", return_value={}):
+            response = self.client.post(
+                "/api/auto-rate",
+                json={
+                    "evolutionId": "evolution-1",
+                    "numRounds": 1,
+                    "skipSave": True,
+                },
+            )
+
+        assert response.status_code == 200, response.text
+        assert callable(captured["should_stop"])
+        assert captured["should_stop"]() is False
+
+        with pytest.raises(ValueError, match="authenticated artifact store"):
+            _autorating_pairwise_evaluator(
+                {
+                    "config": {
+                        "evaluation": {
+                            "components": [
+                                {
+                                    "id": "render",
+                                    "kind": "llm_code_artifact",
+                                    "execution_profile": "remote-render",
+                                    "provides": ["artifact.primary"],
+                                },
+                                {
+                                    "id": "quality",
+                                    "kind": "llm_pairwise",
+                                    "requires": ["artifact.primary"],
+                                },
+                            ],
+                            "allow_generated_code_execution": True,
+                            "fitness": {
+                                "metrics": [
+                                    {
+                                        "component_id": "quality",
+                                        "metric_name": "quality_elo",
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                }
+            )
+
+        loader = object()
+        evaluator = _autorating_pairwise_evaluator(
+            {
+                "config": {
+                    "evaluation": {
+                        "components": [
+                            {
+                                "id": "render",
+                                "kind": "llm_code_artifact",
+                                "execution_profile": "remote-render",
+                                "provides": ["artifact.primary"],
+                            },
+                            {
+                                "id": "quality",
+                                "kind": "llm_pairwise",
+                                "requires": ["artifact.primary"],
+                            },
+                        ],
+                        "allow_generated_code_execution": True,
+                        "fitness": {
+                            "metrics": [
+                                {
+                                    "component_id": "quality",
+                                    "metric_name": "quality_elo",
+                                }
+                            ]
+                        },
+                    }
+                }
+            },
+            artifact_loader=loader,
+        )
+        assert evaluator.artifact_loader is loader
 
     def test_start_evolution_logs_field_count_without_names_or_values(self, caplog):
         from idea.user_state import UserEvolutionState

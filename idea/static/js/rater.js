@@ -174,6 +174,31 @@ function setManualSwissStatus(swissStatus) {
     statusEl.textContent = text;
 }
 
+function announceRatingStatus(message) {
+    const announcement = document.getElementById('ratingStatusAnnouncement');
+    const text = String(message || '').trim();
+    if (announcement && text && announcement.textContent !== text) {
+        announcement.textContent = text;
+    }
+}
+
+function rememberModalFocusOrigin(modalElement) {
+    if (!modalElement) return;
+    const activeElement = document.activeElement;
+    modalElement._focusReturnTarget = activeElement && activeElement !== document.body
+        ? activeElement
+        : null;
+    if (modalElement.dataset.focusReturnBound === 'true') return;
+
+    modalElement.dataset.focusReturnBound = 'true';
+    modalElement.addEventListener('hidden.bs.modal', () => {
+        const target = modalElement._focusReturnTarget;
+        modalElement._focusReturnTarget = null;
+        if (!target?.isConnected || target.disabled || typeof target.focus !== 'function') return;
+        target.focus({ preventScroll: true });
+    });
+}
+
 function normalizeGenerationValue(generation) {
     if (generation === null || generation === undefined || generation === '') {
         return null;
@@ -315,7 +340,57 @@ async function initializeRating(ideas, shouldRefreshPair = true) {
     }
 }
 
-// Add the markdown rendering function from viewer.js
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function decodeMarkdownCodePoint(value, radix) {
+    const codePoint = parseInt(value, radix);
+    if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        return '\ufffd';
+    }
+    return String.fromCodePoint(codePoint);
+}
+
+function decodeMarkdownUrlForPolicy(value) {
+    let decoded = String(value || '');
+    for (let index = 0; index < 3; index++) {
+        decoded = decoded
+            .replace(/&amp;/gi, '&')
+            .replace(/&colon;/gi, ':')
+            .replace(/&tab;/gi, '\t')
+            .replace(/&newline;/gi, '\n')
+            .replace(/&#x([0-9a-f]+);?/gi, (match, hex) => decodeMarkdownCodePoint(hex, 16))
+            .replace(/&#([0-9]+);?/g, (match, decimal) => decodeMarkdownCodePoint(decimal, 10));
+    }
+    return decoded;
+}
+
+function sanitizeMarkdownUrl(value) {
+    const renderedValue = String(value || '').trim();
+    const policyValue = decodeMarkdownUrlForPolicy(renderedValue).trim();
+    if (!policyValue || /[\s\u0000-\u001f\u007f]/.test(policyValue) || /[\\"'<>]/.test(policyValue)) {
+        return null;
+    }
+    if (/^https?:\/\//i.test(policyValue)) {
+        return renderedValue;
+    }
+    if (/^(?:\/(?!\/)|\.\.?\/|#|\?)/.test(policyValue)) {
+        return renderedValue;
+    }
+    if (!policyValue.includes(':') && !policyValue.startsWith('//')) {
+        return renderedValue;
+    }
+    return null;
+}
+
+// Add the small allow-list markdown rendering function from viewer.js.
 function renderMarkdown(text) {
     if (!text) return '';
 
@@ -325,7 +400,8 @@ function renderMarkdown(text) {
     // Escape HTML to prevent XSS
     text = text.replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 
     // Process code blocks first
     text = text.replace(/```([\s\S]*?)```/g, function (match, code) {
@@ -393,8 +469,13 @@ function renderMarkdown(text) {
     // Process blockquotes
     text = text.replace(/^>\s+(.*?)$/gm, '<blockquote>$1</blockquote>');
 
-    // Process links
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+    // Process links. Unsafe destinations degrade to their inert label.
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, destination) => {
+        const safeDestination = sanitizeMarkdownUrl(destination);
+        return safeDestination
+            ? `<a href="${safeDestination}" target="_blank" rel="noopener noreferrer">${label}</a>`
+            : label;
+    });
 
     // Process paragraphs - any line that's not already a block element
     lines = text.split('\n');
@@ -921,6 +1002,13 @@ function updateProgressBar(percent) {
     // Update the width with !important to override any conflicting styles
     progressBar.style.cssText = `width: ${percentStr} !important; transition: width 0.3s ease;`;
     progressBar.setAttribute('aria-valuenow', roundedPercent);
+    progressBar.setAttribute('aria-valuetext', `${roundedPercent}% complete`);
+
+    const announcementStep = roundedPercent >= 100 ? 100 : Math.floor(roundedPercent / 10) * 10;
+    if (progressBar.dataset.announcedStep !== String(announcementStep)) {
+        progressBar.dataset.announcedStep = String(announcementStep);
+        announceRatingStatus(`Automated rating ${announcementStep}% complete`);
+    }
 
     // Force a reflow to ensure the browser updates the progress bar
     void progressBar.offsetHeight;
@@ -1028,6 +1116,7 @@ startAutoRatingBtn.addEventListener('click', async function () {
     autoRatingInProgress = true;
     startAutoRatingBtn.disabled = true;
     startAutoRatingBtn.textContent = 'Auto Swiss Rating...';
+    announceRatingStatus('Automated Swiss rating started');
 
     // Hide the idea comparison view
     document.querySelector('.ideas-container').style.display = 'none';
@@ -1047,6 +1136,8 @@ startAutoRatingBtn.addEventListener('click', async function () {
         // Reset the progress bar to 0% with a clean slate
         progressBar.style.cssText = 'width: 0% !important; transition: width 0.3s ease;';
         progressBar.setAttribute('aria-valuenow', '0');
+        progressBar.setAttribute('aria-valuetext', '0% complete');
+        delete progressBar.dataset.announcedStep;
         progressBar.style.display = 'block';
 
         // Force a reflow to ensure the browser updates the progress bar
@@ -1280,7 +1371,8 @@ startAutoRatingBtn.addEventListener('click', async function () {
     } catch (error) {
         console.error('Error during auto-rating:', error);
         stopAutoRatingProgressPolling();
-        document.getElementById('ratingStats').innerHTML = `<p class="text-danger">Error: ${error.message}</p>`;
+        document.getElementById('ratingStats').innerHTML = `<p class="text-danger">Error: ${escapeHtml(error.message)}</p>`;
+        announceRatingStatus(`Automated rating failed: ${error.message}`);
     } finally {
         stopAutoRatingProgressPolling();
         startAutoRatingBtn.textContent = 'Start Auto Swiss Rating';
@@ -1356,11 +1448,19 @@ function updateSortIndicators() {
     headers.forEach(header => {
         const arrow = header.querySelector('.sort-arrow');
         const column = header.dataset.sort;
+        const columnHeader = header.closest('th');
+        const isActive = column === currentSortColumn;
 
-        if (column === currentSortColumn) {
+        if (isActive) {
             arrow.className = `sort-arrow active ${currentSortDirection}`;
         } else {
             arrow.className = 'sort-arrow inactive';
+        }
+        if (columnHeader) {
+            columnHeader.setAttribute(
+                'aria-sort',
+                isActive ? (currentSortDirection === 'asc' ? 'ascending' : 'descending') : 'none'
+            );
         }
     });
 }
@@ -1482,12 +1582,10 @@ function updateRankingsTableContent(ideas) {
         const row = document.createElement('tr');
         row.className = 'idea-row';
         row.dataset.ideaIndex = index;
-        row.style.cursor = 'pointer';
 
         row.innerHTML = buildRankingRowHtml(idea, index);
 
-        // Add click event to show the idea details
-        row.addEventListener('click', function () {
+        row.querySelector('.idea-details-trigger')?.addEventListener('click', function () {
             showIdeaDetails(index);
         });
 
@@ -1635,13 +1733,13 @@ function buildRankingRowHtml(idea, index) {
 
     return `
         <td>${index + 1}</td>
-        <td>${idea.title || 'Untitled'}</td>
+        <td><button type="button" class="idea-details-trigger">${escapeHtml(idea.title || 'Untitled')}</button></td>
         ${getIdeaRatingCellHtml(idea)}
-        <td>${getIdeaMatchCountByType(idea)}</td>
-        <td>${formatRankingMetric(diversityScore, 4)}</td>
-        <td>${formatRankingMetric(overallFitness, 4)}</td>
-        <td>${birthGeneration}</td>
-        <td>${deathGeneration}</td>
+        <td>${escapeHtml(getIdeaMatchCountByType(idea))}</td>
+        <td>${escapeHtml(formatRankingMetric(diversityScore, 4))}</td>
+        <td>${escapeHtml(formatRankingMetric(overallFitness, 4))}</td>
+        <td>${escapeHtml(birthGeneration)}</td>
+        <td>${escapeHtml(deathGeneration)}</td>
     `;
 }
 
@@ -1751,7 +1849,7 @@ function showAutoratingCostModal(tokenCounts) {
     let estimatesList = '';
     if (tokenCounts.estimates) {
         estimatesList = Object.values(tokenCounts.estimates).map(e => {
-            return `<li class="list-group-item d-flex justify-content-between align-items-center">${e.name}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
+            return `<li class="list-group-item d-flex justify-content-between align-items-center">${escapeHtml(e.name)}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
         }).join('');
     }
 
@@ -1810,7 +1908,7 @@ function showAutoratingCostModal(tokenCounts) {
                             <ul class="list-group">
                                 <li class="list-group-item">
                                     <div class="d-flex justify-content-between align-items-center">
-                                        <span>Critic <span class="badge bg-secondary">${criticModel}</span></span>
+                                        <span>Critic <span class="badge bg-secondary">${escapeHtml(criticModel)}</span></span>
                                         <span class="badge bg-primary rounded-pill">${criticTotal}</span>
                                     </div>
                                     <div class="small text-muted mt-1">
@@ -1841,6 +1939,7 @@ function showAutoratingCostModal(tokenCounts) {
     `;
 
     // Initialize the modal
+    rememberModalFocusOrigin(modalContainer);
     const modal = new bootstrap.Modal(modalContainer);
     modal.show();
 
@@ -1993,13 +2092,13 @@ function showIdeaDetails(ideaIndex) {
     modalContent.innerHTML = `
         <div class="card">
             <div class="card-body">
-                <h4>${idea.title || 'Untitled'}</h4>
-                <p><strong>Generation (${currentGenerationView === 'birth' ? 'Birth' : 'Death'} view):</strong> ${getIdeaGenerationLabel(idea)}</p>
-                <p><strong>Birth Generation:</strong> ${getIdeaGenerationLabel(idea, 'birth')}</p>
-                <p><strong>Death Generation:</strong> ${getIdeaGenerationLabel(idea, 'death')}</p>
-                <p><strong>Auto Rating:</strong> ${autoRating}</p>
-                <p><strong>Manual Rating:</strong> ${manualRating}</p>
-                <p><strong>Difference:</strong> <span class="${diffClass}">${diffSign}${diffRating}</span></p>
+                <h4 class="idea-details-title"></h4>
+                <p><strong>Generation (${currentGenerationView === 'birth' ? 'Birth' : 'Death'} view):</strong> <span data-idea-detail="generation"></span></p>
+                <p><strong>Birth Generation:</strong> <span data-idea-detail="birth-generation"></span></p>
+                <p><strong>Death Generation:</strong> <span data-idea-detail="death-generation"></span></p>
+                <p><strong>Auto Rating:</strong> <span data-idea-detail="auto-rating"></span></p>
+                <p><strong>Manual Rating:</strong> <span data-idea-detail="manual-rating"></span></p>
+                <p><strong>Difference:</strong> <span class="${diffClass}" data-idea-detail="rating-difference"></span></p>
                 <hr>
                 <div class="idea-content">
                     ${renderMarkdown(idea.content || '')}
@@ -2007,9 +2106,18 @@ function showIdeaDetails(ideaIndex) {
             </div>
         </div>
     `;
+    modalContent.querySelector('.idea-details-title').textContent = idea.title || 'Untitled';
+    modalContent.querySelector('[data-idea-detail="generation"]').textContent = getIdeaGenerationLabel(idea);
+    modalContent.querySelector('[data-idea-detail="birth-generation"]').textContent = getIdeaGenerationLabel(idea, 'birth');
+    modalContent.querySelector('[data-idea-detail="death-generation"]').textContent = getIdeaGenerationLabel(idea, 'death');
+    modalContent.querySelector('[data-idea-detail="auto-rating"]').textContent = autoRating;
+    modalContent.querySelector('[data-idea-detail="manual-rating"]').textContent = manualRating;
+    modalContent.querySelector('[data-idea-detail="rating-difference"]').textContent = `${diffSign}${diffRating}`;
 
     // Show the modal
-    const modal = new bootstrap.Modal(document.getElementById('ideaModal'));
+    const modalElement = document.getElementById('ideaModal');
+    rememberModalFocusOrigin(modalElement);
+    const modal = new bootstrap.Modal(modalElement);
     modal.show();
 }
 
@@ -2261,6 +2369,7 @@ function openFocusedChart(chartId, chartTitle) {
         });
     }
 
+    rememberModalFocusOrigin(modalElement);
     chartFocusModalInstance.show();
     if (modalElement.classList.contains('show')) {
         renderFocusedChart();

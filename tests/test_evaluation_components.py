@@ -1,6 +1,9 @@
 import asyncio
 
 from idea.evaluation import (
+    ComputedComponentConfig,
+    ComputedEvaluator,
+    ComputedResultManifest,
     EmbeddingDiversityComponentConfig,
     EmbeddingDiversityEvaluator,
     EvaluationRecord,
@@ -176,6 +179,33 @@ def test_diversity_adapter_converts_component_exception_to_failed_records():
     ]
     assert result.batch.records[0].error == "embedding backend unavailable"
     assert population[1]["evaluations"]["diversity"]["status"] == "failed"
+
+
+def test_computed_evaluator_enforces_declared_timeout_as_failed_record():
+    class SlowRunner:
+        async def run(self, _candidate, **_kwargs):
+            await asyncio.sleep(0.05)
+            return ComputedResultManifest(status="ok", metrics={"score": 1.0})
+
+    population = [{"id": "idea-a", "idea": "A"}]
+    result = asyncio.run(
+        ComputedEvaluator(
+            ComputedComponentConfig(
+                id="simulation",
+                runner_ref="slow-v1",
+                metric_names=["score"],
+                timeout_seconds=0.01,
+            )
+        ).evaluate_population(
+            population,
+            SlowRunner(),
+            evaluation_generation=1,
+        )
+    )
+
+    assert result.scores == {}
+    assert result.batch.records[0].status == EvaluationStatus.FAILED
+    assert "0.01-second timeout" in result.batch.records[0].error
 
 
 def test_candidate_identifier_is_stable_and_safe_for_unstructured_candidates():

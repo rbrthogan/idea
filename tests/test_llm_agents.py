@@ -3,9 +3,12 @@ from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from idea.llm import Breeder, Critic, Formatter, Ideator, Oracle
+from idea.ratings import PairEvaluationError
 
 
 class DummyPrompts:
@@ -61,6 +64,63 @@ def test_get_tournament_ranks_deterministic():
     with patch.object(Critic, 'compare_ideas', side_effect=["A"]):
         ranks = critic.get_tournament_ranks(ideas, "airesearch", rounds=1)
     assert ranks[0] > ranks[1]
+
+
+def test_failed_comparison_does_not_mutate_elo_or_cache_neutral_evidence():
+    critic = create_critic()
+    ideas = [
+        {"id": "a", "idea": {"title": "A", "content": "alpha"}},
+        {"id": "b", "idea": {"title": "B", "content": "beta"}},
+    ]
+    comparison_cache = {}
+
+    with patch.dict("os.environ", {"ENABLE_PARALLEL_TOURNAMENT": "0"}), \
+         patch.object(critic, "compare_ideas", return_value=None), \
+         patch.object(critic, "_elo_update", wraps=critic._elo_update) as elo_update:
+        with pytest.raises(PairEvaluationError, match="failed to produce valid evidence"):
+            critic.get_tournament_ranks(
+                ideas,
+                "airesearch",
+                rounds=1,
+                comparison_cache=comparison_cache,
+            )
+
+    elo_update.assert_not_called()
+    assert comparison_cache == {}
+    assert all("rating_evaluations" not in idea for idea in ideas)
+
+
+def test_parallel_stop_is_graceful_and_does_not_apply_unfinished_evidence():
+    critic = create_critic()
+    ideas = [
+        {"id": str(index), "idea": {"title": str(index), "content": "same"}}
+        for index in range(4)
+    ]
+    stop_checks = {"count": 0}
+
+    def should_stop():
+        stop_checks["count"] += 1
+        # Enter the round, then stop when the parallel evaluator polls.
+        return stop_checks["count"] >= 2
+
+    details = []
+    comparison_cache = {}
+    with patch.dict("os.environ", {"ENABLE_PARALLEL_TOURNAMENT": "1"}), \
+         patch.object(critic, "compare_ideas", return_value="A"), \
+         patch.object(critic, "_elo_update", wraps=critic._elo_update) as elo_update:
+        ranks = critic.get_tournament_ranks(
+            ideas,
+            "airesearch",
+            rounds=2,
+            should_stop=should_stop,
+            details=details,
+            comparison_cache=comparison_cache,
+        )
+
+    assert ranks == {0: 1500.0, 1: 1500.0, 2: 1500.0, 3: 1500.0}
+    elo_update.assert_not_called()
+    assert comparison_cache == {}
+    assert details[0]["cancelled"] is True
 
 
 def test_tournament_ranks_start_from_persisted_global_elo():
@@ -221,7 +281,7 @@ def test_compare_ideas_response_parsing_simple():
     with patch('idea.llm.get_prompts', return_value=DummyPrompts()), \
          patch.object(Critic, 'generate_text', return_value="A"):
         result = critic.compare_ideas({'title': 'A'}, {'title': 'B'}, "airesearch")
-    assert result == "A"
+    assert result is None
 
 
 def test_compare_ideas_response_parsing_complex():
@@ -229,7 +289,7 @@ def test_compare_ideas_response_parsing_complex():
     with patch('idea.llm.get_prompts', return_value=DummyPrompts()), \
          patch.object(Critic, 'generate_text', return_value="I think B is better"):
         result = critic.compare_ideas({'title': 'A'}, {'title': 'B'}, "airesearch")
-    assert result == "B"
+    assert result is None
 
 
 def test_multi_tournament_segmentation_resets_pairing_state():
@@ -528,6 +588,40 @@ def test_gemini_31_pro_sends_explicit_thinking_level():
     assert dumped_config["thinkingConfig"]["thinkingLevel"] == "LOW"
     assert "thinking_level_budget_fallbacks" not in ideator.get_diagnostics()
     assert "thinking_level_sdk_unsupported" not in ideator.get_diagnostics()
+
+
+def test_gemini_36_flash_uses_thinking_level_without_deprecated_sampling_parameters():
+    ideator = create_ideator(
+        model_name="gemini-3.6-flash",
+        thinking_level="medium",
+        temperature=1.5,
+        top_p=0.9,
+    )
+    captured = {}
+
+    class _FakeResponse:
+        text = "done"
+        usage_metadata = None
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**kwargs):
+                captured.update(kwargs)
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "done"
+    dumped_config = captured["config"].model_dump(
+        by_alias=True,
+        exclude_none=True,
+        mode="json",
+    )
+    assert dumped_config["thinkingConfig"]["thinkingLevel"] == "MEDIUM"
+    assert "temperature" not in dumped_config
+    assert "topP" not in dumped_config
 
 
 def test_generate_content_tracks_thinking_cached_and_tiered_costs():

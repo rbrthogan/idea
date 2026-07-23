@@ -4,15 +4,19 @@
 import os
 import json
 import base64
+import hashlib
+import logging
 import time
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, List, Any
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from google.cloud import firestore
+
+logger = logging.getLogger(__name__)
 
 # Firestore client (lazy initialization)
 _db = None
@@ -180,12 +184,28 @@ async def release_global_run_lock(owner_id: str) -> None:
 
 # --- Encryption utilities for API keys ---
 
+
+class EncryptionConfigurationError(RuntimeError):
+    """Raised when the API-key encryption secret is absent or unsafe."""
+
+
+class APIKeyDecryptionError(RuntimeError):
+    """Raised when a stored API key cannot be decrypted with this deployment key."""
+
 def _get_encryption_key() -> bytes:
     """
     Derive encryption key from environment secret.
     In production, use Secret Manager for the master key.
     """
-    master_key = os.getenv("ENCRYPTION_KEY", "default-dev-key-change-in-production")
+    master_key = os.getenv("ENCRYPTION_KEY")
+    if not master_key:
+        raise EncryptionConfigurationError(
+            "ENCRYPTION_KEY is required before API keys can be stored or read"
+        )
+    if len(master_key.encode("utf-8")) < 32:
+        raise EncryptionConfigurationError(
+            "ENCRYPTION_KEY must contain at least 32 bytes"
+        )
     salt = os.getenv("ENCRYPTION_SALT", "idea-evolution-salt").encode()
 
     kdf = PBKDF2HMAC(
@@ -255,8 +275,12 @@ async def get_user_api_key(user_id: str) -> Optional[str]:
     if encrypted:
         try:
             return decrypt_api_key(encrypted)
-        except Exception as e:
-            print(f"Failed to decrypt API key for user {user_id}: {e}")
+        except EncryptionConfigurationError:
+            raise
+        except (InvalidToken, UnicodeDecodeError, ValueError, TypeError) as exc:
+            raise APIKeyDecryptionError(
+                f"Stored API key for user {user_id!r} cannot be decrypted"
+            ) from exc
     return None
 
 
@@ -273,7 +297,21 @@ async def delete_user_api_key(user_id: str) -> None:
 # --- Evolutions ---
 
 EVOLUTION_CHUNKS_COLLECTION = "chunks"
+EVOLUTION_CHUNK_VERSIONS_COLLECTION = "chunk_versions"
+EVOLUTION_TOMBSTONES_COLLECTION = "evolution_tombstones"
 EVOLUTION_FIELD_CHUNK_SIZE = 240_000
+EVOLUTION_CHUNK_GC_GRACE_SECONDS = 600
+EVOLUTION_CHUNK_SCHEMA_VERSION = 2
+
+_EXPECTED_REVISION_UNSET = object()
+
+
+class EvolutionSaveConflict(RuntimeError):
+    """Raised when a stale evolution save loses an optimistic publish race."""
+
+
+class EvolutionStorageIntegrityError(RuntimeError):
+    """Raised when a published evolution cannot be reconstructed exactly."""
 
 # Fields that may contain nested arrays and need JSON serialization.
 # Firestore does not support arrays within arrays, so legacy records stored these
@@ -349,6 +387,8 @@ def _prepare_evolution_save_data(
     chunk_payloads: Dict[str, Dict[str, Any]] = {}
     externalized_fields: Dict[str, Dict[str, Any]] = {}
     chunk_version = str(uuid.uuid4())
+    created_at_ms = _now_ms()
+    save_data["_save_revision"] = chunk_version
 
     for field in EVOLUTION_JSON_FIELDS:
         if field not in save_data or save_data[field] is None:
@@ -357,19 +397,25 @@ def _prepare_evolution_save_data(
         serialized = json.dumps(save_data[field], default=str)
         if field in EVOLUTION_EXTERNALIZED_FIELDS:
             chunks = _chunk_text(serialized)
+            payload_sha256 = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
             externalized_fields[field] = {
+                "schema_version": EVOLUTION_CHUNK_SCHEMA_VERSION,
                 "encoding": "json",
                 "chunk_count": len(chunks),
                 "chunk_version": chunk_version,
+                "payload_sha256": payload_sha256,
             }
             for index, chunk in enumerate(chunks):
                 chunk_id = f"{field}__{chunk_version}__{index:04d}"
                 chunk_payloads[chunk_id] = {
                     "field": field,
                     "index": index,
+                    "chunk_count": len(chunks),
                     "chunk_version": chunk_version,
+                    "schema_version": EVOLUTION_CHUNK_SCHEMA_VERSION,
                     "value": chunk,
                     "updated_at": updated_at,
+                    "created_at_ms": created_at_ms,
                 }
             save_data.pop(field, None)
         else:
@@ -383,72 +429,419 @@ def _prepare_evolution_save_data(
     return save_data, chunk_payloads
 
 
-def _deserialize_evolution_json_fields(data: Dict[str, Any]) -> None:
+def _deserialize_evolution_json_fields(
+    data: Dict[str, Any],
+    *,
+    strict: bool = False,
+) -> None:
     for field in EVOLUTION_JSON_FIELDS:
         if field in data and isinstance(data[field], str):
             try:
                 data[field] = json.loads(data[field])
             except json.JSONDecodeError:
-                pass
+                if strict:
+                    raise EvolutionStorageIntegrityError(
+                        f"stored evolution field {field!r} is not valid JSON"
+                    ) from None
 
 
 def _chunk_doc_id(field: str, chunk_version: str, index: int) -> str:
     return f"{field}__{chunk_version}__{index:04d}"
 
 
+def _chunk_version_ref(doc_ref: Any, chunk_version: str) -> Any:
+    return doc_ref.collection(EVOLUTION_CHUNK_VERSIONS_COLLECTION).document(
+        chunk_version
+    )
+
+
+def _valid_sha256(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
 def _load_externalized_evolution_fields(doc_ref: Any, data: Dict[str, Any]) -> None:
     externalized = data.get("_externalized_fields")
-    if not isinstance(externalized, dict):
+    if externalized is None:
         return
+    if not isinstance(externalized, dict):
+        raise EvolutionStorageIntegrityError(
+            "evolution externalized-field manifest must be an object"
+        )
 
     chunk_collection = doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION)
+    manifest_revision = data.get("_save_revision")
     for field, meta in externalized.items():
+        if field not in EVOLUTION_EXTERNALIZED_FIELDS:
+            raise EvolutionStorageIntegrityError(
+                f"unsupported externalized evolution field {field!r}"
+            )
         if not isinstance(meta, dict):
-            continue
+            raise EvolutionStorageIntegrityError(
+                f"chunk manifest for {field!r} must be an object"
+            )
         try:
             chunk_count = int(meta.get("chunk_count", 0))
         except (TypeError, ValueError):
-            chunk_count = 0
+            raise EvolutionStorageIntegrityError(
+                f"chunk count for {field!r} is invalid"
+            ) from None
         chunk_version = str(meta.get("chunk_version") or "")
         if chunk_count <= 0 or not chunk_version:
-            continue
+            raise EvolutionStorageIntegrityError(
+                f"chunk manifest for {field!r} is incomplete"
+            )
+        try:
+            schema_version = int(meta.get("schema_version", 1))
+        except (TypeError, ValueError):
+            raise EvolutionStorageIntegrityError(
+                f"chunk schema version for {field!r} is invalid"
+            ) from None
+        expected_digest = meta.get("payload_sha256")
+        if schema_version >= EVOLUTION_CHUNK_SCHEMA_VERSION and not _valid_sha256(
+            expected_digest
+        ):
+            raise EvolutionStorageIntegrityError(
+                f"chunk digest for {field!r} is missing or invalid"
+            )
+        if (
+            schema_version >= EVOLUTION_CHUNK_SCHEMA_VERSION
+            and chunk_version != manifest_revision
+        ):
+            raise EvolutionStorageIntegrityError(
+                f"chunk version for {field!r} does not match the published revision"
+            )
+        if field in data:
+            raise EvolutionStorageIntegrityError(
+                f"evolution field {field!r} is both inline and externalized"
+            )
+
+        if schema_version >= EVOLUTION_CHUNK_SCHEMA_VERSION:
+            version_doc = _chunk_version_ref(doc_ref, chunk_version).get()
+            version_data = version_doc.to_dict() if version_doc.exists else {}
+            if (
+                not version_doc.exists
+                or version_data.get("state") != "current"
+                or str(version_data.get("chunk_version") or "") != chunk_version
+            ):
+                raise EvolutionStorageIntegrityError(
+                    f"published chunk version for {field!r} is missing or inactive"
+                )
 
         chunks: List[str] = []
-        missing_chunk = False
         for index in range(chunk_count):
             chunk_doc = chunk_collection.document(_chunk_doc_id(field, chunk_version, index)).get()
             if not chunk_doc.exists:
-                missing_chunk = True
-                break
+                raise EvolutionStorageIntegrityError(
+                    f"missing chunk {index + 1}/{chunk_count} for {field!r}"
+                )
             chunk_data = chunk_doc.to_dict() or {}
-            chunks.append(str(chunk_data.get("value", "")))
-        if missing_chunk:
-            continue
+            if chunk_data.get("field") != field:
+                raise EvolutionStorageIntegrityError(
+                    f"chunk field mismatch for {field!r} at index {index}"
+                )
+            try:
+                stored_index = int(chunk_data.get("index"))
+            except (TypeError, ValueError):
+                stored_index = -1
+            if stored_index != index:
+                raise EvolutionStorageIntegrityError(
+                    f"chunk index mismatch for {field!r} at index {index}"
+                )
+            if str(chunk_data.get("chunk_version") or "") != chunk_version:
+                raise EvolutionStorageIntegrityError(
+                    f"chunk version mismatch for {field!r} at index {index}"
+                )
+            if schema_version >= EVOLUTION_CHUNK_SCHEMA_VERSION:
+                try:
+                    stored_schema_version = int(chunk_data.get("schema_version"))
+                except (TypeError, ValueError):
+                    stored_schema_version = -1
+                if stored_schema_version != schema_version:
+                    raise EvolutionStorageIntegrityError(
+                        f"chunk schema mismatch for {field!r} at index {index}"
+                    )
+                try:
+                    stored_count = int(chunk_data.get("chunk_count"))
+                except (TypeError, ValueError):
+                    stored_count = -1
+                if stored_count != chunk_count:
+                    raise EvolutionStorageIntegrityError(
+                        f"chunk count mismatch for {field!r} at index {index}"
+                    )
+            chunk_value = chunk_data.get("value")
+            if not isinstance(chunk_value, str):
+                raise EvolutionStorageIntegrityError(
+                    f"chunk payload for {field!r} at index {index} is not text"
+                )
+            chunks.append(chunk_value)
 
         raw_value = "".join(chunks)
+        if expected_digest is not None:
+            actual_digest = hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
+            if actual_digest != expected_digest:
+                raise EvolutionStorageIntegrityError(
+                    f"chunk digest mismatch for {field!r}"
+                )
         if meta.get("encoding") == "json":
             try:
                 data[field] = json.loads(raw_value)
             except json.JSONDecodeError:
-                data[field] = raw_value
-        else:
+                raise EvolutionStorageIntegrityError(
+                    f"chunk payload for {field!r} is not valid JSON"
+                ) from None
+        elif meta.get("encoding") in {None, "text"} and schema_version < 2:
+            # Compatibility with the earliest chunk-manifest prototype.
             data[field] = raw_value
+        else:
+            raise EvolutionStorageIntegrityError(
+                f"chunk encoding for {field!r} is unsupported"
+            )
 
 
 def _delete_evolution_chunks(doc_ref: Any) -> None:
-    for chunk_doc in doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION).stream():
-        doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION).document(chunk_doc.id).delete()
+    for collection_name in (
+        EVOLUTION_CHUNKS_COLLECTION,
+        EVOLUTION_CHUNK_VERSIONS_COLLECTION,
+    ):
+        collection = doc_ref.collection(collection_name)
+        for child_doc in collection.stream():
+            collection.document(child_doc.id).delete()
 
 
-def _delete_stale_evolution_chunks(doc_ref: Any, current_versions: set[str]) -> None:
+def _delete_staged_chunk_version(
+    doc_ref: Any,
+    chunk_version: str,
+    chunk_ids: Optional[List[str]] = None,
+) -> None:
     chunk_collection = doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION)
+    if chunk_ids is None:
+        chunk_ids = [
+            chunk_doc.id
+            for chunk_doc in chunk_collection.stream()
+            if (chunk_doc.to_dict() or {}).get("chunk_version") == chunk_version
+        ]
+    for chunk_id in chunk_ids:
+        chunk_collection.document(chunk_id).delete()
+    _chunk_version_ref(doc_ref, chunk_version).delete()
+
+
+def _evolution_tombstone_ref(
+    db: firestore.Client,
+    user_id: str,
+    evolution_id: str,
+) -> Any:
+    return (
+        db.collection("users")
+        .document(user_id)
+        .collection(EVOLUTION_TOMBSTONES_COLLECTION)
+        .document(evolution_id)
+    )
+
+
+def _manifest_chunk_versions(data: Dict[str, Any]) -> set[str]:
+    return {
+        str(meta.get("chunk_version"))
+        for meta in (data.get("_externalized_fields") or {}).values()
+        if isinstance(meta, dict) and meta.get("chunk_version")
+    }
+
+
+def _publish_evolution_manifest(
+    db: firestore.Client,
+    doc_ref: Any,
+    save_data: Dict[str, Any],
+    expected_revision: Optional[str],
+    tombstone_ref: Optional[Any] = None,
+) -> bool:
+    """Atomically publish a manifest only if its base revision is still current."""
+
+    new_versions = _manifest_chunk_versions(save_data)
+    new_revision = str(save_data.get("_save_revision") or "")
+    published_at_ms = _now_ms()
+
+    def _read_publish_inputs(transaction: Optional[Any] = None):
+        current_doc = doc_ref.get(transaction=transaction)
+        tombstone_doc = (
+            tombstone_ref.get(transaction=transaction)
+            if tombstone_ref is not None
+            else None
+        )
+        staged_versions = {
+            version: _chunk_version_ref(doc_ref, version).get(transaction=transaction)
+            for version in new_versions
+        }
+        return current_doc, tombstone_doc, staged_versions
+
+    def _can_publish(current_doc, tombstone_doc, staged_versions) -> bool:
+        if tombstone_doc is not None and tombstone_doc.exists:
+            return False
+        current_data = current_doc.to_dict() if current_doc.exists else {}
+        if current_data.get("_deleted"):
+            return False
+        if current_data.get("_save_revision") != expected_revision:
+            return False
+        for version, version_doc in staged_versions.items():
+            version_data = version_doc.to_dict() if version_doc.exists else {}
+            if (
+                not version_doc.exists
+                or version_data.get("state") != "staged"
+                or version_data.get("chunk_version") != version
+            ):
+                return False
+        return True
+
+    def _version_updates(current_data: Dict[str, Any]):
+        current_versions = _manifest_chunk_versions(current_data)
+        current_update = {
+            "chunk_version": new_revision,
+            "state": "current",
+            "published_at": firestore.SERVER_TIMESTAMP,
+            "published_at_ms": published_at_ms,
+            "updated_at_ms": published_at_ms,
+        }
+        retired_update = {
+            "state": "retired",
+            "retired_at": firestore.SERVER_TIMESTAMP,
+            "retired_at_ms": published_at_ms,
+            "updated_at_ms": published_at_ms,
+        }
+        return current_versions, current_update, retired_update
+
+    # Minimal in-memory test doubles do not implement transactions. Production
+    # Firestore clients always do; the fallback keeps pure serialization tests
+    # lightweight without weakening the deployed path.
+    if not callable(getattr(db, "transaction", None)):
+        current_doc, tombstone_doc, staged_versions = _read_publish_inputs()
+        if not _can_publish(current_doc, tombstone_doc, staged_versions):
+            return False
+        current_data = current_doc.to_dict() if current_doc.exists else {}
+        current_versions, current_update, retired_update = _version_updates(
+            current_data
+        )
+        doc_ref.set(save_data)
+        for version in new_versions:
+            _chunk_version_ref(doc_ref, version).set(current_update, merge=True)
+        for version in current_versions - new_versions:
+            _chunk_version_ref(doc_ref, version).set(retired_update, merge=True)
+        return True
+
+    @firestore.transactional
+    def _publish(transaction):
+        current_doc, tombstone_doc, staged_versions = _read_publish_inputs(transaction)
+        if not _can_publish(current_doc, tombstone_doc, staged_versions):
+            return False
+        current_data = current_doc.to_dict() if current_doc.exists else {}
+        current_versions, current_update, retired_update = _version_updates(
+            current_data
+        )
+        transaction.set(doc_ref, save_data)
+        for version in new_versions:
+            transaction.set(
+                _chunk_version_ref(doc_ref, version),
+                current_update,
+                merge=True,
+            )
+        for version in current_versions - new_versions:
+            transaction.set(
+                _chunk_version_ref(doc_ref, version),
+                retired_update,
+                merge=True,
+            )
+        return True
+
+    return bool(_publish(db.transaction()))
+
+
+def _delete_stale_evolution_chunks(doc_ref: Any) -> None:
+    """Delete retired/abandoned versions only after their lifecycle grace period."""
+    current_doc = doc_ref.get()
+    current_data = current_doc.to_dict() if current_doc.exists else {}
+    current_versions = _manifest_chunk_versions(current_data)
+    cutoff_ms = _now_ms() - int(EVOLUTION_CHUNK_GC_GRACE_SECONDS * 1000)
+    version_collection = doc_ref.collection(EVOLUTION_CHUNK_VERSIONS_COLLECTION)
+    eligible_versions: set[str] = set()
+    tracked_versions: set[str] = set()
+    for version_doc in version_collection.stream():
+        version_data = version_doc.to_dict() or {}
+        chunk_version = str(
+            version_data.get("chunk_version") or version_doc.id or ""
+        )
+        if not chunk_version or chunk_version in current_versions:
+            continue
+        tracked_versions.add(chunk_version)
+        state = version_data.get("state")
+        if state == "retired":
+            age_value = version_data.get("retired_at")
+            fallback_ms = version_data.get("retired_at_ms")
+        elif state == "staged":
+            age_value = None
+            fallback_ms = version_data.get("created_at_ms")
+        elif state == "deleting":
+            eligible_versions.add(chunk_version)
+            continue
+        else:
+            continue
+        if isinstance(age_value, datetime):
+            lifecycle_ms = int(age_value.timestamp() * 1000)
+        else:
+            try:
+                lifecycle_ms = int(fallback_ms)
+            except (TypeError, ValueError):
+                continue
+        if lifecycle_ms <= cutoff_ms:
+            eligible_versions.add(chunk_version)
+
+    chunk_collection = doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION)
+    # Older writers did not create lifecycle documents.  Treat an unreferenced
+    # version as an abandoned stage, but only after the same grace period.
+    untracked_created_at: Dict[str, int] = {}
     for chunk_doc in chunk_collection.stream():
         chunk_data = chunk_doc.to_dict() or {}
-        if not current_versions or chunk_data.get("chunk_version") not in current_versions:
+        chunk_version = str(chunk_data.get("chunk_version") or "")
+        if (
+            not chunk_version
+            or chunk_version in current_versions
+            or chunk_version in tracked_versions
+        ):
+            continue
+        try:
+            created_at_ms = int(chunk_data.get("created_at_ms"))
+        except (TypeError, ValueError):
+            continue
+        previous = untracked_created_at.get(chunk_version)
+        untracked_created_at[chunk_version] = (
+            created_at_ms if previous is None else max(previous, created_at_ms)
+        )
+    eligible_versions.update(
+        version
+        for version, created_at_ms in untracked_created_at.items()
+        if created_at_ms <= cutoff_ms
+    )
+
+    if not eligible_versions:
+        return
+
+    for chunk_doc in chunk_collection.stream():
+        chunk_data = chunk_doc.to_dict() or {}
+        if chunk_data.get("chunk_version") in eligible_versions:
             chunk_collection.document(chunk_doc.id).delete()
+    for chunk_version in eligible_versions:
+        version_collection.document(chunk_version).delete()
 
 
-async def save_evolution(user_id: str, evolution_id: str, data: Dict[str, Any]) -> None:
+async def save_evolution(
+    user_id: str,
+    evolution_id: str,
+    data: Dict[str, Any],
+    *,
+    expected_revision: Any = _EXPECTED_REVISION_UNSET,
+) -> str:
     """Save an evolution for a user.
 
     Note: Firestore doesn't support nested arrays, so we serialize fields like
@@ -457,34 +850,101 @@ async def save_evolution(user_id: str, evolution_id: str, data: Dict[str, Any]) 
     """
     db = get_db()
     updated_at = datetime.utcnow().isoformat()
+    if expected_revision is _EXPECTED_REVISION_UNSET:
+        expected_revision = data.get("_save_revision")
+    if expected_revision is not None:
+        if not isinstance(expected_revision, str) or not expected_revision:
+            raise ValueError("expected evolution revision must be a non-empty string")
     save_data, chunk_payloads = _prepare_evolution_save_data(data, user_id, updated_at)
+    chunk_version = str(save_data["_save_revision"])
 
     doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
+    tombstone_ref = _evolution_tombstone_ref(db, user_id, evolution_id)
     chunk_collection = doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION)
-    for chunk_id, chunk_data in chunk_payloads.items():
-        chunk_collection.document(chunk_id).set(chunk_data)
+    staged_chunk_ids: List[str] = []
+    if chunk_payloads:
+        _chunk_version_ref(doc_ref, chunk_version).set(
+            {
+                "chunk_version": chunk_version,
+                "state": "staged",
+                "created_at_ms": _now_ms(),
+                "updated_at_ms": _now_ms(),
+            }
+        )
+    try:
+        for chunk_id, chunk_data in chunk_payloads.items():
+            chunk_collection.document(chunk_id).set(chunk_data)
+            staged_chunk_ids.append(chunk_id)
+    except Exception:
+        _delete_staged_chunk_version(doc_ref, chunk_version, staged_chunk_ids)
+        raise
 
-    doc_ref.set(save_data)
-    current_versions = {
-        meta.get("chunk_version")
-        for meta in (save_data.get("_externalized_fields") or {}).values()
-        if isinstance(meta, dict) and meta.get("chunk_version")
-    }
-    _delete_stale_evolution_chunks(doc_ref, current_versions)
+    try:
+        published = _publish_evolution_manifest(
+            db,
+            doc_ref,
+            save_data,
+            expected_revision,
+            tombstone_ref=tombstone_ref,
+        )
+    except Exception:
+        # A transport error can be ambiguous: Firestore may have committed the
+        # manifest before the client observed the failure.  Never delete this
+        # version here, because it may already be current.  A genuinely
+        # abandoned stage is collected after the normal grace period.
+        raise
+    if not published:
+        _delete_staged_chunk_version(
+            doc_ref,
+            chunk_version,
+            list(chunk_payloads),
+        )
+        raise EvolutionSaveConflict(
+            f"Evolution {evolution_id!r} changed while this save was being published"
+        )
+    try:
+        _delete_stale_evolution_chunks(doc_ref)
+    except Exception:
+        logger.exception(
+            "Evolution %s was published but stale chunk cleanup failed",
+            evolution_id,
+        )
+    return chunk_version
 
 
 async def get_evolution(user_id: str, evolution_id: str) -> Optional[Dict[str, Any]]:
     """Get a specific evolution for a user."""
     db = get_db()
-    doc = db.collection("users").document(user_id).collection("evolutions").document(evolution_id).get()
+    doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
 
-    if doc.exists:
-        data = doc.to_dict()
-        doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
+    def _visible_data(snapshot: Any) -> Optional[Dict[str, Any]]:
+        if not snapshot.exists:
+            return None
+        snapshot_data = snapshot.to_dict() or {}
+        if snapshot_data.get("_deleted"):
+            return None
+        return snapshot_data
+
+    doc = doc_ref.get()
+    data = _visible_data(doc)
+    if data is None:
+        return None
+    initial_revision = data.get("_save_revision")
+    try:
         _load_externalized_evolution_fields(doc_ref, data)
-        _deserialize_evolution_json_fields(data)
-        return data
-    return None
+    except EvolutionStorageIntegrityError:
+        # A reader may have fetched the old manifest immediately before a
+        # concurrent publish.  Retry exactly once with the new manifest; an
+        # unchanged revision is genuine corruption and must remain visible.
+        latest = _visible_data(doc_ref.get())
+        if latest is None:
+            return None
+        if latest.get("_save_revision") == initial_revision:
+            raise
+        data = latest
+        _load_externalized_evolution_fields(doc_ref, data)
+    _deserialize_evolution_json_fields(data, strict=True)
+    return data
 
 
 async def list_evolutions(user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
@@ -497,7 +957,9 @@ async def list_evolutions(user_id: str, limit: int = 50) -> List[Dict[str, Any]]
 
     evolutions = []
     for doc in docs:
-        data = doc.to_dict()
+        data = doc.to_dict() or {}
+        if data.get("_deleted"):
+            continue
         data["id"] = doc.id
         # Keep list queries cheap: deserialize fields present on the summary doc,
         # but do not fetch externalized history chunks for every row.
@@ -506,15 +968,76 @@ async def list_evolutions(user_id: str, limit: int = 50) -> List[Dict[str, Any]]
     return evolutions
 
 
-async def delete_evolution(user_id: str, evolution_id: str) -> bool:
-    """Delete an evolution."""
-    db = get_db()
-    doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
-    doc = doc_ref.get()
-    if doc.exists:
-        _delete_evolution_chunks(doc_ref)
+def _publish_evolution_tombstone(
+    db: firestore.Client,
+    doc_ref: Any,
+    tombstone_ref: Any,
+    *,
+    user_id: str,
+    evolution_id: str,
+) -> bool:
+    """Atomically hide an evolution and reserve its id against stale saves."""
+
+    deleted_at_ms = _now_ms()
+
+    def _tombstone_data(current_data: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "evolution_id": evolution_id,
+            "user_id": user_id,
+            "deleted_revision": current_data.get("_save_revision"),
+            "deleted_at": firestore.SERVER_TIMESTAMP,
+            "deleted_at_ms": deleted_at_ms,
+        }
+
+    if not callable(getattr(db, "transaction", None)):
+        current_doc = doc_ref.get()
+        if not current_doc.exists:
+            return False
+        current_data = current_doc.to_dict() or {}
+        tombstone_ref.set(_tombstone_data(current_data))
         doc_ref.delete()
         return True
+
+    @firestore.transactional
+    def _delete(transaction):
+        current_doc = doc_ref.get(transaction=transaction)
+        if not current_doc.exists:
+            return False
+        current_data = current_doc.to_dict() or {}
+        transaction.set(tombstone_ref, _tombstone_data(current_data))
+        transaction.delete(doc_ref)
+        return True
+
+    return bool(_delete(db.transaction()))
+
+
+async def delete_evolution(user_id: str, evolution_id: str) -> bool:
+    """Delete an evolution without allowing an in-flight stale save to revive it."""
+    db = get_db()
+    doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
+    tombstone_ref = _evolution_tombstone_ref(db, user_id, evolution_id)
+    deleted = _publish_evolution_tombstone(
+        db,
+        doc_ref,
+        tombstone_ref,
+        user_id=user_id,
+        evolution_id=evolution_id,
+    )
+    if deleted:
+        try:
+            _delete_evolution_chunks(doc_ref)
+        except Exception:
+            # The parent is already atomically hidden and its tombstone blocks
+            # resurrection.  Cleanup is idempotent and can safely be retried.
+            logger.exception(
+                "Evolution %s was deleted but chunk cleanup failed",
+                evolution_id,
+            )
+        return True
+    # A previous attempt may have committed the tombstone before cleanup.
+    if tombstone_ref.get().exists:
+        _delete_evolution_chunks(doc_ref)
+        return False
     return False
 
 

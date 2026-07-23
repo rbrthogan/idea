@@ -12,7 +12,8 @@ LLM_MODELS = [
     {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
     {"id": "gemini-3-flash-preview", "name": "Gemini 3 Flash Preview"},
     {"id": "gemini-3.1-flash-lite-preview", "name": "Gemini 3.1 Flash-Lite Preview"},
-    {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview"}
+    {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview"},
+    {"id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash"},
 ]
 
 # Default model
@@ -99,6 +100,18 @@ THINKING_MODEL_CONFIG = {
         "min_budget": 128,
         "max_budget": 32768,
     },
+    "gemini-3.6-flash": {
+        "supports_thinking": True,
+        "supports_thinking_level": True,
+        "supports_thinking_budget": False,
+        "supports_sampling_parameters": False,
+        "allow_off": False,
+        "allowed_levels": ["low", "medium", "high"],
+        "default_level": "medium",
+        "default_budget": None,
+        "min_budget": 0,
+        "max_budget": 65536,
+    },
 }
 
 # Backwards-compatible budget-only view used by some helper flows.
@@ -157,7 +170,12 @@ model_prices_per_million_tokens = {
                 "cached_input": 0.40,
             },
         ],
-    }
+    },
+    "gemini-3.6-flash": {
+        "input": 1.50,
+        "output": 7.50,
+        "cached_input": 0.15,
+    },
 }
 
 DEFAULT_TEXT_MODEL_PRICE = {"input": 0.1, "output": 0.4}

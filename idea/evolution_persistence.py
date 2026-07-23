@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 from idea import database as db
-from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
-from idea.models import Idea
+from idea.evolution_types import EvolutionRunConfig
+from idea.models import candidate_from_wire, candidate_to_wire
 from idea.prompts.loader import list_available_templates
 
 # Legacy filesystem storage directories (kept for backwards compatibility with local dev)
@@ -35,23 +34,7 @@ def _safe_local_checkpoint_id(checkpoint_id: Any) -> str:
 class EvolutionSerializer:
     @staticmethod
     def serialize_idea(idea: Any) -> Any:
-        if not isinstance(idea, dict):
-            return idea
-
-        result: Dict[str, Any] = {}
-        for key, value in idea.items():
-            if isinstance(value, uuid.UUID):
-                result[key] = str(value)
-            elif isinstance(value, list):
-                result[key] = [str(v) if isinstance(v, uuid.UUID) else v for v in value]
-            elif hasattr(value, "__dict__"):
-                result[key] = {
-                    "title": getattr(value, "title", None),
-                    "content": getattr(value, "content", ""),
-                }
-            else:
-                result[key] = value
-        return result
+        return candidate_to_wire(idea)
 
     @classmethod
     def to_checkpoint_state(cls, engine: Any) -> Dict[str, Any]:
@@ -59,36 +42,7 @@ class EvolutionSerializer:
             "checkpoint_id": engine.checkpoint_id,
             "checkpoint_time": datetime.now().isoformat(),
             "status": "paused" if engine.stop_requested else "in_progress",
-            "config": {
-                "idea_type": engine.idea_type,
-                "pop_size": engine.pop_size,
-                "generations": engine.generations,
-                "model_type": engine.model_type,
-                "creative_temp": engine.creative_temp,
-                "top_p": engine.top_p,
-                "tournament_rounds": engine.tournament_rounds,
-                "tournament_count": engine.tournament_count,
-                "full_tournament_rounds": engine.full_tournament_rounds,
-                "thinking_budget": engine.thinking_budget,
-                "thinking_level": getattr(engine, "thinking_level", None),
-                "max_budget": engine.max_budget,
-                "mutation_rate": engine.mutation_rate,
-                "seed_context_pool_size": engine.seed_context_pool_size,
-                "refine_all_ideas": engine.refine_all_ideas,
-                "survivor_refinement_rate": engine.survivor_refinement_rate,
-                "island_count": getattr(engine, "island_count", 2),
-                "migration_rate": getattr(engine, "migration_rate", 0.05),
-                "migration_novelty_protection_quantile": getattr(
-                    engine,
-                    "migration_novelty_protection_quantile",
-                    0.8,
-                ),
-                "replacement_rate": engine.replacement_rate,
-                "fitness_alpha": engine.fitness_alpha,
-                "age_decay_rate": engine.age_decay_rate,
-                "age_decay_floor": engine.age_decay_floor,
-                "evaluation": engine.evaluation_config.model_dump(mode="json"),
-            },
+            "config": EvolutionRunConfig.from_engine(engine).to_persistence_dict(),
             "current_generation": engine.current_generation,
             "population": [cls.serialize_idea(idea) for idea in engine.population],
             "history": [[cls.serialize_idea(idea) for idea in gen] for gen in engine.history],
@@ -109,32 +63,14 @@ class EvolutionSerializer:
         }
         if engine.template_data:
             state["template_data"] = engine.template_data
+        persistence_revision = getattr(engine, "persistence_revision", None)
+        if persistence_revision is not None:
+            state["_save_revision"] = persistence_revision
         return state
 
     @staticmethod
     def deserialize_idea(idea_data: Any) -> Any:
-        if not isinstance(idea_data, dict):
-            return idea_data
-
-        result = dict(idea_data)
-        if "id" in result and isinstance(result["id"], str):
-            try:
-                result["id"] = uuid.UUID(result["id"])
-            except ValueError:
-                result["id"] = uuid.uuid4()
-
-        if "parent_ids" in result:
-            result["parent_ids"] = [
-                uuid.UUID(pid) if isinstance(pid, str) else pid for pid in result["parent_ids"]
-            ]
-
-        if "idea" in result and isinstance(result["idea"], dict):
-            result["idea"] = Idea(
-                title=result["idea"].get("title"),
-                content=result["idea"].get("content", ""),
-            )
-
-        return result
+        return candidate_from_wire(idea_data)
 
     @classmethod
     def restore_runtime_state(cls, engine: Any, state: Dict[str, Any]) -> None:
@@ -154,6 +90,12 @@ class EvolutionSerializer:
         engine.evolution_name = state.get("name")
         engine.created_at = state.get("created_at")
         engine.updated_at = state.get("updated_at")
+        persistence_revision = state.get("_save_revision")
+        engine.persistence_revision = (
+            persistence_revision
+            if isinstance(persistence_revision, str) and persistence_revision
+            else None
+        )
 
         engine.checkpoint_id = state.get("checkpoint_id") or (
             engine.evolution_id[:18].replace("-", "") if engine.evolution_id else None
@@ -170,6 +112,10 @@ class EvolutionSerializer:
         engine.comparison_cache = comparison_cache if isinstance(comparison_cache, dict) else {}
         engine.avg_idea_cost = state.get("avg_idea_cost", 0.0)
         engine.avg_tournament_cost = state.get("avg_tournament_cost", 0.0)
+        saved_token_counts = state.get("token_counts")
+        engine._persisted_token_counts = (
+            saved_token_counts if isinstance(saved_token_counts, dict) else None
+        )
         raw_metric_stats = state.get("fitness_metric_stats", {})
         if not isinstance(raw_metric_stats, dict):
             raw_metric_stats = {}
@@ -220,9 +166,19 @@ class EvolutionRepository:
             state["created_at"] = engine.created_at
             state["updated_at"] = engine.updated_at
 
-            await db.save_evolution(engine.user_id, engine.evolution_id, state)
+            new_revision = await db.save_evolution(
+                engine.user_id,
+                engine.evolution_id,
+                state,
+                expected_revision=getattr(engine, "persistence_revision", None),
+            )
+            engine.persistence_revision = new_revision
             print(f"💾 Evolution saved to Firestore: {engine.evolution_name} ({engine.evolution_id})")
             return engine.evolution_id
+        except db.EvolutionSaveConflict:
+            # A stale engine must never report a successful checkpoint or
+            # silently overwrite a newer process's state.
+            raise
         except Exception as exc:
             print(f"❌ Failed to save evolution: {exc}")
             import traceback
@@ -269,6 +225,10 @@ class EvolutionRepository:
                     }
                 )
             return result
+        except db.EvolutionStorageIntegrityError:
+            # Corruption is operationally distinct from a missing evolution;
+            # callers need the typed failure to alert or recover explicitly.
+            raise
         except Exception as exc:
             print(f"Error listing evolutions: {exc}")
             return []
@@ -305,6 +265,7 @@ class EvolutionRepository:
         evolution_id: str,
         api_key: Optional[str] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional[Any]:
         try:
             state = await db.get_evolution(user_id, evolution_id)
@@ -330,7 +291,12 @@ class EvolutionRepository:
                 api_key=api_key,
                 user_id=user_id,
                 evaluation_runners=evaluation_runners,
+                artifact_store=artifact_store,
             )
+        except db.EvolutionStorageIntegrityError:
+            # Corruption is operationally distinct from a missing evolution;
+            # callers need the typed failure to alert or recover explicitly.
+            raise
         except Exception as exc:
             print(f"❌ Failed to load evolution: {exc}")
             import traceback
@@ -366,6 +332,7 @@ class EvolutionRepository:
         file_path: Path,
         api_key: Optional[str] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional[Any]:
         try:
             with open(file_path) as f:
@@ -375,6 +342,7 @@ class EvolutionRepository:
                 state,
                 api_key=api_key,
                 evaluation_runners=evaluation_runners,
+                artifact_store=artifact_store,
             )
         except Exception as exc:
             print(f"❌ Failed to load from {file_path}: {exc}")
@@ -390,41 +358,14 @@ class EvolutionRepository:
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Any:
-        config = state.get("config", {})
-        tournament_rounds = config.get("tournament_rounds", 1)
-        full_tournament_rounds = config.get("full_tournament_rounds")
-        tournament_count = config.get("tournament_count")
+        run_config = EvolutionRunConfig.from_stored_mapping(state.get("config"))
 
         engine = engine_cls(
-            idea_type=config.get("idea_type"),
-            pop_size=config.get("pop_size", 5),
-            generations=config.get("generations", 3),
-            model_type=config.get("model_type", "gemini-2.0-flash"),
-            creative_temp=config.get("creative_temp", DEFAULT_CREATIVE_TEMP),
-            top_p=config.get("top_p", DEFAULT_TOP_P),
-            tournament_rounds=tournament_rounds,
-            tournament_count=tournament_count,
-            full_tournament_rounds=full_tournament_rounds,
-            thinking_budget=config.get("thinking_budget"),
-            thinking_level=config.get("thinking_level"),
-            max_budget=config.get("max_budget"),
-            mutation_rate=config.get("mutation_rate", 0.2),
-            seed_context_pool_size=config.get("seed_context_pool_size"),
-            refine_all_ideas=config.get("refine_all_ideas", False),
-            survivor_refinement_rate=config.get("survivor_refinement_rate", 0.1),
-            island_count=config.get("island_count", 2),
-            migration_rate=config.get("migration_rate", 0.05),
-            migration_novelty_protection_quantile=config.get(
-                "migration_novelty_protection_quantile",
-                0.8,
-            ),
-            replacement_rate=config.get("replacement_rate", 0.5),
-            fitness_alpha=config.get("fitness_alpha", 0.7),
-            age_decay_rate=config.get("age_decay_rate", 0.25),
-            age_decay_floor=config.get("age_decay_floor", 0.35),
-            evaluation_config=config.get("evaluation"),
+            **run_config.engine_kwargs(),
             evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
             api_key=api_key,
             user_id=user_id or state.get("user_id"),
             template_data=state.get("template_data"),
@@ -444,6 +385,7 @@ class EvolutionRepository:
         checkpoint_id: str,
         api_key: Optional[str] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional[Any]:
         checkpoint_id = _safe_local_checkpoint_id(checkpoint_id)
         evolution_path = EVOLUTIONS_DIR / f"{checkpoint_id}.json"
@@ -453,6 +395,7 @@ class EvolutionRepository:
                 evolution_path,
                 api_key=api_key,
                 evaluation_runners=evaluation_runners,
+                artifact_store=artifact_store,
             )
 
         checkpoint_path = CHECKPOINT_DIR / f"checkpoint_{checkpoint_id}.json"
@@ -465,6 +408,7 @@ class EvolutionRepository:
             checkpoint_path,
             api_key=api_key,
             evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
         )
 
     @staticmethod

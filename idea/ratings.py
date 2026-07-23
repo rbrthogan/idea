@@ -6,15 +6,29 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from idea.models import CandidateRecord
 
-def extract_title_content(item: Any) -> Dict[str, str]:
+
+class PairEvaluationError(RuntimeError):
+    """One or more pair comparisons failed to produce judge evidence."""
+
+
+class PairEvaluationInputError(PairEvaluationError, ValueError):
+    """A comparison input, including required artifacts, is invalid."""
+
+
+def extract_title_content(item: Any) -> Dict[str, Any]:
     """Best-effort extraction of a dict with title/content from various shapes.
 
-    - If `item` has .model_dump()/.dict(), use that
+    - If `item` is a CandidateRecord, unwrap its legacy candidate dictionary
+    - If another `item` has .model_dump()/.dict(), use that
     - If it's a dict with title/content, return as-is
     - If it's a dict with nested 'idea', unwrap
     - Otherwise, coerce to a string content with Untitled title
     """
+    if isinstance(item, CandidateRecord):
+        item = item.to_candidate_dict()
+
     if hasattr(item, "model_dump") or hasattr(item, "dict"):
         try:
             d = item.model_dump() if hasattr(item, "model_dump") else item.dict()
@@ -26,7 +40,16 @@ def extract_title_content(item: Any) -> Dict[str, str]:
 
     if isinstance(item, dict):
         if "title" in item or "content" in item:
-            return {"title": item.get("title", "Untitled"), "content": item.get("content", str(item))}
+            extracted: Dict[str, Any] = {
+                "title": item.get("title", "Untitled"),
+                "content": item.get("content", str(item)),
+            }
+            # Prepared pairwise payloads carry already-loaded image bytes.
+            # Keep those bytes paired with their owning candidate rather than
+            # silently degrading the comparison to text-only input.
+            if "images" in item:
+                extracted["images"] = item["images"]
+            return extracted
         if "idea" in item:
             inner = item["idea"]
             return extract_title_content(inner)
@@ -37,19 +60,20 @@ def extract_title_content(item: Any) -> Dict[str, str]:
 def parallel_evaluate_pairs(
     pairs: Sequence[Tuple[int, int]],
     items: Sequence[Any],
-    compare_fn: Callable[[Dict[str, str], Dict[str, str], str], str],
+    compare_fn: Callable[[Dict[str, Any], Dict[str, Any], str], Optional[str]],
     idea_type: str,
     concurrency: int = 8,
     randomize_presentation: bool = True,
     progress_callback: Callable[[int, int], None] = None,
     should_stop: Optional[Callable[[], bool]] = None,
-) -> List[Tuple[int, int, str]]:
+    failure_details: Optional[Dict[Tuple[int, int], str]] = None,
+) -> List[Tuple[int, int, Optional[str]]]:
     """Run LLM comparisons for pairs in parallel and return winners.
 
     Returns a list of tuples (idx_a, idx_b, winner) in completion order.
     """
     futures: Dict[Any, Tuple[int, int]] = {}
-    results: List[Tuple[int, int, str]] = []
+    results: List[Tuple[int, int, Optional[str]]] = []
     total_pairs = len(pairs)
     completed_count = 0
     timeout_raw = os.environ.get("PAIR_EVAL_TIMEOUT_SECONDS", "90")
@@ -107,11 +131,19 @@ def parallel_evaluate_pairs(
                 idx_a, idx_b = futures[future]
                 try:
                     out_a, out_b, winner = future.result()
-                except Exception:
-                    out_a, out_b, winner = idx_a, idx_b, "tie"
+                except Exception as exc:
+                    out_a, out_b, winner = idx_a, idx_b, None
+                    if failure_details is not None:
+                        failure_details[(idx_a, idx_b)] = (
+                            f"{exc.__class__.__name__}: {str(exc) or 'comparison failed'}"
+                        )
 
                 if winner not in {"A", "B", "tie"}:
-                    winner = "tie"
+                    if failure_details is not None and (idx_a, idx_b) not in failure_details:
+                        failure_details[(idx_a, idx_b)] = (
+                            f"invalid comparison winner: {winner!r}"
+                        )
+                    winner = None
 
                 results.append((out_a, out_b, winner))
                 completed_count += 1
@@ -125,12 +157,14 @@ def parallel_evaluate_pairs(
             if stop_reason:
                 print(
                     f"parallel_evaluate_pairs ended early ({stop_reason}); "
-                    f"marking {len(pending)} unfinished comparisons as ties."
+                    f"marking {len(pending)} unfinished comparisons as failed."
                 )
             for future in pending:
                 idx_a, idx_b = futures[future]
                 future.cancel()
-                results.append((idx_a, idx_b, "tie"))
+                results.append((idx_a, idx_b, None))
+                if failure_details is not None:
+                    failure_details[(idx_a, idx_b)] = stop_reason or "comparison unfinished"
                 completed_count += 1
                 if progress_callback:
                     try:
@@ -142,3 +176,11 @@ def parallel_evaluate_pairs(
         executor.shutdown(wait=False, cancel_futures=True)
 
     return results
+
+
+__all__ = [
+    "PairEvaluationError",
+    "PairEvaluationInputError",
+    "extract_title_content",
+    "parallel_evaluate_pairs",
+]

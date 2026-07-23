@@ -8,7 +8,7 @@ Idea Evolution is a small web app that uses multiple LLM agents (Ideator, Critic
 
 ## What you can do
 
-- Generate and evolve ideas with Gemini models (2.0 and 2.5 variants)
+- Generate and evolve ideas with selectable Gemini models, including Gemini 3.6 Flash
 - Track population diversity over generations (embeddings‑based)
 - Keep a configurable fraction of each generation as survivors (instead of full replacement)
 - Use hybrid fitness for selection: normalized Elo + normalized diversity
@@ -31,7 +31,13 @@ uv sync
 
 ```bash
 export GEMINI_API_KEY=your_api_key_here
+export ENCRYPTION_KEY="$(openssl rand -base64 32)"
 ```
+
+`ENCRYPTION_KEY` is required before user API keys can be stored or read. Keep
+the same secret across restarts and provide it through your deployment's secret
+manager; the application intentionally has no production fallback key and
+rejects secrets shorter than 32 bytes.
 
 3) Run the app
 
@@ -85,7 +91,7 @@ uv run pytest -q
 
 - `idea/viewer.py` – FastAPI app serving the viewer, rater, and template APIs
 - `idea/evolution.py` – Evolution engine, hybrid fitness, survivor selection, parent allocation, diversity tracking
-- `idea/evaluation/` – Typed evaluator configs/results, legacy LLM/diversity adapters, fitness aggregation, and script result contracts
+- `idea/evaluation/` – Typed evaluator configs/results, legacy LLM/diversity adapters, computed-runner boundaries, and fitness aggregation
 - `idea/artifact_store.py` – Contained, content-addressed local artifact storage
 - `idea/llm.py` – LLM wrapper and agents (Ideator, Formatter, Critic, Breeder, Oracle)
 - `idea/prompts/` – YAML templates system, validation, loader, and Oracle prompt bundle
@@ -118,22 +124,58 @@ suite. Runs with no explicit `evaluation` configuration retain the legacy
 behavior: pairwise LLM Elo weighted by `fitnessAlpha`, embedding diversity
 weighted by `1 - fitnessAlpha`, then age decay for survivor selection.
 
-The typed backend now supports explicit metric direction, normalization,
-weights, failure policies, and a no-evaluation mode. A Python metric evaluator
-can consume the strict JSON contract documented in
+The typed backend now supports maximize-only numeric scores, normalization,
+weights, failure policies, and a no-evaluation mode. A generic computed
+evaluator consumes the strict result contract documented in
 [`docs/PluggableEvaluators.md`](docs/PluggableEvaluators.md) through an injected
-execution runner. Generated code execution is intentionally not enabled in the
-web app: it requires the isolated no-network container backend described in the
-design before it is safe to expose.
+runner; a checked-in Python function or isolated script is only one possible
+implementation. Runners convert costs, latency, and other minimize-only
+measurements into scores where larger is fitter. Generated code execution is
+disabled by default. For a local opt-in Gemini Code Execution workflow, set:
+
+```bash
+export IDEA_ENABLE_GEMINI_CODE_ARTIFACTS=true
+export IDEA_ARTIFACT_STORE_ROOT="$PWD/data/artifacts"
+```
+
+An evaluation suite must still explicitly set
+`allow_generated_code_execution: true` and declare an `llm_code_artifact`
+component. The web app then creates a private per-user/per-evolution store,
+uses only Gemini 3.6 Flash's remote Code Execution tool, caps the request at 30
+seconds and 8,192 output tokens, and never executes returned Python locally.
+After the server opt-in, the browser exposes a still-off-by-default **Generate
+visualization artifacts** switch under Advanced Config. It submits the bundled
+render → ordinary pairwise judge → diversity suite; callers can instead send a
+custom typed `evaluation` suite to `/api/start-evolution`.
+Artifact-runner token usage is included in saved usage totals and the run's
+`maxBudget`; resumed runs retain the previously spent amount.
+Generated images are served only through an authenticated ownership-checked
+route; the idea modal exposes Overview, Artifacts, Code & run, and Evaluations
+tabs only when corresponding data exists. The investigated remote and local
+isolation options, current Gemini 3.6 Flash pricing, and recommended staged
+rollout are documented in
+[`docs/ManagedExecutionOptions.md`](docs/ManagedExecutionOptions.md).
+
+Artifact-producing components enrich candidates before the existing pairwise
+LLM judge. There is no separate artifact-only LLM evaluator: when a pairwise
+component explicitly requires a current image artifact, that same judge receives
+both candidates' text and matching PNG bytes in one multimodal comparison.
+
+For a zero-trust-boundary computed example, `builtin.character_count` is an
+allow-listed in-process runner that emits one configurable maximize-only length
+metric. It never evaluates candidate source or performs I/O. External
+simulations and API-backed scorers still require an explicitly injected runner.
 
 Local artifact output can be imported into the content-addressed artifact store
 after traversal, symlink, media-type, size, and digest checks. Firestore history
 stores references rather than artifact bytes.
 
-The bundled `prime_visualization` template turns the Ulam spiral into a
-baseline/anti-copy reference and asks for explicit mappings, falsifiable nulls,
-deterministic implementation plans, and PNG/metadata/result contracts. It does
-not execute generated code or claim that proposed patterns were observed.
+The bundled `prime_visualization` template treats the Ulam spiral as only one
+optional anti-copy precedent among modular maps, prime races, binomial
+divisibility, gap/constellation views, and factor geometry. It asks for explicit
+mappings, falsifiable nulls, deterministic implementation plans, and
+PNG/metadata/result contracts. The template never fabricates results; an
+explicit artifact producer may subsequently implement a proposal.
 
 ## Troubleshooting
 

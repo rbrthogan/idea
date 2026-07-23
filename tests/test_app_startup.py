@@ -24,5 +24,7 @@ def test_viewer_injects_model_aware_thinking_config():
 
     assert "window.IDEA_THINKING_MODEL_CONFIG" in html
     assert '"gemini-3.1-pro-preview"' in html
+    assert '"gemini-3.6-flash"' in html
     assert '"default_level": "low"' in html
+    assert '"default_level": "medium"' in html
     assert '"supports_thinking_budget": false' in html

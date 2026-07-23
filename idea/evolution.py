@@ -20,16 +20,19 @@ from idea.prompts.loader import list_available_templates, get_prompts, get_promp
 from idea.diversity import DiversityCalculator
 from idea.evaluation import (
     ComponentKind,
+    ComputedEvaluator,
+    ArtifactStoreLoader,
     EmbeddingDiversityEvaluator,
     EvaluationBatch,
     EvaluationRecord,
     EvaluationStatus,
     FitnessAggregator,
+    LLMCodeArtifactProducer,
     LLMPairwiseEvaluator,
     MetricNormalization,
-    PythonMetricEvaluator,
     attach_evaluation_record,
     candidate_identifier,
+    create_builtin_computed_runner,
     resolve_evaluation_suite,
 )
 from idea import database as db  # noqa: F401 - compatibility seam for tests and external patches
@@ -88,6 +91,7 @@ class EvolutionEngine:
         template_data: Optional[Dict[str, Any]] = None,  # Custom template data from Firestore
         evaluation_config: Optional[Dict[str, Any]] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ):
         self.user_id = user_id  # User ID for scoped storage
         self.idea_type = idea_type or get_default_template_id()
@@ -242,6 +246,7 @@ class EvolutionEngine:
         # Cost tracking for better estimation
         self.avg_idea_cost = 0.0
         self.avg_tournament_cost = 0.0
+        self._persisted_token_counts: Optional[Dict[str, Any]] = None
 
         # Concurrency control
         self.concurrency_limit = 10
@@ -269,13 +274,21 @@ class EvolutionEngine:
             "diversity.diversity": self.fitness_diversity_stats,
         }
         self.comparison_cache: Dict[str, Any] = {}
-        self._configure_evaluation(evaluation_config, evaluation_runners)
+        self._configure_evaluation(
+            evaluation_config,
+            evaluation_runners,
+            artifact_store=artifact_store,
+        )
 
         # Evolution identity and tracking
         self.evolution_id = None  # Unique ID for this evolution (UUID)
         self.evolution_name = None  # Human-readable name
         self.created_at = None  # ISO timestamp when evolution started
         self.updated_at = None  # ISO timestamp of last update
+        # Optimistic-concurrency token for the Firestore manifest.  This is
+        # injected when a persisted run is loaded and advanced only after a
+        # successful save; it is not part of the user-facing run config.
+        self.persistence_revision = None
 
         # Legacy checkpoint tracking (for backwards compatibility)
         self.checkpoint_id = None  # Set when evolution starts
@@ -302,6 +315,8 @@ class EvolutionEngine:
         self,
         config: Optional[Dict[str, Any]],
         runners: Optional[Dict[str, Any]] = None,
+        *,
+        artifact_store: Optional[Any] = None,
     ) -> None:
         """Resolve evaluator configuration and instantiate supported adapters."""
 
@@ -312,9 +327,20 @@ class EvolutionEngine:
         self.fitness_aggregator = FitnessAggregator(self.evaluation_config)
         self.quality_evaluator = None
         self.diversity_evaluator = None
-        self.python_metric_evaluators = []
+        self.computed_evaluators = []
+        self.artifact_producers = []
+        self.pre_judge_evaluators = []
         self.unsupported_evaluation_components = []
         self.last_evaluation_batch = None
+        self.pre_judge_evaluation_batch = None
+        self._pre_judge_candidate_ids = None
+
+        self.artifact_store = artifact_store
+        artifact_loader = (
+            ArtifactStoreLoader(artifact_store)
+            if artifact_store is not None
+            else None
+        )
 
         if not self.evaluation_config.enabled:
             return
@@ -327,25 +353,42 @@ class EvolutionEngine:
                 component.kind == ComponentKind.LLM_PAIRWISE
                 and self.quality_evaluator is None
             ):
-                self.quality_evaluator = LLMPairwiseEvaluator(component)
+                self.quality_evaluator = LLMPairwiseEvaluator(
+                    component,
+                    artifact_loader=artifact_loader,
+                )
             elif (
                 component.kind == ComponentKind.EMBEDDING_DIVERSITY
                 and self.diversity_evaluator is None
             ):
                 self.diversity_evaluator = EmbeddingDiversityEvaluator(component)
-            elif component.kind == ComponentKind.PYTHON_METRIC:
+            elif component.kind == ComponentKind.COMPUTED:
                 runner = runners.get(component.id)
+                if runner is None:
+                    runner = runners.get(component.runner_ref)
+                if runner is None:
+                    runner = create_builtin_computed_runner(component.runner_ref)
                 if runner is None:
                     self.unsupported_evaluation_components.append(component.id)
                 else:
-                    self.python_metric_evaluators.append(
-                        (PythonMetricEvaluator(component), runner)
+                    entry = (ComputedEvaluator(component), runner)
+                    self.computed_evaluators.append(entry)
+                    self.pre_judge_evaluators.append(entry)
+            elif component.kind == ComponentKind.LLM_CODE_ARTIFACT:
+                runner = runners.get(component.id)
+                if runner is None:
+                    runner = runners.get(component.execution_profile)
+                if runner is None:
+                    runner = runners.get("llm_code_artifact")
+                if runner is None or artifact_store is None:
+                    self.unsupported_evaluation_components.append(component.id)
+                else:
+                    entry = (
+                        LLMCodeArtifactProducer(component, artifact_store),
+                        runner,
                     )
-            elif component.kind in {
-                ComponentKind.LLM_CODE_ARTIFACT,
-                ComponentKind.LLM_ARTIFACT_SCORE,
-            }:
-                self.unsupported_evaluation_components.append(component.id)
+                    self.artifact_producers.append(entry)
+                    self.pre_judge_evaluators.append(entry)
 
     @staticmethod
     def _coerce_unit_float(value: Any, *, default: float) -> float:
@@ -494,34 +537,13 @@ class EvolutionEngine:
 
     def _sync_typed_state_from_attrs(self):
         """Keep typed internal snapshots aligned while preserving legacy attribute access."""
-        from idea.evolution_types import EvolutionConfig, EvolutionIdentity, EvolutionRuntimeState
-
-        self.config_state = EvolutionConfig(
-            idea_type=self.idea_type,
-            pop_size=self.pop_size,
-            generations=self.generations,
-            model_type=self.model_type,
-            creative_temp=self.creative_temp,
-            top_p=self.top_p,
-            tournament_rounds=self.tournament_rounds,
-            tournament_count=self.tournament_count,
-            full_tournament_rounds=self.full_tournament_rounds,
-            thinking_budget=self.thinking_budget,
-            thinking_level=self.thinking_level,
-            max_budget=self.max_budget,
-            mutation_rate=self.mutation_rate,
-            seed_context_pool_size=self.seed_context_pool_size,
-            refine_all_ideas=self.refine_all_ideas,
-            survivor_refinement_rate=self.survivor_refinement_rate,
-            island_count=self.island_count,
-            migration_rate=self.migration_rate,
-            migration_novelty_protection_quantile=self.migration_novelty_protection_quantile,
-            replacement_rate=self.replacement_rate,
-            fitness_alpha=self.fitness_alpha,
-            age_decay_rate=self.age_decay_rate,
-            age_decay_floor=self.age_decay_floor,
-            evaluation=self.evaluation_config.model_dump(mode="json"),
+        from idea.evolution_types import (
+            EvolutionIdentity,
+            EvolutionRunConfig,
+            EvolutionRuntimeState,
         )
+
+        self.config_state = EvolutionRunConfig.from_engine(self)
         self.identity_state = EvolutionIdentity(
             evolution_id=self.evolution_id,
             evolution_name=self.evolution_name,
@@ -580,12 +602,18 @@ class EvolutionEngine:
         date_str = datetime.now().strftime('%b %d, %Y')
         return f"{template_name} - {date_str}"
 
-    def initialize_evolution(self, name: str = None):
+    def initialize_evolution(
+        self,
+        name: str = None,
+        *,
+        evolution_id: Optional[str] = None,
+    ):
         """Initialize a new evolution with ID, name, and timestamps."""
-        self.evolution_id = str(uuid.uuid4())
+        self.evolution_id = str(evolution_id or uuid.uuid4())
         self.evolution_name = name or self.generate_default_name()
         self.created_at = datetime.now().isoformat()
         self.updated_at = self.created_at
+        self.persistence_revision = None
         self.checkpoint_id = self.evolution_id[:18].replace('-', '')
         self._sync_typed_state_from_attrs()
 
@@ -616,6 +644,7 @@ class EvolutionEngine:
         evolution_id: str,
         api_key: Optional[str] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional['EvolutionEngine']:
         from idea.evolution_persistence import EvolutionRepository
 
@@ -625,6 +654,7 @@ class EvolutionEngine:
             evolution_id,
             api_key=api_key,
             evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
         )
 
     @classmethod
@@ -645,6 +675,7 @@ class EvolutionEngine:
         file_path: Path,
         api_key: Optional[str] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional['EvolutionEngine']:
         from idea.evolution_persistence import EvolutionRepository
 
@@ -653,6 +684,7 @@ class EvolutionEngine:
             file_path,
             api_key=api_key,
             evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
         )
 
     @classmethod
@@ -662,6 +694,7 @@ class EvolutionEngine:
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> 'EvolutionEngine':
         from idea.evolution_persistence import EvolutionRepository
 
@@ -671,6 +704,7 @@ class EvolutionEngine:
             api_key=api_key,
             user_id=user_id,
             evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
         )
 
     @classmethod
@@ -679,6 +713,7 @@ class EvolutionEngine:
         checkpoint_id: str,
         api_key: Optional[str] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional['EvolutionEngine']:
         from idea.evolution_persistence import EvolutionRepository
 
@@ -687,6 +722,7 @@ class EvolutionEngine:
             checkpoint_id,
             api_key=api_key,
             evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
         )
 
     @classmethod
@@ -1291,6 +1327,14 @@ class EvolutionEngine:
             ("diversity_embeddings", getattr(self, "diversity_calculator", None)),
             ("oracle", getattr(self, "oracle", None)),
         ]
+        seen_usage_components = {id(component) for _, component in component_specs}
+        for evaluator, runner in getattr(self, "pre_judge_evaluators", []):
+            if id(runner) in seen_usage_components:
+                continue
+            seen_usage_components.add(id(runner))
+            kind = getattr(getattr(evaluator, "config", None), "kind", None)
+            prefix = "artifact" if kind == ComponentKind.LLM_CODE_ARTIFACT else "computed"
+            component_specs.append((f"{prefix}_{evaluator.config.id}", runner))
 
         token_data: Dict[str, Any] = {}
         models: Dict[str, str] = {}
@@ -1332,6 +1376,59 @@ class EvolutionEngine:
             diagnostic_events_by_agent[component_name] = getattr(
                 component, "get_diagnostic_events", lambda: []
             )()
+
+        persisted = getattr(self, "_persisted_token_counts", None)
+        if isinstance(persisted, dict):
+            persisted_cost = persisted.get("cost")
+            if not isinstance(persisted_cost, dict):
+                persisted_cost = {}
+            prior_total = safe_int(persisted.get("total"))
+            prior_input = safe_int(persisted.get("total_input"))
+            prior_output = safe_int(persisted.get("total_output"))
+            prior_thoughts = safe_int(persisted.get("total_thoughts"))
+            prior_cached = safe_int(persisted.get("total_cached_input"))
+            prior_uncached = safe_int(
+                persisted.get("total_uncached_input", max(prior_input - prior_cached, 0))
+            )
+            prior_tool = safe_int(persisted.get("total_tool_input"))
+            prior_input_cost = safe_float(persisted_cost.get("input_cost"))
+            prior_output_cost = safe_float(persisted_cost.get("output_cost"))
+            prior_thought_cost = safe_float(persisted_cost.get("thought_cost"))
+            prior_total_cost = safe_float(persisted_cost.get("total_cost"))
+            if (
+                prior_input_cost + prior_output_cost + prior_thought_cost == 0
+                and prior_total_cost > 0
+            ):
+                prior_input_cost = prior_total_cost
+            if prior_total > 0 or prior_total_cost > 0:
+                total_provider_tokens += prior_total
+                total_input += prior_input
+                total_output += prior_output
+                total_thoughts += prior_thoughts
+                total_cached_input += prior_cached
+                total_uncached_input += prior_uncached
+                total_tool_input += prior_tool
+                total_input_cost += prior_input_cost
+                total_uncached_input_cost += safe_float(
+                    persisted_cost.get("uncached_input_cost")
+                )
+                total_cached_input_cost += safe_float(
+                    persisted_cost.get("cached_input_cost")
+                )
+                total_output_cost += prior_output_cost
+                total_thought_cost += prior_thought_cost
+                token_data["restored_usage"] = {
+                    "total": prior_total,
+                    "input": prior_input,
+                    "output": prior_output,
+                    "thoughts": prior_thoughts,
+                    "cached_input": prior_cached,
+                    "uncached_input": prior_uncached,
+                    "tool_input": prior_tool,
+                    "model": "checkpoint aggregate",
+                    "cost": prior_total_cost,
+                }
+                models["restored_usage"] = "checkpoint aggregate"
 
         total = total_provider_tokens or (total_input + total_output + total_thoughts + total_tool_input)
         total_cost = total_input_cost + total_output_cost + total_thought_cost
@@ -1543,8 +1640,8 @@ class EvolutionEngine:
         """Populate running-z-score values for every configured metric.
 
         Normalization belongs to the fitness configuration, not to a specific
-        evaluator implementation.  This lets injected Python metrics use the
-        same persisted normalization behavior as legacy Elo and diversity.
+        evaluator implementation. This lets any injected computed metric use
+        the same persisted normalization behavior as legacy Elo and diversity.
         """
 
         successful_statuses = {EvaluationStatus.OK, EvaluationStatus.CACHED}
@@ -1699,6 +1796,63 @@ class EvolutionEngine:
 
         return diversity_scores
 
+    async def _prepare_population_for_judging(
+        self,
+        population: List[Any],
+        *,
+        evaluation_generation: Optional[int] = None,
+    ) -> EvaluationBatch:
+        """Run configured producer/computed components before the pairwise judge.
+
+        Components execute in their declared suite order.  This guarantees,
+        for example, that an artifact producer precedes a computed scorer that
+        requires its output, and that the same enriched candidate object then
+        reaches the existing pairwise judge. Numeric records are retained for
+        subsequent fitness aggregation instead of recomputed.
+        """
+
+        if self.unsupported_evaluation_components:
+            raise RuntimeError(
+                "evaluation execution backends are not configured for: "
+                + ", ".join(self.unsupported_evaluation_components)
+            )
+
+        generation = (
+            max(0, int(evaluation_generation))
+            if evaluation_generation is not None
+            else max(0, int(getattr(self, "current_generation", 0) or 0))
+        )
+        records: List[EvaluationRecord] = []
+        artifacts_by_id = {}
+        for evaluator, runner in self.pre_judge_evaluators:
+            result = await evaluator.evaluate_population(
+                population,
+                runner,
+                evaluation_generation=generation,
+                should_stop=lambda: bool(self.stop_requested) or self.check_budget(),
+            )
+            records.extend(result.batch.records)
+            for artifact in result.batch.artifacts:
+                existing = artifacts_by_id.get(artifact.id)
+                if existing is not None and existing != artifact:
+                    raise RuntimeError(
+                        f"pre-judge artifact id collision for {artifact.id!r}"
+                    )
+                artifacts_by_id[artifact.id] = artifact
+
+        batch = EvaluationBatch(
+            generation=generation,
+            records=records,
+            artifacts=list(artifacts_by_id.values()),
+            metadata={"phase": "pre_judge"},
+        )
+        self.pre_judge_evaluation_batch = batch
+        self._pre_judge_candidate_ids = tuple(
+            candidate_identifier(candidate, index)
+            for index, candidate in enumerate(population)
+        )
+        return batch
+
     async def _score_population_fitness(
         self, population: List[Any], ranks: Dict[int, float]
     ) -> Dict[int, Dict[str, Any]]:
@@ -1718,6 +1872,12 @@ class EvolutionEngine:
             for index, candidate in enumerate(population)
         ]
         generation = max(0, int(getattr(self, "current_generation", 0) or 0))
+        if (
+            isinstance(self.pre_judge_evaluation_batch, EvaluationBatch)
+            and self.pre_judge_evaluation_batch.generation is not None
+            and self._pre_judge_candidate_ids == tuple(candidate_ids)
+        ):
+            generation = self.pre_judge_evaluation_batch.generation
         records: List[EvaluationRecord] = []
 
         if self.unsupported_evaluation_components:
@@ -1725,6 +1885,27 @@ class EvolutionEngine:
                 "evaluation execution backends are not configured for: "
                 + ", ".join(self.unsupported_evaluation_components)
             )
+
+        prepared_batch = self.pre_judge_evaluation_batch
+        prepared_ids = self._pre_judge_candidate_ids
+        if self.pre_judge_evaluators and not (
+            isinstance(prepared_batch, EvaluationBatch)
+            and prepared_batch.generation == generation
+            and prepared_ids == tuple(candidate_ids)
+        ):
+            prepared_batch = await self._prepare_population_for_judging(
+                population,
+                evaluation_generation=generation,
+            )
+        if isinstance(prepared_batch, EvaluationBatch):
+            records.extend(prepared_batch.records)
+        prepared_artifacts = (
+            list(prepared_batch.artifacts)
+            if isinstance(prepared_batch, EvaluationBatch)
+            else []
+        )
+        self.pre_judge_evaluation_batch = None
+        self._pre_judge_candidate_ids = None
 
         prior_batch = self.last_evaluation_batch
         quality_scores: Dict[int, float] = {}
@@ -1757,14 +1938,6 @@ class EvolutionEngine:
                 index: record
                 for index, record in enumerate(diversity_result.batch.records)
             }
-
-        for evaluator, runner in self.python_metric_evaluators:
-            python_result = await evaluator.evaluate_population(
-                population,
-                runner,
-                evaluation_generation=generation,
-            )
-            records.extend(python_result.batch.records)
 
         if self.quality_evaluator is not None:
             quality_config = self.quality_evaluator.config
@@ -1848,6 +2021,7 @@ class EvolutionEngine:
         batch = EvaluationBatch(
             generation=generation,
             records=records,
+            artifacts=prepared_artifacts,
             metadata={"suite": self.evaluation_config.model_dump(mode="json")},
         )
         self.last_evaluation_batch = batch

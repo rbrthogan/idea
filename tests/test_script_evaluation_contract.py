@@ -4,9 +4,9 @@ import pytest
 from pydantic import ValidationError
 
 from idea.evaluation import (
+    ComputedComponentConfig,
+    ComputedEvaluator,
     EvaluationStatus,
-    PythonMetricComponentConfig,
-    PythonMetricEvaluator,
     ScriptResultError,
     ScriptResultManifest,
     parse_script_result,
@@ -82,15 +82,15 @@ class _Runner:
         )
 
 
-def test_python_metric_evaluator_uses_runner_boundary_and_records_failures():
+def test_computed_evaluator_uses_runner_boundary_and_records_failures():
     population = [
         {"id": "good", "idea": "A"},
         {"id": "bad", "idea": "B"},
     ]
-    evaluator = PythonMetricEvaluator(
-        PythonMetricComponentConfig(
+    evaluator = ComputedEvaluator(
+        ComputedComponentConfig(
             id="numeric",
-            script_ref="evaluators/score.py",
+            runner_ref="python-script-v1",
             metric_names=["score"],
         )
     )
@@ -111,11 +111,11 @@ def test_python_metric_evaluator_uses_runner_boundary_and_records_failures():
     assert population[1]["evaluations"]["numeric"]["status"] == "failed"
 
 
-def test_python_metric_evaluator_requires_all_configured_metrics():
-    evaluator = PythonMetricEvaluator(
-        PythonMetricComponentConfig(
+def test_computed_evaluator_requires_all_configured_metrics():
+    evaluator = ComputedEvaluator(
+        ComputedComponentConfig(
             id="numeric",
-            script_ref="evaluators/score.py",
+            runner_ref="python-script-v1",
             metric_names=["score", "missing"],
         )
     )
@@ -129,3 +129,41 @@ def test_python_metric_evaluator_requires_all_configured_metrics():
 
     assert result.batch.records[0].status == EvaluationStatus.FAILED
     assert "omitted configured metrics" in result.batch.records[0].error
+
+
+def test_computed_evaluator_enriches_candidate_with_artifact_manifest():
+    class ArtifactRunner:
+        async def run(self, _candidate, **_kwargs):
+            return ScriptResultManifest(
+                status="ok",
+                metrics={"structure_signal": 0.6},
+                artifacts=[
+                    {
+                        "path": "visualization.png",
+                        "role": "primary",
+                        "media_type": "image/png",
+                    }
+                ],
+            )
+
+    candidate = {"id": "idea-a", "idea": "A"}
+    evaluator = ComputedEvaluator(
+        ComputedComponentConfig(
+            id="render-and-score",
+            runner_ref="isolated-prime-v1",
+            metric_names=["structure_signal"],
+        )
+    )
+
+    result = asyncio.run(
+        evaluator.evaluate_population([candidate], ArtifactRunner())
+    )
+
+    assert result.batch.records[0].metrics == {"structure_signal": 0.6}
+    assert candidate["artifact_outputs"]["render-and-score"] == [
+        {
+            "path": "visualization.png",
+            "role": "primary",
+            "media_type": "image/png",
+        }
+    ]

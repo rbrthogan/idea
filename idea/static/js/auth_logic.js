@@ -37,6 +37,37 @@ let idToken = null;
 const authContainer = document.getElementById('authContainer');
 let loginOverlay = document.getElementById('loginOverlay');
 
+function getSafeUserImageUrl(value, origin = window.location.origin) {
+    const fallback = '/static/img/logo.png';
+    const rawValue = String(value || '').trim();
+    if (!rawValue || rawValue.startsWith('//')) {
+        return fallback;
+    }
+    try {
+        const baseUrl = new URL(origin);
+        const parsedUrl = new URL(rawValue, baseUrl);
+        const isSameOriginHttp = parsedUrl.protocol === 'http:' && parsedUrl.origin === baseUrl.origin;
+        if (parsedUrl.protocol === 'https:' || isSameOriginHttp) {
+            return parsedUrl.href;
+        }
+    } catch (_) {
+        // Invalid or active URLs use the local inert fallback.
+    }
+    return fallback;
+}
+
+function isInternalRequestUrl(value, origin = window.location.origin) {
+    try {
+        const requestValue = typeof Request !== 'undefined' && value instanceof Request
+            ? value.url
+            : value;
+        const baseUrl = new URL(origin);
+        return new URL(String(requestValue), baseUrl).origin === baseUrl.origin;
+    } catch (_) {
+        return false;
+    }
+}
+
 // 3. Create Login Modal if missing
 if (!loginOverlay) {
     loginOverlay = document.createElement('div');
@@ -188,23 +219,31 @@ if (isDevAuthEnabled) {
 function renderUserUI(user) {
     if (!authContainer) return;
 
-    const photoURL = user.photoURL || 'https://via.placeholder.com/32';
-    const name = user.displayName || user.email;
+    const photoURL = getSafeUserImageUrl(user.photoURL);
+    const name = String(user.displayName || user.email || 'Signed-in user');
+    const email = String(user.email || '');
 
     authContainer.innerHTML = `
         <div class="dropdown">
             <button class="btn btn-link text-decoration-none dropdown-toggle d-flex align-items-center text-dark"
                     type="button" id="userDropdown" data-bs-toggle="dropdown" aria-expanded="false">
-                <img src="${photoURL}" alt="User" class="rounded-circle me-2 border" style="width: 32px; height: 32px; object-fit: cover;">
-                <span class="d-none d-md-block fw-bold small">${name}</span>
+                <img alt="User" class="rounded-circle me-2 border user-avatar" style="width: 32px; height: 32px; object-fit: cover;">
+                <span class="d-none d-md-block fw-bold small user-display-name"></span>
             </button>
             <ul class="dropdown-menu dropdown-menu-end shadow border-0" aria-labelledby="userDropdown">
-                <li><h6 class="dropdown-header text-truncate" style="max-width: 200px;">${user.email}</h6></li>
+                <li><h6 class="dropdown-header text-truncate user-email" style="max-width: 200px;"></h6></li>
                 <li><hr class="dropdown-divider"></li>
-                <li><a class="dropdown-item text-danger" href="#" onclick="signOut()"><i class="fas fa-sign-out-alt me-2"></i>Sign Out</a></li>
+                <li><a class="dropdown-item text-danger sign-out-link" href="#"><i class="fas fa-sign-out-alt me-2"></i>Sign Out</a></li>
             </ul>
         </div>
     `;
+    authContainer.querySelector('.user-avatar').src = photoURL;
+    authContainer.querySelector('.user-display-name').textContent = name;
+    authContainer.querySelector('.user-email').textContent = email;
+    authContainer.querySelector('.sign-out-link').addEventListener('click', event => {
+        event.preventDefault();
+        signOut();
+    });
 
     window.signOut = signOut;
 }
@@ -212,9 +251,9 @@ function renderUserUI(user) {
 // 7. Monkey-patch Fetch to inject Token
 const originalFetch = window.fetch;
 window.fetch = async function (url, options = {}) {
-    // Only intercept internal API calls
-    // (Assuming relative URLs or same domain)
-    const isInternal = url.toString().startsWith('/') || url.toString().includes(window.location.origin);
+    // Only same-origin requests may receive the bearer token. Substring checks
+    // are unsafe because an attacker URL can include our origin in its path.
+    const isInternal = isInternalRequestUrl(url);
 
     if (isInternal && window.currentUser) {
         // Refresh token if potentially expired? (Firebase SDK handles internal caching, getIdToken() manages refresh)

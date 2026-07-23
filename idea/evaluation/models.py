@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from enum import Enum
-from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import (
@@ -31,9 +30,8 @@ Identifier = Annotated[
 class ComponentKind(str, Enum):
     LLM_PAIRWISE = "llm_pairwise"
     EMBEDDING_DIVERSITY = "embedding_diversity"
-    PYTHON_METRIC = "python_metric"
+    COMPUTED = "computed"
     LLM_CODE_ARTIFACT = "llm_code_artifact"
-    LLM_ARTIFACT_SCORE = "llm_artifact_score"
 
 
 class EvaluationScope(str, Enum):
@@ -55,11 +53,6 @@ class EvaluationStatus(str, Enum):
     CACHED = "cached"
     FAILED = "failed"
     SKIPPED = "skipped"
-
-
-class MetricDirection(str, Enum):
-    MAXIMIZE = "maximize"
-    MINIMIZE = "minimize"
 
 
 class MetricNormalization(str, Enum):
@@ -123,13 +116,21 @@ class EmbeddingDiversityComponentConfig(BaseComponentConfig):
     metric_name: Identifier = "diversity"
 
 
-class PythonMetricComponentConfig(BaseComponentConfig):
-    kind: Literal[ComponentKind.PYTHON_METRIC] = ComponentKind.PYTHON_METRIC
+class ComputedComponentConfig(BaseComponentConfig):
+    """Numeric evidence supplied through an injected execution boundary.
+
+    The runner may use a checked-in function, an isolated script, an external
+    scientific tool, or an LLM. The engine only accepts its declared finite
+    metrics, and every metric must already use the convention that larger is
+    fitter.
+    """
+
+    kind: Literal[ComponentKind.COMPUTED] = ComponentKind.COMPUTED
     scope: EvaluationScope = EvaluationScope.CANDIDATE
-    script_ref: str = Field(min_length=1, max_length=512)
-    execution_profile: Identifier = "python-metric-v1"
+    runner_ref: Identifier = "injected"
     metric_names: List[Identifier] = Field(min_length=1)
     timeout_seconds: float = Field(default=30.0, gt=0, le=3600)
+    parameters: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("metric_names")
     @classmethod
@@ -138,52 +139,52 @@ class PythonMetricComponentConfig(BaseComponentConfig):
             raise ValueError("metric_names must be unique")
         return values
 
-    @field_validator("script_ref")
-    @classmethod
-    def validate_script_reference(cls, value: str) -> str:
-        normalized = value.replace("\\", "/")
-        windows_path = PureWindowsPath(value)
-        posix_path = PurePosixPath(normalized)
-        if (
-            "\x00" in value
-            or posix_path.is_absolute()
-            or windows_path.is_absolute()
-            or bool(windows_path.drive)
-            or any(part in {"", ".", ".."} for part in normalized.split("/"))
-            or not normalized.endswith(".py")
-        ):
-            raise ValueError(
-                "script_ref must be a traversal-free relative .py reference"
-            )
-        return normalized
-
 
 class LLMCodeArtifactComponentConfig(BaseComponentConfig):
+    """Produce one rendered PNG and its Python source through an injected runner.
+
+    Schema version 1 intentionally fixes the built-in implementation to Gemini
+    3.6 Flash Code Execution.  Other execution systems can implement the same
+    runner protocol, but callers must inject both the runner and an
+    ``ArtifactStore`` explicitly.
+    """
+
     kind: Literal[ComponentKind.LLM_CODE_ARTIFACT] = ComponentKind.LLM_CODE_ARTIFACT
     scope: EvaluationScope = EvaluationScope.CANDIDATE
-    model: Optional[str] = None
+    model: Literal["gemini-3.6-flash"] = "gemini-3.6-flash"
     execution_profile: Identifier
     artifact_role: Identifier = "primary"
     source_role: Identifier = "source"
-    timeout_seconds: float = Field(default=30.0, gt=0, le=3600)
+    metadata_role: Identifier = "metadata"
+    timeout_seconds: float = Field(default=30.0, gt=0, le=30.0)
+    max_output_tokens: int = Field(default=8192, ge=512, le=32768)
+    max_png_bytes: int = Field(default=5 * 1024 * 1024, ge=8, le=25 * 1024 * 1024)
+    max_source_bytes: int = Field(default=512 * 1024, ge=1, le=2 * 1024 * 1024)
 
-
-class LLMArtifactScoreComponentConfig(BaseComponentConfig):
-    kind: Literal[ComponentKind.LLM_ARTIFACT_SCORE] = ComponentKind.LLM_ARTIFACT_SCORE
-    scope: EvaluationScope = EvaluationScope.CANDIDATE
-    model: Optional[str] = None
-    artifact_role: Identifier = "primary"
-    metric_name: Identifier = "artifact_score"
-    rubric: Optional[str] = Field(default=None, max_length=50_000)
+    @model_validator(mode="after")
+    def validate_artifact_roles(self) -> "LLMCodeArtifactComponentConfig":
+        roles = [self.artifact_role, self.source_role, self.metadata_role]
+        if len(roles) != len(set(roles)):
+            raise ValueError("artifact, source, and metadata roles must be distinct")
+        declared_artifact_keys = {
+            evidence for evidence in self.provides if evidence.startswith("artifact.")
+        }
+        supported_artifact_keys = {f"artifact.{role}" for role in roles}
+        unsupported = sorted(declared_artifact_keys - supported_artifact_keys)
+        if unsupported:
+            raise ValueError(
+                "artifact provides must match configured output roles: "
+                + ", ".join(unsupported)
+            )
+        return self
 
 
 EvaluationComponentConfig = Annotated[
     Union[
         LLMPairwiseComponentConfig,
         EmbeddingDiversityComponentConfig,
-        PythonMetricComponentConfig,
+        ComputedComponentConfig,
         LLMCodeArtifactComponentConfig,
-        LLMArtifactScoreComponentConfig,
     ],
     Field(discriminator="kind"),
 ]
@@ -195,7 +196,7 @@ class MetricConfig(VersionedModel):
     component_id: Identifier
     metric_name: Identifier
     weight: float = Field(default=1.0, ge=0)
-    direction: MetricDirection = MetricDirection.MAXIMIZE
+    direction: Literal["maximize"] = "maximize"
     normalization: MetricNormalization = MetricNormalization.MIN_MAX
     bounds: Optional[Tuple[float, float]] = None
     clamp: bool = True
@@ -267,6 +268,48 @@ class EvaluationSuiteConfig(VersionedModel):
                 )
 
         components_by_id = {component.id: component for component in self.components}
+        pairwise_index = next(
+            (
+                index
+                for index, component in enumerate(self.components)
+                if component.enabled and component.kind == ComponentKind.LLM_PAIRWISE
+            ),
+            None,
+        )
+        if pairwise_index is not None:
+            late_pre_judge_components = [
+                component.id
+                for index, component in enumerate(self.components)
+                if component.enabled
+                and component.kind
+                in {ComponentKind.LLM_CODE_ARTIFACT, ComponentKind.COMPUTED}
+                and index > pairwise_index
+            ]
+            if late_pre_judge_components:
+                raise ValueError(
+                    "pre-judge producers and computed evaluators must precede "
+                    "the llm_pairwise judge so declared execution order is "
+                    "preserved: "
+                    + ", ".join(late_pre_judge_components)
+                )
+
+        provided_evidence: set[str] = set()
+        for component in self.components:
+            if not component.enabled:
+                continue
+            missing_artifacts = [
+                requirement
+                for requirement in component.requires
+                if requirement.startswith("artifact.")
+                and requirement not in provided_evidence
+            ]
+            if missing_artifacts:
+                raise ValueError(
+                    f"component {component.id!r} requires artifact evidence before "
+                    "it is produced: " + ", ".join(missing_artifacts)
+                )
+            provided_evidence.update(component.provides)
+
         for metric in self.fitness.metrics:
             component = components_by_id.get(metric.component_id)
             if component is None:
@@ -283,10 +326,8 @@ class EvaluationSuiteConfig(VersionedModel):
                 (LLMPairwiseComponentConfig, EmbeddingDiversityComponentConfig),
             ):
                 emitted_metrics = {component.metric_name}
-            elif isinstance(component, PythonMetricComponentConfig):
+            elif isinstance(component, ComputedComponentConfig):
                 emitted_metrics = set(component.metric_names)
-            elif isinstance(component, LLMArtifactScoreComponentConfig):
-                emitted_metrics = {component.metric_name}
             else:
                 emitted_metrics = set()
             if metric.metric_name not in emitted_metrics:

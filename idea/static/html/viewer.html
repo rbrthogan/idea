@@ -144,7 +144,7 @@
             <!-- Lower-priority utilities -->
             <div class="sidebar-utility-section">
               <div class="list-group list-group-flush border-top border-bottom utility-links">
-                <a href="https://github.com/rbrthogan/idea/issues/new" target="_blank"
+                <a href="https://github.com/rbrthogan/idea/issues/new" target="_blank" rel="noopener noreferrer"
                   class="list-group-item list-group-item-action d-flex align-items-center py-2 px-0 border-0 bg-transparent">
                   <i class="fab fa-github me-2 text-muted" style="width: 20px; text-align: center;"></i>
                   <span>Report a Bug</span>
@@ -283,6 +283,28 @@
                 <input type="range" class="form-range" min="0.25" max="3" step="0.25" id="tournamentCount" value="1"
                   oninput="document.getElementById('tournamentCountValue').textContent = parseFloat(this.value).toFixed(2)">
                 <small class="text-muted">1.00 = full Swiss tournament (pop size − 1 rounds). Fractions run proportional rounds.</small>
+              </div>
+
+              <h6 class="mb-3 mt-4">Evaluation Evidence</h6>
+
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch"
+                    id="enableVisualizationArtifacts"
+                    aria-describedby="visualizationArtifactsHelp"
+                    {% if not gemini_code_artifacts_enabled %}disabled{% endif %}>
+                  <label class="form-check-label" for="enableVisualizationArtifacts">
+                    Generate visualization artifacts
+                  </label>
+                </div>
+                <small class="text-muted" id="visualizationArtifactsHelp">
+                  {% if gemini_code_artifacts_enabled %}
+                  Uses Gemini 3.6 Flash remote Code Execution to attach one PNG and its source to each idea,
+                  then gives the matching images to the ordinary pairwise judge. This adds model cost.
+                  {% else %}
+                  Disabled by the server. Set IDEA_ENABLE_GEMINI_CODE_ARTIFACTS=true and restart to opt in.
+                  {% endif %}
+                </small>
               </div>
 
               <h6 class="mb-3 mt-4">Breeding Controls</h6>
@@ -479,9 +501,6 @@
                   </div>
 
                   <div class="d-grid gap-2">
-                    <button class="btn btn-outline-secondary" id="copyApiKeyBtn">
-                      <i class="fas fa-copy me-2"></i>Copy Key
-                    </button>
                     <button class="btn btn-outline-danger" id="deleteApiKeyBtn" type="button">
                       <i class="fas fa-trash-alt me-2"></i>Delete Key
                     </button>
@@ -518,7 +537,7 @@
             </h3>
             <p class="text-muted mb-4">Pick one path to start. You can switch anytime.</p>
 
-            <div class="template-flow-toggle mb-4" role="tablist" aria-label="Template setup mode">
+            <div class="template-flow-toggle mb-4" role="group" aria-label="Template setup mode">
               <button type="button" class="btn btn-outline-primary active" id="modeUseExistingBtn"
                 onclick="setTemplateFlowMode('browse', { focusSearch: true })" aria-pressed="true">
                 <i class="fas fa-folder-open me-2"></i>Use Existing
@@ -575,21 +594,21 @@
               <div class="mt-3 text-center">
                 <small class="text-muted">
                   <strong>Try:</strong>
-                  <span class="example-link"
+                  <button type="button" class="example-link"
                     onclick="setEntryText('Arduino project ideas for beginners using only common components under $20 - outline only')">Arduino
-                    projects</span>
-                  <span class="example-link"
+                    projects</button>
+                  <button type="button" class="example-link"
                     onclick="setEntryText('New and original concept for a superhero characters - short pitch')">Superhero
-                    character design</span>
-                  <span class="example-link"
+                    character design</button>
+                  <button type="button" class="example-link"
                     onclick="setEntryText('Interesting Math problems solvable by high schoolers in under 5 minutes with elegant solutions')">Math
-                    problems</span>
-                  <span class="example-link"
+                    problems</button>
+                  <button type="button" class="example-link"
                     onclick="setEntryText('Surprising Python code optimization tips demonstrable in under 10 lines of code')">Code
-                    optimizations</span>
-                  <span class="example-link"
+                    optimizations</button>
+                  <button type="button" class="example-link"
                     onclick="setEntryText('Home science experiments using only kitchen materials and measurable results')">Kitchen
-                    science</span>
+                    science</button>
 
                 </small>
               </div>
@@ -599,7 +618,7 @@
             <div id="generationStatus" class="mt-3" style="display: none;">
               <div class="alert" id="statusAlert">
                 <i class="fas fa-spinner fa-spin me-2" id="statusSpinner" style="display: none;"></i>
-                <span id="statusText"></span>
+                <span id="statusText" role="status" aria-live="polite" aria-atomic="true"></span>
               </div>
             </div>
 
@@ -717,18 +736,21 @@
             <span>Evolution View</span>
           </div>
           <div class="evolution-view-toggle" role="tablist" aria-label="Evolution view mode">
-            <button type="button" class="evolution-view-toggle-btn" data-view-mode="cards"
-              aria-selected="false">
+            <button type="button" class="evolution-view-toggle-btn" id="evolution-view-tab-cards"
+              data-view-mode="cards" role="tab" aria-controls="generations-container" aria-selected="false"
+              tabindex="-1">
               <i class="fas fa-table-cells-large"></i>
               <span>Cards</span>
             </button>
-            <button type="button" class="evolution-view-toggle-btn active" data-view-mode="tree"
-              aria-selected="true">
+            <button type="button" class="evolution-view-toggle-btn active" id="evolution-view-tab-tree"
+              data-view-mode="tree" role="tab" aria-controls="evolution-tree-container" aria-selected="true"
+              tabindex="0">
               <i class="fas fa-sitemap"></i>
               <span>Tree</span>
             </button>
-            <button type="button" class="evolution-view-toggle-btn" data-view-mode="ranked"
-              aria-selected="false">
+            <button type="button" class="evolution-view-toggle-btn" id="evolution-view-tab-ranked"
+              data-view-mode="ranked" role="tab" aria-controls="evolution-ranked-container" aria-selected="false"
+              tabindex="-1">
               <i class="fas fa-list-ol"></i>
               <span>Ranked</span>
             </button>
@@ -736,15 +758,18 @@
         </div>
 
         <!-- Generations will be rendered here -->
-        <div id="generations-container" class="generations-container">
+        <div id="generations-container" class="generations-container" role="tabpanel"
+          aria-labelledby="evolution-view-tab-cards">
           <!-- Generation content will be dynamically added here -->
         </div>
 
-        <div id="evolution-tree-container" class="evolution-tree-container" hidden>
+        <div id="evolution-tree-container" class="evolution-tree-container" role="tabpanel"
+          aria-labelledby="evolution-view-tab-tree" hidden>
           <!-- Evolution tree content will be dynamically added here -->
         </div>
 
-        <div id="evolution-ranked-container" class="evolution-ranked-container" hidden>
+        <div id="evolution-ranked-container" class="evolution-ranked-container" role="tabpanel"
+          aria-labelledby="evolution-view-tab-ranked" hidden>
           <!-- Ranked population content will be dynamically added here -->
         </div>
 
@@ -784,11 +809,11 @@
   </div>
 
   <!-- Contact Modal -->
-  <div class="modal fade" id="contactModal" tabindex="-1" aria-hidden="true">
+  <div class="modal fade" id="contactModal" tabindex="-1" aria-labelledby="contactModalLabel" aria-hidden="true">
     <div class="modal-dialog">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title">Contact Us</h5>
+          <h5 class="modal-title" id="contactModalLabel">Contact Us</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
@@ -819,11 +844,12 @@
   </div>
 
   <!-- Delete Key Confirmation Modal -->
-  <div class="modal fade" id="deleteKeyModal" tabindex="-1" aria-hidden="true">
+  <div class="modal fade" id="deleteKeyModal" tabindex="-1" aria-labelledby="deleteKeyModalLabel"
+    aria-hidden="true">
     <div class="modal-dialog">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title">Delete API Key</h5>
+          <h5 class="modal-title" id="deleteKeyModalLabel">Delete API Key</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
@@ -838,12 +864,13 @@
   </div>
 
   <!-- Save Modal -->
-  <div class="modal fade" id="saveDataModal" tabindex="-1">
+  <div class="modal fade" id="saveDataModal" tabindex="-1" aria-labelledby="saveDataModalLabel"
+    aria-hidden="true">
     <div class="modal-dialog">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title">Save Evolution Results</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          <h5 class="modal-title" id="saveDataModalLabel">Save Evolution Results</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
           <div class="mb-3">
@@ -868,14 +895,33 @@
           <h5 class="modal-title" id="ideaModalLabel">Idea Title</h5>
           <div class="d-flex align-items-start ms-auto">
             <button type="button" id="copyIdeaButton" class="btn btn-outline-secondary btn-sm me-2"
-              title="Copy raw markdown">
+              title="Copy raw markdown" aria-label="Copy raw idea markdown">
               <i class="fa-regular fa-copy"></i>
             </button>
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
         </div>
         <div class="modal-body">
-          <div id="ideaModalContent" class="idea-content markdown-content"></div>
+          <div id="ideaModalTabs" class="idea-reader-tabs" role="tablist" aria-label="Idea details" hidden>
+            <button type="button" role="tab" data-idea-modal-tab="overview" aria-controls="ideaModalOverview"
+              aria-selected="true" tabindex="0">Overview</button>
+            <button type="button" role="tab" data-idea-modal-tab="artifacts" aria-controls="ideaModalArtifacts"
+              aria-selected="false" tabindex="-1" hidden>Artifacts</button>
+            <button type="button" role="tab" data-idea-modal-tab="code" aria-controls="ideaModalCode"
+              aria-selected="false" tabindex="-1" hidden>Code &amp; run</button>
+            <button type="button" role="tab" data-idea-modal-tab="evaluations" aria-controls="ideaModalEvaluations"
+              aria-selected="false" tabindex="-1" hidden>Evaluations</button>
+          </div>
+          <section id="ideaModalOverview" class="idea-reader-panel" role="tabpanel" data-idea-modal-panel="overview">
+            <div id="ideaModalPrimaryArtifact" class="idea-primary-artifact" hidden></div>
+            <div id="ideaModalContent" class="idea-content markdown-content"></div>
+          </section>
+          <section id="ideaModalArtifacts" class="idea-reader-panel" role="tabpanel"
+            data-idea-modal-panel="artifacts" hidden></section>
+          <section id="ideaModalCode" class="idea-reader-panel" role="tabpanel" data-idea-modal-panel="code" hidden>
+          </section>
+          <section id="ideaModalEvaluations" class="idea-reader-panel" role="tabpanel"
+            data-idea-modal-panel="evaluations" hidden></section>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
@@ -886,11 +932,12 @@
   </div>
 
   <!-- Welcome Modal -->
-  <div class="modal fade" id="welcomeModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static">
+  <div class="modal fade" id="welcomeModal" tabindex="-1" aria-labelledby="welcomeModalLabel" aria-hidden="true"
+    data-bs-backdrop="static">
     <div class="modal-dialog modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header border-0 pb-0">
-          <h5 class="modal-title">Welcome!</h5>
+          <h5 class="modal-title" id="welcomeModalLabel">Welcome!</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body pt-2">
@@ -1171,12 +1218,15 @@
       if (evolutionId) {
         // This would load the historical evolution data
         // For now, just show that we're in evolution mode
-        document.getElementById('generations-container').innerHTML = `
-          <div class="alert alert-info">
-            <i class="fas fa-info-circle me-2"></i>
-            Loading evolution ${evolutionId}... (Historical evolution viewing to be implemented)
-          </div>
-        `;
+        const container = document.getElementById('generations-container');
+        const notice = document.createElement('div');
+        notice.className = 'alert alert-info';
+        const icon = document.createElement('i');
+        icon.className = 'fas fa-info-circle me-2';
+        notice.append(icon, document.createTextNode(
+          `Loading evolution ${evolutionId}... (Historical evolution viewing to be implemented)`
+        ));
+        container.replaceChildren(notice);
       }
     }
 
@@ -1252,7 +1302,7 @@
 
     function showStatusInSettings(msg, type) {
       const el = document.getElementById('settingsStatus');
-      el.className = `alert alert-${type}`;
+      el.className = `alert alert-${normalizeTemplateAlertType(type)}`;
       el.textContent = msg;
       el.style.display = 'block';
     }
@@ -1313,15 +1363,6 @@
     let currentMainPageFilter = 'all';
     let currentMainPageSearch = '';
 
-    function escapeHtmlMainPage(value) {
-      return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
-
     function displayExistingTemplates(templates) {
       allMainPageTemplates = templates;
       renderFilteredTemplates();
@@ -1345,12 +1386,10 @@
         if (!template.error) {
           const isCore = isCoreTemplate(id, template);
           const templateName = template.name || id;
-          const escapedTemplateName = escapeHtmlMainPage(templateName);
-          const description = template.description || '';
+          const description = String(template.description || '');
           const truncatedDescription = description.substring(0, 180);
-          const escapedDescription = escapeHtmlMainPage(description);
           const isSelected = document.getElementById('ideaType')?.value === id;
-          const descriptionForDisplay = isSelected ? escapedDescription : `${escapeHtmlMainPage(truncatedDescription)}${description.length > 180 ? '...' : ''}`;
+          const descriptionForDisplay = isSelected ? description : `${truncatedDescription}${description.length > 180 ? '...' : ''}`;
           const row = document.createElement('div');
           row.className = `template-library-row ${isSelected ? 'template-row-selected' : ''}`;
           row.setAttribute('role', 'button');
@@ -1361,22 +1400,30 @@
             <div class="template-library-col template-library-col-name">
               <div class="template-name-cell">
                 <div class="template-name-line">
-                  <span class="template-name">${escapedTemplateName}</span>
+                  <span class="template-name"></span>
                   ${isCore ? '<span class="template-type-badge template-type-core">Core</span>' : '<span class="template-type-badge template-type-custom">Custom</span>'}
                 </div>
               </div>
             </div>
             <div class="template-library-col template-library-col-description">
-              <p class="template-description mb-0" title="${escapedDescription}">${descriptionForDisplay}</p>
+              <p class="template-description mb-0"></p>
             </div>
             <div class="template-library-col template-library-col-actions">
               <div class="template-action-group" role="group" aria-label="Template actions">
-                <button class="btn btn-sm template-manage-btn" onclick="event.stopPropagation(); editTemplateMainPage('${id}')">
+                <button type="button" class="btn btn-sm template-manage-btn">
                   <i class="fas fa-edit me-1"></i>${isCore ? 'Customize' : 'Edit'}
                 </button>
               </div>
             </div>
           `;
+          row.querySelector('.template-name').textContent = templateName;
+          const descriptionElement = row.querySelector('.template-description');
+          descriptionElement.textContent = descriptionForDisplay;
+          descriptionElement.title = description;
+          row.querySelector('.template-manage-btn').addEventListener('click', event => {
+            event.stopPropagation();
+            editTemplateMainPage(id);
+          });
           row.addEventListener('click', () => selectExistingTemplate(id, templateName));
           row.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') {
@@ -1614,19 +1661,32 @@
       }
     }
 
+    function getTemplatePreviewDisplay(template) {
+      const criteria = Array.isArray(template?.comparison_criteria)
+        ? template.comparison_criteria.map(value => String(value ?? ''))
+        : [];
+      return {
+        name: String(template?.name ?? 'Untitled template'),
+        description: String(template?.description ?? ''),
+        itemType: String(template?.metadata?.item_type ?? ''),
+        criteria: `${criteria.slice(0, 2).join(', ')}${criteria.length > 2 ? '...' : ''}`
+      };
+    }
+
     function showTemplatePreview(template) {
       const preview = document.getElementById('templatePreview');
       const content = document.getElementById('templatePreviewContent');
+      const display = getTemplatePreviewDisplay(template);
 
       // Show key details about the generated template
       content.innerHTML = `
         <div class="row mb-3">
           <div class="col-md-8">
-            <h5 class="text-success">${template.name}</h5>
-            <p class="text-muted mb-2">${template.description}</p>
+            <h5 class="text-success template-preview-name"></h5>
+            <p class="text-muted mb-2 template-preview-description"></p>
             <small class="text-muted">
-              <strong>Item Type:</strong> ${template.metadata.item_type} |
-              <strong>Criteria:</strong> ${template.comparison_criteria.slice(0, 2).join(', ')}${template.comparison_criteria.length > 2 ? '...' : ''}
+              <strong>Item Type:</strong> <span class="template-preview-item-type"></span> |
+              <strong>Criteria:</strong> <span class="template-preview-criteria"></span>
             </small>
           </div>
           <div class="col-md-4">
@@ -1639,6 +1699,10 @@
           </div>
         </div>
       `;
+      content.querySelector('.template-preview-name').textContent = display.name;
+      content.querySelector('.template-preview-description').textContent = display.description;
+      content.querySelector('.template-preview-item-type').textContent = display.itemType;
+      content.querySelector('.template-preview-criteria').textContent = display.criteria;
 
       preview.style.display = 'block';
     }
@@ -1754,13 +1818,19 @@
       setTemplateFlowMode('browse');
     }
 
+    function normalizeTemplateAlertType(type) {
+      const allowedTypes = new Set(['danger', 'info', 'success', 'warning']);
+      const normalized = type === 'error' ? 'danger' : String(type || '').toLowerCase();
+      return allowedTypes.has(normalized) ? normalized : 'info';
+    }
+
     function showStatus(message, type) {
       const statusDiv = document.getElementById('generationStatus');
       const alertDiv = document.getElementById('statusAlert');
       const textSpan = document.getElementById('statusText');
 
-      alertDiv.className = `alert alert-${type}`;
-      textSpan.innerHTML = message;
+      alertDiv.className = `alert alert-${normalizeTemplateAlertType(type)}`;
+      textSpan.textContent = message;
       statusDiv.style.display = 'block';
     }
 
@@ -1769,44 +1839,49 @@
     }
 
     function showSimpleAlert(message, type) {
-      const alertClass = type === 'error' ? 'danger' : type;
-      const icon = type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle';
+      const alertClass = normalizeTemplateAlertType(type);
+      const icon = alertClass === 'success'
+        ? 'check-circle'
+        : alertClass === 'danger'
+          ? 'exclamation-circle'
+          : 'info-circle';
 
       // Generate a unique ID for this alert
       const alertId = 'alert-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
 
-      const alertHtml = `
-        <div id="${alertId}" class="alert alert-${alertClass} alert-dismissible fade show position-fixed"
-             style="top: 20px; right: 20px; z-index: 9999; max-width: 400px;">
-          <i class="fas fa-${icon} me-2"></i>${message}
-          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
-      `;
-
-      document.body.insertAdjacentHTML('beforeend', alertHtml);
+      const alertElement = document.createElement('div');
+      alertElement.id = alertId;
+      alertElement.className = `alert alert-${alertClass} alert-dismissible fade show position-fixed`;
+      alertElement.style.cssText = 'top: 20px; right: 20px; z-index: 9999; max-width: 400px;';
+      const iconElement = document.createElement('i');
+      iconElement.className = `fas fa-${icon} me-2`;
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'btn-close';
+      closeButton.setAttribute('data-bs-dismiss', 'alert');
+      closeButton.setAttribute('aria-label', 'Close');
+      alertElement.append(iconElement, document.createTextNode(String(message ?? '')), closeButton);
+      document.body.appendChild(alertElement);
 
       // Auto-dismiss after 4 seconds
       const timeoutId = setTimeout(() => {
-        const alertElement = document.getElementById(alertId);
-        if (alertElement) {
+        const currentAlert = document.getElementById(alertId);
+        if (currentAlert) {
           // Use Bootstrap's fade out animation
-          alertElement.classList.remove('show');
+          currentAlert.classList.remove('show');
           // Remove from DOM after animation completes
           setTimeout(() => {
-            if (alertElement.parentNode) {
-              alertElement.parentNode.removeChild(alertElement);
+            if (currentAlert.parentNode) {
+              currentAlert.parentNode.removeChild(currentAlert);
             }
           }, 150); // Bootstrap fade transition is 150ms
         }
       }, 4000);
 
       // Clear timeout if user manually closes the alert
-      const alertElement = document.getElementById(alertId);
-      if (alertElement) {
-        alertElement.addEventListener('closed.bs.alert', () => {
-          clearTimeout(timeoutId);
-        });
-      }
+      alertElement.addEventListener('closed.bs.alert', () => {
+        clearTimeout(timeoutId);
+      });
     }
     // Template editing functions for main page
     let currentEditingTemplateId = null;
@@ -1817,7 +1892,7 @@
       currentEditingTemplateIsSystem = false;
 
       try {
-        const response = await fetch(`/api/templates/${templateId}`);
+        const response = await fetch(`/api/templates/${encodeURIComponent(templateId)}`);
         const data = await response.json();
 
         if (data.status === 'success') {
@@ -1920,12 +1995,18 @@
       const container = document.getElementById('editCriteriaContainer');
       const criterionDiv = document.createElement('div');
       criterionDiv.className = 'input-group mb-2';
-      criterionDiv.innerHTML = `
-        <input type="text" class="form-control criterion-input" placeholder="e.g., originality, feasibility, clarity" value="${value}">
-        <button class="btn btn-outline-danger" type="button" onclick="this.parentElement.remove()">
-          <i class="fas fa-times"></i>
-        </button>
-      `;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'form-control criterion-input';
+      input.placeholder = 'e.g., originality, feasibility, clarity';
+      input.value = String(value ?? '');
+      const removeButton = document.createElement('button');
+      removeButton.className = 'btn btn-outline-danger';
+      removeButton.type = 'button';
+      removeButton.setAttribute('aria-label', 'Remove criterion');
+      removeButton.innerHTML = '<i class="fas fa-times"></i>';
+      removeButton.addEventListener('click', () => criterionDiv.remove());
+      criterionDiv.append(input, removeButton);
       container.appendChild(criterionDiv);
     }
 
@@ -2005,7 +2086,7 @@
       try {
         const wasUpdate = !!currentEditingTemplateId;
         const url = currentEditingTemplateId
-          ? `/api/templates/${currentEditingTemplateId}`
+          ? `/api/templates/${encodeURIComponent(currentEditingTemplateId)}`
           : '/api/templates/';
         const method = currentEditingTemplateId ? 'PUT' : 'POST';
 
@@ -2058,7 +2139,7 @@
 
       try {
         const deletingTemplateId = currentEditingTemplateId;
-        const response = await fetch(`/api/templates/${currentEditingTemplateId}`, {
+        const response = await fetch(`/api/templates/${encodeURIComponent(currentEditingTemplateId)}`, {
           method: 'DELETE'
         });
 
@@ -2096,14 +2177,15 @@
   </script>
 
   <!-- Template Edit Modal -->
-  <div class="modal fade" id="templateEditModal" tabindex="-1">
+  <div class="modal fade" id="templateEditModal" tabindex="-1" aria-labelledby="templateEditModalTitle"
+    aria-hidden="true">
     <div class="modal-dialog modal-xl">
       <div class="modal-content">
         <div class="modal-header">
           <h5 class="modal-title" id="templateEditModalTitle">
             <i class="fas fa-edit me-2"></i>Edit Template
           </h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
           <form id="templateEditForm">

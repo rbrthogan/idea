@@ -13,7 +13,6 @@ from .models import (
     FitnessContributionStatus,
     FitnessScore,
     MetricConfig,
-    MetricDirection,
     MetricNormalization,
 )
 
@@ -164,11 +163,7 @@ class FitnessAggregator:
                     normalized_value = float(
                         record.normalized_metrics[metric.metric_name]
                     )
-                    score_value = (
-                        normalized_value
-                        if metric.direction == MetricDirection.MAXIMIZE
-                        else 1.0 - normalized_value
-                    )
+                    score_value = normalized_value
                 else:
                     score_value = self._normalize_metric(
                         metric,
@@ -256,11 +251,7 @@ class FitnessAggregator:
         observed_range: Optional[Tuple[float, float]],
     ) -> float:
         if metric.normalization == MetricNormalization.NONE:
-            return (
-                raw_value
-                if metric.direction == MetricDirection.MAXIMIZE
-                else -raw_value
-            )
+            return raw_value
 
         if metric.normalization == MetricNormalization.RUNNING_ZSCORE:
             raise FitnessAggregationError(
@@ -284,6 +275,4 @@ class FitnessAggregator:
             if metric.clamp:
                 normalized = max(0.0, min(1.0, normalized))
 
-        if metric.direction == MetricDirection.MINIMIZE:
-            normalized = 1.0 - normalized
         return normalized
