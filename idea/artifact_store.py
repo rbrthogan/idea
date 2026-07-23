@@ -37,6 +37,7 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _KEY_RE = re.compile(r"art-sha256-([0-9a-f]{64})\Z")
 _HEX_PAIR_RE = re.compile(r"[0-9a-f]{2}\Z")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
+_IGNORABLE_METADATA_NAMES = frozenset({".DS_Store"})
 
 _MEDIA_TYPE_BY_EXTENSION = {
     ".json": "application/json",
@@ -740,9 +741,23 @@ class ArtifactStore:
     def _total_size_locked(self) -> int:
         self._assert_directory(self._objects_root)
         total = 0
+
+        def metadata_size(entry: os.DirEntry[str]) -> int | None:
+            if entry.name not in _IGNORABLE_METADATA_NAMES:
+                return None
+            if not entry.is_file(follow_symlinks=False):
+                raise ArtifactIntegrityError(
+                    "artifact store contains an unexpected object entry"
+                )
+            return entry.stat(follow_symlinks=False).st_size
+
         try:
             first_level = list(os.scandir(self._objects_root))
             for first in first_level:
+                ignored_size = metadata_size(first)
+                if ignored_size is not None:
+                    total += ignored_size
+                    continue
                 if not _HEX_PAIR_RE.fullmatch(first.name) or not first.is_dir(
                     follow_symlinks=False
                 ):
@@ -750,6 +765,10 @@ class ArtifactStore:
                         "artifact store contains an unexpected object entry"
                     )
                 for second in os.scandir(first.path):
+                    ignored_size = metadata_size(second)
+                    if ignored_size is not None:
+                        total += ignored_size
+                        continue
                     if not _HEX_PAIR_RE.fullmatch(second.name) or not second.is_dir(
                         follow_symlinks=False
                     ):
@@ -757,6 +776,10 @@ class ArtifactStore:
                             "artifact store contains an unexpected object entry"
                         )
                     for item in os.scandir(second.path):
+                        ignored_size = metadata_size(item)
+                        if ignored_size is not None:
+                            total += ignored_size
+                            continue
                         if (
                             not _DIGEST_RE.fullmatch(item.name)
                             or not item.name.startswith(first.name + second.name)

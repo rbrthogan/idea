@@ -86,6 +86,40 @@ def test_content_deduplication_does_not_consume_total_limit_twice(
     assert len(list((store.root / "objects" / "sha256").glob("*/*/*"))) == 1
 
 
+def test_macos_metadata_does_not_block_artifact_imports(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    first_contents = b"first artifact"
+    second_contents = b"second artifact"
+    (job_dir / "first.txt").write_bytes(first_contents)
+    (job_dir / "second.txt").write_bytes(second_contents)
+    store = ArtifactStore(tmp_path / "store")
+    objects_root = store.root / "objects" / "sha256"
+    (objects_root / ".DS_Store").write_bytes(b"a")
+
+    first = store.import_file(job_dir, "first.txt")
+    first_digest = str(first["sha256"])
+    first_level = objects_root / first_digest[:2]
+    second_level = first_level / first_digest[2:4]
+    (first_level / ".DS_Store").write_bytes(b"bb")
+    (second_level / ".DS_Store").write_bytes(b"ccc")
+
+    second = store.import_file(job_dir, "second.txt")
+
+    assert second["size_bytes"] == len(second_contents)
+    assert store.total_size_bytes() == (
+        len(first_contents) + len(second_contents) + 1 + 2 + 3
+    )
+
+
+def test_macos_metadata_name_must_still_be_a_regular_file(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "store")
+    (store.root / "objects" / "sha256" / ".DS_Store").mkdir()
+
+    with pytest.raises(ArtifactIntegrityError):
+        store.total_size_bytes()
+
+
 @pytest.mark.parametrize(
     "manifest_path",
     [
