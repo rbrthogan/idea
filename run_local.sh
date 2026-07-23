@@ -6,6 +6,7 @@
 #
 # Prerequisites:
 # - Firebase CLI installed: npm install -g firebase-tools
+# - Java JDK 21+ installed for the Firestore emulator
 # - Firebase emulator initialized: firebase init emulators
 # - Or: GOOGLE_APPLICATION_CREDENTIALS set for remote Firestore access
 
@@ -83,23 +84,62 @@ if [ "$USE_EMULATOR" = true ]; then
         echo -e "${YELLOW}Falling back to remote Firestore...${NC}"
         USE_EMULATOR=false
     else
+        # macOS ships a /usr/bin/java launcher even when no Java runtime is
+        # installed, so checking command -v alone is insufficient.
+        if ! java -version >/dev/null 2>&1; then
+            echo -e "${RED}A working Java JDK is required by the Firestore emulator.${NC}" >&2
+            echo -e "${YELLOW}Install JDK 21 or later, then confirm that 'java -version' succeeds.${NC}" >&2
+            echo -e "${YELLOW}Download: https://adoptium.net/temurin/releases/?version=21${NC}" >&2
+            exit 1
+        fi
+
+        FIREBASE_EMULATOR_PROJECT_ID="${FIREBASE_EMULATOR_PROJECT_ID:-demo-idea-evolution}"
+        export GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT:-$FIREBASE_EMULATOR_PROJECT_ID}"
+        export GCLOUD_PROJECT="${GCLOUD_PROJECT:-$GOOGLE_CLOUD_PROJECT}"
+        export FIRESTORE_EMULATOR_HOST="${FIRESTORE_EMULATOR_HOST:-127.0.0.1:8080}"
+
+        # Local emulator runs use the loopback-only, non-admin auth shim. It
+        # issues an ephemeral bearer token to the same-origin browser.
+        export IDEA_DEV_AUTH="${IDEA_DEV_AUTH:-1}"
+
         echo -e "${GREEN}Starting Firebase emulators...${NC}"
 
         # Start emulator in background
-        firebase emulators:start --only firestore &
+        firebase emulators:start --only firestore --project "$GOOGLE_CLOUD_PROJECT" &
         EMULATOR_PID=$!
 
-        # Wait for emulator to start
-        sleep 5
+        cleanup_emulator() {
+            if kill -0 "$EMULATOR_PID" 2>/dev/null; then
+                echo "Stopping emulator..."
+                kill "$EMULATOR_PID" 2>/dev/null || true
+                wait "$EMULATOR_PID" 2>/dev/null || true
+            fi
+        }
+        trap cleanup_emulator EXIT INT TERM
 
-        # Set emulator host
-        export FIRESTORE_EMULATOR_HOST="localhost:8080"
+        # Fail before starting the app if Firebase exits during startup.
+        STARTUP_ATTEMPTS=0
+        while [ "$STARTUP_ATTEMPTS" -lt 30 ]; do
+            if ! kill -0 "$EMULATOR_PID" 2>/dev/null; then
+                wait "$EMULATOR_PID" 2>/dev/null || true
+                echo -e "${RED}Firestore emulator failed to start; see the Firebase output above.${NC}" >&2
+                exit 1
+            fi
+            if curl --silent --output /dev/null --max-time 1 "http://${FIRESTORE_EMULATOR_HOST}/"; then
+                break
+            fi
+            STARTUP_ATTEMPTS=$((STARTUP_ATTEMPTS + 1))
+            sleep 1
+        done
 
-        echo -e "${GREEN}Firestore emulator running at localhost:8080${NC}"
+        if [ "$STARTUP_ATTEMPTS" -ge 30 ]; then
+            echo -e "${RED}Timed out waiting for Firestore at ${FIRESTORE_EMULATOR_HOST}.${NC}" >&2
+            exit 1
+        fi
+
+        echo -e "${GREEN}Firestore emulator running at ${FIRESTORE_EMULATOR_HOST}${NC}"
         echo -e "${GREEN}Emulator UI available at http://localhost:4000${NC}"
-
-        # Trap to kill emulator on exit
-        trap "echo 'Stopping emulator...'; kill $EMULATOR_PID 2>/dev/null" EXIT
+        echo -e "${GREEN}Loopback development authentication enabled (non-admin).${NC}"
     fi
 fi
 

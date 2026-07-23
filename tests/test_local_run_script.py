@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -44,6 +45,43 @@ def test_local_run_script_visual_artifact_flag_sets_safe_environment():
         'export IDEA_ARTIFACT_STORE_ROOT="${IDEA_ARTIFACT_STORE_ROOT:-${PWD}/data/artifacts}"'
         in script
     )
+
+
+def test_local_run_script_preflights_and_waits_for_firestore_emulator():
+    script = Path("run_local.sh").read_text()
+
+    assert "java -version" in script
+    assert "JDK 21 or later" in script
+    assert '--project "$GOOGLE_CLOUD_PROJECT"' in script
+    assert 'kill -0 "$EMULATOR_PID"' in script
+    assert '"http://${FIRESTORE_EMULATOR_HOST}/"' in script
+
+
+def test_local_run_script_reports_missing_java_before_starting_app(tmp_path):
+    for command, exit_code in (("uv", 0), ("firebase", 0), ("java", 1)):
+        executable = tmp_path / command
+        executable.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+        executable.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", "run_local.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 1
+    assert "A working Java JDK is required" in result.stderr
+    assert "Starting FastAPI development server" not in result.stdout
+
+
+def test_local_run_script_enables_non_admin_dev_auth_for_emulator():
+    script = Path("run_local.sh").read_text()
+
+    assert 'export IDEA_DEV_AUTH="${IDEA_DEV_AUTH:-1}"' in script
+    assert "IDEA_DEV_AUTH_ADMIN" not in script
+    assert 'IDEA_BIND_HOST="${IDEA_BIND_HOST:-127.0.0.1}"' in script
 
 
 def test_local_run_script_rejects_unknown_flags():

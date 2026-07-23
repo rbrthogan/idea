@@ -54,9 +54,12 @@ IDEA_DEV_AUTH=1 uv run uvicorn idea.viewer:app --host 127.0.0.1 --port 8000
 
 The development shim uses a per-process random bearer token and is non-admin by
 default; set `IDEA_DEV_AUTH_ADMIN=1` only when admin testing is required.
-`run_local.sh` also binds to `127.0.0.1` unless `IDEA_BIND_HOST` is explicitly
-set. Browser access is same-origin by default; a separate frontend must be
-allow-listed with comma-separated `IDEA_CORS_ORIGINS`.
+`run_local.sh` enables this shim automatically when it starts the Firestore
+emulator, and binds to `127.0.0.1` unless `IDEA_BIND_HOST` is explicitly set.
+The emulator requires a working Java JDK; install JDK 21+ to remain compatible
+with current and upcoming Firestore emulator releases. Browser access is
+same-origin by default; a separate frontend must be allow-listed with
+comma-separated `IDEA_CORS_ORIGINS`.
 
 Local JSON exports are stored in an opaque per-user directory under
 `data/local-users/`. Root-level `data/*.json` files are not exposed through the
