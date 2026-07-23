@@ -139,7 +139,9 @@ The first remote producer should be narrower than a general shell agent:
   prompt, and callers must not put secrets in candidate text;
 - deterministic Matplotlib/Pillow-only output requirements;
 - exactly one bounded primary PNG plus Python source and bounded JSON metadata;
-- at most 30 seconds, 8,192 output tokens by default, and one requested render;
+- a 180-second end-to-end interaction timeout by default (configurable up to
+  300 seconds), while each provider-managed code execution remains limited to
+  30 seconds; 8,192 output tokens by default; and one requested render;
 - validate decoded PNG bytes and dimensions through `ArtifactStore` before
   attaching the opaque artifact reference to the candidate;
 - persist generated source, model ID, prompt digest, usage, and result digest;

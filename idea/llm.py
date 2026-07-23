@@ -1013,12 +1013,40 @@ class Formatter(LLMWrapper):
             temperature=0.7
         )
 
+        fallback_title = "Untitled"
         fallback_idea_text = ""
         if isinstance(idea_text, str):
             fallback_idea_text = idea_text.strip()
+            source_lines = fallback_idea_text.splitlines()
+            for index, line in enumerate(source_lines):
+                stripped = line.strip()
+                if stripped.startswith("Title:"):
+                    source_title = stripped.removeprefix("Title:").strip()
+                    if source_title:
+                        fallback_title = source_title
+                    for content_index in range(index + 1, len(source_lines)):
+                        content_line = source_lines[content_index].strip()
+                        if content_line.startswith("Content:"):
+                            inline_content = content_line.removeprefix("Content:").strip()
+                            remaining_content = source_lines[content_index + 1 :]
+                            fallback_idea_text = "\n".join(
+                                ([inline_content] if inline_content else [])
+                                + remaining_content
+                            ).strip()
+                            break
+                    break
+                if stripped.startswith("# "):
+                    fallback_title = stripped.removeprefix("# ").strip() or fallback_title
+                    break
         elif hasattr(idea_text, "content"):
+            fallback_title = str(
+                getattr(idea_text, "title", "") or fallback_title
+            ).strip()
             fallback_idea_text = str(getattr(idea_text, "content", "") or "").strip()
         elif isinstance(idea_text, dict):
+            fallback_title = str(
+                idea_text.get("title") or fallback_title
+            ).strip()
             fallback_idea_text = str(
                 idea_text.get("content")
                 or idea_text.get("idea")
@@ -1056,9 +1084,11 @@ class Formatter(LLMWrapper):
             print(f"FORMATTER: JSON parsing failed: {e}")
             print(f"FORMATTER: Raw response: {response}")
 
-            # Fallback: Try to extract title and content manually
-            title = "Untitled"
-            content = response.strip()
+            # A malformed structured response is not a safe replacement for the
+            # complete upstream idea. Start from the source and only replace it
+            # when the response can be recovered unambiguously.
+            title = fallback_title
+            content = fallback_idea_text
 
             # If raw response is just JSON-like but failed parsing, try to clean it
             if response.strip().startswith('{') and response.strip().endswith('}'):
@@ -1068,9 +1098,9 @@ class Formatter(LLMWrapper):
                      # Basic fix for unescaped newlines in JSON values
                      cleaned = re.sub(r'(?<=: ")(.*?)(?=")', lambda m: m.group(1).replace('\n', '\\n'), response, flags=re.DOTALL)
                      data = json.loads(cleaned)
-                     if 'title' in data:
+                     if data.get('title'):
                          title = data['title']
-                     if 'content' in data:
+                     if data.get('content'):
                          content = data['content']
                      # If successful, create idea and return
                      if content and content.strip():

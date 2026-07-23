@@ -37,6 +37,7 @@ from .models import (
     EvaluationBatch,
     EvaluationRecord,
     EvaluationStatus,
+    FailurePolicy,
     LLMCodeArtifactComponentConfig,
 )
 
@@ -479,15 +480,21 @@ class GeminiCodeExecutionRunner:
                 timeout=float(config.timeout_seconds),
             )
 
+        request_timeout = float(config.timeout_seconds)
+        outer_deadline = asyncio.get_running_loop().time() + request_timeout + 5.0
+
+        def remaining_timeout() -> float:
+            return max(0.001, outer_deadline - asyncio.get_running_loop().time())
+
         try:
             interaction = await asyncio.wait_for(
                 asyncio.to_thread(create_interaction),
-                timeout=float(config.timeout_seconds) + 5.0,
+                timeout=remaining_timeout(),
             )
             if inspect.isawaitable(interaction):
                 interaction = await asyncio.wait_for(
                     interaction,
-                    timeout=float(config.timeout_seconds) + 5.0,
+                    timeout=remaining_timeout(),
                 )
         except asyncio.TimeoutError as exc:
             raise ArtifactProductionError("Gemini Code Execution request timed out") from exc
@@ -774,6 +781,11 @@ class LLMCodeArtifactProducer:
                 )
             attach_evaluation_record(candidate, record)
             records.append(record)
+            if (
+                record.status == EvaluationStatus.FAILED
+                and self.config.failure_policy == FailurePolicy.FAIL_RUN
+            ):
+                break
 
         return PopulationEvaluationResult(
             scores={},

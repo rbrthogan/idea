@@ -275,6 +275,26 @@ def test_artifact_dependencies_must_be_provided_in_declared_order():
 
 
 def test_code_artifact_schema_fixes_model_and_distinct_roles():
+    default_component = LLMCodeArtifactComponentConfig(
+        id="render",
+        execution_profile="gemini-code-execution-v1",
+    )
+    assert default_component.timeout_seconds == 180.0
+
+    bounded_component = LLMCodeArtifactComponentConfig(
+        id="render",
+        execution_profile="gemini-code-execution-v1",
+        timeout_seconds=300,
+    )
+    assert bounded_component.timeout_seconds == 300
+
+    with pytest.raises(ValidationError, match="less than or equal to 300"):
+        LLMCodeArtifactComponentConfig(
+            id="render",
+            execution_profile="gemini-code-execution-v1",
+            timeout_seconds=301,
+        )
+
     with pytest.raises(ValidationError, match="gemini-3.6-flash"):
         LLMCodeArtifactComponentConfig(
             id="render",

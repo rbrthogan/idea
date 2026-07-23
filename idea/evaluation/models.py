@@ -156,7 +156,11 @@ class LLMCodeArtifactComponentConfig(BaseComponentConfig):
     artifact_role: Identifier = "primary"
     source_role: Identifier = "source"
     metadata_role: Identifier = "metadata"
-    timeout_seconds: float = Field(default=30.0, gt=0, le=30.0)
+    # Remote code execution commonly needs longer than an ordinary model call:
+    # the provider must generate, execute, and render the proposed program
+    # before returning its artifacts. Keep the limit bounded, but allow enough
+    # time for a normal render to complete.
+    timeout_seconds: float = Field(default=180.0, gt=0, le=300.0)
     max_output_tokens: int = Field(default=8192, ge=512, le=32768)
     max_png_bytes: int = Field(default=5 * 1024 * 1024, ge=8, le=25 * 1024 * 1024)
     max_source_bytes: int = Field(default=512 * 1024, ge=1, le=2 * 1024 * 1024)

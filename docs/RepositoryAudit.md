@@ -226,7 +226,8 @@ steps across threads.
 ### Generated execution remains a deliberately narrow backend
 
 The Gemini reference runner is fixed to Gemini 3.6 Flash Code Execution,
-disabled by default, capped at 30 seconds/8,192 output tokens, requests
+disabled by default, capped at a 180-second interaction timeout (configurable
+up to 300 seconds) and 8,192 output tokens, requests
 non-stored interactions, accepts exactly one bounded PNG, and never executes
 returned Python locally. This is appropriate for the first visualization
 experiment, not an arbitrary simulator.

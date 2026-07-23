@@ -133,6 +133,7 @@ def test_gemini_runner_is_opt_in_and_uses_only_code_execution_tool():
     assert call["tools"] == [{"type": "code_execution"}]
     assert call["generation_config"] == {"max_output_tokens": 8192}
     assert call["store"] is False
+    assert call["timeout"] == 180.0
     assert "conflicting instructions" in call["system_instruction"]
     assert set(call) == {
         "model",
@@ -441,6 +442,44 @@ def test_fail_run_artifact_error_is_reported_before_pairwise_judging(tmp_path):
         population[0]["evaluations"]["render"]["error"]
         == "provider rejected the artifact request"
     )
+
+
+def test_fail_run_artifact_error_stops_before_next_candidate(tmp_path):
+    class _CountingFailingRunner:
+        def __init__(self):
+            self.candidate_ids = []
+
+        async def run(self, _candidate, **kwargs):
+            self.candidate_ids.append(kwargs["candidate_id"])
+            raise RuntimeError("provider rejected the artifact request")
+
+    runner = _CountingFailingRunner()
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        evaluation_config={
+            "allow_generated_code_execution": True,
+            "components": [_artifact_config()],
+            "fitness": {"enabled": False, "metrics": []},
+        },
+        evaluation_runners={"render": runner},
+        artifact_store=ArtifactStore(tmp_path / "artifact-store"),
+    )
+    population = [
+        {"id": "candidate-a", "idea": {"title": "A", "content": "alpha"}},
+        {"id": "candidate-b", "idea": {"title": "B", "content": "beta"}},
+    ]
+
+    with pytest.raises(RuntimeError, match="provider rejected"):
+        asyncio.run(
+            engine._prepare_population_for_judging(
+                population,
+                evaluation_generation=0,
+            )
+        )
+
+    assert runner.candidate_ids == ["candidate-a"]
+    assert "evaluations" not in population[1]
 
 
 def test_rerunning_producer_replaces_same_producer_refs_and_ids(tmp_path):

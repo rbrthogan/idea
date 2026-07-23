@@ -699,3 +699,38 @@ def test_formatter_recovers_empty_response_with_source_idea_text():
 
     assert result["idea"].title == "Untitled"
     assert result["idea"].content == "Original idea body from upstream generation"
+
+
+def test_formatter_recovers_truncated_json_from_complete_source_idea():
+    formatter = create_formatter()
+    prompts = SimpleNamespace(FORMAT_PROMPT="FORMAT:{input_text}")
+    source = (
+        "Title: Modular Newton Dynamics\n\n"
+        "Content:\n"
+        "# Modular Newton Dynamics\n\n"
+        "Complete proposal body with equations and an artifact manifest."
+    )
+
+    with patch("idea.llm.get_prompts", return_value=prompts), patch.object(
+        Formatter,
+        "generate_text",
+        return_value=(
+            '{"title":"Modular Newton Dynamics",'
+            '"content":"# Modular Newton Dynamics\\n\\nTruncated'
+        ),
+    ):
+        result = formatter.format_idea(
+            {
+                "id": "idea-1",
+                "idea": source,
+                "parent_ids": [],
+            },
+            "airesearch",
+        )
+
+    assert result["idea"].title == "Modular Newton Dynamics"
+    assert result["idea"].content == (
+        "# Modular Newton Dynamics\n\n"
+        "Complete proposal body with equations and an artifact manifest."
+    )
+    assert "Truncated" not in result["idea"].content
