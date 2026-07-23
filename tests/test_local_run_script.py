@@ -55,6 +55,10 @@ def test_local_run_script_preflights_and_waits_for_firestore_emulator():
     assert '--project "$GOOGLE_CLOUD_PROJECT"' in script
     assert 'kill -0 "$EMULATOR_PID"' in script
     assert '"http://${FIRESTORE_EMULATOR_HOST}/"' in script
+    assert "Reusing existing Firestore emulator" in script
+    assert script.index("Reusing existing Firestore emulator") < script.index(
+        "firebase emulators:start"
+    )
 
 
 def test_local_run_script_reports_missing_java_before_starting_app(tmp_path):
