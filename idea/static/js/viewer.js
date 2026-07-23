@@ -925,6 +925,17 @@ async function restoreCurrentEvolution() {
                 }
 
                 if (generationsData && generationsData.length > 0) {
+                    // Artifact URLs are derived while cards render, so restore
+                    // the owning run identity before creating any card DOM.
+                    currentEvolutionId = evolutionState?.evolution_id
+                        || evolutionState?.evolutionId
+                        || serverProgressData?.evolution_id
+                        || null;
+                    currentEvolutionName = evolutionState?.evolution_name
+                        || evolutionState?.evolutionName
+                        || serverProgressData?.evolution_name
+                        || null;
+
                     // Render the generations
                     renderGenerations(generationsData);
                     const restoredVersion = Number.isInteger(evolutionState?.history_version)
@@ -945,8 +956,8 @@ async function restoreCurrentEvolution() {
 
                     // Set up currentEvolutionData for download functionality
                     currentEvolutionData = {
-                        evolution_id: evolutionState.evolution_id || serverProgressData?.evolution_id || null,
-                        evolution_name: evolutionState.evolution_name || serverProgressData?.evolution_name || null,
+                        evolution_id: currentEvolutionId,
+                        evolution_name: currentEvolutionName,
                         history: generationsData,
                         history_version: restoredVersion,
                         diversity_history: diversityData,
@@ -4589,6 +4600,17 @@ async function loadHistoryItemData(item) {
                     evolutionData = cachedEvolution;
                 }
                 if (evolutionData && evolutionData.history) {
+                    // Set identity before rendering because artifact previews
+                    // build authenticated URLs synchronously during card creation.
+                    currentEvolutionId = data.id || evolutionData.evolution_id || item.id;
+                    currentEvolutionName = data.name
+                        || evolutionData.evolution_name
+                        || evolutionData.name
+                        || item.display_name
+                        || null;
+                    evolutionData.evolution_id = currentEvolutionId;
+                    evolutionData.evolution_name = currentEvolutionName;
+
                     if (evolutionData.config) {
                         item.config = evolutionData.config;
                         item.can_use_config = true;

@@ -80,6 +80,8 @@ def _restore_completed_evolution_from_local_storage(stored_state, progress_respo
     bundle = _extract_function_bundle(script, "restoreCurrentEvolution", "function setupDownloadButton")
     node_script = f"""
 let currentEvolutionData = null;
+let currentEvolutionId = 'stale-evolution';
+let currentEvolutionName = 'Stale evolution';
 let contexts = [];
 let specificPrompts = [];
 let breedingPrompts = [];
@@ -121,7 +123,9 @@ restoreCurrentEvolution().then((restored) => {{
     renderedHistory,
     chartArgs,
     pollingStarted,
-    currentEvolutionData
+    currentEvolutionData,
+    currentEvolutionId,
+    currentEvolutionName
   }}));
 }});
 """
@@ -273,6 +277,8 @@ def test_live_diversity_update_reuses_last_rendered_history_when_progress_omits_
 
 def test_completed_evolution_restore_uses_local_storage_without_active_run():
     stored_state = {
+        "evolution_id": "saved-evolution",
+        "evolution_name": "Saved evolution",
         "history": [[{"generation_metrics": {"0": {"fitness": 0.5, "elo": 1500, "diversity": 0.2}}}]],
         "history_version": 4,
         "diversity_history": [{"generation": 0, "diversity_score": 0.2}],
@@ -290,6 +296,8 @@ def test_completed_evolution_restore_uses_local_storage_without_active_run():
     assert restored["chartArgs"]["generationHistory"] == stored_state["history"]
     assert restored["chartArgs"]["islandDiversityHistory"] == stored_state["island_diversity_history"]
     assert restored["pollingStarted"] is False
+    assert restored["currentEvolutionId"] == "saved-evolution"
+    assert restored["currentEvolutionName"] == "Saved evolution"
 
 
 def test_fitness_plot_preserves_island_diversity_series():

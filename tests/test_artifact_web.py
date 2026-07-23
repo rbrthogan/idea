@@ -170,4 +170,16 @@ def test_viewer_exposes_server_gated_artifact_opt_in(monkeypatch):
     viewer_js = Path("idea/static/js/viewer.js").read_text()
     assert "buildVisualizationArtifactEvaluation" in viewer_js
     assert "requestBody.evaluation" in viewer_js
+
+
+def test_saved_evolution_identity_is_set_before_artifact_cards_render():
+    viewer_js = Path("idea/static/js/viewer.js").read_text()
+    history_loader = viewer_js.split("async function loadHistoryItemData", 1)[1]
+    history_loader = history_loader.split("async function handleHistoryResume", 1)[0]
+
+    identity_assignment = "currentEvolutionId = data.id || evolutionData.evolution_id || item.id;"
+    assert identity_assignment in history_loader
+    assert history_loader.index(identity_assignment) < history_loader.index(
+        "renderGenerations(evolutionData.history);"
+    )
     assert "requires: ['artifact.primary']" in viewer_js
