@@ -550,7 +550,7 @@
             const value = document.createElement('span');
             value.textContent = metric.value === null ? metric.status : metric.value.toLocaleString(undefined, { maximumFractionDigits: 4 });
             const description = document.createElement('small');
-            const weight = metric.weight === null ? 'weight unspecified' : `weight ${metric.weight}`;
+            const weight = metric.weight === null ? 'weight unspecified' : `weight ${Number(metric.weight.toFixed(4))}`;
             description.textContent = `${metric.evaluator} · ${metric.status} · ${metric.direction === 'maximize' ? 'higher is better' : metric.direction} · ${weight}${metric.normalization ? ` · ${metric.normalization.replace(/_/g, ' ')}` : ''}`;
             row.append(title, value, description);
             if (metric.reason) {

@@ -8,9 +8,9 @@
   <title>IDEA — Evolution studio</title>
 
   <!-- Favicon -->
-  <link rel="icon" href="/static/img/favicon.ico?v=0.2.0-rc.12" sizes="16x16 32x32 48x48">
-  <link rel="icon" href="/static/img/favicon.svg?v=0.2.0-rc.12" type="image/svg+xml" sizes="any">
-  <link rel="apple-touch-icon" href="/static/img/apple-touch-icon.png?v=0.2.0-rc.12">
+  <link rel="icon" href="/static/img/favicon.ico?v=0.2.0-rc.13" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="/static/img/favicon.svg?v=0.2.0-rc.13" type="image/svg+xml" sizes="any">
+  <link rel="apple-touch-icon" href="/static/img/apple-touch-icon.png?v=0.2.0-rc.13">
 
   <!-- Google Font -->
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -22,8 +22,8 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
 
   <!-- Custom CSS -->
-  <link rel="stylesheet" href="/static/css/viewer.css?v=0.2.0-rc.12" />
-  <link rel="stylesheet" href="/static/css/workbench.css?v=0.2.0-rc.12" />
+  <link rel="stylesheet" href="/static/css/viewer.css?v=0.2.0-rc.13" />
+  <link rel="stylesheet" href="/static/css/workbench.css?v=0.2.0-rc.13" />
 
   <!-- Firebase SDK (for cloud deployment) -->
   <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
@@ -1060,7 +1060,7 @@
             <button type="button" role="tab" data-idea-modal-tab="code" aria-controls="ideaModalCode"
               aria-selected="false" tabindex="-1" hidden>Code &amp; run</button>
             <button type="button" role="tab" data-idea-modal-tab="evaluations" aria-controls="ideaModalEvaluations"
-              aria-selected="false" tabindex="-1" hidden>Evaluations</button>
+              aria-selected="false" tabindex="-1" hidden>Scores</button>
           </div>
           <section id="ideaModalOverview" class="idea-reader-panel" role="tabpanel" data-idea-modal-panel="overview">
             <div id="ideaModalPrimaryArtifact" class="idea-primary-artifact" hidden></div>
@@ -2929,15 +2929,15 @@
   </div>
 
   <!-- Include original viewer.js for evolution functionality -->
-  <script src="/static/js/auth.js?v=0.2.0-rc.12"></script>
+  <script src="/static/js/auth.js?v=0.2.0-rc.13"></script>
   <script>
     window.IDEA_DEV_AUTH = {{ dev_auth_config | tojson }};
     window.IDEA_DEFAULT_MODEL = {{ default_model | tojson }};
     window.IDEA_THINKING_MODEL_CONFIG = {{ thinking_config | tojson }};
   </script>
-  <script src="/static/js/workbench.js?v=0.2.0-rc.12"></script>
-  <script src="/static/js/auth_logic.js?v=0.2.0-rc.12"></script>
-  <script src="/static/js/viewer.js?v=0.2.0-rc.12"></script>
+  <script src="/static/js/workbench.js?v=0.2.0-rc.13"></script>
+  <script src="/static/js/auth_logic.js?v=0.2.0-rc.13"></script>
+  <script src="/static/js/viewer.js?v=0.2.0-rc.13"></script>
 </body>
 
 </html>

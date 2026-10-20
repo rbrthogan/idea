@@ -3108,9 +3108,7 @@ small {
 }
 
 .idea-evaluation-card dl {
-  display: grid;
-  grid-template-columns: minmax(7rem, auto) 1fr;
-  gap: 0.3rem 0.75rem;
+  display: block;
   margin: 0;
   font-size: 0.84rem;
 }
@@ -3118,11 +3116,17 @@ small {
 .idea-evaluation-card dt {
   color: var(--text-muted);
   font-weight: 600;
+  margin-top: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
+.idea-evaluation-card dt:first-child { margin-top: 0; }
+
 .idea-evaluation-card dd {
-  margin: 0;
+  margin: 0.2rem 0 0;
+  min-width: 0;
   overflow-wrap: anywhere;
+  line-height: 1.6;
 }
 
 .idea-card-artifact {
