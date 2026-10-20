@@ -289,6 +289,27 @@
         }
     }
 
+    function providerKeySaveNotice(provider, freshStatus) {
+        const name = providerName(provider);
+        if (!freshStatus) return {
+            type: 'warning',
+            message: `${name} key was saved, but its status could not be refreshed. Reopen Settings to retry.`
+        };
+        const status = freshStatus.api_keys?.[provider];
+        if (status?.error_code === 'stored_key_unreadable') return {
+            type: 'warning',
+            message: status.message || `The saved ${name} key cannot be opened. Reopen Settings to check it.`
+        };
+        if (status?.configured === true) return {
+            type: 'success',
+            message: `${name} API key saved.`
+        };
+        return {
+            type: 'warning',
+            message: `The save was accepted, but no usable ${name} key was found. Reopen Settings to check it.`
+        };
+    }
+
     async function saveSharedKey() {
         const input = document.getElementById('apiKeyInput');
         if (!input?.value.trim()) {
@@ -320,10 +341,12 @@
                 const status = await loadProviderSettings(true);
                 renderSharedKeySettings(status);
                 await window.checkApiKeyStatus?.();
-                showSharedKeyError(new Error(`${providerName(provider)} key saved. You can use this provider in your next run.`), 'success');
+                const notice = providerKeySaveNotice(provider, status);
+                showSharedKeyError(new Error(notice.message), notice.type);
             } catch (_) {
                 if (owner !== (window.currentUser?.uid || 'local')) return;
-                showSharedKeyError(new Error(`${providerName(provider)} key was saved, but its status could not be refreshed. Reopen provider settings to check it.`), 'warning');
+                const notice = providerKeySaveNotice(provider, null);
+                showSharedKeyError(new Error(notice.message), notice.type);
             }
         } catch (error) {
             if (owner === (window.currentUser?.uid || 'local')) showSharedKeyError(error);
@@ -801,5 +824,5 @@
         narrow.addEventListener('change', () => { syncSidebar(); syncInspector(); });
     });
 
-    window.IdeaWorkbench = { finite, providerName, modelProvider, preferredModel, selectedProvider, setProviderSettings, providerSettingsSnapshot: () => providerSettings, loadProviderSettings, updateProviderReadiness, configureModelPicker, selectModel, openProviderSettings, renderSharedKeySettings, editProviderKey, cancelProviderKeyEdit, money, billingCoverageText, renderBilling, showCosts, historySamplingNotice, renderHistorySamplingNote, metricEvidence, renderMetrics, renderPrimaryArtifact, openInspector, closeInspector, closeSidebar, selectSidebarView, renderChartTable };
+    window.IdeaWorkbench = { finite, providerName, providerKeySaveNotice, modelProvider, preferredModel, selectedProvider, setProviderSettings, providerSettingsSnapshot: () => providerSettings, loadProviderSettings, updateProviderReadiness, configureModelPicker, selectModel, openProviderSettings, renderSharedKeySettings, editProviderKey, cancelProviderKeyEdit, money, billingCoverageText, renderBilling, showCosts, historySamplingNotice, renderHistorySamplingNote, metricEvidence, renderMetrics, renderPrimaryArtifact, openInspector, closeInspector, closeSidebar, selectSidebarView, renderChartTable };
 })();

@@ -202,6 +202,74 @@ process.stdout.write(JSON.stringify({ pending, value: nodes.apiKeyInput.value, d
     assert result["display"] == "block"
 
 
+@pytest.mark.parametrize('flow', ['viewer', 'shared'])
+@pytest.mark.parametrize('provider', ['google_generative_ai', 'openai'])
+@pytest.mark.parametrize('outcome', ['ready', 'unreadable', 'missing', 'unknown', 'failed'])
+def test_key_save_only_reports_success_after_fresh_selected_provider_confirmation(flow, provider, outcome):
+    viewer = (ROOT / 'idea/static/js/viewer.js').read_text()
+    start = viewer.index('let settingsStatusVersion')
+    viewer_flow = viewer[start:viewer.index('/**\n * Delete API Key', start)]
+    result = run_shared(
+        'const flow=' + json.dumps(flow) + ', provider=' + json.dumps(provider)
+        + ', outcome=' + json.dumps(outcome) + ';\n' + """
+['view-settings', 'apiKeyInput', 'saveSettingsBtn', 'apiKeyProviderSelect', 'cancelApiKeyEdit',
+ 'settingsStatus', 'apiKeyInputContainer', 'apiKeyConfiguredContainer'].forEach(id => nodes[id] = makeNode());
+nodes.apiKeyInput.value = 'synthetic-key';
+nodes.apiKeyProviderSelect.value = provider;
+nodes.saveSettingsBtn.textContent = nodes.saveSettingsBtn.innerHTML = 'Save key';
+document.body = { dataset: { sharedKeySettings: 'true' }, classList: { toggle() {} } };
+document.querySelector = () => null;
+document.querySelectorAll = () => [];
+const other = provider === 'openai' ? 'google_generative_ai' : 'openai';
+// A prior successful check or a ready other provider cannot establish this save.
+window.IdeaWorkbench.setProviderSettings({api_keys:{[provider]:{configured:true}}});
+const status = {api_keys:{[other]:{configured:true}}};
+if (outcome !== 'unknown') status.api_keys[provider] = {
+ configured: outcome === 'ready',
+ error_code: outcome === 'unreadable' ? 'stored_key_unreadable' : undefined,
+ message: outcome === 'unreadable' ? 'Saved key cannot be opened. Check server configuration.' : undefined
+};
+const calls = [];
+global.fetch = async (url, options) => {
+ calls.push({url, method:options?.method || 'GET', body:options?.body && JSON.parse(options.body)});
+ if (options?.method === 'POST') return {ok:true,json:async()=>({status:'success'})};
+ if (outcome === 'failed') throw new Error('Offline');
+ return {ok:true,json:async()=>status};
+};
+function showStatusInSettings(message, type) {
+ nodes.settingsStatus.textContent = message;
+ nodes.settingsStatus.className = 'alert-' + type;
+ nodes.settingsStatus.hidden = false;
+}
+const loadExecutionSettings = force => window.IdeaWorkbench.loadProviderSettings(force);
+const apiErrorMessage = (data, fallback) => data.message || fallback;
+""" + viewer_flow + """
+if (flow === 'shared') { readyCallbacks[0](); await nodes.saveSettingsBtn.listeners.click(); }
+else await saveSettings();
+process.stdout.write(JSON.stringify({
+ calls, message:nodes.settingsStatus.textContent, type:nodes.settingsStatus.className,
+ hidden:nodes.settingsStatus.hidden, value:nodes.apiKeyInput.value,
+ input:nodes.apiKeyInputContainer.style.display, configured:nodes.apiKeyConfiguredContainer.style.display
+}));
+"""
+    )
+    assert [call['method'] for call in result['calls']] == ['POST', 'GET']
+    assert result['calls'][0]['body'] == {'provider': provider, 'api_key': 'synthetic-key'}
+    assert result['hidden'] is False and result['value'] == ''
+    assert ('success' in result['type']) is (outcome == 'ready')
+    if outcome == 'ready':
+        assert 'API key saved.' in result['message']
+        assert result['configured'] == 'block'
+    else:
+        assert 'warning' in result['type']
+        if outcome == 'unreadable':
+            assert result['message'] == 'Saved key cannot be opened. Check server configuration.'
+        elif outcome == 'failed':
+            assert 'could not be refreshed' in result['message']
+        else:
+            assert 'no usable' in result['message']
+
+
 def test_sidebar_back_restores_the_control_that_opened_settings():
     result = run_shared("""
 let current = 'view-main';
