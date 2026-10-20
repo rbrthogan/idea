@@ -3302,11 +3302,39 @@ function geneStoryIds(candidate) {
         ? observation.genes.map(g => g.gene_id).filter(id => typeof id === 'string') : []);
 }
 
+function geneHistoryIdeas(gens) {
+    const ideas = new Map();
+    gens.forEach((population, generation) => (population || []).forEach((idea, slot) => {
+        const id = String(idea?.id ?? idea?.idea?.id ?? `unknown:${generation}:${slot}`);
+        ideas.set(id, {id, idea, generation, firstGeneration: ideas.get(id)?.firstGeneration ?? generation});
+    }));
+    return [...ideas.values()].sort((a, b) => a.firstGeneration - b.firstGeneration);
+}
+
+function geneExplorerCandidate(gens, state) {
+    if (!state.candidateId) return null;
+    const snapshot = gens[state.candidateGeneration]?.find(idea => String(idea?.id ?? idea?.idea?.id) === state.candidateId);
+    return snapshot ? {id: state.candidateId, idea: snapshot, generation: state.candidateGeneration}
+        : geneHistoryIdeas(gens).find(candidate => candidate.id === state.candidateId);
+}
+
+function geneExplorerCandidates(gens, row, state) {
+    const query = (state.ideaSearch || '').trim().toLocaleLowerCase();
+    if (query) return geneHistoryIdeas(gens).filter(candidate =>
+        String(getIdeaData(candidate.idea).title || 'Untitled').toLocaleLowerCase().includes(query));
+    // Hovering a gene previews it without replacing the selected idea's list.
+    return geneHistoryCarriers(gens, (state.candidateId && state.candidateGeneId) || row.id);
+}
+
 function changeGeneExplorerFocus(state, id, generation, mode = 'hover') {
-    if (mode === 'hover' && (state.pinnedGeneId || state.candidateId)) return false;
+    if (mode === 'hover' && state.pinnedGeneId) return false;
     state.focusId = id;
     state.focusGeneration = generation;
-    if (mode === 'pin') { state.pinnedGeneId = id; state.candidateId = null; }
+    state.previewGeneId = state.candidateId && mode !== 'pin' ? id : null;
+    if (mode === 'pin') {
+        state.pinnedGeneId = id; state.candidateId = null;
+        state.candidateGeneId = null; state.candidateGeneration = null;
+    }
     if (mode === 'keyboard' && state.pinnedGeneId) state.pinnedGeneId = id;
     return true;
 }
@@ -3314,21 +3342,36 @@ function changeGeneExplorerFocus(state, id, generation, mode = 'hover') {
 function clearGeneExplorerSelection(state) {
     state.pinnedGeneId = null;
     state.candidateId = null;
+    state.candidateGeneId = null;
+    state.candidateGeneration = null;
+    state.previewGeneId = null;
+}
+
+function endGeneExplorerPreview(state) {
+    if (!state.previewGeneId) return false;
+    state.previewGeneId = null;
+    if (state.candidateGeneId) state.focusId = state.candidateGeneId;
+    return true;
 }
 
 function renderGeneStories(candidates, row, state) {
-    return `<div class="gene-stories-heading"><h5>Ideas <span title="Unique carriers across all history">${candidates.length}</span></h5></div>
+    const searching = Boolean((state.ideaSearch || '').trim());
+    return `<div class="gene-stories-heading"><h5>Ideas <span title="${searching ? 'Matching ideas across all history' : 'Unique carriers across all history'}">${candidates.length}${searching ? ' found' : ''}</span></h5></div>
         <ul class="gene-story-list">${candidates.map((candidate, index) => {
             const title = getIdeaData(candidate.idea).title || 'Untitled';
-            return `<li class="is-carrier ${state.candidateId === candidate.id ? 'is-selected' : ''}">
+            return `<li class="${geneStoryIds(candidate).has(row.id) ? 'is-carrier' : ''} ${state.candidateId === candidate.id ? 'is-selected' : ''}">
                 <button type="button" class="gene-story-select" data-gene-story="${index}" aria-pressed="${state.candidateId === candidate.id}" title="${escapeHtml(title)}"><span class="gene-story-dot" aria-hidden="true"></span><span>${escapeHtml(title)}</span><span class="visually-hidden"> · highlight DNA</span></button>
-                <small class="gene-idea-generation" title="First observed carrying this gene in generation ${candidate.firstGeneration}">G${candidate.firstGeneration}</small>
+                <small class="gene-idea-generation" title="${searching ? 'First observed' : 'First observed carrying this gene'} in generation ${candidate.firstGeneration}">G${candidate.firstGeneration}</small>
                 <button type="button" class="gene-story-read" data-gene-story-read="${index}" aria-label="Read ${escapeHtml(title)}" title="Read idea">↗</button></li>`;
-        }).join('')}</ul>${candidates.length ? '' : '<p class="gene-explanation">No observed carriers.</p>'}`;
+        }).join('')}</ul>${candidates.length ? '' : `<p class="gene-explanation">${searching ? 'No matching ideas.' : 'No observed carriers.'}</p>`}`;
 }
 
 function geneExplorerHeading(row, candidates, state) {
     const candidate = candidates.find(c => c.id === state.candidateId);
+    if (candidate && state.previewGeneId) return {
+        name: row.label,
+        summary: `${geneStoryIds(candidate).has(row.id) ? 'In' : 'Not in'} selected idea · ${getIdeaData(candidate.idea).title || 'Untitled'}`
+    };
     return candidate ? {name: getIdeaData(candidate.idea).title || 'Untitled', summary: getGeneObservation(candidate.idea)?.status === 'ok' ? (geneStoryIds(candidate).size ? `DNA · ${geneStoryIds(candidate).size} mapped genes highlighted` : 'Gene mapping pending · use ↗ to inspect raw genes') : 'Gene analysis unavailable'}
         : {name: row.label, summary: `${state.pinnedGeneId ? 'Pinned · ' : ''}${row.unique} unique carrier${row.unique === 1 ? '' : 's'}`};
 }
@@ -3344,16 +3387,20 @@ function renderGeneHistory(history, state, gens = []) {
     const activeIndex = Math.max(0, model.tracks.findIndex(t => t.row.id === (state.pinnedGeneId || state.focusId || selectedGeneId)));
     const active = model.tracks[activeIndex].row;
     const generation = Math.max(0, Math.min(history.summaries.length - 1, state.focusGeneration ?? history.summaries.length - 1));
-    const candidates = geneHistoryCarriers(gens, active.id);
-    if (state.candidateId && !candidates.some(c => c.id === state.candidateId)) state.candidateId = null;
-    const dna = geneStoryIds(candidates.find(c => c.id === state.candidateId));
+    const candidate = geneExplorerCandidate(gens, state);
+    if (state.candidateId && !candidate) clearGeneExplorerSelection(state);
+    if (candidate && !state.candidateGeneId) state.candidateGeneId = active.id;
+    const candidates = geneExplorerCandidates(gens, active, state);
+    const dna = geneStoryIds(candidate);
     state.focusId = active.id; state.focusGeneration = generation;
-    const heading = geneExplorerHeading(active, candidates, state);
+    const heading = geneExplorerHeading(active, candidate ? [candidate] : [], state);
     return `<section class="gene-history" aria-label="Gene history" style="--gene-active-color:${geneThreadColor(active.id)}">
         <div class="gene-thread-toolbar"><p><strong>${model.tracks.length} genes</strong> · ${history.summaries.length} generation${history.summaries.length === 1 ? '' : 's'}</p>
             <div class="gene-thread-actions"><button type="button" id="gene-thread-pin" aria-pressed="${Boolean(state.pinnedGeneId)}">${state.pinnedGeneId ? 'Pinned' : 'Pin gene'}</button><button type="button" id="gene-thread-clear" ${state.pinnedGeneId || state.candidateId ? '' : 'disabled'}>Clear <kbd>Esc</kbd></button>
             <label><span class="visually-hidden">Find a gene</span><input id="gene-history-search" class="form-control form-control-sm" type="search" value="${escapeHtml(state.search)}" placeholder="Find a gene…" list="gene-thread-options"><datalist id="gene-thread-options">${model.tracks.map(t => `<option value="${escapeHtml(t.row.label)}"></option>`).join('')}</datalist></label></div></div>
-        <div class="gene-river-layout"><aside class="gene-stories" id="gene-thread-stories" aria-label="Ideas and their DNA">${renderGeneStories(candidates, active, state)}</aside><div class="gene-river-main">
+        <div class="gene-river-layout"><aside class="gene-stories" id="gene-thread-stories" aria-label="Ideas and their DNA">
+            <label class="gene-idea-search"><span class="visually-hidden">Search all ideas by title</span><input id="gene-idea-search" class="form-control form-control-sm" type="search" value="${escapeHtml(state.ideaSearch || '')}" placeholder="Find an idea…" autocomplete="off"></label>
+            <div id="gene-story-results">${renderGeneStories(candidates, active, state)}</div></aside><div class="gene-river-main">
             <div class="gene-thread-heading"><h4 id="gene-thread-name" aria-live="polite">${escapeHtml(heading.name)}</h4><p id="gene-thread-summary">${escapeHtml(heading.summary)}</p></div>
             <svg id="gene-thread-canvas" viewBox="0 0 ${model.width} ${model.height}" preserveAspectRatio="none" tabindex="0" role="group" aria-label="${model.tracks.length} gene paths. Arrow keys explore. Click or Enter pins a gene. Escape clears selection." style="height:${model.height}px">
                 ${model.generations.map(gen => `<path class="gene-thread-grid" d="M${model.x(gen)},22V${model.bottom + 4}"/><text class="gene-thread-axis-label" x="${model.x(gen)}" y="14" text-anchor="middle">Gen ${gen}</text>`).join('')}
@@ -3375,16 +3422,16 @@ function bindGeneThreads(container, history, state, gens) {
     let generation = state.focusGeneration ?? history.summaries.length - 1;
     const sync = () => {
         const row = model.tracks[activeIndex].row;
-        const candidates = geneHistoryCarriers(gens, row.id);
-        if (state.candidateId && !candidates.some(c => c.id === state.candidateId)) state.candidateId = null;
-        const dna = geneStoryIds(candidates.find(c => c.id === state.candidateId));
+        const candidates = geneExplorerCandidates(gens, row, state);
+        const candidate = geneExplorerCandidate(gens, state);
+        const dna = geneStoryIds(candidate);
         groups.forEach((group, index) => {
             group.classList.toggle('is-active', index === activeIndex);
             group.classList.toggle('is-dna', Boolean(state.candidateId) && dna.has(model.tracks[index].row.id));
             group.classList.toggle('is-dna-dimmed', Boolean(state.candidateId) && !dna.has(model.tracks[index].row.id));
         });
         if (groups[activeIndex]) canvas.append(groups[activeIndex]);
-        const heading = geneExplorerHeading(row, candidates, state);
+        const heading = geneExplorerHeading(row, candidate ? [candidate] : [], state);
         container.querySelector('#gene-thread-name').textContent = heading.name;
         container.querySelector('#gene-thread-summary').textContent = heading.summary;
         root.style.setProperty('--gene-active-color', geneThreadColor(row.id));
@@ -3392,7 +3439,9 @@ function bindGeneThreads(container, history, state, gens) {
         container.querySelector('#gene-thread-detail').innerHTML = renderGeneThreadDetail(row, generation);
         const stories = container.querySelector('#gene-thread-stories');
         const scroll = stories.querySelector('.gene-story-list')?.scrollTop || 0;
-        stories.innerHTML = renderGeneStories(candidates, row, state);
+        const results = stories.querySelector('#gene-story-results');
+        const html = renderGeneStories(candidates, row, state);
+        if (results.innerHTML !== html) results.innerHTML = html;
         if (stories.querySelector('.gene-story-list')) stories.querySelector('.gene-story-list').scrollTop = scroll;
         const pin = container.querySelector('#gene-thread-pin');
         pin.textContent = state.pinnedGeneId ? 'Pinned' : 'Pin gene';
@@ -3403,7 +3452,7 @@ function bindGeneThreads(container, history, state, gens) {
     const update = (index, gen, mode = 'hover') => {
         index = Math.max(0, Math.min(model.tracks.length - 1, index));
         gen = Math.max(0, Math.min(history.summaries.length - 1, gen));
-        if (mode === 'hover' && index === activeIndex && gen === generation) return;
+        if (mode === 'hover' && index === activeIndex && gen === generation && (!state.candidateId || state.previewGeneId)) return;
         if (!changeGeneExplorerFocus(state, model.tracks[index].row.id, gen, mode)) return;
         activeIndex = index; generation = gen;
         if (mode === 'pin') selectedGeneId = state.pinnedGeneId;
@@ -3418,8 +3467,15 @@ function bindGeneThreads(container, history, state, gens) {
         return [targetTrack ? Number(targetTrack.dataset.geneTrack) : Math.floor((y - model.top) / model.lane), Math.floor((x - model.left) / model.step)];
     };
     canvas.addEventListener('pointermove', event => {
-        if (event.pointerType === 'touch' || state.pinnedGeneId || state.candidateId) return;
+        if (event.pointerType === 'touch' || state.pinnedGeneId) return;
         const position = hit(event); if (position) update(...position);
+    });
+    canvas.addEventListener('pointerleave', () => {
+        if (endGeneExplorerPreview(state)) {
+            const index = model.tracks.findIndex(track => track.row.id === state.focusId);
+            if (index >= 0) activeIndex = index;
+            sync();
+        }
     });
     canvas.addEventListener('click', event => {
         const position = hit(event); if (position) update(...position, 'pin');
@@ -3438,22 +3494,35 @@ function bindGeneThreads(container, history, state, gens) {
         else if (button.id === 'gene-thread-pin') {
             if (state.pinnedGeneId) clear(); else update(activeIndex, generation, 'pin');
         } else if (button.hasAttribute('data-gene-story-read')) {
-            const candidate = geneHistoryCarriers(gens, model.tracks[activeIndex].row.id)[Number(button.dataset.geneStoryRead)];
+            const candidate = geneExplorerCandidates(gens, model.tracks[activeIndex].row, state)[Number(button.dataset.geneStoryRead)];
             if (candidate) showIdeaModal(getIdeaData(candidate.idea));
         } else if (button.hasAttribute('data-gene-story')) {
             const index = Number(button.dataset.geneStory);
-            const candidate = geneHistoryCarriers(gens, model.tracks[activeIndex].row.id)[index];
+            const candidate = geneExplorerCandidates(gens, model.tracks[activeIndex].row, state)[index];
             if (!candidate) return;
             state.candidateId = state.candidateId === candidate.id ? null : candidate.id;
+            state.candidateGeneration = state.candidateId ? candidate.generation : null;
+            state.previewGeneId = null;
             state.pinnedGeneId = null; selectedGeneId = null;
             const dna = geneStoryIds(candidate);
             if (state.candidateId && !dna.has(model.tracks[activeIndex].row.id)) {
                 const first = model.tracks.findIndex(t => dna.has(t.row.id));
                 if (first >= 0) { activeIndex = first; state.focusId = model.tracks[first].row.id; }
             }
+            state.candidateGeneId = state.candidateId ? model.tracks[activeIndex].row.id : null;
             sync();
             root.querySelector(`[data-gene-story="${index}"]`)?.focus();
         }
+    });
+    const ideaSearch = container.querySelector('#gene-idea-search');
+    ideaSearch?.addEventListener('input', event => {
+        state.ideaSearch = event.target.value;
+        sync();
+    });
+    ideaSearch?.addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        container.querySelector('[data-gene-story]')?.click();
     });
     const search = container.querySelector('#gene-history-search');
     let searchMatches = model.tracks.map((track, index) => [track.row.label, ...(track.row.aliases || [])].some(label => String(label).toLocaleLowerCase().includes(state.search.trim().toLocaleLowerCase())) ? index : -1).filter(i => i >= 0);
@@ -3483,7 +3552,7 @@ function applyGeneCatalogue(data, reset = false) {
 }
 
 function getGeneExplorerState() {
-    return getGeneExplorerState.state ||= { mode: 'history', search: '', focusId: null, focusGeneration: null, pinnedGeneId: null, candidateId: null };
+    return getGeneExplorerState.state ||= { mode: 'history', search: '', ideaSearch: '', focusId: null, focusGeneration: null, pinnedGeneId: null, candidateId: null, candidateGeneration: null, candidateGeneId: null, previewGeneId: null };
 }
 
 function renderGeneCatalogue(gens = generations) {
@@ -3596,22 +3665,59 @@ function renderIdeaModalGenes(idea) {
     const observation = getGeneObservation(idea);
     const rows = new Map((geneCatalogue?.genes || []).map(gene => [gene.id, gene]));
     if (!observation) {
-        panel.innerHTML = '<p class="gene-explanation">This candidate has not been analysed for genes. Older runs may have no observations. Viewing a candidate does not trigger analysis.</p>';
+        panel.innerHTML = '<p class="gene-explanation">No gene analysis saved for this idea.</p>';
         return;
     }
     if (observation.status !== 'ok' || !Array.isArray(observation.genes)) {
-        panel.innerHTML = `<h3 class="gene-inspector-title">Gene analysis unavailable</h3><p class="gene-explanation">No successful observation was saved for this candidate.</p>${observation.error ? `<p class="gene-error">${escapeHtml(String(observation.error))}</p>` : ''}`;
+        panel.innerHTML = `<h3 class="gene-inspector-title">Gene analysis unavailable</h3>${observation.error ? `<p class="gene-error">${escapeHtml(String(observation.error))}</p>` : ''}`;
         return;
     }
-    const unclassified = observation.genes.filter(gene => !rows.has(gene.gene_id)).length;
-    panel.innerHTML = `<p class="gene-explanation">${observation.consolidated ? `Breeding ingredients · catalogue revision ${escapeHtml(String(observation.revision))}` : 'Concepts extracted from this candidate.'}</p>
-        ${unclassified ? `<p class="gene-coverage">${unclassified} gene${unclassified === 1 ? '' : 's'} unclassified${observation.mapping_status === 'failed' ? ' · catalogue mapping failed' : ''}.</p>` : ''}
-        ${observation.genes.length ? `<ul class="candidate-gene-list">${observation.genes.map((gene, index) => {
-            const canonical = rows.get(gene.gene_id);
-            const provenance = Array.isArray(gene.decisions) ? `<details><summary>Source &amp; reasoning</summary>${gene.decisions.map(d => `<p><strong>${escapeHtml(String(d.source || ''))}</strong> — ${escapeHtml(String(d.reason || ''))}${d.unresolved ? ` · Unresolved: ${escapeHtml(String(d.unresolved))}` : ''}</p>`).join('')}</details>` : '';
-            return `<li>${canonical ? `<button type="button" class="gene-label-button" data-candidate-gene="${index}">${escapeHtml(String(canonical.label || gene.text || canonical.id))}</button>${String(canonical.label) !== String(gene.text) ? `<p>${escapeHtml(String(gene.text || ''))}</p>` : ''}` : `<span>${escapeHtml(String(gene.text || 'Unnamed gene'))}</span><small>Unclassified</small>`}${provenance}</li>`;
-        }).join('')}</ul>` : '<p class="gene-explanation">Analysis completed with no extracted genes.</p>'}
-        ${typeof observation.genotype === 'string' && observation.genotype ? `<details class="gene-raw"><summary>Raw genotype</summary><pre>${escapeHtml(observation.raw_genotype ?? observation.genotype)}</pre></details>` : ''}`;
+    const normalize = value => String(value || '').trim().toLocaleLowerCase().replace(/\s+/g, ' ').replace(/[.;:]+$/, '');
+    const uniqueTerms = terms => [...new Map(terms.filter(term => typeof term === 'string' && term.trim())
+        .map(term => [normalize(term), term.trim()])).values()];
+    const entries = new Map();
+    observation.genes.forEach((gene, index) => {
+        const canonical = rows.get(gene.gene_id);
+        const label = String(canonical?.label || gene.text || canonical?.id || 'Unnamed gene');
+        const key = canonical ? `id:${canonical.id}` : `raw:${normalize(label)}`;
+        if (!entries.has(key)) entries.set(key, {canonical, label, index, genes: []});
+        entries.get(key).genes.push(gene);
+    });
+    const history = typeof generations !== 'undefined' && Array.isArray(generations) ? generations : [];
+    const reasoning = [];
+    const visibleTerms = new Set();
+    const unchanged = new Set(['carried forward unchanged', 'unchanged', 'exact match', 'identity mapping', 'no change']);
+    const items = [...entries.values()].map(({canonical, label, index, genes}) => {
+        const decisions = genes.flatMap(gene => Array.isArray(gene.decisions) ? gene.decisions.filter(d => d && typeof d === 'object') : []);
+        const sources = uniqueTerms(genes.flatMap(gene => [gene.text, ...(Array.isArray(gene.source_terms) ? gene.source_terms : [])])
+            .concat(decisions.map(d => d.source))).filter(source => normalize(source) !== normalize(label));
+        [label, ...sources].forEach(term => visibleTerms.add(normalize(term)));
+        const unresolved = uniqueTerms(decisions.map(d => d.unresolved));
+        const notes = uniqueTerms(decisions.filter(d => typeof d.reason === 'string' && !unchanged.has(normalize(d.reason))
+            && [d.source, d.input].some(term => term && normalize(term) !== normalize(label))).map(d => d.reason));
+        if (notes.length) reasoning.push({label, notes});
+        const count = canonical ? geneHistoryCarriers(history, canonical.id).length : 0;
+        const content = `<span class="gene-inspector-dot" aria-hidden="true"></span><span class="gene-inspector-name">${escapeHtml(label)}</span>
+            ${count ? `<span class="gene-inspector-count" title="Unique ideas across saved history">${count} idea${count === 1 ? '' : 's'}</span>` : ''}`;
+        return `<li style="--gene-color:${geneThreadColor(canonical?.id || label)}">
+            ${canonical ? `<button type="button" class="gene-inspector-link" data-candidate-gene="${index}" aria-label="${escapeHtml(label)}${count ? `, ${count} idea${count === 1 ? '' : 's'} across history` : ''}. Explore gene">${content}</button>` : `<div class="gene-inspector-link">${content}<span class="gene-inspector-count">Unmapped</span></div>`}
+            ${sources.length ? `<p class="gene-inspector-source"><span>From</span> ${sources.map(escapeHtml).join(' · ')}</p>` : ''}
+            ${unresolved.length ? `<p class="gene-inspector-review">Review: ${unresolved.map(escapeHtml).join(' · ')}</p>` : ''}
+        </li>`;
+    });
+    // Original terms already shown inline need no duplicate raw-text drawer.
+    const raw = typeof (observation.raw_genotype ?? observation.genotype) === 'string'
+        ? (observation.raw_genotype ?? observation.genotype).trim() : '';
+    const extraRaw = raw && raw.split(';').some(term => normalize(term) && !visibleTerms.has(normalize(term)));
+    panel.innerHTML = items.length ? `<div class="gene-inspector-heading"><span>${items.length} gene${items.length === 1 ? '' : 's'}</span>
+        ${observation.mapping_status === 'failed' ? '<span>Mapping incomplete</span>' : ''}</div>
+        <ul class="candidate-gene-list">${items.join('')}</ul>` : '<p class="gene-explanation">No genes were extracted.</p>';
+    if (reasoning.length || extraRaw) {
+        panel.innerHTML += `<details class="gene-inspector-details"><summary>Extraction details</summary>
+            ${extraRaw ? `<p class="gene-inspector-original">${escapeHtml(raw)}</p>` : ''}
+            ${reasoning.map(({label, notes}) => `<p><strong>${escapeHtml(label)}</strong> ${notes.map(escapeHtml).join(' · ')}</p>`).join('')}
+        </details>`;
+    }
     panel.querySelectorAll('[data-candidate-gene]').forEach(button => button.addEventListener('click', () => {
         const gene = observation.genes[Number(button.dataset.candidateGene)];
         if (gene && rows.has(gene.gene_id)) openGeneCatalogue(gene.gene_id);
@@ -4117,6 +4223,7 @@ function buildArtifactFigure(ref, ideaTitle) {
 function activateIdeaModalTab(tabName) {
     const modal = document.getElementById('ideaModal');
     if (!modal) return;
+    modal.dataset.activeTab = tabName;
     modal.querySelectorAll('[data-idea-modal-tab]').forEach(button => {
         const selected = !button.hidden && button.dataset.ideaModalTab === tabName;
         button.setAttribute('aria-selected', selected ? 'true' : 'false');
