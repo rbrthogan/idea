@@ -1,21 +1,23 @@
 name: Drabble (100-word story)
 description: Generate creative 100-word stories with complete narrative arcs
-version: 1.2.0
+version: "1.5.0"
 author: Original Idea App
 created_date: '2024-01-15'
 
 metadata:
   item_type: stories
 
-special_requirements: |
-  Output constraints:
-  - A drabble is a short work of fiction with exactly 100 words in the story body (title excluded).
-  - Return exactly two labeled lines:
-    Title: [short evocative title]
-    Content: [exactly 100-word drabble]
-  - The Content field must be a complete narrative arc (beginning, middle, end).
-  - Prioritize originality and avoid cliches, stock twists, and generic trope combinations.
-  - No analysis, commentary, or extra text beyond the two required fields.
+requirements:
+  - "Tell a complete fictional narrative with a beginning, middle, and end."
+  - "Prioritize originality and avoid cliches, stock twists, and generic trope combinations."
+
+output:
+  title: "A short, evocative title."
+  content: |
+    The complete drabble itself, not a synopsis, description, or review.
+  word_count:
+    min: 100
+    max: 100
 
 prompts:
   context: |
@@ -52,17 +54,8 @@ prompts:
     - "Write a drabble about a child who finds a door to another world in their closet."
     - "A 100-word story about a robot who learns to love."
 
-  idea: |
-    Generate one drabble from the selected direction.
-    Apply all constraints below:
-    {requirements}
-
   format: |
-    You are a formatting assistant. Your task is to take the input text and structure it into a JSON object with "title" and "content" fields.
-
-    If the input has a clear title (e.g. "Title: X"), use it. If not, generate a suitable title based on the content.
-
-    The "content" field should contain the body of the story.
+    Preserve the original title and complete story body exactly. Do not rewrite, extend, or shorten the story to satisfy a word count.
 
     Input to format:
     {input_text}
@@ -88,43 +81,21 @@ prompts:
     {critique}
 
     Create a refined version that addresses the critique while preserving the core creative elements and unusual concepts that make the story distinctive.
-    Write exactly 100 words: a complete story, not a description.
-
-    {requirements}
+    Write a complete story, not a description.
 
   breed: |
     {ideas}
-    Generate one new drabble while following all constraints below:
-    {requirements}
+    Generate one new drabble.
 
   genotype_encode: |
-    You are an expert literary analyst skilled at deconstructing stories into their fundamental narrative DNA.
-    Convert a complete drabble into its basic genetic elements (genotype).
+    For stories, consider genre, tone, subject, character archetypes, setting and themes, alongside distinctive narrative techniques.
 
-    Capture:
-    - Genre/style
-    - Central conflict
-    - Character archetype
-    - Setting/atmosphere
-    - Narrative technique
-    - Emotional core
-    - Thematic element
-
-    Preserve hard constraints as tags when relevant:
-    {requirements_digest}
-
-    Extract only fundamental elements. Strip away plot specifics, names, and incidental details.
-
-    Format as a condensed semicolon-separated list.
-
-    Example:
-    Input: "Sarah's fingers trembled as she opened the letter. Twenty years later, and Mom's handwriting still made her heart race. 'I forgive you,' it read. But Mom had been dead for five years. Sarah laughed through tears, finally understanding. The letter was in her own handwriting - a message from her younger self, hidden and forgotten until now. Sometimes forgiveness comes from the most unexpected places."
-    Output: "psychological realism; guilt and redemption; mother-daughter relationship; domestic setting; twist ending; self-forgiveness; time/memory; epistolary element"
+    One illustrative decomposition, not a vocabulary to copy:
+    Input: "A comic fairy tale told in first person by a retired gardener who bargains with a talking crow."
+    Output: "fairy tale; comedy; first-person narration; retired protagonist; talking animals; bargaining"
 
     Drabble to encode:
     {idea_content}
-
-    Genotype:
 
 comparison_criteria:
   - creativity / originality

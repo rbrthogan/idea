@@ -33,7 +33,7 @@ class TestYAMLTemplateLoading:
         prompts = get_prompts(template_name, use_yaml=True)
 
         required_prompts = [
-            'CONTEXT_PROMPT', 'IDEA_PROMPT',
+            'CONTEXT_PROMPT', 'SPECIFIC_PROMPT',
             'FORMAT_PROMPT', 'CRITIQUE_PROMPT', 'REFINE_PROMPT', 'BREED_PROMPT',
             'COMPARISON_PROMPT'
         ]
@@ -43,6 +43,7 @@ class TestYAMLTemplateLoading:
             prompt_text = getattr(prompts, prompt_name)
             assert isinstance(prompt_text, str), f"{prompt_name} should be a string"
             assert len(prompt_text) > 0, f"{prompt_name} should not be empty"
+        assert not hasattr(prompts, 'IDEA_PROMPT')
 
     @pytest.mark.parametrize("template_name", ["drabble", "airesearch", "game_design"])
     def test_comparison_criteria_present(self, template_name):
@@ -82,17 +83,14 @@ class TestSpecialFeatures:
         """Test that special requirements are properly interpolated"""
         prompts = get_prompts('drabble', use_yaml=True)
 
-        # Check that special requirements were interpolated into prompts
-        idea_prompt = prompts.IDEA_PROMPT
-        assert 'A drabble is a short work of fiction' in idea_prompt
+        assert not hasattr(prompts, 'IDEA_PROMPT')
 
 
     def test_game_design_special_requirements_interpolation(self):
         """Test that game design special requirements are properly interpolated"""
         prompts = get_prompts('game_design', use_yaml=True)
 
-        idea_prompt = prompts.IDEA_PROMPT
-        assert 'The game should be simple enough' in idea_prompt
+        assert not hasattr(prompts, 'IDEA_PROMPT')
 
 
     def test_placeholder_validation(self):
@@ -130,8 +128,7 @@ class TestTemplateValidation:
             "metadata": {"item_type": "test"},
             "prompts": {
                 "context": "Context prompt",
-                "idea": "Idea prompt",
-                "specific_prompt": "Specific prompt",
+                "specific_prompt": "Direction builder prompt",
                 "format": "Format prompt missing input_text placeholder",  # Missing {input_text}
                 "critique": "Critique prompt missing idea placeholder",  # Missing {idea}
                 "refine": "Refine prompt missing placeholders",  # Missing {idea} and {critique}
@@ -172,6 +169,13 @@ class TestTemplateManagerCompatibility:
             assert 'type' in template_info
             assert template_info['type'] == 'yaml'
 
+    def test_archived_prime_visualization_is_absent_from_active_catalog(self):
+        assert "prime_visualization" not in list_available_templates()
+        assert list_available_templates()["drabble"]["evaluation"] == {
+            "artifact_generation": False,
+            "fitness_score": False,
+        }
+
     def test_missing_comparison_prompt_uses_default(self, tmp_path):
         """Templates without comparison_prompt should still load with a default"""
         template_path = Path('idea/prompts/templates/drabble.yaml')
@@ -185,3 +189,95 @@ class TestTemplateManagerCompatibility:
         assert hasattr(wrapper, 'COMPARISON_PROMPT')
         assert isinstance(wrapper.COMPARISON_PROMPT, str)
         assert len(wrapper.COMPARISON_PROMPT) > 0
+
+    def test_comparison_criteria_are_optional_for_non_llm_evaluators(self):
+        """A prompt template should not force every run to use an LLM judge."""
+        template_path = Path('idea/prompts/templates/drabble.yaml')
+        data = yaml.safe_load(template_path.read_text())
+        data.pop('comparison_criteria', None)
+
+        template = TemplateValidator.validate_dict(data)
+        wrapper = YAMLTemplateWrapper(template)
+
+        assert template.comparison_criteria == []
+        assert wrapper.COMPARISON_CRITERIA == []
+        # The compatibility wrapper still exposes a default prompt for callers
+        # that explicitly select the legacy LLM evaluator.
+        assert isinstance(wrapper.COMPARISON_PROMPT, str)
+        assert wrapper.COMPARISON_PROMPT
+
+
+class TestPrimeVisualizationTemplate:
+    """Contract tests for the artifact-ready prime experiment preset."""
+
+    def test_prime_visualization_template_validates_and_loads(self):
+        data = yaml.safe_load(Path('archive/prime-visualization/idea/prompts/templates/prime_visualization.yaml').read_text())
+        prompts = YAMLTemplateWrapper(TemplateValidator.validate_dict(data))
+        assert prompts.ITEM_TYPE == 'prime visualization experiment proposals'
+        assert prompts.get_info()['version'] == '1.2.0'
+
+        required_prompts = [
+            'CONTEXT_PROMPT',
+            'SPECIFIC_PROMPT',
+            'FORMAT_PROMPT',
+            'CRITIQUE_PROMPT',
+            'REFINE_PROMPT',
+            'BREED_PROMPT',
+            'GENOTYPE_ENCODE_PROMPT',
+        ]
+        for prompt_name in required_prompts:
+            assert getattr(prompts, prompt_name).strip()
+
+    def test_prime_visualization_contract_is_explicit_and_honest(self):
+        template_path = Path('archive/prime-visualization/idea/prompts/templates/prime_visualization.yaml')
+        data = yaml.safe_load(template_path.read_text())
+        requirements = data['special_requirements']
+        all_prompts = '\n'.join(data['prompts'].values())
+
+        for contract_term in [
+            'Ulam square spiral',
+            'Sacks number spiral',
+            'residue grids',
+            'cyclic multiplication maps',
+            'prime-race curves',
+            'Pascal/binomial arrays',
+            'recursive dot or polygon groupings',
+            'falsifiable hypothesis',
+            'deterministic sieve',
+            'fixed seed of 0',
+            'visualization.png',
+            'metadata.json',
+            'result.json',
+            'media_type="image/png"',
+        ]:
+            assert contract_term in requirements
+
+        assert 'never claim that code was executed' in requirements
+        assert 'Do not claim that the experiment has been run' in all_prompts
+        assert 'seeds, not recipes' in requirements
+        assert 'At least 48 of the 60' in data['prompts']['context']
+        assert 'At least 40 must use a single mapping rule' in data['prompts']['context']
+        assert 'select exactly one primary ingredient' in data['prompts']['specific_prompt']
+        assert 'one or two plain-language sentences' in requirements
+        assert any(
+            'conceptual simplicity and elegance' in criterion
+            for criterion in data['comparison_criteria']
+        )
+        complete_template_text = '\n'.join([
+            requirements,
+            all_prompts,
+            *data['comparison_criteria'],
+        ])
+        assert complete_template_text.count('Ulam') <= 2
+        assert '{context_pool}' in data['prompts']['specific_prompt']
+        assert '{input_text}' in data['prompts']['format']
+
+    def test_archived_prime_visualization_retains_its_original_llm_criteria(self):
+        templates = list_available_templates()
+        assert 'prime_visualization' not in templates
+        data = yaml.safe_load(Path('archive/prime-visualization/idea/prompts/templates/prime_visualization.yaml').read_text())
+        prompts = YAMLTemplateWrapper(TemplateValidator.validate_dict(data))
+        assert len(prompts.COMPARISON_CRITERIA) >= 5
+        assert any('cited precedents' in criterion for criterion in prompts.COMPARISON_CRITERIA)
+        assert any('abstracted precedent principle' in criterion for criterion in prompts.COMPARISON_CRITERIA)
+        assert any('fabricated' in criterion for criterion in prompts.COMPARISON_CRITERIA)

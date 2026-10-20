@@ -1,31 +1,34 @@
 # Auth module for Firebase Authentication
 # Provides middleware and utilities for user authentication
 
+import logging
 import os
-from functools import wraps
-from typing import Optional, Callable
-from fastapi import Request, HTTPException, Depends
+import secrets
+from typing import Optional
+from fastapi import HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import auth, credentials
+from idea.blocking_io import run_blocking
+import threading
 
 # Initialize Firebase Admin SDK
 _firebase_app = None
+_firebase_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 def get_firebase_app():
     """Get or initialize the Firebase Admin app."""
     global _firebase_app
-    if _firebase_app is None:
-        # In Cloud Run, this uses Application Default Credentials
-        # Locally, set GOOGLE_APPLICATION_CREDENTIALS to a service account key
-        try:
-            _firebase_app = firebase_admin.get_app()
-        except ValueError:
-            # App not initialized yet
-            cred = credentials.ApplicationDefault()
-            _firebase_app = firebase_admin.initialize_app(cred)
+    with _firebase_lock:
+        if _firebase_app is None:
+            try:
+                _firebase_app = firebase_admin.get_app()
+            except ValueError:
+                cred = credentials.ApplicationDefault()
+                _firebase_app = firebase_admin.initialize_app(cred, options={"httpTimeout": 15})
     return _firebase_app
 
 
@@ -52,30 +55,109 @@ class UserInfo:
 
 
 # Admin email addresses (can also be stored in Firestore for dynamic updates)
-ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").split(",")
+ADMIN_EMAILS = {email.strip().lower() for email in os.getenv("ADMIN_EMAILS", "").split(",") if email.strip()}
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+LOCAL_REQUEST_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_GENERATED_DEV_AUTH_TOKEN = secrets.token_urlsafe(32)
+
+
+def _env_flag(name: str, default: str = "") -> bool:
+    return os.getenv(name, default).strip().lower() in TRUE_ENV_VALUES
+
+
+def _local_dev_auth_enabled() -> bool:
+    return _env_flag("IDEA_DEV_AUTH")
+
+
+def _local_host_name(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    host = value.split(",", 1)[0].strip().lower()
+    if host.startswith("[") and "]" in host:
+        return host[1:host.index("]")]
+    return host.split(":", 1)[0]
+
+
+def _is_local_request(request: Optional[Request]) -> bool:
+    if request is None:
+        return False
+
+    client_host = getattr(getattr(request, "client", None), "host", None)
+    host_header = request.headers.get("host")
+    client_is_local = (
+        not client_host or _local_host_name(client_host) in LOCAL_REQUEST_HOSTS
+    )
+    host_is_local = _local_host_name(host_header) in LOCAL_REQUEST_HOSTS
+    return client_is_local and host_is_local
+
+
+def _dev_auth_allowed(request: Optional[Request]) -> bool:
+    return _local_dev_auth_enabled() and _is_local_request(request)
+
+
+def get_dev_auth_token() -> str:
+    return os.getenv("IDEA_DEV_AUTH_TOKEN") or _GENERATED_DEV_AUTH_TOKEN
+
+
+def get_dev_user_info() -> UserInfo:
+    email = os.getenv("IDEA_DEV_AUTH_EMAIL", "local-dev@example.local")
+    return UserInfo(
+        uid=os.getenv("IDEA_DEV_AUTH_UID", "local-dev-user"),
+        email=email,
+        display_name=os.getenv("IDEA_DEV_AUTH_NAME", "Local Dev"),
+        is_admin=_env_flag("IDEA_DEV_AUTH_ADMIN") or email in ADMIN_EMAILS,
+    )
+
+
+def get_dev_auth_client_config(request: Optional[Request] = None) -> dict:
+    if not _dev_auth_allowed(request):
+        return {"enabled": False}
+
+    user = get_dev_user_info()
+    return {
+        "enabled": True,
+        "token": get_dev_auth_token(),
+        "uid": user.uid,
+        "email": user.email,
+        "displayName": user.display_name,
+        "isAdmin": user.is_admin,
+    }
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request = None,
 ) -> Optional[UserInfo]:
     """
     Dependency to get the current authenticated user.
     Returns None if no valid token is provided.
     """
+    if _dev_auth_allowed(request):
+        if credentials is not None and secrets.compare_digest(
+            credentials.credentials,
+            get_dev_auth_token(),
+        ):
+            return get_dev_user_info()
+
     if credentials is None:
         return None
 
     try:
-        get_firebase_app()
-        # Verify the ID token
-        decoded_token = auth.verify_id_token(credentials.credentials)
+        def verify_token():
+            get_firebase_app()
+            return auth.verify_id_token(credentials.credentials)
+
+        decoded_token = await run_blocking(verify_token, timeout=20)
 
         uid = decoded_token.get("uid")
         email = decoded_token.get("email")
         display_name = decoded_token.get("name")
 
         # Check if user is admin
-        is_admin = email in ADMIN_EMAILS if email else False
+        # Email/password signups can assert an address before proving ownership.
+        # Only verified addresses may match the administrator allowlist.
+        is_admin = bool(email and decoded_token.get("email_verified") is True
+                        and email.lower() in ADMIN_EMAILS)
 
         return UserInfo(
             uid=uid,
@@ -83,24 +165,24 @@ async def get_current_user(
             display_name=display_name,
             is_admin=is_admin
         )
-    except Exception as e:
-        print(f"Token verification failed: {e}")
+    except Exception:
+        logger.warning("Token verification failed", exc_info=True)
         return None
 
 
 async def require_auth(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request = None,
 ) -> UserInfo:
     """
     Dependency that requires authentication.
     Raises 401 if not authenticated.
     """
     try:
-        if credentials is None:
-            raise HTTPException(status_code=401, detail="Authentication required")
-
-        user = await get_current_user(credentials)
+        user = await get_current_user(credentials, request)
         if user is None:
+            if credentials is None:
+                raise HTTPException(status_code=401, detail="Authentication required")
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
         return user
@@ -122,11 +204,3 @@ async def require_admin(
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
-
-
-def get_user_from_request(request: Request) -> Optional[UserInfo]:
-    """
-    Utility to get user info attached to a request.
-    Use this in routes where auth is optional.
-    """
-    return getattr(request.state, "user", None)

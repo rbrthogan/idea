@@ -1,3 +1,45 @@
+function getRaterChartTheme() {
+    const styles = typeof getComputedStyle === 'function' && typeof document !== 'undefined' && document.documentElement
+        ? getComputedStyle(document.documentElement) : null;
+    const token = (name, fallback) => styles?.getPropertyValue(name).trim() || fallback;
+    const theme = {
+        violet: token('--chart-violet', '#7146d8'),
+        coral: token('--chart-coral', '#c45d28'),
+        green: token('--chart-green', '#27836a'),
+        amber: token('--chart-amber', '#9b7019'),
+        blue: token('--chart-blue', '#4378b8'),
+        text: token('--text-primary', '#342151'),
+        secondary: token('--text-secondary', '#695c78'),
+        border: token('--border', '#ded4e8'),
+        surface: token('--surface', '#fcf9f5')
+    };
+    if (typeof Chart !== 'undefined' && Chart.defaults) {
+        Chart.defaults.font.family = "'Figtree', sans-serif";
+        Chart.defaults.color = theme.secondary;
+        Chart.defaults.borderColor = theme.border;
+        const plugins = Chart.defaults.plugins;
+        if (plugins?.title) plugins.title.color = theme.text;
+        if (plugins?.legend?.labels) plugins.legend.labels.color = theme.secondary;
+        if (plugins?.tooltip) {
+            plugins.tooltip.backgroundColor = theme.surface;
+            plugins.tooltip.titleColor = theme.text;
+            plugins.tooltip.bodyColor = theme.secondary;
+            plugins.tooltip.borderColor = theme.border;
+        }
+    }
+    return theme;
+}
+
+function raterChartColorWithAlpha(color, alpha) {
+    const hex = /^#([a-f\d]{6})$/i.exec(color);
+    if (hex) {
+        const channels = [0, 2, 4].map(offset => parseInt(hex[1].slice(offset, offset + 2), 16));
+        return `rgba(${channels.join(', ')}, ${alpha})`;
+    }
+    const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(color);
+    return rgb ? `rgba(${rgb.slice(1).join(', ')}, ${alpha})` : color;
+}
+
 function generateUUID() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
         const r = Math.random() * 16 | 0;
@@ -8,6 +50,61 @@ function generateUUID() {
 
 let currentPair = null;
 let currentEvolutionId = null;
+let ratingSelectionVersion = 0;
+let pairRequestVersion = 0;
+let voteRequestVersion = 0;
+let evolutionListRequestVersion = 0;
+let modelRequestVersion = 0;
+let autoRatingRequestVersion = 0;
+let pairContext = null;
+let pairLoading = false;
+let ratingSelectionLoading = false;
+
+function captureRatingContext() {
+    return { owner: window.currentUser?.uid, selection: ratingSelectionVersion, evolutionId: currentEvolutionId };
+}
+
+function isRatingContextCurrent(context) {
+    return Boolean(context.owner)
+        && context.owner === window.currentUser?.uid
+        && context.selection === ratingSelectionVersion
+        && context.evolutionId === currentEvolutionId;
+}
+
+function updateManualRatingControls() {
+    const ready = currentPair && pairContext && isRatingContextCurrent(pairContext)
+        && !pairLoading && !ratingSelectionLoading && !voteInFlight;
+    document.querySelectorAll('.vote-btn').forEach(button => { button.disabled = !ready; });
+    const retry = document.getElementById('retryManualPair');
+    if (retry) retry.disabled = pairLoading || ratingSelectionLoading || voteInFlight;
+}
+
+function beginRatingSelection(evolutionId) {
+    ratingSelectionVersion += 1;
+    pairRequestVersion += 1;
+    voteRequestVersion += 1;
+    currentEvolutionId = evolutionId || null;
+    currentPair = null;
+    pairContext = null;
+    pairLoading = false;
+    ratingSelectionLoading = true;
+    voteInFlight = false;
+    ideasDb = {};
+    currentModalIdea = null;
+    window.rankedIdeas = [];
+    window.IdeaWorkbench?.closeInspector?.();
+    document.getElementById('manualRatingFeedback').hidden = true;
+    document.getElementById('titleA').textContent = 'Loading ideas…';
+    document.getElementById('contentA').textContent = 'Loading this experiment for comparison.';
+    document.getElementById('titleB').textContent = '';
+    document.getElementById('contentB').textContent = '';
+    ['artifactA', 'artifactB'].forEach(id => { document.getElementById(id)?.replaceChildren(); });
+    document.querySelector('.ideas-container').style.display = 'flex';
+    document.getElementById('autoRatingResults').style.display = 'none';
+    setManualSwissStatus(null);
+    updateManualRatingControls();
+    return captureRatingContext();
+}
 let ideasDb = {};
 let currentRatingType = 'auto';
 let currentGenerationView = 'death';
@@ -33,24 +130,34 @@ let currentSortDirection = 'desc';
 let originalIdeasOrder = [];
 let autoRatingProgressPollTimer = null;
 
-// Wait for Firebase auth to be ready before loading data
-function waitForAuth(callback, timeout = 5000) {
-    const startTime = Date.now();
-
-    function checkAuth() {
-        if (window.currentUser) {
-            console.log("Auth ready, loading data...");
-            callback();
-        } else if (Date.now() - startTime > timeout) {
-            console.warn("Auth timeout, attempting to load anyway...");
-            callback();
-        } else {
-            setTimeout(checkAuth, 100);
-        }
-    }
-
-    checkAuth();
+// Authentication may finish well after page load; do not time out into anonymous reads.
+let initializedRatingOwner = null;
+function initializeAuthenticatedRating() {
+    const owner = window.currentUser?.uid;
+    if (!owner || initializedRatingOwner === owner) return;
+    initializedRatingOwner = owner;
+    document.getElementById('evolutionSelect').innerHTML = '<option value="">Current Evolution</option>';
+    void loadEvolutions();
+    void loadCurrentEvolution();
+    void loadModels();
 }
+window.addEventListener('idea-auth-ready', () => {
+    if (document.readyState === 'complete') initializeAuthenticatedRating();
+});
+window.addEventListener('idea-auth-cleared', () => {
+    initializedRatingOwner = null;
+    stopAutoRatingProgressPolling();
+    autoRatingInProgress = false;
+    autoRatingRequestVersion += 1;
+    const autoButton = document.getElementById('startAutoRating');
+    if (autoButton) { autoButton.disabled = false; autoButton.textContent = 'Start Auto Swiss Rating'; }
+    beginRatingSelection(null);
+    document.getElementById('evolutionSelect').innerHTML = '<option value="">Current Evolution</option>';
+    ratingSelectionLoading = false;
+    document.getElementById('titleA').textContent = 'Sign in to compare ideas';
+    document.getElementById('contentA').textContent = '';
+    updateManualRatingControls();
+});
 
 // Fetch a random pair on load
 window.addEventListener("load", () => {
@@ -67,20 +174,12 @@ window.addEventListener("load", () => {
 
     toggleRatingMode('manual'); // Start in manual mode
 
-    // Wait for auth before fetching data
-    waitForAuth(() => {
-        loadEvolutions();
-        loadCurrentEvolution();
-        loadModels();
+    initializeAuthenticatedRating();
+    document.getElementById('retryManualPair')?.addEventListener('click', async () => {
+        if (!currentEvolutionId) await loadCurrentEvolution();
+        else if (Object.keys(ideasDb).length < 2) await loadEvolution(currentEvolutionId);
+        else await refreshPair();
     });
-
-    // Set up retry mechanism for refreshPair
-    setTimeout(() => {
-        if (Object.keys(ideasDb).length < 2) {
-            console.log("No ideas loaded yet, retrying refreshPair...");
-            refreshPair();
-        }
-    }, 5000);
 });
 
 // Helper to extract title and content from possibly nested idea structures
@@ -174,6 +273,39 @@ function setManualSwissStatus(swissStatus) {
     statusEl.textContent = text;
 }
 
+function updateAutoratingBillingWarning(message) {
+    const warning = document.getElementById('autoratingBillingWarning');
+    if (!warning) return;
+    const text = typeof message === 'string' ? message.trim() : '';
+    if (warning.textContent !== text) warning.textContent = text;
+    warning.hidden = !text;
+}
+
+function announceRatingStatus(message) {
+    const announcement = document.getElementById('ratingStatusAnnouncement');
+    const text = String(message || '').trim();
+    if (announcement && text && announcement.textContent !== text) {
+        announcement.textContent = text;
+    }
+}
+
+function rememberModalFocusOrigin(modalElement) {
+    if (!modalElement) return;
+    const activeElement = document.activeElement;
+    modalElement._focusReturnTarget = activeElement && activeElement !== document.body
+        ? activeElement
+        : null;
+    if (modalElement.dataset.focusReturnBound === 'true') return;
+
+    modalElement.dataset.focusReturnBound = 'true';
+    modalElement.addEventListener('hidden.bs.modal', () => {
+        const target = modalElement._focusReturnTarget;
+        modalElement._focusReturnTarget = null;
+        if (!target?.isConnected || target.disabled || typeof target.focus !== 'function') return;
+        target.focus({ preventScroll: true });
+    });
+}
+
 function normalizeGenerationValue(generation) {
     if (generation === null || generation === undefined || generation === '') {
         return null;
@@ -213,6 +345,7 @@ function setCurrentEvolutionAnalytics(rawEvolutionData) {
 
     currentEvolutionAnalytics = {
         history,
+        evaluation: config.evaluation || null,
         diversity_history: diversityHistory,
         fitness_alpha: clampUnitInterval(
             config.fitness_alpha ?? evolutionData.fitness_alpha,
@@ -315,17 +448,143 @@ async function initializeRating(ideas, shouldRefreshPair = true) {
     }
 }
 
-// Add the markdown rendering function from viewer.js
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function decodeMarkdownCodePoint(value, radix) {
+    const codePoint = parseInt(value, radix);
+    if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        return '\ufffd';
+    }
+    return String.fromCodePoint(codePoint);
+}
+
+function decodeMarkdownUrlForPolicy(value) {
+    let decoded = String(value || '');
+    for (let index = 0; index < 3; index++) {
+        decoded = decoded
+            .replace(/&amp;/gi, '&')
+            .replace(/&colon;/gi, ':')
+            .replace(/&tab;/gi, '\t')
+            .replace(/&newline;/gi, '\n')
+            .replace(/&#x([0-9a-f]+);?/gi, (match, hex) => decodeMarkdownCodePoint(hex, 16))
+            .replace(/&#([0-9]+);?/g, (match, decimal) => decodeMarkdownCodePoint(decimal, 10));
+    }
+    return decoded;
+}
+
+function sanitizeMarkdownUrl(value) {
+    const renderedValue = String(value || '').trim();
+    const policyValue = decodeMarkdownUrlForPolicy(renderedValue).trim();
+    if (!policyValue || /[\s\u0000-\u001f\u007f]/.test(policyValue) || /[\\"'<>]/.test(policyValue)) {
+        return null;
+    }
+    if (/^https?:\/\//i.test(policyValue)) {
+        return renderedValue;
+    }
+    if (/^(?:\/(?!\/)|\.\.?\/|#|\?)/.test(policyValue)) {
+        return renderedValue;
+    }
+    if (!policyValue.includes(':') && !policyValue.startsWith('//')) {
+        return renderedValue;
+    }
+    return null;
+}
+
+function normalizeMarkdownStructure(text) {
+    if (!text) return '';
+
+    const commonSectionHeadings = [
+        'Concept & Precedent Departure',
+        'Precedent Palette Analysis',
+        'Departure and Abstracted Principle',
+        'Mathematical Mapping',
+        'Finite Domain Definition',
+        'Domain and Sequence Definition',
+        'Core Mapping Functions',
+        'Hypothesis, Null & Falsification',
+        'Statement of Falsifiable Hypothesis',
+        'Confirmatory Hypothesis',
+        'Baseline / Null Model',
+        'Quantitative Signal Definition',
+        'Falsification Criterion',
+        'Visual Encoding',
+        'Detailed Encoding Rules',
+        'Deterministic Implementation Plan',
+        'Algorithmic Sequence',
+        'Resource Bounds',
+        'Artifact & Metric Contract',
+        'Produced Files',
+        'Interpretation Limits',
+        'Confounders and Artifact Mitigation',
+        'Overview',
+        'Summary',
+        'Implementation',
+        'Constraints',
+        'Description'
+    ].sort((a, b) => b.length - a.length);
+    const headingPattern = commonSectionHeadings
+        .map(heading => heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|');
+    const numberedHeadingPattern = `(?:\\d+\\.\\s*)?(?:${headingPattern})`;
+    const inlineKnownHeadingPattern = new RegExp(`(?<=[^#\\n])\\s*(#{1,6})\\s*(${numberedHeadingPattern})(?=\\s|[#*:_\\-0-9A-Z("]|$)`, 'g');
+
+    const normalizeSegment = (segment) => {
+        let normalized = segment;
+        normalized = normalized.replace(inlineKnownHeadingPattern, '\n$1 $2');
+        normalized = normalized.replace(/^(#{1,6})(?!#)(?=\S)/gm, '$1 ');
+        normalized = normalized.replace(/([:.!?])\s*(\d+\.\s+)/g, '$1\n$2');
+        normalized = normalized.replace(/([.!?])\s*([*-]\s+)/g, '$1\n$2');
+        normalized = normalized.replace(/^(#{1,6})\s+(.+)$/gm, (match, hashes, content) => {
+            const trimmedContent = content.trim();
+            const numberMatch = trimmedContent.match(/^(\d+\.\s*)/);
+            const numberPrefix = numberMatch ? numberMatch[1] : '';
+            const unnumberedContent = numberMatch
+                ? trimmedContent.slice(numberMatch[0].length)
+                : trimmedContent;
+            for (const heading of commonSectionHeadings) {
+                if (unnumberedContent === heading) {
+                    return `${hashes} ${numberPrefix}${heading}`;
+                }
+                if (unnumberedContent.startsWith(heading)) {
+                    const body = unnumberedContent.slice(heading.length).trim();
+                    if (!body || !/^(?:\s|[*:_\-0-9A-Z("])/.test(body)) {
+                        continue;
+                    }
+                    return `${hashes} ${numberPrefix}${heading}\n${body}`;
+                }
+            }
+            return `${hashes} ${trimmedContent}`;
+        });
+        return normalized;
+    };
+
+    return String(text)
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split(/(```[\s\S]*?```)/g)
+        .map(part => part.startsWith('```') ? part : normalizeSegment(part))
+        .join('');
+}
+
+// Add the small allow-list markdown rendering function from viewer.js.
 function renderMarkdown(text) {
     if (!text) return '';
 
-    // Normalize line endings
-    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    text = normalizeMarkdownStructure(text);
 
     // Escape HTML to prevent XSS
     text = text.replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 
     // Process code blocks first
     text = text.replace(/```([\s\S]*?)```/g, function (match, code) {
@@ -393,8 +652,13 @@ function renderMarkdown(text) {
     // Process blockquotes
     text = text.replace(/^>\s+(.*?)$/gm, '<blockquote>$1</blockquote>');
 
-    // Process links
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+    // Process links. Unsafe destinations degrade to their inert label.
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, destination) => {
+        const safeDestination = sanitizeMarkdownUrl(destination);
+        return safeDestination
+            ? `<a href="${safeDestination}" target="_blank" rel="noopener noreferrer">${label}</a>`
+            : label;
+    });
 
     // Process paragraphs - any line that's not already a block element
     lines = text.split('\n');
@@ -436,175 +700,143 @@ function renderMarkdown(text) {
     return lines.join('\n');
 }
 
-// Update refreshPair function to use the backend API for efficient pair selection
+// Pair selection is bound to the selected run and signed-in account.
 async function refreshPair() {
+    if (voteInFlight || ratingSelectionLoading) return;
+    const context = captureRatingContext();
+    const request = ++pairRequestVersion;
+    const stillCurrent = () => request === pairRequestVersion && isRatingContextCurrent(context);
+    currentPair = null;
+    pairContext = null;
+    pairLoading = true;
+    updateManualRatingControls();
     try {
-        // Get all ideas
-        const ideas = Object.values(ideasDb);
-
-        if (ideas.length < 2) {
-            console.log('Not enough ideas to compare, waiting for data to load...');
-
-            // Show loading message instead of alert
-            document.getElementById('titleA').textContent = "Loading ideas...";
-            document.getElementById('contentA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
-            document.getElementById('titleB').textContent = "";
-            document.getElementById('contentB').innerHTML = "";
-
-            // Disable voting buttons
-            document.querySelectorAll('.vote-btn').forEach(btn => {
-                btn.disabled = true;
-            });
-
+        if (!context.owner || !context.evolutionId || Object.keys(ideasDb).length < 2) {
+            document.getElementById('titleA').textContent = 'No comparison available';
+            document.getElementById('contentA').textContent = 'Choose an experiment with at least two saved ideas.';
+            document.getElementById('titleB').textContent = '';
+            document.getElementById('contentB').textContent = '';
             return;
         }
-
-        // Enable voting buttons
-        document.querySelectorAll('.vote-btn').forEach(btn => {
-            btn.disabled = false;
+        const response = await fetch('/api/get-efficient-pair', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ evolution_id: context.evolutionId })
         });
-
-        // Get next Swiss pair from backend API
-        try {
-            const response = await fetch('/api/get-efficient-pair', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    evolution_id: currentEvolutionId
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to get efficient pair: ${response.status}`);
-            }
-
-            const data = await response.json();
-            if (!data.idea_a || !data.idea_b) {
-                throw new Error('Incomplete pair payload');
-            }
-            const ideaA = normalizeIdeaRecord(data.idea_a, data.idea_a?.id);
-            const ideaB = normalizeIdeaRecord(data.idea_b, data.idea_b?.id);
-            setManualSwissStatus(data.swiss_status);
-
-            // Update local database with the returned ideas (they may have been modified)
-            if (ideaA && ideaA.id) {
-                ideasDb[ideaA.id] = ideaA;
-            }
-            if (ideaB && ideaB.id) {
-                ideasDb[ideaB.id] = ideaB;
-            }
-
-            currentPair = [ideaA, ideaB];
-
-            // Extract nested idea data
-            const ideaDataA = getIdeaData(ideaA);
-            const ideaDataB = getIdeaData(ideaB);
-
-            // Display the ideas without showing ratings
-            document.getElementById('titleA').textContent = ideaDataA.title;
-            document.getElementById('titleB').textContent = ideaDataB.title;
-
-            document.getElementById('contentA').innerHTML = renderMarkdown(ideaDataA.content);
-            document.getElementById('contentB').innerHTML = renderMarkdown(ideaDataB.content);
-
-            console.log(`Swiss pair selected: ${ideaA.id} vs ${ideaB.id}`);
-
-        } catch (error) {
-            console.error('Error getting Swiss pair, falling back to random selection:', error);
-            setManualSwissStatus(null);
-
-            // Fallback to random selection if API call fails
-            const [ideaA, ideaB] = getRandomPair(ideas);
-            currentPair = [ideaA, ideaB];
-
-            // Extract nested idea data
-            const ideaDataA = getIdeaData(ideaA);
-            const ideaDataB = getIdeaData(ideaB);
-
-            // Display the ideas without showing ratings
-            document.getElementById('titleA').textContent = ideaDataA.title;
-            document.getElementById('titleB').textContent = ideaDataB.title;
-
-            document.getElementById('contentA').innerHTML = renderMarkdown(ideaDataA.content);
-            document.getElementById('contentB').innerHTML = renderMarkdown(ideaDataB.content);
+        if (!stillCurrent()) return;
+        if (!response.ok) throw new Error(`Failed to get efficient pair: ${response.status}`);
+        const data = await response.json();
+        if (!stillCurrent()) return;
+        if (!data.idea_a?.id || !data.idea_b?.id || data.idea_a.id === data.idea_b.id || !data.pair_token) {
+            throw new Error('Incomplete pair payload');
         }
-
-        // Show the comparison view
+        const ideaA = normalizeIdeaRecord(data.idea_a, data.idea_a.id);
+        const ideaB = normalizeIdeaRecord(data.idea_b, data.idea_b.id);
+        ideasDb[ideaA.id] = ideaA;
+        ideasDb[ideaB.id] = ideaB;
+        currentPair = [ideaA, ideaB];
+        pairContext = { ...context, pairToken: data.pair_token };
+        setManualSwissStatus(data.swiss_status);
+        const ideaDataA = getIdeaData(ideaA);
+        const ideaDataB = getIdeaData(ideaB);
+        document.getElementById('titleA').textContent = ideaDataA.title;
+        document.getElementById('titleB').textContent = ideaDataB.title;
+        document.getElementById('contentA').innerHTML = renderMarkdown(ideaDataA.content);
+        document.getElementById('contentB').innerHTML = renderMarkdown(ideaDataB.content);
+        window.IdeaWorkbench?.renderPrimaryArtifact(document.getElementById('artifactA'), ideaA, context.evolutionId);
+        window.IdeaWorkbench?.renderPrimaryArtifact(document.getElementById('artifactB'), ideaB, context.evolutionId);
+        document.getElementById('manualRatingFeedback').hidden = true;
         document.querySelector('.ideas-container').style.display = 'flex';
         document.getElementById('autoRatingResults').style.display = 'none';
-
     } catch (error) {
-        console.error('Error refreshing pair:', error);
+        if (!stillCurrent()) return;
+        console.error('Error getting Swiss pair:', error);
+        setManualSwissStatus(null);
+        currentPair = null;
+        pairContext = null;
+        showManualRatingFeedback('Could not load a pair. Check your connection and use Reload pair.');
+    } finally {
+        if (stillCurrent()) {
+            pairLoading = false;
+            updateManualRatingControls();
+        }
     }
 }
 
-// Fix the manual rating functionality
+// A vote retains its pair, run and owner even if the selection changes while saving.
+let voteInFlight = false;
 async function vote(outcome) {
-    if (!currentPair) return;
-
+    if (!currentPair || !pairContext || !isRatingContextCurrent(pairContext)
+        || voteInFlight || pairLoading || ratingSelectionLoading) return;
+    const context = captureRatingContext();
+    const votedPair = currentPair.slice();
+    const pairToken = pairContext.pairToken;
+    const request = ++voteRequestVersion;
+    const stillCurrent = () => request === voteRequestVersion && isRatingContextCurrent(context);
+    voteInFlight = true;
+    updateManualRatingControls();
+    document.getElementById('manualRatingFeedback').hidden = true;
+    announceRatingStatus('Saving your rating…');
     try {
         const response = await fetch('/api/submit-rating', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                idea_a_id: currentPair[0].id,
-                idea_b_id: currentPair[1].id,
-                outcome: outcome,
-                evolution_id: currentEvolutionId
+                idea_a_id: votedPair[0].id,
+                idea_b_id: votedPair[1].id,
+                outcome,
+                evolution_id: context.evolutionId,
+                pair_token: pairToken
             })
         });
-
-        if (!response.ok) {
-            throw new Error('Failed to submit rating');
+        if (!stillCurrent()) return;
+        if (response.status === 409) {
+            voteInFlight = false;
+            await refreshPair();
+            if (stillCurrent() && currentPair && pairContext && isRatingContextCurrent(pairContext)) {
+                showManualRatingFeedback('Your rating was not saved because this comparison changed. The current pair has been reloaded.');
+            } else if (stillCurrent()) {
+                showManualRatingFeedback('Your rating was not saved. Could not load the current pair. Use Reload pair to retry.');
+            }
+            return;
         }
-
+        if (!response.ok) throw new Error('Failed to submit rating');
         const result = await response.json();
-        console.log('Rating submitted:', result);
-
-        // Update local ELO ratings and match counts for manual ratings
+        if (!stillCurrent()) return;
         if (result.updated_elos) {
             Object.entries(result.updated_elos).forEach(([id, elo]) => {
-                if (ideasDb[id]) {
-                    // Initialize ratings object if needed
-                    if (!ideasDb[id].ratings) {
-                        ideasDb[id].ratings = { auto: ideasDb[id].elo || 1500, manual: 1500 };
-                    }
-
-                    // Update the manual rating
-                    ideasDb[id].ratings.manual = elo;
-
-                    console.log(`Updated manual rating for idea ${id} to ${elo}`);
-                }
+                if (!ideasDb[id]) return;
+                if (!ideasDb[id].ratings) ideasDb[id].ratings = { auto: ideasDb[id].elo || 1500, manual: 1500 };
+                ideasDb[id].ratings.manual = elo;
             });
         }
-
-        // Update match counts if provided by the server
         if (result.updated_match_counts) {
             Object.entries(result.updated_match_counts).forEach(([id, counts]) => {
-                if (ideasDb[id]) {
-                    ideasDb[id].match_count = counts.total;
-                    ideasDb[id].manual_match_count = counts.manual;
-                    ideasDb[id].auto_match_count = counts.auto;
-                    console.log(`Updated match counts for idea ${id}: total=${counts.total}, manual=${counts.manual}, auto=${counts.auto}`);
-                }
+                if (!ideasDb[id]) return;
+                ideasDb[id].match_count = counts.total;
+                ideasDb[id].manual_match_count = counts.manual;
+                ideasDb[id].auto_match_count = counts.auto;
             });
         } else {
-            // Fallback to incrementing match counts locally if not provided by the server
-            currentPair.forEach(idea => {
+            votedPair.forEach(idea => {
+                if (!ideasDb[idea.id]) return;
                 ideasDb[idea.id].match_count = (ideasDb[idea.id].match_count || 0) + 1;
                 ideasDb[idea.id].manual_match_count = (ideasDb[idea.id].manual_match_count || 0) + 1;
             });
         }
-
-        // Get next pair
+        voteInFlight = false;
         await refreshPair();
     } catch (error) {
+        if (!stillCurrent()) return;
         console.error('Error submitting rating:', error);
-        alert('Error: ' + error.message);
+        currentPair = null;
+        pairContext = null;
+        showManualRatingFeedback('Rating could not be confirmed. Reload the pair to check the saved state before voting again.');
+    } finally {
+        if (stillCurrent()) {
+            voteInFlight = false;
+            updateManualRatingControls();
+        }
     }
 }
 
@@ -677,6 +909,8 @@ async function showRanking() {
 function toggleRatingMode(mode) {
     const manualControls = document.getElementById('manualRatingControls');
     const autoControls = document.getElementById('autoRatingControls');
+    const votes = document.getElementById('manualVoteBar');
+    if (votes) votes.hidden = mode !== 'manual';
 
     if (mode === 'manual') {
         manualControls.style.display = 'block';
@@ -691,34 +925,11 @@ function toggleRatingMode(mode) {
     }
 }
 
-function showMeanElo() {
-    fetch("/mean-elo-per-generation")
-        .then((res) => {
-            if (!res.ok) {
-                throw new Error("Failed to get mean ELO: " + res.statusText);
-            }
-            return res.json();
-        })
-        .then((meanElo) => {
-            const resultsContainer = document.getElementById("results-container");
-            resultsContainer.innerHTML = "<h2>Mean ELO per Generation</h2>";
-
-            const list = document.createElement("ul");
-            for (const genIndex in meanElo) {
-                const item = document.createElement("li");
-                item.textContent = `Generation ${genIndex}: ${meanElo[genIndex].toFixed(2)}`;
-                list.appendChild(item);
-            }
-            resultsContainer.appendChild(list);
-        })
-        .catch((error) => {
-            console.error(error);
-            alert(error.message);
-        });
-}
-
 // Add event listener for keydown events
 document.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.target.closest('input, textarea, select, button, a, [contenteditable], .candidate-inspector, .modal')) return;
+    if (document.querySelector('.ideas-container')?.style.display === 'none' || document.getElementById('manualVoteBar')?.hidden) return;
     switch (event.key) {
         case "ArrowLeft":
             vote("A");
@@ -735,189 +946,105 @@ document.addEventListener("keydown", (event) => {
     }
 });
 
+function showManualRatingFeedback(message) {
+    const feedback = document.getElementById('manualRatingFeedback');
+    if (!feedback) return;
+    feedback.querySelector('span').textContent = message;
+    feedback.hidden = false;
+    announceRatingStatus(message);
+}
+
 async function loadCurrentEvolution() {
+    const context = beginRatingSelection(null);
     try {
-        console.log("Loading current evolution...");
-
-        // First check if there's actually an evolution running on the server
-        let shouldRestoreFromLocalStorage = false;
-        try {
-            const progressResponse = await fetch('/api/progress');
-            if (progressResponse.ok) {
-                const progressData = await progressResponse.json();
-                console.log("Evolution status from server:", progressData);
-
-                // Only restore localStorage data if evolution is actually running
-                if (progressData.is_running) {
-                    shouldRestoreFromLocalStorage = true;
-                } else {
-                    console.log("No evolution is currently running, skipping localStorage restoration");
-                }
-            }
-        } catch (e) {
-            console.log("Could not check evolution status, skipping localStorage restoration:", e);
+        const progressResponse = await fetch('/api/progress');
+        if (!isRatingContextCurrent(context)) return;
+        if (!progressResponse.ok) throw new Error('Could not load the current experiment.');
+        const progress = await progressResponse.json();
+        if (!isRatingContextCurrent(context) || document.getElementById('evolutionSelect').value) return;
+        currentEvolutionId = progress.evolution_id || null;
+        context.evolutionId = currentEvolutionId;
+        if (progress.is_running) {
+            document.getElementById('titleA').textContent = 'Evolution is still running';
+            document.getElementById('contentA').textContent = 'Return to Evolution to follow its progress. Rating becomes available after it completes or stops.';
+            return;
         }
-
-        // Check localStorage for current evolution data (only if evolution is running)
-        if (shouldRestoreFromLocalStorage) {
-            const storedData = localStorage.getItem('currentEvolutionData');
-            if (storedData) {
-                try {
-                    const evolutionState = JSON.parse(storedData);
-                    console.log("Loaded evolution state from localStorage:", evolutionState);
-
-                    // Handle both old format (just history array) and new format (object with history and diversity_history)
-                    let generationsData;
-                    if (Array.isArray(evolutionState)) {
-                        // Old format - just the history array
-                        generationsData = evolutionState;
-                        setCurrentEvolutionAnalytics({ history: generationsData });
-                    } else if (evolutionState && evolutionState.history) {
-                        // New format - object with history and diversity_history
-                        generationsData = evolutionState.history;
-                        setCurrentEvolutionAnalytics(evolutionState);
-                    } else {
-                        console.error("Invalid evolution data format");
-                        // Continue to API call if localStorage parsing fails
-                        throw new Error("Invalid evolution data format");
-                    }
-
-                    if (generationsData && generationsData.length > 0) {
-                        const ideas = flattenGenerationHistory(generationsData, 'current-local');
-                        console.log("Processed ideas from localStorage:", ideas);
-                        await initializeRating(ideas, false);
-                        await refreshPair(); // Ensure refreshPair is called
-                        return; // Exit early if we successfully loaded from localStorage
-                    }
-                } catch (e) {
-                    console.error("Error parsing localStorage data:", e);
-                    // Continue to API call if localStorage parsing fails
-                }
-            }
+        if (!currentEvolutionId) {
+            document.getElementById('titleA').textContent = 'Choose an experiment';
+            document.getElementById('contentA').textContent = 'Select a saved evolution to compare its ideas, or start an experiment in Evolution.';
+            return;
         }
-
-        // If localStorage doesn't have data, try the API
-        const response = await fetch('/api/generations');
-
-        if (response.ok) {
-            const generations = await response.json();
-            console.log("Loaded generations from API:", generations);
-
-            if (generations && generations.length > 0) {
-                setCurrentEvolutionAnalytics({ history: generations });
-                const ideas = flattenGenerationHistory(generations, 'current-api');
-                console.log("Processed ideas from API:", ideas);
-                await initializeRating(ideas, false);
-
-                // Refresh the pair now that we have ideas
-                await refreshPair();
-            } else {
-                console.warn("No generations found or empty generations array");
-                document.getElementById("titleA").textContent = "No ideas to rate";
-                document.getElementById("contentA").textContent = "Please run an evolution first or select a saved evolution.";
-                document.getElementById("titleB").textContent = "";
-                document.getElementById("contentB").textContent = "";
-
-                // Do not retry automatically to avoid overwriting user selection
-                console.log("No running evolution found. Waiting for user selection.");
-            }
-        } else {
-            console.error("Failed to load generations:", await response.text());
-        }
+        const response = await fetch(`/api/evolution/${encodeURIComponent(context.evolutionId)}`);
+        if (!isRatingContextCurrent(context)) return;
+        if (!response.ok) throw new Error('Could not load this experiment. Use Reload pair to retry.');
+        const payload = await response.json();
+        if (!isRatingContextCurrent(context) || document.getElementById('evolutionSelect').value) return;
+        const data = payload.data || {};
+        if (!data.history?.length) throw new Error('This experiment has no saved ideas yet.');
+        setCurrentEvolutionAnalytics(data);
+        await initializeRating(flattenGenerationHistory(data.history, `current-${context.evolutionId}`), false);
+        if (!isRatingContextCurrent(context)) return;
+        ratingSelectionLoading = false;
+        await refreshPair();
     } catch (error) {
-        console.error('Error loading current evolution:', error);
+        if (isRatingContextCurrent(context)) showManualRatingFeedback(error.message || 'Could not load this experiment. Please retry.');
+    } finally {
+        if (isRatingContextCurrent(context)) {
+            ratingSelectionLoading = false;
+            updateManualRatingControls();
+        }
     }
 }
 
 async function loadEvolutions() {
-    const response = await fetch('/api/evolutions');
-    const evolutions = await response.json();
-
-    const select = document.getElementById('evolutionSelect');
-    select.innerHTML = '<option value="">Current Evolution</option>';
-
-    evolutions.forEach(evolution => {
-        const option = document.createElement('option');
-        option.value = evolution.id;
-        option.textContent = `Evolution from ${new Date(evolution.timestamp).toLocaleString()} - ${evolution.filename}`;
-        select.appendChild(option);
-    });
+    const owner = window.currentUser?.uid;
+    const request = ++evolutionListRequestVersion;
+    const stillCurrent = () => owner && owner === window.currentUser?.uid && request === evolutionListRequestVersion;
+    try {
+        const response = await fetch('/api/evolutions');
+        if (!stillCurrent()) return;
+        if (!response.ok) throw new Error('Could not load saved experiments. Refresh the page to retry.');
+        const evolutions = await response.json();
+        if (!stillCurrent()) return;
+        const select = document.getElementById('evolutionSelect');
+        const selected = select.value;
+        select.innerHTML = '<option value="">Current Evolution</option>';
+        evolutions.forEach(evolution => {
+            const option = document.createElement('option');
+            option.value = evolution.id;
+            option.textContent = evolution.filename || `Evolution from ${new Date(evolution.timestamp).toLocaleString()}`;
+            select.appendChild(option);
+        });
+        if (selected && Array.from(select.options).some(option => option.value === selected)) select.value = selected;
+    } catch (error) {
+        if (stillCurrent()) showManualRatingFeedback(error.message);
+    }
 }
 
-document.getElementById('evolutionSelect').addEventListener('change', async (e) => {
-    const evolutionId = e.target.value;
-    currentEvolutionId = evolutionId;
-
-    // Show loading state
-    document.getElementById('titleA').textContent = "Loading ideas...";
-    document.getElementById('contentA').innerHTML = "<p>Please wait while we load the ideas for comparison.</p>";
-    document.getElementById('titleB').textContent = "";
-    document.getElementById('contentB').innerHTML = "";
-
-    // Disable voting buttons while loading
-    document.querySelectorAll('.vote-btn').forEach(btn => {
-        btn.disabled = true;
-    });
-
-    try {
-        if (evolutionId) {
-            console.log(`Loading evolution ${evolutionId}...`);
-            const response = await fetch(`/api/evolution/${evolutionId}`);
-            if (response.ok) {
-                const data = await response.json();
-                console.log('Loaded evolution data:', data);
-
-                if (data.data && data.data.history) {
-                    setCurrentEvolutionAnalytics(data.data);
-                    const ideas = flattenGenerationHistory(data.data.history, `evo-${evolutionId}`);
-                    console.log('Processed ideas:', ideas);
-
-                    await initializeRating(ideas, false);
-                    // IMPORTANT: Call refreshPair after initialization
-                    await refreshPair();
-                } else {
-                    console.error('Invalid evolution data structure:', data);
-                    document.getElementById('titleA').textContent = "No ideas found";
-                    document.getElementById('contentA').innerHTML = "<p>This evolution contains no ideas to rate.</p>";
-                }
-            } else {
-                console.error('Failed to load evolution:', await response.text());
-                document.getElementById('titleA').textContent = "Error loading evolution";
-                document.getElementById('contentA').innerHTML = "<p>Failed to load the selected evolution. Please try again.</p>";
-            }
-        } else {
-            // Load current evolution
-            console.log('Loading current evolution...');
-            await loadCurrentEvolution();
-        }
-    } catch (error) {
-        console.error('Error in evolution selector:', error);
-        document.getElementById('titleA').textContent = "Error";
-        document.getElementById('contentA').innerHTML = "<p>An error occurred while loading the evolution. Please try again.</p>";
-    }
+document.getElementById('evolutionSelect').addEventListener('change', async (event) => {
+    const evolutionId = event.target.value;
+    if (evolutionId) await loadEvolution(evolutionId);
+    else await loadCurrentEvolution();
 });
 
 // Add this function to load available models
 async function loadModels() {
+    const owner = window.currentUser?.uid;
+    const request = ++modelRequestVersion;
+    const stillCurrent = () => owner && owner === window.currentUser?.uid && request === modelRequestVersion;
     try {
         const response = await fetch('/api/models');
+        if (!stillCurrent()) return;
         if (response.ok) {
             const data = await response.json();
+            if (!stillCurrent()) return;
             const modelSelect = document.getElementById('modelSelect');
 
-            // Clear existing options
-            modelSelect.innerHTML = '';
-
-            // Add models to dropdown
-            data.models.forEach(model => {
-                const option = document.createElement('option');
-                option.value = model.id;
-                option.textContent = model.name;
-                if (model.id === data.default) {
-                    option.selected = true;
-                }
-                modelSelect.appendChild(option);
+            window.IdeaWorkbench?.configureModelPicker({
+                modelId: 'modelSelect', providerId: 'ratingProviderSelect',
+                models: data.models || [], defaultModel: data.default,
             });
+            await window.checkApiKeyStatus?.();
         } else {
             console.error('Failed to load models:', await response.text());
         }
@@ -947,6 +1074,13 @@ function updateProgressBar(percent) {
     // Update the width with !important to override any conflicting styles
     progressBar.style.cssText = `width: ${percentStr} !important; transition: width 0.3s ease;`;
     progressBar.setAttribute('aria-valuenow', roundedPercent);
+    progressBar.setAttribute('aria-valuetext', `${roundedPercent}% complete`);
+
+    const announcementStep = roundedPercent >= 100 ? 100 : Math.floor(roundedPercent / 10) * 10;
+    if (progressBar.dataset.announcedStep !== String(announcementStep)) {
+        progressBar.dataset.announcedStep = String(announcementStep);
+        announceRatingStatus(`Automated rating ${announcementStep}% complete`);
+    }
 
     // Force a reflow to ensure the browser updates the progress bar
     void progressBar.offsetHeight;
@@ -1051,9 +1185,18 @@ startAutoRatingBtn.addEventListener('click', async function () {
         return;
     }
 
+    if (ratingSelectionLoading || currentEvolutionId !== evolutionId) {
+        showManualRatingFeedback('Wait for the selected experiment to load before starting a rating run.');
+        return;
+    }
+    const context = captureRatingContext();
+    const request = ++autoRatingRequestVersion;
+    const stillCurrent = () => request === autoRatingRequestVersion && isRatingContextCurrent(context);
     autoRatingInProgress = true;
     startAutoRatingBtn.disabled = true;
     startAutoRatingBtn.textContent = 'Auto Swiss Rating...';
+    announceRatingStatus('Automated Swiss rating started');
+    updateAutoratingBillingWarning(null);
 
     // Hide the idea comparison view
     document.querySelector('.ideas-container').style.display = 'none';
@@ -1073,6 +1216,8 @@ startAutoRatingBtn.addEventListener('click', async function () {
         // Reset the progress bar to 0% with a clean slate
         progressBar.style.cssText = 'width: 0% !important; transition: width 0.3s ease;';
         progressBar.setAttribute('aria-valuenow', '0');
+        progressBar.setAttribute('aria-valuetext', '0% complete');
+        delete progressBar.dataset.announcedStep;
         progressBar.style.display = 'block';
 
         // Force a reflow to ensure the browser updates the progress bar
@@ -1086,6 +1231,7 @@ startAutoRatingBtn.addEventListener('click', async function () {
     document.getElementById('ratingStats').innerHTML = 'Processing Swiss rounds...';
     document.getElementById('rankingsTable').innerHTML = '';
 
+    let progressPollingActive = true;
     try {
         const ratingStatsEl = document.getElementById('ratingStats');
         let expectedRounds = tournamentEstimate.targetRounds;
@@ -1093,16 +1239,16 @@ startAutoRatingBtn.addEventListener('click', async function () {
         let allResults = [];
         let finalIdeas = [];
         let finalTokenCounts = null;
-        let progressPollingActive = true;
         let lastProgressVersion = -1;
         const pollProgress = async () => {
-            if (!progressPollingActive) {
-                return;
-            }
+            if (!progressPollingActive || !stillCurrent()) return;
             try {
                 const progressResponse = await fetch('/api/auto-rate/progress');
+                if (!stillCurrent()) return;
                 if (progressResponse.ok) {
                     const progressData = await progressResponse.json();
+                    if (!stillCurrent()) return;
+                    if (progressData?.billing_warning) updateAutoratingBillingWarning(progressData.billing_warning);
                     if (!progressData || !progressData.is_running) {
                         return;
                     }
@@ -1183,7 +1329,7 @@ startAutoRatingBtn.addEventListener('click', async function () {
             } catch (pollError) {
                 console.warn('Error polling auto-rating progress:', pollError);
             } finally {
-                if (progressPollingActive) {
+                if (progressPollingActive && stillCurrent()) {
                     autoRatingProgressPollTimer = setTimeout(pollProgress, 350);
                 }
             }
@@ -1204,12 +1350,15 @@ startAutoRatingBtn.addEventListener('click', async function () {
             })
         });
         progressPollingActive = false;
-        stopAutoRatingProgressPolling();
+        if (request === autoRatingRequestVersion) stopAutoRatingProgressPolling();
+        if (!stillCurrent()) return;
 
         if (!response.ok) {
             let errorMessage = 'Failed to perform automated Swiss rating';
             try {
                 const errorPayload = await response.json();
+                if (!stillCurrent()) return;
+                if (errorPayload?.billing_warning) updateAutoratingBillingWarning(errorPayload.billing_warning);
                 if (errorPayload?.message) {
                     errorMessage = errorPayload.message;
                 } else if (errorPayload?.detail) {
@@ -1222,6 +1371,8 @@ startAutoRatingBtn.addEventListener('click', async function () {
         }
 
         const data = await response.json();
+        if (!stillCurrent()) return;
+        if (data.billing_warning) updateAutoratingBillingWarning(data.billing_warning);
         allResults = data.results || [];
         const completedRounds = Math.max(
             0,
@@ -1304,14 +1455,19 @@ startAutoRatingBtn.addEventListener('click', async function () {
         }
 
     } catch (error) {
+        if (!stillCurrent()) return;
         console.error('Error during auto-rating:', error);
         stopAutoRatingProgressPolling();
-        document.getElementById('ratingStats').innerHTML = `<p class="text-danger">Error: ${error.message}</p>`;
+        document.getElementById('ratingStats').innerHTML = `<p class="text-danger">Error: ${escapeHtml(error.message)}</p>`;
+        announceRatingStatus(`Automated rating failed: ${error.message}`);
     } finally {
-        stopAutoRatingProgressPolling();
-        startAutoRatingBtn.textContent = 'Start Auto Swiss Rating';
-        startAutoRatingBtn.disabled = false;
-        autoRatingInProgress = false;
+        progressPollingActive = false;
+        if (request === autoRatingRequestVersion) {
+            stopAutoRatingProgressPolling();
+            startAutoRatingBtn.textContent = 'Start Auto Swiss Rating';
+            startAutoRatingBtn.disabled = false;
+            autoRatingInProgress = false;
+        }
     }
 });
 
@@ -1382,11 +1538,19 @@ function updateSortIndicators() {
     headers.forEach(header => {
         const arrow = header.querySelector('.sort-arrow');
         const column = header.dataset.sort;
+        const columnHeader = header.closest('th');
+        const isActive = column === currentSortColumn;
 
-        if (column === currentSortColumn) {
+        if (isActive) {
             arrow.className = `sort-arrow active ${currentSortDirection}`;
         } else {
             arrow.className = 'sort-arrow inactive';
+        }
+        if (columnHeader) {
+            columnHeader.setAttribute(
+                'aria-sort',
+                isActive ? (currentSortDirection === 'asc' ? 'ascending' : 'descending') : 'none'
+            );
         }
     });
 }
@@ -1508,12 +1672,10 @@ function updateRankingsTableContent(ideas) {
         const row = document.createElement('tr');
         row.className = 'idea-row';
         row.dataset.ideaIndex = index;
-        row.style.cursor = 'pointer';
 
         row.innerHTML = buildRankingRowHtml(idea, index);
 
-        // Add click event to show the idea details
-        row.addEventListener('click', function () {
+        row.querySelector('.idea-details-trigger')?.addEventListener('click', function () {
             showIdeaDetails(index);
         });
 
@@ -1661,50 +1823,14 @@ function buildRankingRowHtml(idea, index) {
 
     return `
         <td>${index + 1}</td>
-        <td>${idea.title || 'Untitled'}</td>
+        <td><button type="button" class="idea-details-trigger">${escapeHtml(idea.title || 'Untitled')}</button></td>
         ${getIdeaRatingCellHtml(idea)}
-        <td>${getIdeaMatchCountByType(idea)}</td>
-        <td>${formatRankingMetric(diversityScore, 4)}</td>
-        <td>${formatRankingMetric(overallFitness, 4)}</td>
-        <td>${birthGeneration}</td>
-        <td>${deathGeneration}</td>
+        <td>${escapeHtml(getIdeaMatchCountByType(idea))}</td>
+        <td>${escapeHtml(formatRankingMetric(diversityScore, 4))}</td>
+        <td>${escapeHtml(formatRankingMetric(overallFitness, 4))}</td>
+        <td>${escapeHtml(birthGeneration)}</td>
+        <td>${escapeHtml(deathGeneration)}</td>
     `;
-}
-
-// Add this function to show idea details in a modal
-function showIdeaDetails(ideaIndex) {
-    if (!window.rankedIdeas || !window.rankedIdeas[ideaIndex]) {
-        console.error('Idea not found');
-        return;
-    }
-
-    const idea = window.rankedIdeas[ideaIndex];
-    currentModalIdea = idea;
-
-    // Set modal title
-    document.getElementById('ideaModalLabel').textContent = idea.title || 'Untitled';
-
-    // Set modal content with markdown rendering
-    const modalContent = document.getElementById('modalIdeaContent');
-    modalContent.innerHTML = `
-        <div class="card">
-            <div class="card-body">
-                <h4>${idea.title || 'Untitled'}</h4>
-                <p><strong>Generation (${currentGenerationView === 'birth' ? 'Birth' : 'Death'} view):</strong> ${getIdeaGenerationLabel(idea)}</p>
-                <p><strong>Birth Generation:</strong> ${getIdeaGenerationLabel(idea, 'birth')}</p>
-                <p><strong>Death Generation:</strong> ${getIdeaGenerationLabel(idea, 'death')}</p>
-                <p><strong>ELO Rating:</strong> ${idea.elo}</p>
-                <hr>
-                <div class="idea-content">
-                    ${renderMarkdown(idea.content || '')}
-                </div>
-            </div>
-        </div>
-    `;
-
-    // Show the modal
-    const modal = new bootstrap.Modal(document.getElementById('ideaModal'));
-    modal.show();
 }
 
 // Add event listener for the return button when the document loads
@@ -1789,11 +1915,15 @@ function showAutoratingCostModal(tokenCounts) {
     const totalTokens = tokenCounts.total.toLocaleString();
     const totalInputTokens = tokenCounts.total_input.toLocaleString();
     const totalOutputTokens = tokenCounts.total_output.toLocaleString();
+    const totalThoughtTokens = (tokenCounts.total_thoughts || 0).toLocaleString();
+    const totalCachedInputTokens = (tokenCounts.total_cached_input || 0).toLocaleString();
 
     // Component totals and details for critic
     const criticTotal = tokenCounts.critic.total.toLocaleString();
     const criticInput = tokenCounts.critic.input.toLocaleString();
     const criticOutput = tokenCounts.critic.output.toLocaleString();
+    const criticThoughts = (tokenCounts.critic.thoughts || 0).toLocaleString();
+    const criticCachedInput = (tokenCounts.critic.cached_input || 0).toLocaleString();
     const criticModel = tokenCounts.critic.model;
     const criticCost = tokenCounts.critic.cost.toFixed(4);
 
@@ -1802,12 +1932,14 @@ function showAutoratingCostModal(tokenCounts) {
     const totalCost = costInfo.total_cost.toFixed(4);
     const inputCost = costInfo.input_cost.toFixed(4);
     const outputCost = costInfo.output_cost.toFixed(4);
+    const thoughtCost = (costInfo.thought_cost || 0).toFixed(4);
+    const cachedInputCost = (costInfo.cached_input_cost || 0).toFixed(4);
 
     // Prepare alternative cost estimates using the critic token counts
     let estimatesList = '';
     if (tokenCounts.estimates) {
         estimatesList = Object.values(tokenCounts.estimates).map(e => {
-            return `<li class="list-group-item d-flex justify-content-between align-items-center">${e.name}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
+            return `<li class="list-group-item d-flex justify-content-between align-items-center">${escapeHtml(e.name)}<span>$${e.cost.toFixed(4)} <small class="text-muted">estimate</small></span></li>`;
         }).join('');
     }
 
@@ -1841,12 +1973,18 @@ function showAutoratingCostModal(tokenCounts) {
                                         <span>Input: <span class="text-info">${totalInputTokens}</span></span>
                                         <span>Output: <span class="text-success">${totalOutputTokens}</span></span>
                                     </div>
+                                    <div class="small text-muted mt-1">
+                                        <span>Thoughts: ${totalThoughtTokens}</span>
+                                        ${tokenCounts.total_cached_input ? `<span class="ms-2">Cached input: ${totalCachedInputTokens}</span>` : ''}
+                                    </div>
                                     <hr>
                                     <h6>Cost Breakdown:</h6>
                                     <p class="mb-1">Total cost: <strong>$${totalCost}</strong></p>
                                     <div class="small text-muted">
                                         <div>Input: $${inputCost}</div>
+                                        ${tokenCounts.total_cached_input ? `<div>Cached input read: $${cachedInputCost}</div>` : ''}
                                         <div>Output: $${outputCost}</div>
+                                        <div>Thoughts: $${thoughtCost}</div>
                                     </div>
                                     <hr>
                                     <h6>Other Model Estimates:</h6>
@@ -1860,12 +1998,14 @@ function showAutoratingCostModal(tokenCounts) {
                             <ul class="list-group">
                                 <li class="list-group-item">
                                     <div class="d-flex justify-content-between align-items-center">
-                                        <span>Critic <span class="badge bg-secondary">${criticModel}</span></span>
+                                        <span>Critic <span class="badge bg-secondary">${escapeHtml(criticModel)}</span></span>
                                         <span class="badge bg-primary rounded-pill">${criticTotal}</span>
                                     </div>
                                     <div class="small text-muted mt-1">
                                         <span>Input: ${criticInput}</span> |
                                         <span>Output: ${criticOutput}</span> |
+                                        ${tokenCounts.critic.thoughts ? `<span>Thoughts: ${criticThoughts}</span> |` : ''}
+                                        ${tokenCounts.critic.cached_input ? `<span>Cached input: ${criticCachedInput}</span> |` : ''}
                                         <span>Cost: $${criticCost}</span>
                                     </div>
                                 </li>
@@ -1889,6 +2029,7 @@ function showAutoratingCostModal(tokenCounts) {
     `;
 
     // Initialize the modal
+    rememberModalFocusOrigin(modalContainer);
     const modal = new bootstrap.Modal(modalContainer);
     modal.show();
 
@@ -1896,20 +2037,22 @@ function showAutoratingCostModal(tokenCounts) {
     modalContainer.addEventListener('shown.bs.modal', function () {
         // For autorating, we only have the critic component, so create simpler charts
 
-        // Create a pie chart for input vs output tokens
+        // Create a pie chart for input vs output/thinking tokens
         const pieCtx = document.getElementById('autoratingTokenPieChart').getContext('2d');
         new Chart(pieCtx, {
             type: 'pie',
             data: {
-                labels: ['Input Tokens', 'Output Tokens'],
+                labels: ['Input Tokens', 'Output Tokens', 'Thinking Tokens'],
                 datasets: [{
                     data: [
                         tokenCounts.total_input,
-                        tokenCounts.total_output
+                        tokenCounts.total_output,
+                        tokenCounts.total_thoughts || 0
                     ],
                     backgroundColor: [
-                        '#36a2eb',
-                        '#4bc0c0'
+                        getRaterChartTheme().violet,
+                        getRaterChartTheme().green,
+                        getRaterChartTheme().blue
                     ]
                 }]
             },
@@ -1918,7 +2061,7 @@ function showAutoratingCostModal(tokenCounts) {
                 plugins: {
                     title: {
                         display: true,
-                        text: 'Token Distribution (Input vs Output)'
+                        text: 'Token Distribution'
                     },
                     legend: {
                         position: 'bottom'
@@ -1932,15 +2075,16 @@ function showAutoratingCostModal(tokenCounts) {
         new Chart(barCtx, {
             type: 'bar',
             data: {
-                labels: ['Input Cost', 'Output Cost', 'Total Cost'],
+                labels: ['Input Cost', 'Output Cost', 'Thinking Cost', 'Total Cost'],
                 datasets: [{
                     label: 'Cost (USD)',
                     data: [
                         parseFloat(inputCost),
                         parseFloat(outputCost),
+                        parseFloat(thoughtCost),
                         parseFloat(totalCost)
                     ],
-                    backgroundColor: ['#36a2eb', '#4bc0c0', '#ff9f40']
+                    backgroundColor: [getRaterChartTheme().violet, getRaterChartTheme().green, getRaterChartTheme().blue, getRaterChartTheme().coral]
                 }]
             },
             options: {
@@ -1979,6 +2123,7 @@ async function resetRatings(type) {
         return;
     }
 
+    const context = captureRatingContext();
     try {
         const response = await fetch('/api/reset-ratings', {
             method: 'POST',
@@ -1991,14 +2136,17 @@ async function resetRatings(type) {
             })
         });
 
+        if (!isRatingContextCurrent(context)) return;
         if (!response.ok) {
             throw new Error('Failed to reset ratings and match counts');
         }
 
         const data = await response.json();
+        if (!isRatingContextCurrent(context)) return;
 
-        // Reload the current evolution
-        await loadEvolution(evolutionId);
+        // Refresh only if the user is still viewing the run that was reset.
+        const reloaded = await loadEvolution(evolutionId);
+        if (!reloaded) return;
 
         // Show a success message
         alert(data.message);
@@ -2008,6 +2156,7 @@ async function resetRatings(type) {
             showRanking();
         }
     } catch (error) {
+        if (!isRatingContextCurrent(context)) return;
         console.error('Error resetting ratings and match counts:', error);
         alert('Error: ' + error.message);
     }
@@ -2038,13 +2187,13 @@ function showIdeaDetails(ideaIndex) {
     modalContent.innerHTML = `
         <div class="card">
             <div class="card-body">
-                <h4>${idea.title || 'Untitled'}</h4>
-                <p><strong>Generation (${currentGenerationView === 'birth' ? 'Birth' : 'Death'} view):</strong> ${getIdeaGenerationLabel(idea)}</p>
-                <p><strong>Birth Generation:</strong> ${getIdeaGenerationLabel(idea, 'birth')}</p>
-                <p><strong>Death Generation:</strong> ${getIdeaGenerationLabel(idea, 'death')}</p>
-                <p><strong>Auto Rating:</strong> ${autoRating}</p>
-                <p><strong>Manual Rating:</strong> ${manualRating}</p>
-                <p><strong>Difference:</strong> <span class="${diffClass}">${diffSign}${diffRating}</span></p>
+                <h4 class="idea-details-title"></h4>
+                <p><strong>Generation (${currentGenerationView === 'birth' ? 'Birth' : 'Death'} view):</strong> <span data-idea-detail="generation"></span></p>
+                <p><strong>Birth Generation:</strong> <span data-idea-detail="birth-generation"></span></p>
+                <p><strong>Death Generation:</strong> <span data-idea-detail="death-generation"></span></p>
+                <p><strong>Auto Rating:</strong> <span data-idea-detail="auto-rating"></span></p>
+                <p><strong>Manual Rating:</strong> <span data-idea-detail="manual-rating"></span></p>
+                <p><strong>Difference:</strong> <span class="${diffClass}" data-idea-detail="rating-difference"></span></p>
                 <hr>
                 <div class="idea-content">
                     ${renderMarkdown(idea.content || '')}
@@ -2052,51 +2201,45 @@ function showIdeaDetails(ideaIndex) {
             </div>
         </div>
     `;
+    modalContent.querySelector('.idea-details-title').textContent = idea.title || 'Untitled';
+    modalContent.querySelector('[data-idea-detail="generation"]').textContent = getIdeaGenerationLabel(idea);
+    modalContent.querySelector('[data-idea-detail="birth-generation"]').textContent = getIdeaGenerationLabel(idea, 'birth');
+    modalContent.querySelector('[data-idea-detail="death-generation"]').textContent = getIdeaGenerationLabel(idea, 'death');
+    modalContent.querySelector('[data-idea-detail="auto-rating"]').textContent = autoRating;
+    modalContent.querySelector('[data-idea-detail="manual-rating"]').textContent = manualRating;
+    modalContent.querySelector('[data-idea-detail="rating-difference"]').textContent = `${diffSign}${diffRating}`;
 
     // Show the modal
-    const modal = new bootstrap.Modal(document.getElementById('ideaModal'));
-    modal.show();
+    const modalElement = document.getElementById('ideaModal');
+    rememberModalFocusOrigin(modalElement);
+    window.IdeaWorkbench?.renderMetrics(document.getElementById('candidateMetricEvidence'), idea, currentEvolutionAnalytics?.evaluation || {});
+    window.IdeaWorkbench?.renderPrimaryArtifact(document.getElementById('raterIdeaPrimaryArtifact'), idea, currentEvolutionId);
+    window.IdeaWorkbench?.openInspector(modalElement);
 }
 
 async function loadEvolution(evolutionId) {
+    const context = beginRatingSelection(evolutionId);
     try {
-        const response = await fetch(`/api/evolution/${evolutionId}`);
-        if (!response.ok) {
-            throw new Error('Failed to load evolution');
-        }
-
+        const response = await fetch(`/api/evolution/${encodeURIComponent(evolutionId)}`);
+        if (!isRatingContextCurrent(context)) return null;
+        if (!response.ok) throw new Error('Could not load this experiment. Use Reload pair to retry.');
         const data = await response.json();
-        currentEvolutionId = evolutionId;
+        if (!isRatingContextCurrent(context)) return null;
+        if (!data.data?.history?.length) throw new Error('This experiment has no saved ideas yet.');
         setCurrentEvolutionAnalytics(data.data);
-
-        const allIdeas = flattenGenerationHistory(data.data.history, `load-${evolutionId}`);
-
-        allIdeas.forEach(idea => {
-            if (!idea.ratings) {
-                idea.ratings = {
-                    auto: idea.elo || 1500,
-                    manual: 1500
-                };
-            } else if (typeof idea.ratings === 'number') {
-                const oldElo = idea.ratings;
-                idea.ratings = {
-                    auto: oldElo,
-                    manual: oldElo
-                };
-            }
-
-            idea.elo = idea.ratings.auto;
-            idea.match_count = idea.match_count || 0;
-            idea.auto_match_count = idea.auto_match_count || 0;
-            idea.manual_match_count = idea.manual_match_count || 0;
-        });
-
-        await initializeRating(allIdeas);
-
-        return data;
+        await initializeRating(flattenGenerationHistory(data.data.history, `load-${evolutionId}`), false);
+        if (!isRatingContextCurrent(context)) return null;
+        ratingSelectionLoading = false;
+        await refreshPair();
+        return isRatingContextCurrent(context) ? data : null;
     } catch (error) {
-        console.error('Error loading evolution:', error);
+        if (isRatingContextCurrent(context)) showManualRatingFeedback(error.message || 'Could not load this experiment. Please retry.');
         return null;
+    } finally {
+        if (isRatingContextCurrent(context)) {
+            ratingSelectionLoading = false;
+            updateManualRatingControls();
+        }
     }
 }
 
@@ -2306,6 +2449,7 @@ function openFocusedChart(chartId, chartTitle) {
         });
     }
 
+    rememberModalFocusOrigin(modalElement);
     chartFocusModalInstance.show();
     if (modalElement.classList.contains('show')) {
         renderFocusedChart();
@@ -2361,8 +2505,8 @@ function createDiversityChart(labels, diversitySeries) {
                 {
                     label: 'Diversity Score',
                     data: diversitySeries,
-                    borderColor: 'rgba(153, 102, 255, 1)',
-                    backgroundColor: 'rgba(153, 102, 255, 0.2)',
+                    borderColor: getRaterChartTheme().violet,
+                    backgroundColor: raterChartColorWithAlpha(getRaterChartTheme().violet, 0.2),
                     tension: 0.2
                 }
             ]
@@ -2405,7 +2549,7 @@ function createDiversityChart(labels, diversitySeries) {
     });
 }
 
-function createFitnessChart(labels, combinedFitnessSeries, normalizedEloSeries, normalizedDiversitySeries, fitnessAlpha) {
+function createFitnessChart(labels, combinedFitnessSeries, normalizedEloSeries, normalizedDiversitySeries, fitnessAlpha, usesSavedFitness = false) {
     const canvas = document.getElementById('fitnessChart');
     if (!canvas) {
         return;
@@ -2413,7 +2557,9 @@ function createFitnessChart(labels, combinedFitnessSeries, normalizedEloSeries, 
 
     const formulaEl = document.getElementById('fitnessFormula');
     if (formulaEl) {
-        formulaEl.textContent = `fitness = ${fitnessAlpha.toFixed(2)} × norm(mean ELO) + ${(1 - fitnessAlpha).toFixed(2)} × norm(diversity)`;
+        formulaEl.textContent = usesSavedFitness
+            ? 'Mean of saved candidate fitness. Inspect a candidate for evaluator weights and evidence.'
+            : `Legacy estimate: ${fitnessAlpha.toFixed(2)} × norm(mean ELO) + ${(1 - fitnessAlpha).toFixed(2)} × norm(diversity)`;
     }
 
     const ctx = canvas.getContext('2d');
@@ -2428,27 +2574,27 @@ function createFitnessChart(labels, combinedFitnessSeries, normalizedEloSeries, 
             labels,
             datasets: [
                 {
-                    label: 'Combined Fitness',
+                    label: usesSavedFitness ? 'Saved selection fitness' : 'Legacy fitness estimate',
                     data: combinedFitnessSeries,
-                    borderColor: 'rgba(255, 159, 64, 1)',
-                    backgroundColor: 'rgba(255, 159, 64, 0.2)',
+                    borderColor: getRaterChartTheme().violet,
+                    backgroundColor: raterChartColorWithAlpha(getRaterChartTheme().violet, 0.2),
                     tension: 0.2
                 },
                 {
                     label: 'Normalized Mean ELO',
                     data: normalizedEloSeries,
-                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderColor: getRaterChartTheme().blue,
                     borderDash: [6, 4],
                     tension: 0.2
                 },
                 {
                     label: 'Normalized Diversity',
                     data: normalizedDiversitySeries,
-                    borderColor: 'rgba(153, 102, 255, 1)',
+                    borderColor: getRaterChartTheme().green,
                     borderDash: [6, 4],
                     tension: 0.2
                 }
-            ]
+            ].filter((_, index) => !usesSavedFitness || index === 0)
         },
         options: {
             responsive: true,
@@ -2456,7 +2602,7 @@ function createFitnessChart(labels, combinedFitnessSeries, normalizedEloSeries, 
             plugins: {
                 title: {
                     display: true,
-                    text: hasFitnessData ? 'Combined Fitness by Generation' : 'Combined Fitness by Generation (insufficient data)'
+                    text: usesSavedFitness ? 'Saved Selection Fitness by Generation' : (hasFitnessData ? 'Legacy Fitness Estimate' : 'Fitness (insufficient data)')
                 },
                 tooltip: {
                     callbacks: {
@@ -2472,10 +2618,10 @@ function createFitnessChart(labels, combinedFitnessSeries, normalizedEloSeries, 
             scales: {
                 y: {
                     beginAtZero: true,
-                    max: 1,
+                    ...(usesSavedFitness ? {} : { max: 1 }),
                     title: {
                         display: true,
-                        text: 'Normalized Score'
+                        text: usesSavedFitness ? 'Selection fitness' : 'Normalized estimate'
                     }
                 },
                 x: {
@@ -2559,22 +2705,22 @@ function createEloChart(ideas, ratingType) {
                 {
                     label: 'Max ELO',
                     data: maxElos,
-                    borderColor: 'rgba(255, 99, 132, 1)',
-                    backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                    borderColor: getRaterChartTheme().green,
+                    backgroundColor: raterChartColorWithAlpha(getRaterChartTheme().green, 0.2),
                     tension: 0.1
                 },
                 {
                     label: 'Mean ELO',
                     data: meanElos,
-                    borderColor: 'rgba(54, 162, 235, 1)',
-                    backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                    borderColor: getRaterChartTheme().violet,
+                    backgroundColor: raterChartColorWithAlpha(getRaterChartTheme().violet, 0.2),
                     tension: 0.1
                 },
                 {
                     label: 'Median ELO',
                     data: medianElos,
-                    borderColor: 'rgba(75, 192, 192, 1)',
-                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                    borderColor: getRaterChartTheme().blue,
+                    backgroundColor: raterChartColorWithAlpha(getRaterChartTheme().blue, 0.2),
                     tension: 0.1
                 }
             ]
@@ -2651,11 +2797,31 @@ function createEloChart(ideas, ratingType) {
         return (fitnessAlpha * eloComponent) + ((1 - fitnessAlpha) * diversityComponent);
     });
 
+    const savedFitnessSeries = fitnessGenerations.map(generation => {
+        const values = (analyticsHistory[generation] || [])
+            .map(idea => window.IdeaWorkbench?.finite(idea?.selection_metrics?.fitness ?? idea?.fitness))
+            .filter(value => Number.isFinite(value));
+        return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    });
+    const usesSavedFitness = savedFitnessSeries.some(value => Number.isFinite(value));
+    const displayedFitnessSeries = usesSavedFitness ? savedFitnessSeries : combinedFitnessSeries;
     createFitnessChart(
         fitnessLabels,
-        combinedFitnessSeries,
+        displayedFitnessSeries,
         normalizedEloSeries,
         normalizedDiversitySeries,
-        fitnessAlpha
+        fitnessAlpha,
+        usesSavedFitness
+    );
+    const samplingNotice = window.IdeaWorkbench?.renderHistorySamplingNote(
+        document.getElementById('raterDiversitySamplingNote'), currentEvolutionAnalytics?.diversity_history,
+    ) || '';
+    window.IdeaWorkbench?.renderChartTable(
+        document.getElementById('raterChartTable'), fitnessLabels,
+        [
+            { label: 'Mean automatic Elo', data: meanAutoFitnessSeries },
+            { label: 'Diversity', data: diversitySeries },
+            { label: usesSavedFitness ? 'Saved selection fitness' : 'Legacy fitness estimate', data: displayedFitnessSeries },
+        ], `Comparison analytics by generation${samplingNotice ? `. ${samplingNotice}` : ''}`,
     );
 }

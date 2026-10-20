@@ -1,0 +1,205 @@
+name: "Prime Visualization Experiments"
+description: "Generate mathematically explicit, artifact-ready experiments for discovering visual structure in the prime numbers"
+version: "1.2.0"
+author: "Original Idea App"
+created_date: "2026-07-22"
+
+metadata:
+  item_type: "prime visualization experiment proposals"
+
+evaluation:
+  artifact_generation: true
+  fitness_score: true
+
+special_requirements: |
+  Prime-visualization proposal constraints:
+  - Prefer conceptual simplicity. The core idea should be explainable in one or two plain-language sentences, like a classic integer spiral's simple placement rule. Rigor belongs in the test and controls; it does not require a complicated mapping.
+  - Use one central mapping and one primary encoded quantity. Add a mathematical transform, secondary encoding, or extra panel only when it is essential to the hypothesis and cannot be replaced by a simpler direct view.
+  - Treat simplicity as a design objective: when two experiments could test the same question, choose the one with fewer rules, parameters, transforms, and visual channels.
+  - Known representations are an optional precedent palette, not a required starting point. A proposal may use zero, one, or two precedents, but it must extract a general structural principle and create a materially different mapping or test.
+  - A rotation, recoloring, animation, projection, parameter change, or other cosmetic restyling of any precedent is not a new proposal. Combining two complete existing pictures side by side is not new either.
+  - Define the integer sample and every mathematical mapping explicitly. State the domain bound, whether the inputs are integers n or indexed primes p_k, the coordinate or graph map, adjacency/order, and every mark, size, opacity, and color quantity as a formula or unambiguous algorithm.
+  - State one falsifiable hypothesis about prime structure, one baseline or null comparison, a quantitative signal or predeclared visual signature, and an outcome that would count against the hypothesis. Distinguish exploratory pattern-finding from confirmatory evidence and guard against visual apophenia.
+  - Supply a deterministic, bounded implementation specification for a future isolated Python runner. It is a plan and artifact contract only: never claim that code was executed, a PNG was rendered, or a pattern was observed.
+
+  Optional precedent palette — seeds, not recipes:
+  - Integer paths: the Ulam square spiral, the Sacks number spiral that aligns perfect squares on a ray, and other number-spiral or lattice orderings. Abstractable principles include sequence order mapped to geometry and alignment of a reference subsequence.
+  - Modular structure: residue grids, residue wheels, and Chinese-remainder coordinates; cyclic multiplication maps r -> a*r mod m shown as tables or chords. Abstractable principles include quotient/remainder coordinates, periodicity, and orbit structure.
+  - Sequence dynamics: prime-gap series g_k = p_(k+1) - p_k, constellation spacings, and prime-race curves pi(x; m, a) for reduced residue classes a mod m. Abstractable principles include increments, cumulative lead changes, crossings, and scale dependence.
+  - Combinatorial divisibility: Pascal/binomial arrays colored by C(n,k) mod p, divisibility, or p-adic valuation. Abstractable principles include local recurrences, arithmetic texture, and multiscale self-similarity.
+  - Factor structure and natural-number geometry: factor-pair rectangles, divisor lattices, and recursive dot or polygon groupings that encode prime factorization. Abstractable principles include product structure, hierarchy, and symmetry.
+  These precedents supply questions and encoding principles only. Do not copy their full construction, treat their visible patterns as unexplained evidence, or assume that a familiar picture is the best control.
+
+  Mathematical and experimental requirements:
+  - Use exact notation and define all symbols. Explain why the mapping might expose arithmetic structure rather than merely create an attractive picture.
+  - Compute primality with a deterministic sieve for the declared finite range. Do not use an external prime list or network data.
+  - Include at least one control, such as shuffled prime labels, density-matched random integers, residue-preserving surrogates, a parameter holdout, or a matched rendering from a cited precedent over the same range.
+  - Name likely confounders, including changing prime density, aspect-ratio distortion, overplotting, interpolation, color normalization, and arbitrary parameter tuning when relevant.
+  - Do not present an unproved visual pattern as a theorem or imply that a finite plot proves an asymptotic claim.
+
+  Deterministic implementation envelope:
+  - Target one noninteractive Python 3.11 script using only the standard library, NumPy, and Matplotlib with the Agg backend.
+  - Use a default upper bound N no greater than 250,000, a fixed seed of 0 for any control sampling, and an explicit time-complexity and memory-complexity estimate. No network, subprocesses, shell commands, package installation, user input, or reads outside the job inputs.
+  - Keep the primary image at or below 1600 x 1600 pixels and 25 MiB. Use a colorblind-safe palette, readable labels, a legend, and a caption that explains what position and color encode without relying on color alone.
+  - Use relative output paths only. The proposed script must write visualization.png, metadata.json, and result.json. metadata.json records parameters, formulas/algorithm steps, seed, hypotheses, controls, and metric definitions.
+  - result.json follows this exact shape: schema_version=1; status="ok" or "failed"; metrics is a map of finite numeric values; artifacts lists relative path, role, and media_type; summary is concise; failed results include error and no metrics. The successful manifest must identify visualization.png as role="primary" with media_type="image/png" and metadata.json as role="metadata" with media_type="application/json".
+  - A successful manifest is structurally equivalent to {"schema_version": 1, "status": "ok", "metrics": {"structure_signal": 0.0}, "artifacts": [{"path": "visualization.png", "role": "primary", "media_type": "image/png"}, {"path": "metadata.json", "role": "metadata", "media_type": "application/json"}], "summary": "...", "error": null}. Define structure_signal mathematically in the proposal; do not invent its value. A failed manifest uses empty metrics/artifacts and a non-empty error.
+
+  Required proposal sections:
+  - Concept & Precedent Departure
+  - Mathematical Mapping
+  - Hypothesis, Null & Falsification
+  - Visual Encoding
+  - Deterministic Implementation Plan
+  - Artifact & Metric Contract
+  - Interpretation Limits
+
+  Output format:
+  - Return exactly two labeled fields:
+    Title: [concise experiment name]
+    Content: [full markdown proposal with all required sections]
+  - Do not include implementation results, invented measurements, or commentary outside those fields.
+
+prompts:
+  context: |
+    Generate 60 technically distinct ingredients for prime-number visualization experiments. Seek mappings that could expose arithmetic relationships, not visual styles.
+
+    The following compact precedent palette is optional and non-exhaustive. It contains seeds, not recipes:
+    - Integer paths: Ulam and Sacks spirals, plus other number-spiral or lattice orderings. Abstract sequence-to-geometry or reference-subsequence alignment; do not reuse a whole layout.
+    - Modular structure: residue grids/wheels, Chinese-remainder coordinates, and cyclic multiplication tables or chord maps. Abstract periodic coordinates and orbit structure.
+    - Sequence dynamics: prime gaps, constellation spacings, and cumulative races between reduced residue classes. Abstract increments, crossings, and scale dependence.
+    - Combinatorial divisibility: Pascal/binomial arrays modulo a prime or colored by divisibility/valuation. Abstract recurrence-driven arithmetic texture.
+    - Factor geometry: factor-pair rectangles, divisor lattices, and recursive prime-factor dot groupings. Abstract product hierarchy and symmetry.
+
+    Sample principles across this palette rather than sampling finished pictures. A concept may cite zero, one, or two palette families. If it cites one, name the abstracted principle and then change the mathematical object, coordinate rule, encoded quantity, or experimental test substantially. Never merely restyle a precedent or splice two precedents together.
+
+    Diversity requirements:
+    - At least 48 of the 60 ingredients must avoid spiral or path-winding geometry.
+    - At least 30 must be independent constructions rather than direct variants of a named precedent.
+    - At least 40 must use a single mapping rule and a single encoded quantity that can be explained in one sentence.
+    - Distribute the set across spatial maps, graphs, small multiples, matrices, timelines, distributions, and multiscale summaries.
+
+    Draw from varied mathematical families, including:
+    - Residue classes, quotient/remainder coordinates, modular tori, and Chinese-remainder coordinates
+    - Prime gaps, constellations, indexed-prime sequences, and local density
+    - Digit and bit representations with explicitly chosen bases
+    - Graphs defined by arithmetic relations, with deterministic layouts rather than force-directed randomness
+    - Recurrences, dynamical systems, and trajectories seeded by integers or primes
+    - Multiscale bins, transforms, and projections with invertible or well-explained information loss
+    - Comparisons against density-matched, shuffled, or residue-preserving controls
+
+    Make each ingredient concrete enough to combine later. Use exactly one line per ingredient with this schema:
+    Domain=<finite integer or indexed-prime domain> | Precedent principle=<independent or abstract principle only> | Mapping=<explicit coordinate/graph rule> | Candidate signal=<measurable pattern> | Control=<null or baseline>
+
+    Return as:
+    CONCEPTS:
+    - <ingredient 1>
+    - <ingredient 2>
+    - ...
+
+  specific_prompt: |
+    From the following pool, select exactly one primary ingredient and turn it into one coherent prime-visualization experiment direction. You may borrow a second ingredient only as a minimal control, never as another mapping or visual layer:
+
+    {context_pool}
+
+    Selection rules:
+    - The concept must be explainable in one or two plain-language sentences before any notation is introduced.
+    - Use one central mapping, one primary encoded quantity, and one falsifiable question. Prefer a single main plot plus the smallest control view needed for comparison.
+    - Reject avoidable machinery. Do not add Fourier analysis, dimensionality reduction, graph construction, dynamical systems, multiple coordinate transforms, or multi-panel diagnostics unless that machinery is the subject of the hypothesis itself.
+    - Use zero, one, or two precedent seeds; choosing none is valid. If a precedent is used, identify the abstract principle borrowed and the material mathematical departure.
+    - The central mapping must be mathematically explicit and substantively different from every cited precedent.
+    - Prefer a simple generative rule with a strong test over a complicated collage of encodings. If a simpler candidate can test the same claim, choose it.
+    - Name the finite domain, the position/edge rule, the encoded arithmetic quantity, the hypothesis, and the null comparison.
+    - Ensure a deterministic Python/PNG implementation is plausible inside the bounded template requirements.
+    - Do not claim that the experiment has been run or that the predicted structure exists.
+
+    Write one concise request in this form:
+    "Design an experiment that maps [defined inputs] by [mathematical rule], encodes [quantity], and tests whether [falsifiable hypothesis] against [control]."
+
+    Your concise experiment request:
+
+  format: |
+    You are a formatting assistant. Convert the input prime-visualization proposal into a JSON object with "title" and "content" fields.
+
+    Preserve equations, algorithm details, hypotheses, controls, implementation bounds, and the artifact manifest specification. The content must be markdown and must not imply that the proposed script has run or that any result has been observed.
+    Preserve real line breaks. Put every Markdown heading on its own line with a blank line before and after it. Never concatenate a heading marker, heading text, or following paragraph.
+
+    If the input has a clear title, use it. Otherwise, generate a concise title that names the mathematical mapping rather than an aesthetic style.
+
+    Input to format:
+    {input_text}
+
+  critique: |
+    You are a rigorous reviewer of computational number-theory visualizations.
+
+    Current proposal:
+    {idea}
+
+    Audit the proposal for:
+    - Whether the core concept is simple enough to explain in one or two plain-language sentences, with every added transform or visual channel justified by the hypothesis
+    - Mathematical completeness and correctness of the domain, mapping, and encodings
+    - Substantive novelty beyond restyling, reparameterizing, or collaging known precedents
+    - Whether any precedent contributes an abstract principle rather than dictating the finished representation
+    - A falsifiable hypothesis, appropriate null/control, and a predeclared signal
+    - Confounders, multiple-comparison risk, and safeguards against visual apophenia
+    - Deterministic feasibility within the Python, range, dependency, resource, and PNG bounds
+    - A complete, traversal-free artifact and metric contract
+    - Honest language that does not fabricate execution or findings
+
+    Apply these full constraints:
+    {requirements}
+
+    Identify precise repairs. No additional text, just the critique.
+
+  refine: |
+    Current proposal:
+    {idea}
+
+    Critique:
+    {critique}
+
+    Produce an improved prime-visualization experiment proposal. Simplify the central mapping before adding machinery: preserve one primary rule and one encoded quantity, remove transforms and panels that are not essential to the hypothesis, repair mathematical ambiguity, strengthen the null and falsification conditions, and keep the implementation deterministic and bounded. If the concept merely restyles or reparameterizes a known precedent, replace its central mapping or abstract only one principle into a materially different test.
+
+    Do not claim execution or observed results.
+
+    {requirements}
+
+  breed: |
+    Candidate proposals:
+    {ideas}
+
+    Generate one new proposal by combining only mathematically complementary elements. Preserve the clearest mapping and strongest falsifiable test; do not accumulate unrelated panels, encodings, hypotheses, or complete precedent constructions. The result must be substantively different from every cited precedent and must not claim execution.
+
+    {requirements}
+
+  genotype_encode: |
+    You are a computational number theorist extracting the design DNA of a prime-visualization experiment.
+
+    Capture:
+    - Integer or indexed-prime domain and bound
+    - Coordinate, graph, or trajectory mapping
+    - Encoded arithmetic quantities
+    - Hypothesis and predicted signature
+    - Null model or baseline
+    - Quantitative metric and falsification condition
+    - Determinism and resource envelope
+    - Artifact set
+    - Key interpretation limitation
+
+    Explicitly tag the mapping as independent or name each abstracted precedent principle and the material departure from it. Strip away names and decorative styling. Format as a condensed semicolon-separated list.
+
+    Prime-visualization proposal to encode:
+    {idea_content}
+
+    Genotype:
+
+comparison_criteria:
+  - "conceptual simplicity and elegance: one explainable core rule, minimal parameters and transforms, and no visual or mathematical machinery that does not directly serve the hypothesis"
+  - mathematical correctness and explicitness of the domain, mapping, and visual encodings
+  - strength and falsifiability of the hypothesis, null comparison, metric, and disconfirming outcome
+  - substantive novelty beyond cited precedents rather than cosmetic restyling, reparameterization, or collage
+  - quality of any abstracted precedent principle and clarity of the resulting mathematical departure
+  - likelihood of producing an interpretable view that helps investigate prime structure without overstating finite visual evidence
+  - deterministic implementation feasibility within the declared Python, resource, and artifact constraints
+  - completeness of the PNG, metadata, and result-manifest contract
+  - honesty about unexecuted code and absence of fabricated observations

@@ -1,99 +1,53 @@
-# Idea Evolution
+# IDEA
 
-Idea Evolution is a small web app that uses multiple LLM agents (Ideator, Critic, Breeder, Oracle) to generate, evolve, and rate ideas over several generations. You can run a full end‑to‑end evolution, visualize diversity, and rank ideas manually or automatically.
+Explore ideas through evolution. Generate a population, compare candidates,
+combine their ingredients, and follow what changes across generations.
 
-![Screenshot](docs/IDEA_screen1.png)
-![Screenshot](docs/IDEA_screen2.png)
-![Evolution Overview](docs/evolution_overview.png)
+**[Open IDEA](https://idea-evolution.cloud.run/)** — sign in with Google and add
+your Gemini or OpenAI API key in **Settings**.
 
-## What you can do
+Choose a template, model, population and budget, then start. Open any idea to
+read it, inspect its evaluations and genes, or trace its parents. The gene
+history shows shared ingredients across the whole run; selecting an idea
+highlights its DNA.
 
-- Generate and evolve ideas with Gemini models (2.0 and 2.5 variants)
-- Track population diversity over generations (embeddings‑based)
-- Keep a configurable fraction of each generation as survivors (instead of full replacement)
-- Use hybrid fitness for selection: normalized Elo + normalized diversity
-- Apply age‑decayed survival pressure so very old ideas phase out gradually
-- Rate ideas with an ELO‑style tournament (manual and automated)
-- Create and edit YAML prompt templates in the UI
-- Save/load evolutions and re‑rate them later
+Built-in templates cover **100-word stories, game design, arcade games and AI
+research proposals**. Create or customize templates in the app.
 
-## Quickstart
+## Run locally
 
-1) Install dependencies
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/),
+[Firebase CLI](https://firebase.google.com/docs/cli) and Java JDK 21+.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+git clone https://github.com/rbrthogan/idea.git
+cd idea
+uv sync --locked
+./run_local.sh
 ```
 
-2) Configure your API key
+Open **[localhost:8000](http://127.0.0.1:8000/)**. The local launcher uses the
+Firestore emulator and development sign-in. Add a provider key in Settings.
+Stop with **Ctrl+C** and let the emulator finish saving before closing the
+terminal.
+
+Model calls cost money. Start with a small population and budget. Displayed
+costs are estimates from reported usage; running or failed requests can still
+incur charges. Provider billing is the final authority.
+
+## Development
 
 ```bash
-export GEMINI_API_KEY=your_api_key_here
+uv run pytest -q --strict-markers
 ```
 
-3) Run the app
+The default suite is offline and does not make paid model calls.
 
-```bash
-uvicorn idea.viewer:app
-```
+- [Local setup and troubleshooting](docs/LocalDevelopment.md)
+- [How evolution works](docs/EvolutionOverview.md)
+- [Template authoring](idea/prompts/templates/README.md)
+- [Deploy and roll back](DEPLOY.md)
 
-4) Open the UI
-
-- Evolution viewer/creator: http://localhost:8000/
-- Idea rater: http://localhost:8000/rate
-
-## A 1‑minute tour
-
-- Pick a template (or generate a new one), choose model and population settings, then click Start Evolution.
-- Watch ideas arrive plus a diversity chart for each generation.
-- Each generation keeps some survivors and breeds only the configured replacement fraction.
-- Parent selection for children is weighted by hybrid fitness (`alpha * elo_norm + (1 - alpha) * diversity_norm`).
-- Survivor selection uses the same fitness with an age decay factor so older ideas are less likely to persist forever.
-- The Oracle can still replace the least interesting idea (closest to the centroid) to avoid convergence.
-- Use Save Results to snapshot an evolution; visit Rate Ideas to compare and rank saved runs (manual or automated; costs are estimated and shown).
-
-See the explainer: `docs/EvolutionOverview.md`.
-
-## Running tests
-
-```bash
-pytest -q
-```
-
-## Structure (high‑level)
-
-- `idea/viewer.py` – FastAPI app serving the viewer, rater, and template APIs
-- `idea/evolution.py` – Evolution engine, hybrid fitness, survivor selection, parent allocation, diversity tracking
-- `idea/llm.py` – LLM wrapper and agents (Ideator, Formatter, Critic, Breeder, Oracle)
-- `idea/prompts/` – YAML templates system, validation, loader, and Oracle prompt bundle
-- `idea/static/` – Frontend HTML/CSS/JS (viewer and rater UIs)
-
-## Templates
-
-YAML templates live in `idea/prompts/templates/`.
-
-- `airesearch.yaml` – GPU‑poor AI research proposals
-- `game_design.yaml` – Browser game designs
-- `drabble.yaml` – 100‑word stories
-
-Create new templates from the UI (on the main page) or by adding YAML files. See `idea/prompts/templates/README.md` for the schema.
-
-## Configuration tips
-
-- Models and pricing are defined in `idea/config.py` and used to estimate token costs for evolution and auto‑rating.
-- Gemini 2.5 models support an optional “thinking budget”; the UI enables this when applicable.
-- Advanced evolution controls include:
-  - `mutationRate` (breeding mutation on new children)
-  - `replacementRate` (fraction of population replaced per generation)
-  - `fitnessAlpha` (weight of Elo vs diversity in hybrid fitness)
-  - `ageDecayRate` (how quickly older ideas lose survival probability)
-
-## Troubleshooting
-
-- “GEMINI_API_KEY environment variable is not set” banner: export the key and restart the app.
-- Empty diversity chart for “current evolution”: save the evolution and re‑open it from the list (see also known issue in `TODO.md`).
-
-## Roadmap
-
-See `TODO.md` for planned features, research ideas, and open bugs.
+IDEA uses FastAPI, plain JavaScript, Firebase Authentication and Firestore.
+Local evolutions run in a supervised task; production uses Cloud Run Jobs.
+Generated-code execution is archived; this release evolves text ideas.

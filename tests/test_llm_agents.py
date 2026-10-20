@@ -1,11 +1,15 @@
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from idea.llm import Breeder, Critic, Formatter, Ideator, Oracle
+from idea.models import Idea
+from idea.ratings import PairEvaluationError
 
 
 class DummyPrompts:
@@ -15,7 +19,6 @@ class DummyPrompts:
     ORACLE_INSTRUCTION = ""
     ORACLE_FORMAT_INSTRUCTIONS = ""
     ORACLE_MAIN_PROMPT = "{mode_instruction}{format_instructions}{example_idea_prompts}"
-    IDEA_PROMPT = ""
     SPECIFIC_PROMPT = "{context_pool}"
     BREED_PROMPT = "{ideas}"
     EXAMPLE_IDEA_PROMPTS = ""
@@ -41,6 +44,35 @@ def create_formatter():
         return Formatter()
 
 
+def test_argon_has_model_deadline_and_does_not_duplicate_timed_out_requests(monkeypatch):
+    import httpx
+    from unittest.mock import Mock
+    from idea.llm import GenerationResponseDeadlineError
+    monkeypatch.delenv("GENAI_HTTP_TIMEOUT_MS", raising=False)
+    ideator = create_ideator(model_name="gemini-4-argon", thinking_level="low")
+    assert ideator._http_timeout_ms == 900000
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=Mock(side_effect=httpx.ReadTimeout("response deadline"))))
+    with patch.object(ideator, "_get_client", return_value=client):
+        with pytest.raises(GenerationResponseDeadlineError):
+            ideator.generate_text("A small structured idea")
+    assert client.models.generate_content.call_count == 1
+    config = client.models.generate_content.call_args.kwargs["config"]
+    assert config.max_output_tokens == 32768
+    assert config.temperature is None and config.top_p is None
+    assert ideator.get_token_usage_summary()["missing_usage_requests"] == 1
+
+
+def test_prefixed_openai_model_is_canonicalized_only_in_outgoing_request():
+    from unittest.mock import Mock
+    ideator = create_ideator(provider="openai", model_name="models/gpt-6-luna", thinking_level="none")
+    response = SimpleNamespace(raise_for_status=lambda:None, json=lambda:{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":2}})
+    client = SimpleNamespace(post=Mock(return_value=response))
+    with patch.object(ideator, "_get_client", return_value=client):
+        assert ideator.generate_text("Test") == "ok"
+    assert client.post.call_args.kwargs["json"]["model"] == "gpt-6-luna"
+    assert ideator.model_name == "models/gpt-6-luna"
+
+
 def test_elo_update_cases():
     critic = create_critic()
     elo_a, elo_b = critic._elo_update(1500, 1500, "A")
@@ -56,12 +88,353 @@ def test_elo_update_cases():
     assert elo_b_tie == 1500
 
 
+@pytest.mark.parametrize("total_tokens", [30, 35])
+def test_inconsistent_openai_reasoning_does_not_expand_billable_output(total_tokens):
+    ideator = create_ideator(provider="openai", model_name="gpt-6-luna")
+    ideator._record_openai_generation_usage({
+        "input_tokens": 20,
+        "output_tokens": 10,
+        "output_tokens_details": {"reasoning_tokens": 15},
+        "total_tokens": total_tokens,
+    })
+    usage = ideator.get_token_usage_summary()
+    assert usage["output"] == 0
+    assert usage["thoughts"] == 10
+    assert usage["output"] + usage["thoughts"] == 10
+    assert usage["requests"] == 1
+    assert usage["missing_usage_requests"] == 1
+    assert usage["cost"] == pytest.approx((20 * 0.1 + 10 * 0.5) / 1_000_000)
+
+
+def test_gemini_thoughts_remain_separate_from_visible_output():
+    ideator = create_ideator(model_name="gemini-3.8-flash")
+    ideator._record_generation_usage({
+        "prompt_token_count": 7,
+        "candidates_token_count": 20,
+        "thoughts_token_count": 22,
+        "total_token_count": 49,
+    })
+    usage = ideator.get_token_usage_summary()
+    assert usage["total"] == 49
+    assert usage["output"] == 20
+    assert usage["thoughts"] == 22
+    assert usage["missing_usage_requests"] == 0
+    price = usage["usage_by_price"][0]
+    assert usage["cost"] == pytest.approx((7 * price["input_rate"] + 42 * price["output_rate"]) / 1_000_000)
+
+
+def test_gemini_gene_schema_survives_sdk_wire_serialization():
+    import json
+
+    import httpx
+    from google import genai
+    from google.genai import types
+    from idea.genes import GeneMatchResponse, parse_gene_matches
+
+    captured = []
+    output = '{"groups":[{"existing_gene_id":null,"input_indices":[0,1]}]}'
+
+    def respond(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"role": "model", "parts": [{"text": output}]}}],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 5,
+                              "totalTokenCount": 10},
+        })
+
+    ideator = create_ideator(model_name="gemini-3.5-flash-lite")
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
+        with genai.Client(api_key="unit-test-key", http_options=types.HttpOptions(
+            httpx_client=http_client,
+        )) as client:
+            with patch.object(ideator, "_get_client", return_value=client):
+                result = ideator.generate_text("Group equivalent input genes", response_schema=GeneMatchResponse)
+
+    assert result == output
+    assert len(captured) == 1
+    generation = captured[0]["generationConfig"]
+    assert generation["responseMimeType"] == "application/json"
+    assert "responseSchema" not in generation
+    schema = generation["responseJsonSchema"]
+    assert schema == GeneMatchResponse.model_json_schema()
+    assert schema["additionalProperties"] is False
+    assert schema["$defs"]["GeneMatchGroup"]["additionalProperties"] is False
+    assert schema["$defs"]["GeneMatchGroup"]["properties"]["existing_gene_id"]["anyOf"] == [
+        {"type": "string"}, {"type": "null"},
+    ]
+    assert parse_gene_matches(result, 2, set())[0].input_indices == [0, 1]
+
+
+def test_openai_gene_schema_keeps_nested_strict_validation():
+    from idea.genes import GeneMatchResponse
+    from idea.llm import _openai_strict_json_schema
+
+    schema = _openai_strict_json_schema(GeneMatchResponse)
+    group = schema["$defs"]["GeneMatchGroup"]
+    assert schema["additionalProperties"] is False
+    assert group["additionalProperties"] is False
+    assert group["required"] == ["existing_gene_id", "input_indices"]
+
+
+def test_openai_responses_request_uses_reasoning_and_strict_json_schema():
+    ideator = create_ideator(
+        provider="openai",
+        model_name="gpt-5.6-luna",
+        thinking_level="high",
+        temperature=1.5,
+        top_p=0.9,
+    )
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"title":"T","content":"C"}'}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
+                    "output_tokens": 40,
+                    "output_tokens_details": {"reasoning_tokens": 15},
+                    "total_tokens": 140,
+                },
+            }
+
+    class _FakeClient:
+        def post(self, path, json):
+            captured["path"] = path
+            captured["json"] = json
+            return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_openai_response("prompt", None, None, Idea)
+
+    assert result == '{"title":"T","content":"C"}'
+    assert captured["path"] == "/v1/responses"
+    request = captured["json"]
+    assert request["reasoning"] == {"effort": "high"}
+    assert "temperature" not in request
+    assert "top_p" not in request
+
+    response_format = request["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["strict"] is True
+    assert response_format["schema"]["additionalProperties"] is False
+    assert response_format["schema"]["required"] == ["title", "content"]
+    assert "default" not in response_format["schema"]["properties"]["title"]
+
+    usage = ideator.get_token_usage_summary()
+    assert usage["total"] == 140
+    assert usage["input"] == 100
+    assert usage["cached_input"] == 20
+    assert usage["cache_write_input"] == 10
+    assert usage["output"] == 25
+    assert usage["thoughts"] == 15
+    assert usage["cost"] == (
+        70 * 0.20 / 1_000_000
+        + 20 * 0.02 / 1_000_000
+        + 10 * 0.25 / 1_000_000
+        + 25 * 1.20 / 1_000_000
+        + 15 * 1.20 / 1_000_000
+    )
+
+
+def test_openai_none_reasoning_enables_sampling_parameters():
+    ideator = create_ideator(
+        provider="openai",
+        model_name="gpt-5.6-luna",
+        thinking_level="none",
+        temperature=1.4,
+        top_p=0.8,
+    )
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "output": [{"content": [{"type": "output_text", "text": "done"}]}],
+            }
+
+    class _FakeClient:
+        def post(self, _path, json):
+            captured.update(json)
+            return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        assert ideator._generate_openai_response("prompt", None, None, None) == "done"
+
+    assert captured["reasoning"] == {"effort": "none"}
+    assert captured["temperature"] == 1.4
+    assert captured["top_p"] == 0.8
+
+
 def test_get_tournament_ranks_deterministic():
     critic = create_critic()
     ideas = ["idea0", "idea1"]
     with patch.object(Critic, 'compare_ideas', side_effect=["A"]):
         ranks = critic.get_tournament_ranks(ideas, "airesearch", rounds=1)
     assert ranks[0] > ranks[1]
+
+
+def test_failed_comparison_does_not_mutate_elo_or_cache_neutral_evidence():
+    critic = create_critic()
+    ideas = [
+        {"id": "a", "idea": {"title": "A", "content": "alpha"}},
+        {"id": "b", "idea": {"title": "B", "content": "beta"}},
+    ]
+    comparison_cache = {}
+
+    with patch.dict("os.environ", {"ENABLE_PARALLEL_TOURNAMENT": "0"}), \
+         patch.object(critic, "compare_ideas", return_value=None), \
+         patch.object(critic, "_elo_update", wraps=critic._elo_update) as elo_update:
+        with pytest.raises(PairEvaluationError, match="failed to produce valid evidence"):
+            critic.get_tournament_ranks(
+                ideas,
+                "airesearch",
+                rounds=1,
+                comparison_cache=comparison_cache,
+            )
+
+    elo_update.assert_not_called()
+    assert comparison_cache == {}
+    assert all("rating_evaluations" not in idea for idea in ideas)
+
+
+def test_parallel_stop_is_graceful_and_does_not_apply_unfinished_evidence():
+    critic = create_critic()
+    ideas = [
+        {"id": str(index), "idea": {"title": str(index), "content": "same"}}
+        for index in range(4)
+    ]
+    stop_checks = {"count": 0}
+
+    def should_stop():
+        stop_checks["count"] += 1
+        # Enter the round, then stop when the parallel evaluator polls.
+        return stop_checks["count"] >= 2
+
+    details = []
+    comparison_cache = {}
+    with patch.dict("os.environ", {"ENABLE_PARALLEL_TOURNAMENT": "1"}), \
+         patch.object(critic, "compare_ideas", return_value="A"), \
+         patch.object(critic, "_elo_update", wraps=critic._elo_update) as elo_update:
+        ranks = critic.get_tournament_ranks(
+            ideas,
+            "airesearch",
+            rounds=2,
+            should_stop=should_stop,
+            details=details,
+            comparison_cache=comparison_cache,
+        )
+
+    assert ranks == {0: 1500.0, 1: 1500.0, 2: 1500.0, 3: 1500.0}
+    elo_update.assert_not_called()
+    assert comparison_cache == {}
+    assert details[0]["cancelled"] is True
+
+
+def test_tournament_ranks_start_from_persisted_global_elo():
+    critic = create_critic()
+    ideas = [
+        {"id": "high", "idea": "high", "selection_metrics": {"elo": 1800}},
+        {"id": "low", "idea": "low", "selection_metrics": {"elo": 1200}},
+    ]
+
+    with patch.object(Critic, 'compare_ideas', side_effect=["tie"]):
+        ranks = critic.get_tournament_ranks(ideas, "airesearch", rounds=1)
+
+    assert 1780 < ranks[0] < 1800
+    assert 1200 < ranks[1] < 1220
+    assert ranks[0] > ranks[1]
+
+
+def test_single_idea_tournament_preserves_persisted_global_elo():
+    critic = create_critic()
+    ranks = critic.get_tournament_ranks(
+        [{"id": "solo", "idea": "solo", "selection_metrics": {"elo": 1712}}],
+        "airesearch",
+        rounds=1,
+    )
+
+    assert ranks == {0: 1712.0}
+
+
+def test_tournament_reuses_cached_pair_without_rejudging_reversed_order():
+    critic = create_critic()
+    idea_a = {"id": "a", "idea": {"title": "A", "content": "alpha"}}
+    idea_b = {"id": "b", "idea": {"title": "B", "content": "beta"}}
+    comparison_cache = {}
+    details = []
+
+    with patch.object(Critic, "compare_ideas", return_value="A") as compare:
+        first_ranks = critic.get_tournament_ranks(
+            [idea_a, idea_b],
+            "airesearch",
+            rounds=1,
+            comparison_cache=comparison_cache,
+            details=details,
+        )
+
+    assert compare.call_count == 1
+    assert first_ranks[0] > first_ranks[1]
+    assert comparison_cache
+    assert details[0]["pairs"][0]["cached"] is False
+    assert details[0]["pairs"][0]["winner_source"] == "llm"
+
+    reversed_details = []
+    with patch.object(Critic, "compare_ideas", side_effect=AssertionError("cache miss")) as compare:
+        reversed_ranks = critic.get_tournament_ranks(
+            [idea_b, idea_a],
+            "airesearch",
+            rounds=1,
+            comparison_cache=comparison_cache,
+            details=reversed_details,
+        )
+
+    assert compare.call_count == 0
+    assert reversed_ranks[1] > reversed_ranks[0]
+    assert reversed_details[0]["pairs"][0]["cached"] is True
+    assert reversed_details[0]["pairs"][0]["winner_source"] == "cache"
+    pair = reversed_details[0]["pairs"][0]
+    winner_id = pair["a_id"] if pair["winner"] == "A" else pair["b_id"]
+    assert winner_id == "a"
+    assert reversed_ranks[1] == first_ranks[0]
+
+
+def test_tournament_records_evaluation_metadata_on_ideas():
+    critic = create_critic()
+    ideas = [
+        {"id": "a", "idea": {"title": "A", "content": "alpha"}},
+        {"id": "b", "idea": {"title": "B", "content": "beta"}},
+    ]
+
+    with patch.object(Critic, "compare_ideas", return_value="tie"):
+        critic.get_tournament_ranks(
+            ideas,
+            "airesearch",
+            rounds=1,
+            comparison_cache={},
+            evaluation_generation=3,
+        )
+
+    for idea in ideas:
+        metadata = idea["rating_evaluations"]
+        assert metadata["comparison_count"] == 1
+        assert metadata["llm_comparison_count"] == 1
+        assert metadata["cached_comparison_count"] == 0
+        assert metadata["last_evaluated_generation"] == 3
+        assert idea["auto_match_count"] == 1
 
 
 def test_swiss_pairings_even_no_repeats():
@@ -98,6 +471,18 @@ def test_swiss_pairings_odd_rotates_byes():
     assert len(bye_history) == 2
 
 
+def test_swiss_pairing_prefers_nearest_elo_unseen_partner():
+    critic = create_critic()
+    ranks = {0: 2000, 1: 1000, 2: 1500, 3: 1990}
+    match_history = {(0, 3)}
+    bye_counts = {}
+
+    pairs, bye = critic._generate_swiss_round_pairs(ranks, match_history, bye_counts)
+
+    assert bye is None
+    assert (0, 2) in {tuple(sorted(pair)) for pair in pairs}
+
+
 def test_compare_ideas_response_parsing():
     critic = create_critic()
     with patch('idea.llm.get_prompts', return_value=DummyPrompts()), \
@@ -120,7 +505,7 @@ def test_compare_ideas_response_parsing_simple():
     with patch('idea.llm.get_prompts', return_value=DummyPrompts()), \
          patch.object(Critic, 'generate_text', return_value="A"):
         result = critic.compare_ideas({'title': 'A'}, {'title': 'B'}, "airesearch")
-    assert result == "A"
+    assert result is None
 
 
 def test_compare_ideas_response_parsing_complex():
@@ -128,7 +513,7 @@ def test_compare_ideas_response_parsing_complex():
     with patch('idea.llm.get_prompts', return_value=DummyPrompts()), \
          patch.object(Critic, 'generate_text', return_value="I think B is better"):
         result = critic.compare_ideas({'title': 'A'}, {'title': 'B'}, "airesearch")
-    assert result == "B"
+    assert result is None
 
 
 def test_multi_tournament_segmentation_resets_pairing_state():
@@ -157,18 +542,43 @@ def test_multi_tournament_segmentation_resets_pairing_state():
     assert observed_match_history_sizes[2] == 0
 
 
+def test_tournament_completes_evidence_budget_despite_stable_elo_boundary():
+    critic = create_critic()
+    ideas = [
+        {"id": "a", "idea": "a", "selection_metrics": {"elo": 1800}},
+        {"id": "b", "idea": "b", "selection_metrics": {"elo": 1700}},
+        {"id": "c", "idea": "c", "selection_metrics": {"elo": 1300}},
+        {"id": "d", "idea": "d", "selection_metrics": {"elo": 1200}},
+    ]
+    details = []
+
+    with patch.dict("os.environ", {"ENABLE_PARALLEL_TOURNAMENT": "0"}), \
+         patch.object(Critic, "compare_ideas", return_value="A") as compare:
+        critic.get_tournament_ranks(
+            ideas,
+            "airesearch",
+            rounds=5,
+            details=details,
+            early_stop_top_n=2,
+            early_stop_min_rounds=2,
+        )
+
+    assert compare.call_count == 6
+    assert len(details) == 5
+    assert not any(detail.get("early_stopped") for detail in details)
+
+
 def test_breeder_keeps_mutation_context_per_child():
     with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
         breeder = Breeder(mutation_rate=0.5)
 
     fake_ideator = SimpleNamespace(
-        generate_context=patch,
+        generate_context=Mock(side_effect=AssertionError("Seed context must not supply mutation")),
         generate_context_from_parents=lambda parent_genotypes, mutation_rate, mutation_context_pool: "ctx",
         generate_idea_from_context=lambda context_pool, idea_type: ("child idea", "child prompt"),
     )
 
     # Replace methods with deterministic fakes
-    fake_ideator.generate_context = lambda idea_type: f"mutation-{idea_type}"
     breeder._get_thread_ideator = lambda: fake_ideator
     breeder.encode_to_genotype = lambda parent, idea_type: "gene"
 
@@ -179,16 +589,43 @@ def test_breeder_keeps_mutation_context_per_child():
 
     # Track mutation-context calls across two child generations
     calls = {"count": 0}
-    def counting_generate_context(idea_type):
+    def counting_generate_mutation_genes(idea_type, parent_genotypes):
+        assert idea_type == "airesearch" and parent_genotypes == ["gene", "gene"]
         calls["count"] += 1
-        return f"mutation-{calls['count']}"
+        return [f"mutation-{calls['count']}"]
 
-    fake_ideator.generate_context = counting_generate_context
+    fake_ideator.generate_mutation_genes = counting_generate_mutation_genes
 
     breeder.breed(parents, "airesearch")
     breeder.breed(parents, "airesearch")
 
     assert calls["count"] == 2
+    fake_ideator.generate_context.assert_not_called()
+
+
+def test_breeder_returns_parent_genotypes_for_display():
+    with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
+        breeder = Breeder()
+
+    fake_ideator = SimpleNamespace(
+        generate_context_from_parents=lambda parent_genotypes, mutation_rate, mutation_context_pool: "ctx",
+        generate_idea_from_context=lambda context_pool, idea_type: ("child idea", "child prompt"),
+    )
+
+    breeder._get_thread_ideator = lambda: fake_ideator
+    breeder.encode_to_genotype = lambda parent, idea_type: f"gene-{parent['id']}"
+
+    parents = [
+        {"id": "p1", "idea": "idea1"},
+        {"id": "p2", "idea": "idea2"},
+    ]
+
+    result = breeder.breed(parents, "airesearch")
+
+    assert result["parent_genotypes"] == [
+        {"parent_id": "p1", "genotype": "gene-p1", "raw_genotype": "gene-p1", "source": "raw", "gene_pool_revision": None},
+        {"parent_id": "p2", "genotype": "gene-p2", "raw_genotype": "gene-p2", "source": "raw", "gene_pool_revision": None},
+    ]
 
 
 def test_context_from_parents_uses_weighted_parent_mix_and_non_overlapping_mutation():
@@ -208,8 +645,10 @@ def test_context_from_parents_uses_weighted_parent_mix_and_non_overlapping_mutat
     concepts = [c.strip() for c in context_pool.split(",") if c.strip()]
 
     # target_child_size = 4, primary ratio = 50% => 2 from parent 1, then 2 from parent 2.
-    # secondary overlap on "beta" is filtered and not backfilled, then one mutation is injected.
-    assert concepts == ["alpha", "beta", "delta", "omega"]
+    # Secondary overlap reduces inherited size to three; the only fresh gene
+    # replaces alpha. Mutation must not grow the three-concept context.
+    assert concepts == ["omega", "beta", "delta"]
+    assert ideator.last_mutation_details["removed"] == ["alpha"]
 
 
 def test_oracle_response_parsing():
@@ -249,7 +688,6 @@ def test_generate_idea_from_context_appends_template_constraints():
     ideator = create_ideator()
     prompts = SimpleNamespace(
         SPECIFIC_PROMPT="SPEC:{context_pool}",
-        IDEA_PROMPT="UNUSED",
         BREED_PROMPT="UNUSED",
         template=SimpleNamespace(special_requirements="must include title and content"),
     )
@@ -275,7 +713,6 @@ def test_generate_idea_from_context_without_requirements_uses_specific_prompt_on
     ideator = create_ideator()
     prompts = SimpleNamespace(
         SPECIFIC_PROMPT="SPEC:{context_pool}",
-        IDEA_PROMPT="UNUSED",
         BREED_PROMPT="UNUSED",
     )
 
@@ -330,6 +767,144 @@ def test_generate_content_coerces_empty_text_to_no_response():
     assert ideator.get_diagnostics().get("blocked_or_empty_responses", 0) >= 1
 
 
+def test_gemini_25_level_preset_maps_to_budget_without_fallback_diagnostic():
+    ideator = create_ideator(model_name="gemini-2.5-flash", thinking_level="high")
+    captured = {}
+
+    class _FakeResponse:
+        text = "done"
+        usage_metadata = None
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**kwargs):
+                captured.update(kwargs)
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "done"
+    dumped_config = captured["config"].model_dump(by_alias=True, exclude_none=True)
+    assert dumped_config["thinkingConfig"]["thinkingBudget"] == -1
+    assert "thinking_level_budget_fallbacks" not in ideator.get_diagnostics()
+
+
+def test_gemini_31_pro_sends_explicit_thinking_level():
+    ideator = create_ideator(model_name="gemini-3.1-pro-preview", thinking_level="low")
+    captured = {}
+
+    class _FakeResponse:
+        text = "done"
+        usage_metadata = None
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**kwargs):
+                captured.update(kwargs)
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "done"
+    dumped_config = captured["config"].model_dump(by_alias=True, exclude_none=True, mode="json")
+    assert dumped_config["thinkingConfig"]["thinkingLevel"] == "LOW"
+    assert "thinking_level_budget_fallbacks" not in ideator.get_diagnostics()
+    assert "thinking_level_sdk_unsupported" not in ideator.get_diagnostics()
+
+
+def test_gemini_36_flash_uses_thinking_level_without_deprecated_sampling_parameters():
+    ideator = create_ideator(
+        model_name="gemini-3.6-flash",
+        thinking_level="medium",
+        temperature=1.5,
+        top_p=0.9,
+    )
+    captured = {}
+
+    class _FakeResponse:
+        text = "done"
+        usage_metadata = None
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**kwargs):
+                captured.update(kwargs)
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "done"
+    dumped_config = captured["config"].model_dump(
+        by_alias=True,
+        exclude_none=True,
+        mode="json",
+    )
+    assert dumped_config["thinkingConfig"]["thinkingLevel"] == "MEDIUM"
+    assert "temperature" not in dumped_config
+    assert "topP" not in dumped_config
+
+
+def test_generate_content_tracks_thinking_cached_and_tiered_costs():
+    ideator = create_ideator(model_name="gemini-2.5-pro")
+
+    class _FakeResponse:
+        text = "done"
+        usage_metadata = SimpleNamespace(
+            prompt_token_count=210_000,
+            cached_content_token_count=50_000,
+            candidates_token_count=1_000,
+            thoughts_token_count=2_000,
+            total_token_count=213_000,
+        )
+
+    class _FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(**_kwargs):
+                return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_content("prompt", None, None, None)
+
+    assert result == "done"
+    assert ideator.input_token_count == 210_000
+    assert ideator.cached_input_token_count == 50_000
+    assert ideator.uncached_input_token_count == 160_000
+    assert ideator.output_token_count == 1_000
+    assert ideator.thought_token_count == 2_000
+    assert ideator.total_token_count == 213_000
+
+    expected_uncached_input_cost = 160_000 * 2.50 / 1_000_000
+    expected_cached_input_cost = 50_000 * 0.25 / 1_000_000
+    expected_output_cost = 1_000 * 15.00 / 1_000_000
+    expected_thought_cost = 2_000 * 15.00 / 1_000_000
+    assert ideator.uncached_input_cost == expected_uncached_input_cost
+    assert ideator.cached_input_cost == expected_cached_input_cost
+    assert ideator.input_cost == expected_uncached_input_cost + expected_cached_input_cost
+    assert ideator.output_cost == expected_output_cost
+    assert ideator.thought_cost == expected_thought_cost
+    assert ideator.total_cost == (
+        expected_uncached_input_cost
+        + expected_cached_input_cost
+        + expected_output_cost
+        + expected_thought_cost
+    )
+
+    summary = ideator.get_token_usage_summary()
+    assert summary["thoughts"] == 2_000
+    assert summary["cached_input"] == 50_000
+    assert summary["uncached_input"] == 160_000
+    assert summary["requests"] == 1
+    assert summary["large_prompt_requests"] == 1
+    assert summary["cost"] == ideator.total_cost
+
+
 def test_formatter_recovers_empty_response_with_source_idea_text():
     formatter = create_formatter()
     prompts = SimpleNamespace(FORMAT_PROMPT="FORMAT:{input_text}")
@@ -350,3 +925,38 @@ def test_formatter_recovers_empty_response_with_source_idea_text():
 
     assert result["idea"].title == "Untitled"
     assert result["idea"].content == "Original idea body from upstream generation"
+
+
+def test_formatter_recovers_truncated_json_from_complete_source_idea():
+    formatter = create_formatter()
+    prompts = SimpleNamespace(FORMAT_PROMPT="FORMAT:{input_text}")
+    source = (
+        "Title: Modular Newton Dynamics\n\n"
+        "Content:\n"
+        "# Modular Newton Dynamics\n\n"
+        "Complete proposal body with equations and an artifact manifest."
+    )
+
+    with patch("idea.llm.get_prompts", return_value=prompts), patch.object(
+        Formatter,
+        "generate_text",
+        return_value=(
+            '{"title":"Modular Newton Dynamics",'
+            '"content":"# Modular Newton Dynamics\\n\\nTruncated'
+        ),
+    ):
+        result = formatter.format_idea(
+            {
+                "id": "idea-1",
+                "idea": source,
+                "parent_ids": [],
+            },
+            "airesearch",
+        )
+
+    assert result["idea"].title == "Modular Newton Dynamics"
+    assert result["idea"].content == (
+        "# Modular Newton Dynamics\n\n"
+        "Complete proposal body with equations and an artifact manifest."
+    )
+    assert "Truncated" not in result["idea"].content

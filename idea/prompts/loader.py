@@ -14,7 +14,7 @@ from .yaml_template import YAMLTemplateWrapper
 # Keys are template_id strings, values are template data dicts
 _custom_template_cache: Dict[str, Any] = {}
 _custom_template_wrapper_cache: Dict[str, Any] = {}
-_yaml_wrapper_cache: Dict[str, tuple[float, Any]] = {}
+_yaml_wrapper_cache: Dict[str, tuple[tuple[int, int], Any]] = {}
 _prompt_cache: Dict[tuple[str, bool], Any] = {}
 _cache_lock = RLock()
 
@@ -59,12 +59,11 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
     cache_key = (idea_type, bool(use_yaml))
     with _cache_lock:
         cached = _prompt_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-    # First check the custom template cache (for Firestore templates)
-    with _cache_lock:
         template_data = _custom_template_cache.get(idea_type)
+    # File-backed wrappers must pass their file check below. Returning the
+    # generic cache first would freeze an old bundled version until restart.
+    if cached is not None and (template_data is not None or not use_yaml):
+        return cached
 
     if template_data is not None:
         try:
@@ -88,10 +87,11 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
         yaml_path = _get_yaml_template_path(idea_type)
         if yaml_path and yaml_path.exists():
             try:
-                yaml_mtime = yaml_path.stat().st_mtime
+                file_stat = yaml_path.stat()
+                yaml_signature = (file_stat.st_mtime_ns, file_stat.st_size)
                 with _cache_lock:
                     yaml_cached = _yaml_wrapper_cache.get(idea_type)
-                    if yaml_cached and yaml_cached[0] == yaml_mtime:
+                    if yaml_cached and yaml_cached[0] == yaml_signature:
                         wrapper = yaml_cached[1]
                         _prompt_cache[cache_key] = wrapper
                         return wrapper
@@ -104,7 +104,7 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
                 wrapper = YAMLTemplateWrapper(template)
                 _load_oracle_prompts(wrapper)
                 with _cache_lock:
-                    _yaml_wrapper_cache[idea_type] = (yaml_mtime, wrapper)
+                    _yaml_wrapper_cache[idea_type] = (yaml_signature, wrapper)
                     _prompt_cache[cache_key] = wrapper
                 return wrapper
             except Exception as e:
@@ -112,6 +112,8 @@ def get_prompts(idea_type: str, use_yaml: bool = True):
                 print("Falling back to Python module...")
 
     # Fallback to Python modules (existing behavior)
+    if cached is not None and not isinstance(cached, YAMLTemplateWrapper):
+        return cached
     try:
         module = import_module(f"idea.prompts.{idea_type}")
         with _cache_lock:
@@ -143,6 +145,19 @@ def get_prompts_from_dict(template_data: dict):
         return wrapper
     except Exception as e:
         raise ValueError(f"Failed to load template from dict: {e}")
+
+
+def get_builtin_template_snapshot(idea_type: str) -> Optional[dict]:
+    """Read the current bundled definition for a new run, bypassing custom caches.
+
+    Historical runs without snapshots cannot recover their original definition;
+    callers must use this only when creating a new run.
+    """
+    path = _get_yaml_template_path(idea_type)
+    if path is None or not path.is_file():
+        return None
+    template, _warnings = validate_template_file(str(path))
+    return template.model_dump(mode="json")
 
 
 def _get_yaml_template_path(idea_type: str) -> Optional[Path]:
@@ -177,6 +192,7 @@ def list_available_templates() -> dict:
                     'description': wrapper.description,
                     'version': wrapper.version,
                     'author': wrapper.author,
+                    'evaluation': template.evaluation.model_dump(),
                     'warnings': warnings,
                     'path': str(yaml_file)
                 }
@@ -234,9 +250,9 @@ def _load_oracle_prompts(wrapper: YAMLTemplateWrapper):
         wrapper.ORACLE_FORMAT_INSTRUCTIONS = ORACLE_FORMAT_INSTRUCTIONS
         wrapper.ORACLE_MAIN_PROMPT = ORACLE_MAIN_PROMPT
 
-        # Check if the idea-specific template has Oracle constraints customization
-        # For now, we'll use the default constraints but this allows future customization
-        wrapper.ORACLE_CONSTRAINTS = ORACLE_CONSTRAINTS
+        # A template's Oracle goals override the generic domain defaults.
+        if getattr(wrapper, "ORACLE_CONSTRAINTS", None) is None:
+            wrapper.ORACLE_CONSTRAINTS = ORACLE_CONSTRAINTS
 
     except Exception as e:
         print(f"Warning: Failed to load Oracle prompts: {e}")
@@ -244,7 +260,8 @@ def _load_oracle_prompts(wrapper: YAMLTemplateWrapper):
         wrapper.ORACLE_INSTRUCTION = ''
         wrapper.ORACLE_FORMAT_INSTRUCTIONS = ''
         wrapper.ORACLE_MAIN_PROMPT = ''
-        wrapper.ORACLE_CONSTRAINTS = ''
+        if getattr(wrapper, "ORACLE_CONSTRAINTS", None) is None:
+            wrapper.ORACLE_CONSTRAINTS = ''
 
 
 def validate_template(idea_type: str) -> tuple[bool, list]:
@@ -270,7 +287,7 @@ def validate_template(idea_type: str) -> tuple[bool, list]:
         try:
             module = import_module(f"idea.prompts.{idea_type}")
             # Basic check for required attributes
-            required_attrs = ['ITEM_TYPE', 'CONTEXT_PROMPT', 'IDEA_PROMPT', 'COMPARISON_CRITERIA']
+            required_attrs = ['ITEM_TYPE', 'CONTEXT_PROMPT', 'SPECIFIC_PROMPT', 'COMPARISON_CRITERIA']
             missing = [attr for attr in required_attrs if not hasattr(module, attr)]
             if missing:
                 return False, [f"Missing required attributes: {missing}"]

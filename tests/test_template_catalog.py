@@ -88,7 +88,6 @@ def test_load_evolution_rehydrates_custom_template_snapshot():
         "prompts": {
             "context": "Generate concepts",
             "specific_prompt": "{context_pool}",
-            "idea": "{requirements}",
             "format": "{input_text}",
             "critique": "{idea}",
             "refine": "{idea} {critique}",

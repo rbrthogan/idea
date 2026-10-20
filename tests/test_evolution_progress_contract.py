@@ -1,5 +1,4 @@
 import asyncio
-from types import SimpleNamespace
 
 from idea.evolution_progress import ProgressEmitter
 
@@ -52,3 +51,16 @@ def test_progress_emit_backfills_diversity_history():
     assert len(updates) == 1
     assert "diversity_history" in updates[0]
     assert updates[0]["is_running"] is False
+
+
+def test_progress_emit_backfills_token_counts():
+    emitter = ProgressEmitter(DummyEngine())
+    updates = []
+
+    async def callback(data):
+        updates.append(data)
+
+    asyncio.run(emitter.emit(callback, {"is_running": True}))
+
+    assert len(updates) == 1
+    assert updates[0]["token_counts"]["total"] == 10

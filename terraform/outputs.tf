@@ -14,6 +14,22 @@ output "project_id" {
   value = var.project_id
 }
 
+output "region" {
+  value = var.region
+}
+
+output "worker_job" {
+  value = google_cloud_run_v2_job.evolution_worker.id
+}
+
+output "deployment_image" {
+  value = local.deployment_image
+}
+
+output "runtime_firestore_database_id" {
+  value = var.runtime_firestore_database_id
+}
+
 # We can query the SDK/web config via data source or just output needed IDs
 data "google_firebase_web_app_config" "default" {
   provider   = google-beta
@@ -23,11 +39,11 @@ data "google_firebase_web_app_config" "default" {
 
 output "firebase_config_json" {
   value = jsonencode({
-    apiKey        = data.google_firebase_web_app_config.default.api_key
-    authDomain    = data.google_firebase_web_app_config.default.auth_domain
-    projectId     = var.project_id
-    storageBucket = data.google_firebase_web_app_config.default.storage_bucket
+    apiKey            = data.google_firebase_web_app_config.default.api_key
+    authDomain        = var.firebase_auth_domain != null ? var.firebase_auth_domain : data.google_firebase_web_app_config.default.auth_domain
+    projectId         = var.project_id
+    storageBucket     = data.google_firebase_web_app_config.default.storage_bucket
     messagingSenderId = data.google_firebase_web_app_config.default.messaging_sender_id
-    appId         = google_firebase_web_app.default.app_id
+    appId             = google_firebase_web_app.default.app_id
   })
 }

@@ -83,6 +83,40 @@ def test_progress_includes_history_when_changed_or_requested():
     app.dependency_overrides.clear()
 
 
+def test_progress_includes_live_token_counts_from_engine():
+    client = TestClient(app)
+    mock_user = UserInfo(uid="progress_user_tokens", email="pt@example.com", is_admin=False)
+    mock_state = _make_state()
+    mock_state.engine = SimpleNamespace(
+        tournament_history=[],
+        diversity_history=[{"enabled": True, "diversity_score": 0.42}],
+        island_diversity_history=[],
+        migration_history=[],
+        get_total_token_count=lambda: {
+            "total": 123,
+            "total_input": 100,
+            "total_output": 23,
+            "cost": {"total_cost": 0.0123},
+        },
+    )
+
+    async def mock_require_auth():
+        return mock_user
+
+    async def mock_get_state(user_id):
+        return mock_state
+
+    app.dependency_overrides[require_auth] = mock_require_auth
+    with patch.object(real_user_states, "get", mock_get_state):
+        resp = client.get("/api/progress")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["token_counts"]["total"] == 123
+        assert data["diversity_history"] == [{"enabled": True, "diversity_score": 0.42}]
+
+    app.dependency_overrides.clear()
+
+
 def test_progress_clears_stale_running_state_when_no_engine_and_no_active_run():
     client = TestClient(app)
     mock_user = UserInfo(uid="progress_user_3", email="p3@example.com", is_admin=False)

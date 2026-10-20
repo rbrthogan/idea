@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from datetime import datetime
@@ -7,35 +8,41 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 from idea import database as db
-from idea.config import DEFAULT_CREATIVE_TEMP, DEFAULT_TOP_P
-from idea.models import Idea
+from idea.evolution_progress import terminal_status_fields
+from idea.evolution_types import EvolutionRunConfig
+from idea.models import candidate_from_wire, candidate_to_wire, encode_json_safe
 from idea.prompts.loader import list_available_templates
+from idea.genes import empty_gene_catalogue
+
+
+class EvolutionPersistenceError(RuntimeError):
+    """A checkpoint was not durably saved; callers must surface the failure."""
 
 # Legacy filesystem storage directories (kept for backwards compatibility with local dev)
 EVOLUTIONS_DIR = Path("data/evolutions")
 CHECKPOINT_DIR = Path("data/checkpoints")
 
 
+def _safe_local_checkpoint_id(checkpoint_id: Any) -> str:
+    if not isinstance(checkpoint_id, str):
+        raise ValueError("checkpoint_id must be a string")
+    checkpoint_id = checkpoint_id.strip()
+    if (
+        not checkpoint_id
+        or len(checkpoint_id) > 128
+        or "\x00" in checkpoint_id
+        or "/" in checkpoint_id
+        or "\\" in checkpoint_id
+        or Path(checkpoint_id).name != checkpoint_id
+    ):
+        raise ValueError("checkpoint_id must be a plain path-free identifier")
+    return checkpoint_id
+
+
 class EvolutionSerializer:
     @staticmethod
     def serialize_idea(idea: Any) -> Any:
-        if not isinstance(idea, dict):
-            return idea
-
-        result: Dict[str, Any] = {}
-        for key, value in idea.items():
-            if isinstance(value, uuid.UUID):
-                result[key] = str(value)
-            elif isinstance(value, list):
-                result[key] = [str(v) if isinstance(v, uuid.UUID) else v for v in value]
-            elif hasattr(value, "__dict__"):
-                result[key] = {
-                    "title": getattr(value, "title", None),
-                    "content": getattr(value, "content", ""),
-                }
-            else:
-                result[key] = value
-        return result
+        return candidate_to_wire(idea)
 
     @classmethod
     def to_checkpoint_state(cls, engine: Any) -> Dict[str, Any]:
@@ -43,26 +50,7 @@ class EvolutionSerializer:
             "checkpoint_id": engine.checkpoint_id,
             "checkpoint_time": datetime.now().isoformat(),
             "status": "paused" if engine.stop_requested else "in_progress",
-            "config": {
-                "idea_type": engine.idea_type,
-                "pop_size": engine.pop_size,
-                "generations": engine.generations,
-                "model_type": engine.model_type,
-                "creative_temp": engine.creative_temp,
-                "top_p": engine.top_p,
-                "tournament_rounds": engine.tournament_rounds,
-                "tournament_count": engine.tournament_count,
-                "full_tournament_rounds": engine.full_tournament_rounds,
-                "thinking_budget": engine.thinking_budget,
-                "thinking_level": getattr(engine, "thinking_level", None),
-                "max_budget": engine.max_budget,
-                "mutation_rate": engine.mutation_rate,
-                "seed_context_pool_size": engine.seed_context_pool_size,
-                "replacement_rate": engine.replacement_rate,
-                "fitness_alpha": engine.fitness_alpha,
-                "age_decay_rate": engine.age_decay_rate,
-                "age_decay_floor": engine.age_decay_floor,
-            },
+            "config": EvolutionRunConfig.from_engine(engine).to_persistence_dict(),
             "current_generation": engine.current_generation,
             "population": [cls.serialize_idea(idea) for idea in engine.population],
             "history": [[cls.serialize_idea(idea) for idea in gen] for gen in engine.history],
@@ -71,40 +59,32 @@ class EvolutionSerializer:
             "breeding_prompts": engine.breeding_prompts,
             "tournament_history": engine.tournament_history,
             "diversity_history": engine.diversity_history,
+            "island_diversity_history": getattr(engine, "island_diversity_history", []),
+            "migration_history": getattr(engine, "migration_history", []),
+            "comparison_cache": getattr(engine, "comparison_cache", {}),
+            "algorithm_evidence_version": getattr(engine, "algorithm_evidence_version", 2),
+            "quality_archive": [cls.serialize_idea(idea) for idea in getattr(engine, "quality_archive", [])],
+            "gene_catalogue": getattr(engine, "gene_catalogue", empty_gene_catalogue()),
+            "generation_draft": encode_json_safe(getattr(engine, "generation_draft", None)),
             "avg_idea_cost": engine.avg_idea_cost,
             "avg_tournament_cost": engine.avg_tournament_cost,
             "fitness_elo_stats": engine.fitness_elo_stats,
             "fitness_diversity_stats": engine.fitness_diversity_stats,
+            "fitness_metric_stats": engine.fitness_metric_stats,
             "token_counts": engine.get_total_token_count(),
         }
         if engine.template_data:
             state["template_data"] = engine.template_data
+        if getattr(engine, "source_checkpoint_id", None):
+            state["source_checkpoint_id"] = engine.source_checkpoint_id
+        persistence_revision = getattr(engine, "persistence_revision", None)
+        if persistence_revision is not None:
+            state["_save_revision"] = persistence_revision
         return state
 
     @staticmethod
     def deserialize_idea(idea_data: Any) -> Any:
-        if not isinstance(idea_data, dict):
-            return idea_data
-
-        result = dict(idea_data)
-        if "id" in result and isinstance(result["id"], str):
-            try:
-                result["id"] = uuid.UUID(result["id"])
-            except ValueError:
-                result["id"] = uuid.uuid4()
-
-        if "parent_ids" in result:
-            result["parent_ids"] = [
-                uuid.UUID(pid) if isinstance(pid, str) else pid for pid in result["parent_ids"]
-            ]
-
-        if "idea" in result and isinstance(result["idea"], dict):
-            result["idea"] = Idea(
-                title=result["idea"].get("title"),
-                content=result["idea"].get("content", ""),
-            )
-
-        return result
+        return candidate_from_wire(idea_data)
 
     @classmethod
     def restore_runtime_state(cls, engine: Any, state: Dict[str, Any]) -> None:
@@ -122,8 +102,15 @@ class EvolutionSerializer:
 
         engine.evolution_id = state.get("evolution_id")
         engine.evolution_name = state.get("name")
+        engine.source_checkpoint_id = state.get("source_checkpoint_id")
         engine.created_at = state.get("created_at")
         engine.updated_at = state.get("updated_at")
+        persistence_revision = state.get("_save_revision")
+        engine.persistence_revision = (
+            persistence_revision
+            if isinstance(persistence_revision, str) and persistence_revision
+            else None
+        )
 
         engine.checkpoint_id = state.get("checkpoint_id") or (
             engine.evolution_id[:18].replace("-", "") if engine.evolution_id else None
@@ -134,12 +121,79 @@ class EvolutionSerializer:
         engine.breeding_prompts = state.get("breeding_prompts", [])
         engine.tournament_history = state.get("tournament_history", [])
         engine.diversity_history = state.get("diversity_history", [])
+        engine.island_diversity_history = state.get("island_diversity_history", [])
+        engine.migration_history = state.get("migration_history", [])
+        comparison_cache = state.get("comparison_cache", {})
+        engine.comparison_cache = comparison_cache if isinstance(comparison_cache, dict) else {}
+        version = state.get("algorithm_evidence_version", 1)
+        if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2}:
+            raise ValueError("Unsupported algorithm evidence version")
+        engine.algorithm_evidence_version = version
+        archive = state.get("quality_archive", [])
+        engine.quality_archive = [cls.deserialize_idea(idea) for idea in archive] if isinstance(archive, list) else []
+        catalogue = state.get("gene_catalogue")
+        engine.gene_catalogue = catalogue if isinstance(catalogue, dict) else empty_gene_catalogue()
+        draft = state.get("generation_draft")
+        if draft is not None and (not isinstance(draft, dict) or draft.get("version") != 1
+                                  or not isinstance(draft.get("islands"), dict)
+                                  or draft.get("generation") != engine.current_generation + 1):
+            raise ValueError("Invalid pending generation draft")
+        draft = copy.deepcopy(draft)
+        if draft is not None:
+            for entry in draft["islands"].values():
+                if (not isinstance(entry, dict) or not isinstance(entry.get("plans"), list)
+                        or not isinstance(entry.get("results"), list)
+                        or len(entry["plans"]) != len(entry["results"])
+                        or not isinstance(entry.get("capacity"), int)
+                        or not isinstance(entry.get("survivors"), list)
+                        or not isinstance(entry.get("fallback"), list)):
+                    raise ValueError("Invalid pending generation island")
+                for key in ("survivors", "fallback"):
+                    entry[key] = [cls.deserialize_idea(c) for c in entry[key]]
+                for plan in entry["plans"]:
+                    if (not isinstance(plan, dict) or plan.get("operator") not in
+                            {"independent", "single_parent", "crossover"}
+                            or not isinstance(plan.get("parents"), list)):
+                        raise ValueError("Invalid pending birth plan")
+                    plan["parents"] = [cls.deserialize_idea(c) for c in plan["parents"]]
+                for result in entry["results"]:
+                    if result is not None:
+                        if not isinstance(result, dict) or "candidate" not in result or "prompt" not in result:
+                            raise ValueError("Invalid saved offspring")
+                        result["candidate"] = cls.deserialize_idea(result["candidate"])
+        engine.generation_draft = draft
         engine.avg_idea_cost = state.get("avg_idea_cost", 0.0)
         engine.avg_tournament_cost = state.get("avg_tournament_cost", 0.0)
-        engine.fitness_elo_stats = _coerce_stats(state.get("fitness_elo_stats"))
-        engine.fitness_diversity_stats = _coerce_stats(
-            state.get("fitness_diversity_stats")
+        saved_token_counts = state.get("token_counts")
+        engine._persisted_token_counts = (
+            saved_token_counts if isinstance(saved_token_counts, dict) else None
         )
+        raw_metric_stats = state.get("fitness_metric_stats", {})
+        if not isinstance(raw_metric_stats, dict):
+            raw_metric_stats = {}
+        engine.fitness_elo_stats = _coerce_stats(
+            state.get(
+                "fitness_elo_stats",
+                raw_metric_stats.get("quality_elo.quality_elo"),
+            )
+        )
+        engine.fitness_diversity_stats = _coerce_stats(
+            state.get(
+                "fitness_diversity_stats",
+                raw_metric_stats.get("diversity.diversity"),
+            )
+        )
+        engine.fitness_metric_stats = {
+            str(metric_key): _coerce_stats(metric_stats)
+            for metric_key, metric_stats in raw_metric_stats.items()
+        }
+        # Keep legacy public attributes and generic state synchronized.
+        engine.fitness_metric_stats[
+            "quality_elo.quality_elo"
+        ] = engine.fitness_elo_stats
+        engine.fitness_metric_stats[
+            "diversity.diversity"
+        ] = engine.fitness_diversity_stats
 
         engine.population = [cls.deserialize_idea(idea) for idea in state.get("population", [])]
         engine.history = [[cls.deserialize_idea(idea) for idea in gen] for gen in state.get("history", [])]
@@ -150,8 +204,7 @@ class EvolutionRepository:
     async def save_checkpoint(engine: Any, status: str = "in_progress") -> Optional[str]:
         try:
             if not engine.user_id:
-                print("❌ Cannot save evolution: user_id not set")
-                return None
+                raise EvolutionPersistenceError("Cannot save evolution without a user id")
 
             if not engine.evolution_id:
                 engine.initialize_evolution()
@@ -161,18 +214,32 @@ class EvolutionRepository:
             state["evolution_id"] = engine.evolution_id
             state["name"] = engine.evolution_name
             state["status"] = status
+            check_budget = getattr(engine, "check_budget", None)
+            state.update(terminal_status_fields(
+                status,
+                budget_reached=status == "paused" and callable(check_budget) and check_budget(),
+            ))
             state["created_at"] = engine.created_at
             state["updated_at"] = engine.updated_at
 
-            await db.save_evolution(engine.user_id, engine.evolution_id, state)
+            new_revision = await db.save_evolution(
+                engine.user_id,
+                engine.evolution_id,
+                state,
+                expected_revision=getattr(engine, "persistence_revision", None),
+                **({"run_token": engine._run_token} if getattr(engine, "_run_token", None) else {}),
+            )
+            engine.persistence_revision = new_revision
+            engine.last_save_error = None
             print(f"💾 Evolution saved to Firestore: {engine.evolution_name} ({engine.evolution_id})")
             return engine.evolution_id
+        except (db.EvolutionSaveConflict, db.RunOwnershipLost):
+            # A stale engine must never report a successful checkpoint or
+            # silently overwrite a newer process's state.
+            raise
         except Exception as exc:
-            print(f"❌ Failed to save evolution: {exc}")
-            import traceback
-
-            traceback.print_exc()
-            return None
+            engine.last_save_error = "Checkpoint could not be durably saved"
+            raise EvolutionPersistenceError("Checkpoint could not be durably saved") from exc
 
     @staticmethod
     async def list_evolutions_for_user(user_id: str) -> List[Dict[str, Any]]:
@@ -182,6 +249,20 @@ class EvolutionRepository:
             for data in evolutions:
                 config = data.get("config", {})
                 history = data.get("history", [])
+                history_summary = data.get("_history_summary") or {}
+                population_summary = data.get("_population_summary") or {}
+                if isinstance(history, list) and history:
+                    generation_count = len(history)
+                    total_ideas = sum(len(gen) for gen in history if isinstance(gen, list))
+                    inferred_pop_size = len(history[0]) if isinstance(history[0], list) else 0
+                else:
+                    generation_count = int(history_summary.get("generation_count") or 0)
+                    total_ideas = int(history_summary.get("total_ideas") or 0)
+                    inferred_pop_size = int(
+                        population_summary.get("population_size")
+                        or history_summary.get("last_generation_size")
+                        or 0
+                    )
                 result.append(
                     {
                         "id": data.get("evolution_id") or data.get("id"),
@@ -189,15 +270,20 @@ class EvolutionRepository:
                         "status": data.get("status", "unknown"),
                         "created_at": data.get("created_at"),
                         "updated_at": data.get("updated_at"),
-                        "generation": data.get("current_generation", len(history)),
-                        "total_generations": config.get("generations", len(history)),
+                        "generation": data.get("current_generation", generation_count),
+                        "total_generations": config.get("generations", generation_count),
                         "idea_type": config.get("idea_type", "unknown"),
                         "model_type": config.get("model_type", "unknown"),
-                        "pop_size": config.get("pop_size", len(history[0]) if history else 0),
-                        "total_ideas": sum(len(gen) for gen in history),
+                        "pop_size": config.get("pop_size", inferred_pop_size),
+                        "total_ideas": total_ideas,
+                        "config": config,
                     }
                 )
             return result
+        except db.EvolutionStorageIntegrityError:
+            # Corruption is operationally distinct from a missing evolution;
+            # callers need the typed failure to alert or recover explicitly.
+            raise
         except Exception as exc:
             print(f"Error listing evolutions: {exc}")
             return []
@@ -211,7 +297,7 @@ class EvolutionRepository:
                 config = data.get("config", {})
                 result.append(
                     {
-                        "id": data.get("checkpoint_id") or data.get("id"),
+                        "id": data.get("id") or data.get("checkpoint_id"),
                         "time": data.get("checkpoint_time") or data.get("updated_at"),
                         "status": data.get("status", "unknown"),
                         "generation": data.get("current_generation", 0),
@@ -219,6 +305,7 @@ class EvolutionRepository:
                         "idea_type": config.get("idea_type", "unknown"),
                         "model_type": config.get("model_type", "unknown"),
                         "pop_size": config.get("pop_size", 0),
+                        "config": config,
                     }
                 )
             return result
@@ -232,12 +319,29 @@ class EvolutionRepository:
         user_id: str,
         evolution_id: str,
         api_key: Optional[str] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional[Any]:
         try:
-            state = await db.get_evolution(user_id, evolution_id)
+            state = await db.get_evolution_for_restore(user_id, evolution_id)
             if not state:
                 print(f"❌ Evolution not found: {evolution_id}")
                 return None
+
+            legacy_checkpoint_id = state.pop("_legacy_checkpoint_id", None)
+            if legacy_checkpoint_id:
+                # A legacy snapshot may name a newer evolution or carry an old
+                # revision. Restore it as a distinct experiment; never replace
+                # either the source checkpoint or the newer evolution.
+                new_id = str(uuid.uuid4())
+                state.update({
+                    "evolution_id": new_id,
+                    "checkpoint_id": new_id[:18].replace("-", ""),
+                    "source_checkpoint_id": legacy_checkpoint_id,
+                    "name": state.get("name") or f"Checkpoint {legacy_checkpoint_id}",
+                    "created_at": datetime.now().isoformat(),
+                })
+                state.pop("_save_revision", None)
 
             config = state.get("config", {})
             idea_type = config.get("idea_type")
@@ -252,8 +356,17 @@ class EvolutionRepository:
                         state["template_data"] = user_template
 
             return EvolutionRepository.restore_from_state(
-                engine_cls, state, api_key=api_key, user_id=user_id
+                engine_cls,
+                state,
+                api_key=api_key,
+                user_id=user_id,
+                evaluation_runners=evaluation_runners,
+                artifact_store=artifact_store,
             )
+        except db.EvolutionStorageIntegrityError:
+            # Corruption is operationally distinct from a missing evolution;
+            # callers need the typed failure to alert or recover explicitly.
+            raise
         except Exception as exc:
             print(f"❌ Failed to load evolution: {exc}")
             import traceback
@@ -285,12 +398,22 @@ class EvolutionRepository:
 
     @staticmethod
     def load_from_file(
-        engine_cls: Type[Any], file_path: Path, api_key: Optional[str] = None
+        engine_cls: Type[Any],
+        file_path: Path,
+        api_key: Optional[str] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional[Any]:
         try:
             with open(file_path) as f:
                 state = json.load(f)
-            return EvolutionRepository.restore_from_state(engine_cls, state, api_key=api_key)
+            return EvolutionRepository.restore_from_state(
+                engine_cls,
+                state,
+                api_key=api_key,
+                evaluation_runners=evaluation_runners,
+                artifact_store=artifact_store,
+            )
         except Exception as exc:
             print(f"❌ Failed to load from {file_path}: {exc}")
             import traceback
@@ -304,31 +427,15 @@ class EvolutionRepository:
         state: Dict[str, Any],
         api_key: Optional[str] = None,
         user_id: Optional[str] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Any:
-        config = state.get("config", {})
-        tournament_rounds = config.get("tournament_rounds", 1)
-        full_tournament_rounds = config.get("full_tournament_rounds")
-        tournament_count = config.get("tournament_count")
+        run_config = EvolutionRunConfig.from_stored_mapping(state.get("config"))
 
         engine = engine_cls(
-            idea_type=config.get("idea_type"),
-            pop_size=config.get("pop_size", 5),
-            generations=config.get("generations", 3),
-            model_type=config.get("model_type", "gemini-2.0-flash"),
-            creative_temp=config.get("creative_temp", DEFAULT_CREATIVE_TEMP),
-            top_p=config.get("top_p", DEFAULT_TOP_P),
-            tournament_rounds=tournament_rounds,
-            tournament_count=tournament_count,
-            full_tournament_rounds=full_tournament_rounds,
-            thinking_budget=config.get("thinking_budget"),
-            thinking_level=config.get("thinking_level"),
-            max_budget=config.get("max_budget"),
-            mutation_rate=config.get("mutation_rate", 0.2),
-            seed_context_pool_size=config.get("seed_context_pool_size"),
-            replacement_rate=config.get("replacement_rate", 0.5),
-            fitness_alpha=config.get("fitness_alpha", 0.7),
-            age_decay_rate=config.get("age_decay_rate", 0.25),
-            age_decay_floor=config.get("age_decay_floor", 0.35),
+            **run_config.engine_kwargs(),
+            evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
             api_key=api_key,
             user_id=user_id or state.get("user_id"),
             template_data=state.get("template_data"),
@@ -344,21 +451,39 @@ class EvolutionRepository:
 
     @staticmethod
     def load_checkpoint(
-        engine_cls: Type[Any], checkpoint_id: str, api_key: Optional[str] = None
+        engine_cls: Type[Any],
+        checkpoint_id: str,
+        api_key: Optional[str] = None,
+        evaluation_runners: Optional[Dict[str, Any]] = None,
+        artifact_store: Optional[Any] = None,
     ) -> Optional[Any]:
+        checkpoint_id = _safe_local_checkpoint_id(checkpoint_id)
         evolution_path = EVOLUTIONS_DIR / f"{checkpoint_id}.json"
         if evolution_path.exists():
-            return EvolutionRepository.load_from_file(engine_cls, evolution_path, api_key=api_key)
+            return EvolutionRepository.load_from_file(
+                engine_cls,
+                evolution_path,
+                api_key=api_key,
+                evaluation_runners=evaluation_runners,
+                artifact_store=artifact_store,
+            )
 
         checkpoint_path = CHECKPOINT_DIR / f"checkpoint_{checkpoint_id}.json"
         if not checkpoint_path.exists():
             print(f"❌ Checkpoint not found: {checkpoint_path}")
             return None
 
-        return EvolutionRepository.load_from_file(engine_cls, checkpoint_path, api_key=api_key)
+        return EvolutionRepository.load_from_file(
+            engine_cls,
+            checkpoint_path,
+            api_key=api_key,
+            evaluation_runners=evaluation_runners,
+            artifact_store=artifact_store,
+        )
 
     @staticmethod
     def delete_checkpoint(checkpoint_id: str) -> bool:
+        checkpoint_id = _safe_local_checkpoint_id(checkpoint_id)
         checkpoint_path = CHECKPOINT_DIR / f"checkpoint_{checkpoint_id}.json"
         try:
             if checkpoint_path.exists():

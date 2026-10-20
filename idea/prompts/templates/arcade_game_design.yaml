@@ -1,0 +1,122 @@
+name: "Arcade Game Design"
+description: "Design fast, skill-based action games with satisfying controls and replayable systemic challenges"
+version: "1.3.0"
+author: "Original Idea App"
+created_date: "2026-10-14"
+
+metadata:
+  item_type: "arcade game designs"
+
+requirements:
+  - "Design a high-energy action game whose main attraction is playing it: responsive control, satisfying moment-to-moment action, decisions under pressure and the pleasure of getting better."
+  - "Make player skill consequential. Explain what a beginner does, what a practiced player does differently and how that difference changes the outcome. Success should depend on learnable execution and judgment rather than luck, memorizing a single solution or accumulating upgrades."
+  - "Sustain interesting play through interacting rules and repeatable challenges. Explain how fresh situations arise without requiring a new handcrafted level or scripted sequence for every few minutes of gameplay. Variation must change the player's decisions, remain readable and preserve fair opportunities to respond; random placement alone is not replayability."
+  - "Make the action immediately appealing and the pressure intelligible. Specify the controls, consequential state changes, feedback, objective and failure conditions. Players should be able to understand a mistake and quickly try again. Intensity needs pacing and room for deliberate action."
+  - "Let originality strengthen the act of playing. A familiar foundation is welcome when its distinctive rule creates worthwhile choices or expressive skill. A strange control scheme or elaborate restriction needs a clear payoff for the player."
+  - "Give the game a strong visual and sonic identity that makes motion, impact, danger and success feel good while keeping the action readable. Theme can be ambitious; narrative and presentation should support the playable loop. Arcade describes the gameplay, not a required era or art style."
+  - "A browser is the intended first delivery medium. Choose tools after the design; implementation difficulty is a planning consideration rather than the creative objective."
+  - "Start with a compact playable core that remains interesting over repeated attempts. Specify the rules behind generated or recombined challenges, including how they avoid impossible or trivial situations. Handcrafted elements are welcome when they support a reusable system."
+  - "Establish why the base interaction is enjoyable before relying on a content catalogue, unlock grind or progression layer to keep players engaged. Do not claim that a game is fun simply because it is fast, explosive or procedural."
+  - "Omit source code, architecture plans, and long implementation inventories."
+  - "Treat the design as a hypothesis to playtest; do not invent player feedback or measured enjoyment."
+
+output:
+  title: "A distinctive game title."
+  content: |
+    Use these markdown sections:
+    - Core Play: The appeal, objective, controls and causal rules, including a concrete sequence of about 20 seconds showing player inputs, changing pressure and consequences.
+    - Skill and Decisions: What improves with practice, a meaningful tradeoff during action and what stops one repetitive tactic from solving everything.
+    - Replayability: How challenges vary and develop across repeated play, what the system changes, what keeps those changes fair and how failure and retry work.
+    - Feel and Identity: How movement, feedback, sound and visual hierarchy make the action satisfying and readable, with a distinctive theme or style.
+    - Playable Test: The smallest repeatable slice that tests the core loop, the riskiest assumption and observable signs that players are learning, enjoying the action and choosing another attempt.
+    Describe useful rules and decisions, rather than a feature inventory.
+  word_count:
+    min: 600
+    max: 900
+
+prompts:
+  context: |
+    Generate 36 independent seeds for fast, compelling, skill-based action games.
+    Invent varied underlying interactions, demands on player skill and sources of repeatable challenge. Seek different kinds of action rather than variations on one signature mechanic or theme.
+    Each seed should connect a concrete player input to a satisfying consequence and a situation that rewards learning or quick judgment. Leave genre, setting and visual style open.
+    Keep seeds brief and self-contained. Avoid vague claims of excitement and lists of unrelated features.
+
+    Output one seed per line, without commas, using:
+    Action=<what the player does> | Response=<what changes> | Skill=<what improves with practice> | Variation=<what creates fresh decisions>
+
+    Return as:
+    CONCEPTS:
+    - <seed 1>
+    - <seed 2>
+    - ...
+
+  specific_prompt: |
+    Turn the following seeds into one focused arcade game-design request:
+
+    {context_pool}
+
+    Treat the supplied concepts as separate ingredients, which may describe game type, perspective, style, subject or mechanics. Choose a compatible subset, keeping useful broad traits as well as distinctive mechanics.
+    Develop a promising action and its relationship to player skill and repeatable challenge. Leave room for a new design instead of reconstructing a parent or accumulating unrelated features.
+    State what the player actively controls, what creates pressure and why mastering the interaction could be enjoyable over repeated attempts.
+    Keep useful inherited genre, theme or visual style ingredients while leaving the full rules and remaining choices for the designer to discover. Do not prescribe an engine or catalogue of features.
+
+    Return a concise design request of 2-4 sentences, with no introductory commentary.
+
+  format: |
+    Preserve the original title and full markdown design document, including controls, causal rules, skill demands, challenge variation, moment of play, visual and sonic identity, and playable test. Do not invent missing rules or evidence of enjoyment.
+
+    Input to format:
+    {input_text}
+
+  critique: |
+    You are reviewing a proposed arcade action game for the quality of its actual play.
+
+    Current idea:
+    {idea}
+
+    Evaluate:
+    - Whether the repeated inputs and their consequences could feel satisfying, with responsive agency and active decisions under pressure. Walk through the described moment of play and identify missing rules.
+    - What skilled play changes. Look for execution or judgment that improves with practice, fair feedback on mistakes and a reason to adapt rather than repeat one dominant tactic.
+    - Whether repeated attempts create fresh, meaningful situations through specified rules. Check challenge generation for unavoidable failure, trivial safe strategies and cosmetic randomness. Identify reliance on an ongoing supply of authored levels or scripted surprises.
+    - Whether intensity remains readable and well paced. Consider recovery and retry friction, control awkwardness and effects that hide information needed to act.
+    - Whether the distinctive mechanic and presentation strengthen the action. Exciting prose, an unusual theme, feature count and promised procedural depth are not evidence of enjoyable play.
+    - Which uncertain assumption the smallest repeatable prototype should test, and what observable player behavior would support or undermine it.
+
+    Give specific criticism and one promising development direction. Preserve coherent, surprising mechanics with a plausible gameplay payoff. Return only the critique.
+
+  refine: |
+    Current idea:
+    {idea}
+
+    Critique:
+    {critique}
+
+    Produce a stronger arcade action game design. Improve the core interaction, skillful decisions, readable pressure and replayable challenge. Resolve missing rules and weak strategies without piling on features.
+    Preserve or rethink the distinctive mechanic according to how well it supports enjoyable play. Include a revised moment of play and a repeatable prototype test; do not substitute a larger progression system for a satisfying base loop.
+
+  breed: |
+    Parent designs:
+    {ideas}
+
+    Invent a new arcade action game from the supplied ingredients, including useful game types, perspectives, styles, subjects and mechanics.
+    Recombine a compatible subset into one coherent, satisfying loop with room for mastery and repeated play. Supply new details and relationships; the ingredients are not a blueprint for reconstructing a parent.
+
+  genotype_encode: |
+    For arcade games, consider genre, perspective, dimensionality, player arrangement, theme, tone and visual style, alongside the main actions, objectives, skill demands and sources of challenge.
+    Illustration only: "a top-down cooperative shooter with hand-drawn robots" separates into "top-down; co-op; shooting; hand-drawn; robots".
+
+    Game design to encode:
+    {idea_content}
+
+  oracle_constraints: |
+    Search for missing kinds of satisfying action, player skill and repeatable challenge.
+    Identify repeated inputs, decision structures, pressure patterns and sources of variation across the history. Propose a direction with a materially different playable loop rather than a new theme for the same rules.
+    Describe concrete input, consequence, learnable skill and how fresh situations emerge under fair rules. Keep it a high-energy action game with a compelling reason to try again.
+    Leave genre and art style open. Favor a strong interaction over novelty through awkward controls or arbitrary restrictions. Browser delivery is a later implementation consideration.
+
+comparison_criteria:
+  - "core action and game feel: concrete, responsive inputs and satisfying consequences that create active, engaging decisions under pressure; assess the described play rather than claims of excitement"
+  - "skill and agency: learnable execution and judgment that change outcomes, meaningful tradeoffs, understandable failure and resilience against a dominant repetitive tactic"
+  - "systemic replayability: specified rules produce varied, fair challenges and developing decisions across repeated attempts without depending on continual handcrafted levels, scripted surprises or unlock grind"
+  - "distinctive, readable action: originality, visual identity and sound strengthen the playable loop, impact and clarity under pressure; theme or an arbitrary restriction alone is insufficient"
+  - "coherence and testability: internally consistent rules, well-paced intensity and quick retries, with a compact repeatable experiment that can reveal whether players learn and want another attempt; reward neither persuasive prose nor feature count"

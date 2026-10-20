@@ -22,7 +22,7 @@ class TestLLMSystemIntegration:
 
         # Test that all required attributes are available for LLM agents
         required_attrs = [
-            'ITEM_TYPE', 'CONTEXT_PROMPT', 'IDEA_PROMPT',
+            'ITEM_TYPE', 'CONTEXT_PROMPT', 'SPECIFIC_PROMPT',
             'FORMAT_PROMPT', 'CRITIQUE_PROMPT', 'REFINE_PROMPT', 'BREED_PROMPT',
             'COMPARISON_CRITERIA', 'COMPARISON_PROMPT'
         ]
@@ -36,46 +36,35 @@ class TestLLMSystemIntegration:
                 assert len(value) > 0, f"{attr} is empty string"
             elif isinstance(value, list):
                 assert len(value) > 0, f"{attr} is empty list"
+        assert not hasattr(prompts, 'IDEA_PROMPT')
 
 
 class TestPromptInterpolation:
     """Test that prompt interpolation works correctly"""
 
-    def test_special_requirements_interpolation(self):
-        """Test that special_requirements are properly interpolated"""
+    def test_structured_drabble_contract_reaches_refine_and_breed(self):
+        """Length and content rules come from one structured definition."""
         prompts = get_prompts('drabble', use_yaml=True)
+        for prompt in (prompts.REFINE_PROMPT, prompts.BREED_PROMPT):
+            assert 'Body length: exactly 100 words, excluding the title.' in prompt
+            assert all(rule in prompt for rule in prompts.template.requirements)
+            assert prompts.template.output.content in prompt
 
-        # Check that special requirements were interpolated into relevant prompts
-        idea_prompt = prompts.IDEA_PROMPT
-        assert 'A drabble is a short work of fiction' in idea_prompt
-
-        refine_prompt = prompts.REFINE_PROMPT
-        assert 'A drabble is a short work of fiction' in refine_prompt
-
-        breed_prompt = prompts.BREED_PROMPT
-        assert 'A drabble is a short work of fiction' in breed_prompt
-
-    def test_game_design_special_requirements_interpolation(self):
-        """Test that game design special requirements are properly interpolated"""
+    def test_game_design_structured_requirements_reach_refine_and_breed(self):
+        """All game rules survive without manual requirements placeholders."""
         prompts = get_prompts('game_design', use_yaml=True)
+        for prompt in (prompts.REFINE_PROMPT, prompts.BREED_PROMPT):
+            assert all(rule in prompt for rule in prompts.template.requirements)
+            assert prompts.template.output.content in prompt
+            assert '{requirements}' not in prompt
 
-        # Check that special requirements were interpolated into relevant prompts
-        idea_prompt = prompts.IDEA_PROMPT
-        assert 'The game should be simple enough' in idea_prompt
-
-        refine_prompt = prompts.REFINE_PROMPT
-        assert 'The game should be simple enough' in refine_prompt
-
-        breed_prompt = prompts.BREED_PROMPT
-        assert 'The game should be simple enough' in breed_prompt
-
-    def test_airesearch_no_special_requirements(self):
-        """Test that airesearch template works without special requirements"""
+    def test_airesearch_prompts_load_without_idea_prompt(self):
+        """Test that airesearch template loads without the deprecated idea prompt"""
         prompts = get_prompts('airesearch', use_yaml=True)
 
-        # AI research template doesn't have special requirements
         # Just verify the prompts are loaded correctly
-        assert len(prompts.IDEA_PROMPT) > 0
+        assert not hasattr(prompts, 'IDEA_PROMPT')
+        assert len(prompts.SPECIFIC_PROMPT) > 0
         assert len(prompts.REFINE_PROMPT) > 0
         assert len(prompts.BREED_PROMPT) > 0
 
@@ -105,7 +94,7 @@ class TestPromptPlaceholders:
             # Check that template-specific placeholders were resolved
             # (but keep the required runtime placeholders)
             interpolated_prompts = [
-                prompts.IDEA_PROMPT,
+                prompts.SPECIFIC_PROMPT,
                 prompts.REFINE_PROMPT,
                 prompts.BREED_PROMPT
             ]

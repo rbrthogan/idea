@@ -1,30 +1,38 @@
 from abc import ABC
+import base64
 import random
 import secrets
 import os
 import re
 import socket
+import math
+import httpx
 from google import genai
 from google.genai import types
 import json
 from datetime import datetime, timezone
 from pydantic import BaseModel
-from typing import Type, Optional, Dict, List, Callable, Tuple, Set, Any
+from typing import Type, Optional, Dict, List, Callable, Tuple, Set, Any, Mapping
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception
-import numpy as np
 from idea.models import Idea
 from idea.prompts.loader import get_prompts, get_prompts_from_dict
+from idea.template_runtime import extract_title_content_envelope, generation_prompt, render_prompt, requirements_text
+from idea.gene_prompts import extraction_gene_prompt, mutation_gene_prompt
+from idea.config import DEFAULT_MODEL, THINKING_MODEL_CONFIG, estimate_generation_token_cost
 import uuid
 from collections import OrderedDict
 from hashlib import sha256
 import threading
-from idea.ratings import parallel_evaluate_pairs
+from idea.ratings import (
+    PairEvaluationError,
+    PairEvaluationInputError,
+    parallel_evaluate_pairs,
+)
+from idea.evaluation.models import ArtifactRef
 from idea.swiss_tournament import (
     elo_update,
     generate_swiss_round_pairs,
-    pair_players_swiss,
-    select_swiss_bye,
 )
 
 try:
@@ -33,7 +41,11 @@ except Exception:  # pragma: no cover - optional dependency guard
     gapi_exceptions = None
 
 TRANSIENT_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
-NON_RETRYABLE_HTTP_STATUS_CODES = {400, 401, 403, 404, 405, 410, 411, 412, 413, 414, 415, 422}
+NON_RETRYABLE_HTTP_STATUS_CODES = {400, 401, 402, 403, 404, 405, 410, 411, 412, 413, 414, 415, 422}
+# Some providers use 429 for account/billing failures as well as temporary load.
+# These explicit codes require account changes, not another paid attempt.
+NON_RETRYABLE_QUOTA_MARKERS = ("insufficient_quota", "billing_hard_limit_reached")
+MAX_GENERATION_ATTEMPTS = 4
 NON_RETRYABLE_MARKERS = (
     "invalid argument",
     "permission denied",
@@ -59,10 +71,129 @@ TRANSIENT_MARKERS = (
 
 THINKING_LEVEL_TO_BUDGET_FALLBACK = {
     "off": 0,
+    "minimal": 0,
     "low": 1024,
     "medium": 8192,
     "high": -1,  # Dynamic/high-think fallback
 }
+
+OPENAI_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
+
+
+def _canonical_model_name(model_name: str) -> str:
+    name = str(model_name or "").strip()
+    if name.startswith("models/"):
+        return name.split("/", 1)[1]
+    return name
+
+
+def _model_to_dict(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "dict"):
+        return value.dict()
+    return value
+
+
+def _openai_strict_json_schema(response_schema: Type[BaseModel]) -> Dict[str, Any]:
+    """Convert a Pydantic schema to OpenAI's strict Structured Outputs subset."""
+    if hasattr(response_schema, "model_json_schema"):
+        schema = response_schema.model_json_schema()
+    elif hasattr(response_schema, "schema"):
+        schema = response_schema.schema()
+    else:
+        raise TypeError("response_schema must be a Pydantic model type")
+
+    def normalize(node: Any) -> Any:
+        if isinstance(node, list):
+            return [normalize(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+
+        result = {
+            key: normalize(value)
+            for key, value in node.items()
+            if key != "default"
+        }
+        if result.get("type") == "object" or "properties" in result:
+            properties = result.get("properties") or {}
+            result["additionalProperties"] = False
+            result["required"] = list(properties.keys())
+        return result
+
+    return normalize(schema)
+
+
+def _openai_schema_name(response_schema: Type[BaseModel]) -> str:
+    raw_name = getattr(response_schema, "__name__", "structured_response")
+    normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw_name)).strip("_-")
+    return (normalized or "structured_response")[:64]
+
+
+def _openai_input(prompt: Any) -> Any:
+    """Translate the app's text/Gemini-Part inputs to Responses API input."""
+    if isinstance(prompt, str):
+        return prompt
+    if not isinstance(prompt, (list, tuple)):
+        return str(prompt)
+
+    content: List[Dict[str, Any]] = []
+    for item in prompt:
+        if isinstance(item, str):
+            content.append({"type": "input_text", "text": item})
+            continue
+
+        payload = _model_to_dict(item)
+        if not isinstance(payload, dict):
+            raise TypeError(f"Unsupported OpenAI prompt part: {type(item).__name__}")
+        if payload.get("text") is not None:
+            content.append({"type": "input_text", "text": str(payload["text"])})
+            continue
+
+        inline_data = payload.get("inline_data") or payload.get("inlineData")
+        if isinstance(inline_data, dict):
+            data = inline_data.get("data")
+            mime_type = inline_data.get("mime_type") or inline_data.get("mimeType")
+            if isinstance(data, str):
+                encoded = data
+            elif isinstance(data, (bytes, bytearray)):
+                encoded = base64.b64encode(bytes(data)).decode("ascii")
+            else:
+                raise TypeError("OpenAI image prompt data must be bytes or base64 text")
+            if not str(mime_type or "").startswith("image/"):
+                raise TypeError("OpenAI prompt parts currently support inline images only")
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{mime_type};base64,{encoded}",
+                }
+            )
+            continue
+
+        raise TypeError("Unsupported OpenAI prompt part")
+
+    return [{"role": "user", "content": content}]
+
+
+def _openai_output_text(payload: Mapping[str, Any]) -> str:
+    text_parts: List[str] = []
+    refusals: List[str] = []
+    for output_item in payload.get("output", []) or []:
+        if not isinstance(output_item, Mapping):
+            continue
+        for content_item in output_item.get("content", []) or []:
+            if not isinstance(content_item, Mapping):
+                continue
+            item_type = content_item.get("type")
+            if item_type == "output_text" and content_item.get("text") is not None:
+                text_parts.append(str(content_item["text"]))
+            elif item_type == "refusal" and content_item.get("refusal"):
+                refusals.append(str(content_item["refusal"]))
+    if text_parts:
+        return "".join(text_parts)
+    if refusals:
+        return "\n".join(refusals)
+    return ""
 
 
 def _extract_http_status(exc: BaseException) -> Optional[int]:
@@ -94,9 +225,34 @@ def _extract_http_status(exc: BaseException) -> Optional[int]:
     return None
 
 
+class GenerationCancelledError(RuntimeError):
+    """Local cancellation forbids scheduling another paid provider attempt."""
+
+
+class GenerationResponseDeadlineError(RuntimeError):
+    """A slow accepted request may still be running; do not duplicate its spend."""
+
+
+def _is_response_timeout_error(exc: BaseException) -> bool:
+    """Distinguish uncertain accepted requests from connection/DNS failures."""
+    return (
+        isinstance(exc, (TimeoutError, socket.timeout, httpx.ReadTimeout))
+        or _extract_http_status(exc) in {408, 504}
+    )
+
+
 def _is_transient_generation_error(exc: BaseException) -> bool:
     """Only retry provider/network failures that are likely to succeed on retry."""
-    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+    if isinstance(exc, (GenerationCancelledError, GenerationResponseDeadlineError)):
+        return False
+    message = str(exc).lower()
+    if any(marker in message for marker in NON_RETRYABLE_QUOTA_MARKERS):
+        return False
+    if isinstance(
+        exc,
+        (TimeoutError, socket.timeout, socket.gaierror, ConnectionError,
+         httpx.TimeoutException, httpx.NetworkError),
+    ):
         return True
 
     if gapi_exceptions is not None:
@@ -127,13 +283,36 @@ def _is_transient_generation_error(exc: BaseException) -> bool:
     if status_code in NON_RETRYABLE_HTTP_STATUS_CODES:
         return False
 
-    message = str(exc).lower()
     if any(marker in message for marker in NON_RETRYABLE_MARKERS):
         return False
     if any(marker in message for marker in TRANSIENT_MARKERS):
         return True
 
     return False
+
+
+def _record_generation_retry(retry_state) -> None:
+    """Make automatic recovery visible without logging prompts or credentials."""
+    wrapper = retry_state.args[0]
+    exc = retry_state.outcome.exception()
+    delay = float(retry_state.next_action.sleep)
+    wrapper._increment_diagnostic(
+        "generation_retries",
+        detail=f"Transient provider failure; retrying in {delay:.1f}s.",
+        metadata={
+            "failed_attempt": retry_state.attempt_number,
+            "next_attempt": retry_state.attempt_number + 1,
+            "delay_seconds": delay,
+            "error_type": type(exc).__name__,
+            "http_status": _extract_http_status(exc),
+        },
+    )
+    print(
+        f"{wrapper.agent_name or 'LLM'}: temporary {type(exc).__name__}; "
+        f"retrying provider request in {delay:.1f}s "
+        f"(attempt {retry_state.attempt_number + 1}/{MAX_GENERATION_ATTEMPTS})."
+    )
+
 
 class LLMWrapper(ABC):
     """Base class for LLM interactions"""
@@ -142,7 +321,7 @@ class LLMWrapper(ABC):
 
     def __init__(self,
                  provider: str = "google_generative_ai",
-                 model_name: str = "gemini-2.0-flash",
+                 model_name: str = DEFAULT_MODEL,
                  prompt_template: str = "",
                  temperature: float = 1.0,
                  top_p: float = 0.95,
@@ -164,6 +343,20 @@ class LLMWrapper(ABC):
         self.total_token_count = 0
         self.input_token_count = 0
         self.output_token_count = 0
+        self.thought_token_count = 0
+        self.cached_input_token_count = 0
+        self.cache_write_input_token_count = 0
+        self.uncached_input_token_count = 0
+        self.tool_input_token_count = 0
+        self.request_count = 0
+        self.large_prompt_request_count = 0
+        self.input_cost = 0.0
+        self.uncached_input_cost = 0.0
+        self.cached_input_cost = 0.0
+        self.cache_write_input_cost = 0.0
+        self.output_cost = 0.0
+        self.thought_cost = 0.0
+        self.total_cost = 0.0
         self.agent_name = agent_name
         print(
             f"Initializing {agent_name or 'LLM'} with temperature: {temperature}, top_p: {top_p}, "
@@ -185,16 +378,22 @@ class LLMWrapper(ABC):
         self._resolved_api_key: Optional[str] = None
         self._thread_local_client = threading.local()
         self._client_lock = threading.Lock()
-        timeout_raw = os.environ.get("GENAI_HTTP_TIMEOUT_MS", "60000")
+        model_timeout = THINKING_MODEL_CONFIG.get(_canonical_model_name(self.model_name), {}).get("http_timeout_ms", 60000)
+        timeout_raw = os.environ.get("GENAI_HTTP_TIMEOUT_MS", str(model_timeout))
         try:
             self._http_timeout_ms = max(1000, int(timeout_raw))
         except ValueError:
-            self._http_timeout_ms = 60000
+            self._http_timeout_ms = model_timeout
             self._increment_diagnostic(
                 "invalid_http_timeout_ms",
                 detail=f"GENAI_HTTP_TIMEOUT_MS={timeout_raw!r}",
             )
-        self._http_options = types.HttpOptions(timeout=self._http_timeout_ms)
+        # generate_text owns the bounded retry policy. Keep SDK retries disabled
+        # so retries stay observable and cannot multiply provider attempts.
+        self._http_options = types.HttpOptions(
+            timeout=self._http_timeout_ms,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        )
         self._setup_provider()
 
     def register_custom_template(self, template_id: str, template_data: Dict[str, Any]) -> None:
@@ -254,6 +453,223 @@ class LLMWrapper(ABC):
         with self._diagnostics_lock:
             return [dict(event) for event in self._diagnostic_events]
 
+    @staticmethod
+    def _camel_case(name: str) -> str:
+        parts = str(name).split("_")
+        return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+    @classmethod
+    def _get_usage_token_count(cls, usage: Any, *keys: str) -> int:
+        if usage is None:
+            return 0
+        usage_dict = usage if isinstance(usage, dict) else None
+        if usage_dict is None and hasattr(usage, "model_dump"):
+            try:
+                usage_dict = usage.model_dump()
+            except Exception:
+                usage_dict = None
+        if usage_dict is None and hasattr(usage, "to_dict"):
+            try:
+                usage_dict = usage.to_dict()
+            except Exception:
+                usage_dict = None
+
+        expanded_keys: List[str] = []
+        for key in keys:
+            expanded_keys.append(key)
+            expanded_keys.append(cls._camel_case(key))
+
+        for key in expanded_keys:
+            value = usage_dict.get(key) if isinstance(usage_dict, dict) else getattr(usage, key, None)
+            if value is None:
+                continue
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if numeric >= 0:
+                return numeric
+        return 0
+
+    @classmethod
+    def _usage_count_quality(cls, usage: Any, *keys: str) -> Tuple[bool, bool]:
+        try:
+            mapping = usage if isinstance(usage, dict) else (
+                usage.model_dump() if hasattr(usage, "model_dump") else
+                usage.to_dict() if hasattr(usage, "to_dict") else None)
+        except Exception:
+            mapping = None
+        valid = invalid = False
+        for key in keys:
+            for alias in (key, cls._camel_case(key)):
+                value = mapping.get(alias) if isinstance(mapping, dict) else getattr(usage, alias, None)
+                if value is None:
+                    continue
+                try:
+                    numeric = float(value)
+                    if not isinstance(value, bool) and math.isfinite(numeric) and numeric >= 0 and int(value) == numeric:
+                        valid = True
+                    else:
+                        invalid = True
+                except (TypeError, ValueError, OverflowError):
+                    invalid = True
+        return valid, invalid
+
+    @classmethod
+    def _has_valid_usage_count(cls, usage: Any, *keys: str) -> bool:
+        return cls._usage_count_quality(usage, *keys)[0]
+
+    def _record_generation_usage(self, usage_metadata: Any) -> None:
+        breakdown_keys = ("prompt_token_count", "candidates_token_count", "thoughts_token_count", "tool_use_prompt_token_count")
+        if not usage_metadata or not self._has_valid_usage_count(usage_metadata, *breakdown_keys, "total_token_count"):
+            with self._token_lock:
+                self.missing_usage_requests = getattr(self, "missing_usage_requests", 0) + 1
+            sink = getattr(self, "_usage_sink", None)
+            if sink is not None:
+                sink._record_generation_usage(None)
+            return
+        prompt_tokens = self._get_usage_token_count(usage_metadata, "prompt_token_count")
+        candidate_tokens = self._get_usage_token_count(usage_metadata, "candidates_token_count")
+        thought_tokens = self._get_usage_token_count(usage_metadata, "thoughts_token_count")
+        cached_input_tokens = self._get_usage_token_count(usage_metadata, "cached_content_token_count")
+        cache_write_input_tokens = self._get_usage_token_count(
+            usage_metadata, "cache_write_token_count"
+        )
+        tool_input_tokens = self._get_usage_token_count(usage_metadata, "tool_use_prompt_token_count")
+        total_tokens = self._get_usage_token_count(usage_metadata, "total_token_count")
+        if total_tokens == 0:
+            total_tokens = prompt_tokens + candidate_tokens + thought_tokens + tool_input_tokens
+
+        cost = estimate_generation_token_cost(
+            self.model_name,
+            input_tokens=prompt_tokens,
+            output_tokens=candidate_tokens,
+            thought_tokens=thought_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
+            tool_input_tokens=tool_input_tokens,
+        )
+
+        with self._token_lock:
+            usage_incomplete = (
+                (isinstance(usage_metadata, dict) and usage_metadata.get("_usage_incomplete") is True)
+                or not self._has_valid_usage_count(usage_metadata, *breakdown_keys)
+                or self._usage_count_quality(usage_metadata, *breakdown_keys, "total_token_count", "cached_content_token_count", "cache_write_token_count")[1]
+                or total_tokens > prompt_tokens + candidate_tokens + thought_tokens + tool_input_tokens
+            )
+            if usage_incomplete:
+                self.missing_usage_requests = getattr(self, "missing_usage_requests", 0) + 1
+            self.total_token_count += total_tokens
+            self.input_token_count += prompt_tokens
+            self.output_token_count += candidate_tokens
+            self.thought_token_count += thought_tokens
+            self.cached_input_token_count += cost["cached_input_tokens"]
+            self.cache_write_input_token_count += cost["cache_write_input_tokens"]
+            self.uncached_input_token_count += cost["uncached_input_tokens"]
+            self.tool_input_token_count += tool_input_tokens
+            self.request_count += 1
+            if cost.get("large_prompt_tier"):
+                self.large_prompt_request_count += 1
+            self.uncached_input_cost += cost["uncached_input_cost"]
+            self.cached_input_cost += cost["cached_input_cost"]
+            self.cache_write_input_cost += cost["cache_write_input_cost"]
+            self.input_cost += cost["input_cost"]
+            self.output_cost += cost["output_cost"]
+            self.thought_cost += cost["thought_cost"]
+            self.total_cost += cost["total_cost"]
+            from idea.billing import record_price_usage
+            if not hasattr(self, "_usage_by_price"):
+                self._usage_by_price = {}
+            record_price_usage(self._usage_by_price, cost, {
+                "input": prompt_tokens, "output": candidate_tokens, "thoughts": thought_tokens,
+                "cached_input": cost["cached_input_tokens"],
+                "cache_write_input": cost["cache_write_input_tokens"], "tool_input": tool_input_tokens,
+            })
+        sink = getattr(self, "_usage_sink", None)
+        if sink is not None:
+            sink._record_generation_usage(usage_metadata)
+
+    def _record_openai_generation_usage(self, usage: Any) -> None:
+        """Normalize Responses API usage without double-counting reasoning tokens."""
+        if not usage:
+            self._record_generation_usage(None)
+            return
+        usage_dict = usage if isinstance(usage, dict) else _model_to_dict(usage)
+        if not isinstance(usage_dict, dict) or not self._has_valid_usage_count(usage_dict, "input_tokens", "output_tokens", "total_tokens"):
+            self._record_generation_usage(None)
+            return
+
+        input_tokens = self._get_usage_token_count(usage_dict, "input_tokens")
+        billed_output_tokens = self._get_usage_token_count(usage_dict, "output_tokens")
+        total_tokens = self._get_usage_token_count(usage_dict, "total_tokens")
+
+        input_details = usage_dict.get("input_tokens_details") or {}
+        output_details = usage_dict.get("output_tokens_details") or {}
+        cached_tokens = self._get_usage_token_count(input_details, "cached_tokens")
+        cache_write_tokens = self._get_usage_token_count(input_details, "cache_write_tokens")
+        if cache_write_tokens == 0:
+            cache_write_tokens = self._get_usage_token_count(
+                usage_dict, "cache_write_tokens"
+            )
+        reported_reasoning_tokens = self._get_usage_token_count(output_details, "reasoning_tokens")
+        usage_incomplete = (
+                reported_reasoning_tokens > billed_output_tokens
+                or self._usage_count_quality(usage_dict, "input_tokens", "output_tokens", "total_tokens")[1]
+                or self._usage_count_quality(input_details, "cached_tokens", "cache_write_tokens")[1]
+                or self._usage_count_quality(output_details, "reasoning_tokens")[1]
+        )
+        # Responses output_tokens already includes reasoning. Malformed detail
+        # cannot expand that billable total; retain the valid total and report
+        # the classification gap once in the shared accounting path.
+        reasoning_tokens = min(reported_reasoning_tokens, billed_output_tokens)
+        visible_output_tokens = billed_output_tokens - reasoning_tokens
+
+        self._record_generation_usage(
+            {
+                "prompt_token_count": input_tokens,
+                "candidates_token_count": visible_output_tokens,
+                "thoughts_token_count": reasoning_tokens,
+                "cached_content_token_count": cached_tokens,
+                "cache_write_token_count": cache_write_tokens,
+                "total_token_count": total_tokens or input_tokens + billed_output_tokens,
+                "_usage_incomplete": usage_incomplete,
+            }
+        )
+
+    def get_token_usage_summary(self) -> Dict[str, Any]:
+        with self._token_lock:
+            total = self.total_token_count or (
+                self.input_token_count
+                + self.output_token_count
+                + self.thought_token_count
+                + self.tool_input_token_count
+            )
+            return {
+                "total": int(total),
+                "input": int(self.input_token_count),
+                "output": int(self.output_token_count),
+                "thoughts": int(self.thought_token_count),
+                "cached_input": int(self.cached_input_token_count),
+                "cache_write_input": int(self.cache_write_input_token_count),
+                "uncached_input": int(self.uncached_input_token_count),
+                "tool_input": int(self.tool_input_token_count),
+                "model": self.model_name,
+                "provider": self.provider,
+                "cost": float(self.total_cost),
+                "input_cost": float(self.input_cost),
+                "uncached_input_cost": float(self.uncached_input_cost),
+                "cached_input_cost": float(self.cached_input_cost),
+                "cache_write_input_cost": float(self.cache_write_input_cost),
+                "output_cost": float(self.output_cost),
+                "thought_cost": float(self.thought_cost),
+                "requests": int(self.request_count),
+                "large_prompt_requests": int(self.large_prompt_request_count),
+                "missing_usage_requests": getattr(self, "missing_usage_requests", 0),
+                "usage_basis": "provider_reported",
+                "usage_by_price": [dict(row) for row in getattr(self, "_usage_by_price", {}).values()],
+                "cache_savings": sum(row["cache_savings"] for row in getattr(self, "_usage_by_price", {}).values()),
+            }
+
     def _random_sample(self, population: List[Any], k: int) -> List[Any]:
         with self._rng_lock:
             return self._rng.sample(population, k)
@@ -297,26 +713,156 @@ class LLMWrapper(ABC):
             with self._client_lock:
                 if self.client is None and api_key:
                     self.client = genai.Client(api_key=api_key, http_options=self._http_options)
-        # Add other providers here
+            return
+
+        if self.provider == "openai":
+            api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
+            self._resolved_api_key = api_key
+            if not api_key:
+                print("Warning: OPENAI_API_KEY not set and no api_key provided")
+                return
+
+            base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
+            with self._client_lock:
+                if self.client is None:
+                    self.client = httpx.Client(
+                        base_url=base_url,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=self._http_timeout_ms / 1000,
+                    )
+            return
+
+        raise ValueError(f"Unsupported LLM provider: {self.provider!r}")
 
     @retry(
-        stop=stop_after_attempt(4),
+        stop=stop_after_attempt(MAX_GENERATION_ATTEMPTS),
         wait=wait_exponential_jitter(initial=1, max=20, jitter=1),
         retry=retry_if_exception(_is_transient_generation_error),
+        before_sleep=_record_generation_retry,
         reraise=True
     )
     def generate_text(self,
-                     prompt: str,
+                     prompt: Any,
                      temperature: Optional[float] = None,
                      top_p: Optional[float] = None,
                      response_schema: Type[BaseModel] = None) -> str:
         """Base method for generating text with retry logic built in"""
+        cancel_event = getattr(self, "cancel_event", None)
+        cancel_check = getattr(self, "cancel_check", None)
+        if ((cancel_event is not None and cancel_event.is_set()) or
+                (callable(cancel_check) and cancel_check())):
+            raise GenerationCancelledError("Generation cancelled before provider request")
         if self.provider == "google_generative_ai":
             return self._generate_content(prompt, temperature, top_p, response_schema)
-        return "Not implemented"
+        if self.provider == "openai":
+            return self._generate_openai_response(prompt, temperature, top_p, response_schema)
+        raise ValueError(f"Unsupported LLM provider: {self.provider!r}")
 
-    def _generate_content(self, prompt: str, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
+    def _generate_openai_response(
+        self,
+        prompt: Any,
+        temperature: Optional[float],
+        top_p: Optional[float],
+        response_schema: Type[BaseModel],
+    ) -> str:
+        """Generate with OpenAI's Responses API."""
+        request_started = usage_recorded = False
+        try:
+            client = self._get_client()
+            if client is None:
+                self._increment_diagnostic(
+                    "provider_client_unavailable",
+                    detail="OpenAI client was not initialized when generate_text was called.",
+                )
+                raise RuntimeError("OpenAI client is not initialized")
+
+            model_config = THINKING_MODEL_CONFIG.get(
+                _canonical_model_name(self.model_name), {}
+            )
+            allowed_efforts = set(model_config.get("allowed_levels") or OPENAI_REASONING_EFFORTS)
+            effort = self.thinking_level
+            if effort is not None and effort not in OPENAI_REASONING_EFFORTS:
+                self._increment_diagnostic(
+                    "invalid_thinking_level",
+                    detail=f"thinking_level={self.thinking_level!r}",
+                )
+                effort = None
+            if effort is not None and effort not in allowed_efforts:
+                self._increment_diagnostic(
+                    "invalid_model_thinking_level",
+                    detail=(
+                        f"model={self.model_name!r}, thinking_level={effort!r}, "
+                        f"allowed={sorted(allowed_efforts)!r}"
+                    ),
+                )
+                effort = None
+
+            request_data: Dict[str, Any] = {
+                "model": _canonical_model_name(self.model_name),
+                "input": _openai_input(prompt),
+                "max_output_tokens": self.MAX_TOKENS,
+                "store": False,
+            }
+            if effort is not None:
+                request_data["reasoning"] = {"effort": effort}
+
+            # Reasoning models accept sampling controls only with supported `none` effort.
+            if effort == "none":
+                request_data["temperature"] = (
+                    temperature if temperature is not None else self.temperature
+                )
+                request_data["top_p"] = top_p if top_p is not None else self.top_p
+
+            if self.thinking_budget is not None:
+                self._increment_diagnostic(
+                    "thinking_budget_ignored_for_level_model",
+                    detail=f"Model {self.model_name} uses reasoning effort; ignoring thinking_budget.",
+                )
+
+            if response_schema:
+                request_data["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "name": _openai_schema_name(response_schema),
+                        "strict": True,
+                        "schema": _openai_strict_json_schema(response_schema),
+                    }
+                }
+
+            request_started = True
+            response = client.post("/v1/responses", json=request_data)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("OpenAI returned a non-object response")
+
+            self._record_openai_generation_usage(payload.get("usage"))
+            usage_recorded = True
+
+            text = _openai_output_text(payload)
+            if not text.strip():
+                self._increment_diagnostic(
+                    "blocked_or_empty_responses",
+                    detail=(
+                        "OpenAI returned no output text"
+                        + (f" (status={payload.get('status')})" if payload.get("status") else "")
+                    ),
+                )
+                return "No response."
+            return text
+        except Exception as exc:
+            if request_started and not usage_recorded:
+                self._record_generation_usage(None)
+            self._increment_diagnostic("generation_errors", detail=str(exc))
+            print(f"ERROR: OpenAI generation failed: {exc}")
+            raise
+
+    def _generate_content(self, prompt: Any, temperature: Optional[float], top_p: Optional[float], response_schema: Type[BaseModel]) -> str:
         """Generate using google.genai client"""
+        request_started = usage_recorded = False
         try:
             client = self._get_client()
             if client is None:
@@ -330,16 +876,26 @@ class LLMWrapper(ABC):
             actual_temp = temperature if temperature is not None else self.temperature
             actual_top_p = top_p if top_p is not None else self.top_p
 
-            config_dict = {
-                "temperature": actual_temp,
-                "top_p": actual_top_p,
-                "max_output_tokens": self.MAX_TOKENS,
-            }
+            model_thinking_cfg = THINKING_MODEL_CONFIG.get(
+                _canonical_model_name(self.model_name), {}
+            )
+            config_dict = {"max_output_tokens": model_thinking_cfg.get("max_output_tokens", self.MAX_TOKENS)}
+            if model_thinking_cfg.get("supports_sampling_parameters", True):
+                config_dict.update(
+                    {
+                        "temperature": actual_temp,
+                        "top_p": actual_top_p,
+                    }
+                )
 
-            # Add thinking config when requested.
+            # Add thinking config when requested. Gemini 3 uses levels; Gemini 2.5 uses budgets.
             thinking_fields = getattr(types.ThinkingConfig, "model_fields", {}) or {}
             supports_thinking_level = "thinking_level" in thinking_fields
             supports_thinking_budget = "thinking_budget" in thinking_fields
+            model_supports_thinking = bool(model_thinking_cfg.get("supports_thinking", False))
+            model_supports_thinking_level = bool(model_thinking_cfg.get("supports_thinking_level", False))
+            model_supports_thinking_budget = bool(model_thinking_cfg.get("supports_thinking_budget", False))
+            allowed_model_levels = set(model_thinking_cfg.get("allowed_levels") or [])
             thinking_kwargs: Dict[str, Any] = {}
 
             normalized_level = self.thinking_level
@@ -350,49 +906,91 @@ class LLMWrapper(ABC):
                 )
                 normalized_level = None
 
-            if normalized_level is not None:
-                if supports_thinking_level:
-                    thinking_kwargs["thinking_level"] = normalized_level
-                elif supports_thinking_budget:
-                    mapped_budget = THINKING_LEVEL_TO_BUDGET_FALLBACK[normalized_level]
-                    thinking_kwargs["thinking_budget"] = mapped_budget
-                    self._increment_diagnostic(
-                        "thinking_level_budget_fallbacks",
-                        detail=f"SDK lacks thinking_level; mapped {normalized_level} -> {mapped_budget}",
-                    )
-                else:
-                    self._increment_diagnostic(
-                        "thinking_config_unsupported",
-                        detail="SDK exposes neither thinking_level nor thinking_budget.",
-                    )
+            if (
+                normalized_level is not None
+                and allowed_model_levels
+                and normalized_level not in allowed_model_levels
+            ):
+                self._increment_diagnostic(
+                    "invalid_model_thinking_level",
+                    detail=(
+                        f"model={self.model_name!r}, thinking_level={normalized_level!r}, "
+                        f"allowed={sorted(allowed_model_levels)!r}"
+                    ),
+                )
+                normalized_level = None
 
-            if self.thinking_budget is not None and "thinking_budget" not in thinking_kwargs:
-                if supports_thinking_budget:
-                    try:
-                        thinking_kwargs["thinking_budget"] = int(self.thinking_budget)
-                    except (TypeError, ValueError):
+            if model_supports_thinking:
+                if normalized_level is not None:
+                    if model_supports_thinking_level:
+                        if supports_thinking_level:
+                            thinking_kwargs["thinking_level"] = normalized_level
+                        else:
+                            self._increment_diagnostic(
+                                "thinking_level_sdk_unsupported",
+                                detail=(
+                                    "Installed google-genai SDK does not expose thinking_level; "
+                                    f"cannot send {normalized_level!r} for {self.model_name}."
+                                ),
+                            )
+                    elif model_supports_thinking_budget:
+                        if supports_thinking_budget:
+                            thinking_kwargs["thinking_budget"] = THINKING_LEVEL_TO_BUDGET_FALLBACK[normalized_level]
+                        else:
+                            self._increment_diagnostic(
+                                "thinking_budget_unsupported",
+                                detail="SDK does not expose thinking_budget.",
+                            )
+                    else:
                         self._increment_diagnostic(
-                            "invalid_thinking_budget",
-                            detail=f"thinking_budget={self.thinking_budget!r}",
+                            "thinking_config_unsupported",
+                            detail=f"Model {self.model_name} does not expose a supported thinking control.",
                         )
-                else:
-                    self._increment_diagnostic(
-                        "thinking_budget_unsupported",
-                        detail="SDK does not expose thinking_budget.",
-                    )
+
+                if self.thinking_budget is not None and "thinking_budget" not in thinking_kwargs:
+                    if model_supports_thinking_budget:
+                        if supports_thinking_budget:
+                            try:
+                                thinking_kwargs["thinking_budget"] = int(self.thinking_budget)
+                            except (TypeError, ValueError):
+                                self._increment_diagnostic(
+                                    "invalid_thinking_budget",
+                                    detail=f"thinking_budget={self.thinking_budget!r}",
+                                )
+                        else:
+                            self._increment_diagnostic(
+                                "thinking_budget_unsupported",
+                                detail="SDK does not expose thinking_budget.",
+                            )
+                    elif model_supports_thinking_level:
+                        self._increment_diagnostic(
+                            "thinking_budget_ignored_for_level_model",
+                            detail=f"Model {self.model_name} uses thinking_level; ignoring thinking_budget.",
+                        )
+            elif normalized_level is not None or self.thinking_budget is not None:
+                self._increment_diagnostic(
+                    "thinking_config_unsupported",
+                    detail=f"Model {self.model_name} is not configured for thinking controls.",
+                )
 
             if thinking_kwargs:
                 config_dict["thinking_config"] = types.ThinkingConfig(**thinking_kwargs)
 
             if response_schema:
-                config_dict["response_schema"] = response_schema
+                # Preserve JSON Schema constraints such as additionalProperties;
+                # the legacy response_schema transport uses an OpenAPI subset.
+                config_dict["response_json_schema"] = response_schema.model_json_schema()
                 config_dict["response_mime_type"] = "application/json"
 
             config = types.GenerateContentConfig(**config_dict)
 
-            print(f"{self.agent_name} using client with temperature: {actual_temp}, top_p: {actual_top_p}")
+            if "temperature" in config_dict or "top_p" in config_dict:
+                print(f"{self.agent_name} using client with temperature: {config_dict.get('temperature')}, top_p: {config_dict.get('top_p')}")
+            else:
+                print(f"{self.agent_name} using client with provider-controlled sampling; temperature and top_p omitted")
 
             # Generate content
+            request_started = True
             response = client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
@@ -400,13 +998,8 @@ class LLMWrapper(ABC):
             )
 
             # Track tokens
-            if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                with self._token_lock:
-                    self.total_token_count += response.usage_metadata.total_token_count
-                    if hasattr(response.usage_metadata, 'prompt_token_count'):
-                        self.input_token_count += response.usage_metadata.prompt_token_count
-                    if hasattr(response.usage_metadata, 'candidates_token_count'):
-                        self.output_token_count += response.usage_metadata.candidates_token_count
+            self._record_generation_usage(getattr(response, "usage_metadata", None))
+            usage_recorded = True
 
             print(
                 "Total tokens",
@@ -417,6 +1010,8 @@ class LLMWrapper(ABC):
                 self.input_token_count,
                 ", Output:",
                 self.output_token_count,
+                ", Thoughts:",
+                self.thought_token_count,
                 ")",
             )
 
@@ -439,8 +1034,15 @@ class LLMWrapper(ABC):
             return str(text)
 
         except Exception as e:
+            if request_started and not usage_recorded:
+                self._record_generation_usage(None)
             self._increment_diagnostic("generation_errors", detail=str(e))
             print(f"ERROR: Client generation failed: {e}")
+            retry_timeout = THINKING_MODEL_CONFIG.get(_canonical_model_name(self.model_name), {}).get("retry_response_timeouts", True)
+            if not retry_timeout and _is_response_timeout_error(e):
+                raise GenerationResponseDeadlineError(
+                    "The response deadline expired. The provider may still be processing this request; it was not automatically retried."
+                ) from e
             raise e
 
 class Ideator(LLMWrapper):
@@ -573,24 +1175,38 @@ class Ideator(LLMWrapper):
         return ", ".join(subset)
 
     def generate_specific_prompt(self, context_pool: str, idea_type: str) -> str:
-        """Generate a specific idea prompt from the context pool using the translation layer"""
+        """Generate a concrete idea direction from the context pool."""
         prompts = self._resolve_prompts(idea_type)
 
         # Create the translation prompt with shuffled subset
-        translation_prompt = prompts.SPECIFIC_PROMPT.format(context_pool=context_pool)
+        translation_prompt = render_prompt(prompts.SPECIFIC_PROMPT, context_pool=context_pool)
 
         specific_prompt = self.generate_text(translation_prompt)
-        print(f"Generated specific prompt: {specific_prompt}")
+        print(f"Generated direction prompt: {specific_prompt}")
 
         return specific_prompt
 
-    def generate_context_from_parents(self, parent_genotypes: List[str], mutation_rate: float = 0.0, mutation_context_pool: str = "") -> str:
+    def generate_mutation_genes(self, idea_type: str, parent_genotypes: List[str]) -> List[str]:
+        """Invent ingredients using the same representation and parser as extraction."""
+        from idea.genes import normalize_genotype_response, parse_genotype
+
+        prompts = self._resolve_prompts(idea_type)
+        domain = str(getattr(prompts, "ITEM_TYPE", idea_type))
+        description = getattr(prompts, "description", "")
+        if description:
+            domain += f" — {description}"
+        background = requirements_text(getattr(prompts, "template", None))
+        prompt = mutation_gene_prompt(domain, parent_genotypes, background)
+        response = self.generate_text(prompt)
+        return parse_genotype(normalize_genotype_response(response))
+
+    def generate_context_from_parents(self, parent_genotypes: List[str], mutation_rate: float = 0.0, mutation_context_pool: str | List[str] = "") -> str:
         """Generate context pool from parent genotypes by combining and sampling concepts, with optional mutation.
 
         Args:
             parent_genotypes: List of genotypes from parent ideas
-            mutation_rate: Probability of selecting a concept from the mutation pool (0.0 to 1.0)
-            mutation_context_pool: A string of comma-separated concepts to use for mutation
+            mutation_rate: Fraction of inherited concepts to replace (0.0 to 1.0)
+            mutation_context_pool: Parsed mutation genes, or legacy comma-separated context
 
         Returns:
             A sampled context pool string
@@ -606,7 +1222,10 @@ class Ideator(LLMWrapper):
         # Process mutation concepts if available
         mutation_concepts = []
         if mutation_rate > 0 and mutation_context_pool:
-            mutation_concepts = self._parse_context_items(mutation_context_pool)
+            # Keep parsed genes intact: a comma can be part of one ingredient.
+            # String input remains supported for existing external helper adapters.
+            mutation_concepts = (list(mutation_context_pool) if isinstance(mutation_context_pool, list)
+                                 else self._parse_context_items(mutation_context_pool))
             # Remove duplicates
             mutation_concepts = list(dict.fromkeys(mutation_concepts))
             print(f"Mutation enabled: rate={mutation_rate}, pool size={len(mutation_concepts)}")
@@ -628,7 +1247,7 @@ class Ideator(LLMWrapper):
 
         primary_parent_idx = 0
         primary_parent = parent_concept_lists[primary_parent_idx]
-        primary_ratio = self._random_uniform(0.4, 0.6)
+        primary_ratio = self._random_uniform(0.4, 0.6) if len(parent_concept_lists) > 1 else 1.0
         desired_primary_count = max(1, int(round(target_child_size * primary_ratio)))
         desired_primary_count = min(desired_primary_count, len(primary_parent))
 
@@ -686,28 +1305,32 @@ class Ideator(LLMWrapper):
             )
 
         mutation_count = 0
+        replaced_concepts = []
+        replacement_concepts = []
         if mutation_candidates and mutation_rate > 0:
-            desired_mutation_count = max(1, int(round(target_child_size * mutation_rate)))
-            available_slots = max(0, self.MAX_PARENT_CONTEXT_CONCEPTS - len(sampled_concepts))
+            desired_mutation_count = int(math.floor(len(sampled_concepts) * mutation_rate + 0.5))
             actual_mutation_count = min(
                 len(mutation_candidates),
                 desired_mutation_count,
-                available_slots,
+                len(sampled_concepts),
             )
             if actual_mutation_count > 0:
                 mutated_selection = self._random_sample(mutation_candidates, actual_mutation_count)
-                sampled_concepts.extend(mutated_selection)
+                positions = self._random_sample(list(range(len(sampled_concepts))), actual_mutation_count)
+                for position, replacement in zip(positions, mutated_selection):
+                    replaced_concepts.append(sampled_concepts[position])
+                    replacement_concepts.append(replacement)
+                    sampled_concepts[position] = replacement
                 mutation_count = actual_mutation_count
-                print(f"Injected {len(mutated_selection)} mutation concepts: {mutated_selection}")
-            else:
-                self._increment_diagnostic(
-                    "mutation_injection_capped",
-                    detail=(
-                        f"desired_mutation={desired_mutation_count}, "
-                        f"available_slots={available_slots}, "
-                        f"mutation_candidates={len(mutation_candidates)}"
-                    ),
-                )
+                print(f"Replaced {mutation_count} inherited concepts: {mutated_selection}")
+            if actual_mutation_count < desired_mutation_count:
+                self._increment_diagnostic("mutation_replacement_pool_shortfall")
+
+        self.last_mutation_details = {
+            "operation": "replace", "configured_rate": mutation_rate,
+            "context_size": len(sampled_concepts), "replaced_count": mutation_count,
+            "removed": replaced_concepts, "introduced": replacement_concepts,
+        }
 
         # Safety guard for extremely verbose genotype outputs.
         if len(sampled_concepts) > self.MAX_PARENT_CONTEXT_CONCEPTS:
@@ -742,33 +1365,37 @@ class Ideator(LLMWrapper):
         """Helper function to generate an idea from a context pool
 
         This function encapsulates steps 3 and 4 from the user's request:
-        3. Using the sample to ask LLM to create specific prompt
-        4. Generate an idea from specific prompt
+        3. Use the sample to ask the LLM to create a direction prompt
+        4. Generate an idea from that direction prompt
 
         Args:
             context_pool: The context pool to generate from
             idea_type: Type of idea to generate
 
         Returns:
-            tuple: (generated_idea, specific_prompt_used)
+            tuple: (generated_idea, direction_prompt_used)
         """
-        # Generate specific prompt from context pool
+        # Generate a concrete direction prompt from the context pool.
         specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
 
         # Keep generation compact: specific direction + consolidated template constraints.
         prompts = self._resolve_prompts(idea_type)
-        extended_prompt = specific_prompt
-        if hasattr(prompts, 'template') and prompts.template.special_requirements:
-            extended_prompt = f"{specific_prompt}\n\nConstraints:\n{prompts.template.special_requirements}"
+        extended_prompt = generation_prompt(prompts, specific_prompt)
 
         response = self.generate_text(extended_prompt)
 
         return response, specific_prompt
 
-    def get_idea_prompt(self, idea_type: str) -> str:
-        """Get prompt template for specific idea type"""
+    def generate_child_from_context(self, context_pool: str, idea_type: str) -> tuple[str, str]:
+        """Use the saved breeding instructions in the existing child call."""
+        specific_prompt = self.generate_specific_prompt(context_pool, idea_type)
         prompts = self._resolve_prompts(idea_type)
-        return prompts.IDEA_PROMPT
+        build = getattr(prompts, "build_breeding_prompt", None)
+        if callable(build):
+            prompt = build(specific_prompt, context_pool)
+        else:
+            prompt = generation_prompt(prompts, specific_prompt)
+        return self.generate_text(prompt), specific_prompt
 
     def seed_ideas(self, n: int, idea_type: str) -> tuple[List[str], List[str]]:
         """Generate n initial ideas
@@ -816,37 +1443,61 @@ class Formatter(LLMWrapper):
         idea_text = raw_idea["idea"] if isinstance(raw_idea, dict) and "idea" in raw_idea else raw_idea
         print(f"Formatting idea:\n {idea_text}")
 
-        if is_oracle_idea:
-            # For Oracle ideas, use a different prompt that preserves the analysis context
-            prompt = f"""Format the following idea into a structured format with title and content.
-
-                    ORACLE CONTEXT: This idea was generated by the Oracle diversity agent to address patterns and gaps in the population.
-
-                    IDEA TO FORMAT:
-                    {idea_text}
-
-                    Please format this into a structured format with a compelling title and well-organized content. The Oracle analysis will be preserved separately.
-                    """
-        else:
-            prompt = prompts.FORMAT_PROMPT.format(input_text=idea_text)
+        # Oracle candidates use the same saved formatting contract. Their
+        # analysis is metadata, never a reason to rewrite the candidate body.
+        prompt = render_prompt(prompts.FORMAT_PROMPT, input_text=idea_text)
 
         print(f"Prompt:\n {prompt}")
 
         # Force JSON response schema for structured output
         # Use response_schema for structured output with the new client
-        response = self.generate_text(
-            prompt,
-            response_schema=Idea,
-            # Ensure we're using a temperature that favors structured output
-            temperature=0.7
-        )
+        envelope = extract_title_content_envelope(idea_text)
+        if envelope is not None:
+            # Canonical outputs already contain every field. Extracting them
+            # locally preserves exact wording and avoids an unnecessary call.
+            response = json.dumps(envelope, ensure_ascii=False)
+            self._increment_diagnostic("formatter_envelope_extractions")
+        else:
+            response = self.generate_text(
+                prompt,
+                response_schema=Idea,
+                temperature=0.7,
+            )
 
+        fallback_title = "Untitled"
         fallback_idea_text = ""
         if isinstance(idea_text, str):
             fallback_idea_text = idea_text.strip()
+            source_lines = fallback_idea_text.splitlines()
+            for index, line in enumerate(source_lines):
+                stripped = line.strip()
+                if stripped.startswith("Title:"):
+                    source_title = stripped.removeprefix("Title:").strip()
+                    if source_title:
+                        fallback_title = source_title
+                    for content_index in range(index + 1, len(source_lines)):
+                        content_line = source_lines[content_index].strip()
+                        if content_line.startswith("Content:"):
+                            inline_content = content_line.removeprefix("Content:").strip()
+                            remaining_content = source_lines[content_index + 1 :]
+                            fallback_idea_text = "\n".join(
+                                ([inline_content] if inline_content else [])
+                                + remaining_content
+                            ).strip()
+                            break
+                    break
+                if stripped.startswith("# "):
+                    fallback_title = stripped.removeprefix("# ").strip() or fallback_title
+                    break
         elif hasattr(idea_text, "content"):
+            fallback_title = str(
+                getattr(idea_text, "title", "") or fallback_title
+            ).strip()
             fallback_idea_text = str(getattr(idea_text, "content", "") or "").strip()
         elif isinstance(idea_text, dict):
+            fallback_title = str(
+                idea_text.get("title") or fallback_title
+            ).strip()
             fallback_idea_text = str(
                 idea_text.get("content")
                 or idea_text.get("idea")
@@ -884,9 +1535,11 @@ class Formatter(LLMWrapper):
             print(f"FORMATTER: JSON parsing failed: {e}")
             print(f"FORMATTER: Raw response: {response}")
 
-            # Fallback: Try to extract title and content manually
-            title = "Untitled"
-            content = response.strip()
+            # A malformed structured response is not a safe replacement for the
+            # complete upstream idea. Start from the source and only replace it
+            # when the response can be recovered unambiguously.
+            title = fallback_title
+            content = fallback_idea_text
 
             # If raw response is just JSON-like but failed parsing, try to clean it
             if response.strip().startswith('{') and response.strip().endswith('}'):
@@ -896,9 +1549,9 @@ class Formatter(LLMWrapper):
                      # Basic fix for unescaped newlines in JSON values
                      cleaned = re.sub(r'(?<=: ")(.*?)(?=")', lambda m: m.group(1).replace('\n', '\\n'), response, flags=re.DOTALL)
                      data = json.loads(cleaned)
-                     if 'title' in data:
+                     if data.get('title'):
                          title = data['title']
-                     if 'content' in data:
+                     if data.get('content'):
                          content = data['content']
                      # If successful, create idea and return
                      if content and content.strip():
@@ -988,13 +1641,27 @@ class Critic(LLMWrapper):
         self._max_workers = int(os.environ.get("COMPARISON_CONCURRENCY", "8"))
         # Lock for thread-safe cache access
         self._cache_lock = threading.Lock()
+        self._tournament_evidence_cache: Dict[str, Any] = {}
+        self._artifact_loader: Any = None
+        self._required_artifact_roles: Tuple[str, ...] = ()
+
+    def configure_artifact_evidence(
+        self,
+        *,
+        loader: Any,
+        required_roles: List[str],
+    ) -> None:
+        """Configure immutable artifact loading for the current judge policy."""
+
+        self._artifact_loader = loader
+        self._required_artifact_roles = tuple(dict.fromkeys(required_roles))
 
     def critique(self, idea: str, idea_type: str) -> str:
         """Provide critique for an idea"""
         prompts = self._resolve_prompts(idea_type)
         # Extract idea text if it's a dictionary
         idea_text = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
-        prompt = prompts.CRITIQUE_PROMPT.format(idea=idea_text)
+        prompt = render_prompt(prompts.CRITIQUE_PROMPT, idea=idea_text)
         return self.generate_text(prompt)
 
     def refine(self, idea: str, idea_type: str) -> str:
@@ -1003,7 +1670,7 @@ class Critic(LLMWrapper):
         idea_text = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
         critique = self.critique(idea_text, idea_type)
         prompts = self._resolve_prompts(idea_type)
-        prompt = prompts.REFINE_PROMPT.format(
+        prompt = render_prompt(prompts.REFINE_PROMPT,
             idea=idea_text,
             critique=critique
         )
@@ -1036,34 +1703,6 @@ class Critic(LLMWrapper):
         """Update the Elo rating of an idea"""
         return elo_update(elo_a, elo_b, winner)
 
-    def _select_swiss_bye(self, ordered_indices: List[int], bye_counts: Dict[int, int]) -> Optional[int]:
-        """
-        Select a bye candidate for an odd-sized Swiss round.
-
-        Preference order:
-        1) Fewest byes so far
-        2) Lowest-ranked (last in ordered list)
-        """
-        return select_swiss_bye(ordered_indices, bye_counts)
-
-    def _pair_players_swiss(
-        self,
-        ordered_indices: List[int],
-        match_history: Set[Tuple[int, int]],
-        backtrack_limit: int = 20000,
-    ) -> Optional[List[Tuple[int, int]]]:
-        """
-        Pair players in Swiss style while minimizing repeat matchups.
-
-        Returns a list of pairs (idx_a, idx_b), or None if no pairing found
-        within the backtracking limit.
-        """
-        return pair_players_swiss(
-            ordered_indices,
-            match_history,
-            backtrack_limit=backtrack_limit,
-        )
-
     def _generate_swiss_round_pairs(
         self,
         ranks: Dict[int, float],
@@ -1085,10 +1724,11 @@ class Critic(LLMWrapper):
             if raw_id:
                 idea_id = str(raw_id)
             idea_obj = idea.get("idea", idea)
-            if hasattr(idea_obj, "title"):
-                title = idea_obj.title or title
+            raw_title = getattr(idea_obj, "title", None)
+            if raw_title and not callable(raw_title):
+                title = str(raw_title)
             elif isinstance(idea_obj, dict):
-                title = idea_obj.get("title", title)
+                title = str(idea_obj.get("title", title))
             else:
                 title = str(idea_obj)
         else:
@@ -1099,29 +1739,435 @@ class Critic(LLMWrapper):
 
         return {"id": idea_id, "title": title}
 
+    def _initial_tournament_rating(self, idea) -> float:
+        """Read the persisted global auto Elo for an idea."""
+        candidates = []
+        if isinstance(idea, dict):
+            ratings = idea.get("ratings")
+            if isinstance(ratings, dict):
+                candidates.append(ratings.get("auto"))
+            selection_metrics = idea.get("selection_metrics")
+            if isinstance(selection_metrics, dict):
+                candidates.append(selection_metrics.get("elo"))
+            candidates.append(idea.get("elo"))
+
+        for candidate in candidates:
+            try:
+                rating = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(rating):
+                return rating
+        return 1500.0
+
+    def _tournament_comparison_signature(self, idea_type: str) -> str:
+        """Build a cache namespace for pairwise judgments from judge + prompt settings."""
+        prompts = self._resolve_prompts(idea_type)
+        signature_payload = {
+            "provider": self.provider,
+            "model_name": self.model_name,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "thinking_budget": self.thinking_budget,
+            "thinking_level": self.thinking_level,
+            "idea_type": idea_type,
+            "item_type": getattr(prompts, "ITEM_TYPE", "ideas"),
+            "criteria": getattr(prompts, "COMPARISON_CRITERIA", []),
+            "comparison_prompt": getattr(prompts, "COMPARISON_PROMPT", ""),
+        }
+        component_id = getattr(self, "judge_component_id", "quality_elo")
+        component_version = getattr(self, "judge_component_version", "1")
+        # Preserve the original default namespace for old saved runs. Explicit
+        # custom/versioned evaluators establish a different evidence policy.
+        if component_id != "quality_elo" or component_version != "1":
+            signature_payload["component"] = {"id": component_id, "version": component_version}
+        serialized = json.dumps(signature_payload, sort_keys=True, default=str)
+        return sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _idea_payload_for_comparison(self, idea: Any) -> Any:
+        """Load and validate the exact text-and-image payload shown to the judge."""
+
+        idea_obj = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
+        idea_payload = _model_to_dict(idea_obj)
+        if isinstance(idea_payload, Mapping):
+            payload: Dict[str, Any] = {
+                "title": str(idea_payload.get("title") or "Untitled"),
+                "content": str(idea_payload.get("content") or ""),
+            }
+        else:
+            payload = {"title": "Untitled", "content": str(idea_payload)}
+
+        # Artifact evidence is opt-in per pairwise component. Legacy/text-only
+        # judges must not be influenced by unrelated refs merely present on a
+        # candidate.
+        if not self._required_artifact_roles:
+            return payload
+
+        raw_refs = idea.get("artifact_refs", []) if isinstance(idea, dict) else []
+        if raw_refs is None:
+            raw_refs = []
+        if not isinstance(raw_refs, list):
+            raise PairEvaluationInputError("candidate artifact_refs must be a list")
+
+        refs: List[ArtifactRef] = []
+        for raw_ref in raw_refs:
+            if not isinstance(raw_ref, Mapping):
+                continue
+            if raw_ref.get("role") not in self._required_artifact_roles:
+                continue
+            try:
+                refs.append(ArtifactRef.model_validate(raw_ref))
+            except Exception as exc:
+                raise PairEvaluationInputError(
+                    "candidate contains an invalid artifact reference"
+                ) from exc
+
+        refs_by_role: Dict[str, List[ArtifactRef]] = {}
+        for ref in refs:
+            refs_by_role.setdefault(ref.role, []).append(ref)
+        missing_roles = [
+            role for role in self._required_artifact_roles if role not in refs_by_role
+        ]
+        if missing_roles:
+            raise PairEvaluationInputError(
+                "candidate is missing required artifacts: " + ", ".join(missing_roles)
+            )
+        content_digest = sha256(
+            json.dumps(
+                {"title": payload["title"], "content": payload["content"]},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        for role in self._required_artifact_roles:
+            role_refs = refs_by_role.get(role, [])
+            if len(role_refs) != 1:
+                raise PairEvaluationInputError(
+                    f"candidate must contain exactly one required {role!r} artifact"
+                )
+            if (role_refs[0].content_digest or "").lower() != content_digest:
+                raise PairEvaluationInputError(
+                    f"required artifact {role_refs[0].id!r} is stale for the current candidate text"
+                )
+
+        refs_to_load = list(refs)
+        if refs_to_load and self._artifact_loader is None:
+            raise PairEvaluationInputError(
+                "candidate artifacts require an injected artifact loader"
+            )
+
+        loaded: Dict[str, bytes] = {}
+        load_artifact = getattr(self._artifact_loader, "load", None)
+        if not callable(load_artifact) and callable(self._artifact_loader):
+            load_artifact = self._artifact_loader
+        for ref in refs_to_load:
+            if not callable(load_artifact):
+                raise PairEvaluationInputError("artifact loader has no load operation")
+            try:
+                contents = load_artifact(ref)
+            except PairEvaluationInputError:
+                raise
+            except Exception as exc:
+                raise PairEvaluationInputError(
+                    f"artifact {ref.id!r} could not be loaded"
+                ) from exc
+            if not isinstance(contents, (bytes, bytearray)):
+                raise PairEvaluationInputError(
+                    f"artifact loader returned non-byte data for {ref.id!r}"
+                )
+            immutable_contents = bytes(contents)
+            if len(immutable_contents) != ref.size_bytes:
+                raise PairEvaluationInputError(
+                    f"artifact {ref.id!r} has an invalid byte size"
+                )
+            if sha256(immutable_contents).hexdigest().lower() != ref.sha256.lower():
+                raise PairEvaluationInputError(
+                    f"artifact {ref.id!r} failed digest validation"
+                )
+            loaded[ref.id] = immutable_contents
+
+        images: List[Dict[str, Any]] = []
+        for ref in refs:
+            if not ref.media_type.lower().startswith("image/"):
+                continue
+            if ref.media_type.lower() != "image/png":
+                raise PairEvaluationInputError(
+                    f"pairwise image artifact {ref.id!r} must be image/png"
+                )
+            image_bytes = loaded.get(ref.id)
+            if image_bytes is None:
+                raise PairEvaluationInputError(
+                    f"pairwise image artifact {ref.id!r} was not loaded"
+                )
+            images.append(
+                {
+                    "artifact_id": ref.id,
+                    "role": ref.role,
+                    "media_type": ref.media_type,
+                    "sha256": ref.sha256.lower(),
+                    "data": image_bytes,
+                }
+            )
+        if images:
+            payload["images"] = images
+        return payload
+
+    @staticmethod
+    def _artifact_cache_identity(
+        idea: Any,
+        required_roles: Tuple[str, ...],
+    ) -> List[Dict[str, str]]:
+        if not required_roles:
+            return []
+        if not isinstance(idea, dict) or not isinstance(idea.get("artifact_refs"), list):
+            return []
+        identities: List[Dict[str, str]] = []
+        for raw_ref in idea["artifact_refs"]:
+            if not isinstance(raw_ref, Mapping):
+                continue
+            if raw_ref.get("role") not in required_roles:
+                continue
+            digest = raw_ref.get("sha256")
+            if not isinstance(digest, str):
+                continue
+            identities.append(
+                {
+                    "id": str(raw_ref.get("id") or ""),
+                    "role": str(raw_ref.get("role") or ""),
+                    "media_type": str(raw_ref.get("media_type") or ""),
+                    "sha256": digest.lower(),
+                }
+            )
+        return sorted(
+            identities,
+            key=lambda item: (
+                item["role"], item["media_type"], item["sha256"], item["id"]
+            ),
+        )
+
+    def _idea_cache_key(self, idea: Any) -> str:
+        """Stable cache key for an idea, including content so refined ideas invalidate."""
+        raw_id = idea.get("id") if isinstance(idea, dict) else None
+        idea_obj = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
+        if isinstance(idea, dict) and "idea" not in idea:
+            # Flat exports carry mutable ratings/evaluations alongside text.
+            # Match the actual judge payload, so bookkeeping changes cannot
+            # create another observation of the same content. Nested exports
+            # retain their existing digest format for saved-ledger compatibility.
+            idea_obj = {
+                "title": str(idea.get("title") or "Untitled"),
+                "content": str(idea.get("content") or ""),
+            }
+        payload = {
+            "idea": _model_to_dict(idea_obj),
+            "artifacts": self._artifact_cache_identity(
+                idea,
+                self._required_artifact_roles,
+            ),
+        }
+        serialized = json.dumps(payload, sort_keys=True, default=str)
+        digest = sha256(serialized.encode("utf-8")).hexdigest()
+        return f"{str(raw_id) if raw_id else 'no-id'}:{digest}"
+
+    def _comparison_cache_key(self, signature: str, key_a: str, key_b: str) -> str:
+        # Instance IDs may change during migration. The exact content-and-image
+        # observation remains the same and must not become another Elo win.
+        first, second = sorted((key_a.rsplit(":", 1)[-1], key_b.rsplit(":", 1)[-1]))
+        pair_digest = sha256(f"{first}\n{second}".encode("utf-8")).hexdigest()
+        return f"{signature}:{pair_digest}"
+
+    def _get_cached_comparison(
+        self,
+        comparison_cache: Optional[Dict[str, Dict[str, Any]]],
+        signature: str,
+        key_a: str,
+        key_b: str,
+    ) -> Optional[str]:
+        if not isinstance(comparison_cache, dict):
+            return None
+
+        cache_key = self._comparison_cache_key(signature, key_a, key_b)
+        with self._cache_lock:
+            entry = comparison_cache.get(cache_key)
+            if not isinstance(entry, dict):
+                # Version-one ledgers included instance IDs in the pair hash.
+                first, second = sorted((key_a, key_b))
+                legacy_digest = sha256(f"{first}\n{second}".encode("utf-8")).hexdigest()
+                legacy_key = f"{signature}:{legacy_digest}"
+                entry = comparison_cache.pop(legacy_key, None)
+                if isinstance(entry, dict):
+                    comparison_cache[cache_key] = entry
+            if not isinstance(entry, dict):
+                return None
+            if entry.get("signature") != signature:
+                return None
+            cached_keys = {str(entry.get("idea_a_key")).rsplit(":", 1)[-1],
+                           str(entry.get("idea_b_key")).rsplit(":", 1)[-1]}
+            if cached_keys != {key_a.rsplit(":", 1)[-1], key_b.rsplit(":", 1)[-1]}:
+                return None
+            winner_key = entry.get("winner_key")
+            if winner_key == "tie":
+                winner = "tie"
+            elif str(winner_key).rsplit(":", 1)[-1] == key_a.rsplit(":", 1)[-1]:
+                winner = "A"
+            elif str(winner_key).rsplit(":", 1)[-1] == key_b.rsplit(":", 1)[-1]:
+                winner = "B"
+            else:
+                return None
+            entry["cache_hit_count"] = int(entry.get("cache_hit_count", 0) or 0) + 1
+            entry["last_used_at"] = datetime.now(timezone.utc).isoformat()
+            return winner
+
+    def _store_comparison_cache_result(
+        self,
+        comparison_cache: Optional[Dict[str, Dict[str, Any]]],
+        signature: str,
+        key_a: str,
+        key_b: str,
+        winner: Optional[str],
+    ) -> None:
+        if not isinstance(comparison_cache, dict) or winner not in {"A", "B", "tie"}:
+            return
+
+        winner_key = "tie"
+        if winner == "A":
+            winner_key = key_a
+        elif winner == "B":
+            winner_key = key_b
+
+        now = datetime.now(timezone.utc).isoformat()
+        cache_key = self._comparison_cache_key(signature, key_a, key_b)
+        first, second = sorted((key_a, key_b))
+        with self._cache_lock:
+            existing = comparison_cache.get(cache_key)
+            comparison_count = 1
+            cache_hit_count = 0
+            if isinstance(existing, dict):
+                comparison_count = int(existing.get("comparison_count", 0) or 0) + 1
+                cache_hit_count = int(existing.get("cache_hit_count", 0) or 0)
+            comparison_cache[cache_key] = {
+                "signature": signature,
+                "idea_a_key": first,
+                "idea_b_key": second,
+                "winner_key": winner_key,
+                "evidence_version": 2,
+                "applied": False,
+                "comparison_count": comparison_count,
+                "cache_hit_count": cache_hit_count,
+                "created_at": existing.get("created_at", now) if isinstance(existing, dict) else now,
+                "last_judged_at": now,
+            }
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _record_tournament_evaluation(
+        self,
+        idea: Any,
+        *,
+        cached: bool,
+        evaluation_generation: Optional[int],
+    ) -> None:
+        """Track how much pairwise evidence contributed to an idea's current rating."""
+        if not isinstance(idea, dict):
+            return
+
+        metadata = idea.get("rating_evaluations")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        else:
+            metadata = dict(metadata)
+
+        metadata["comparison_count"] = self._safe_int(metadata.get("comparison_count")) + 1
+        if cached:
+            metadata["cached_comparison_count"] = (
+                self._safe_int(metadata.get("cached_comparison_count")) + 1
+            )
+            metadata["llm_comparison_count"] = self._safe_int(
+                metadata.get("llm_comparison_count")
+            )
+        else:
+            metadata["llm_comparison_count"] = (
+                self._safe_int(metadata.get("llm_comparison_count")) + 1
+            )
+            metadata["cached_comparison_count"] = self._safe_int(
+                metadata.get("cached_comparison_count")
+            )
+        if evaluation_generation is not None:
+            metadata["last_evaluated_generation"] = int(evaluation_generation)
+        metadata["last_evaluated_at"] = datetime.now(timezone.utc).isoformat()
+
+        idea["rating_evaluations"] = metadata
+        idea["auto_match_count"] = self._safe_int(idea.get("auto_match_count")) + 1
+
     def get_tournament_ranks(
         self,
-        ideas: List[str],
+        ideas: List[Any],
         idea_type: str,
         rounds: int = 1,
         progress_callback: Callable[[int, int], None] = None,
         details: Optional[List[Dict[str, Any]]] = None,
         full_tournament_rounds: Optional[int] = None,
         should_stop: Optional[Callable[[], bool]] = None,
+        comparison_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+        evaluation_generation: Optional[int] = None,
+        early_stop_top_n: Optional[int] = None,
+        early_stop_min_rounds: int = 2,
     ) -> dict:
         """Get tournament ranks using a global Swiss-system tournament.
 
         Falls back to sequential evaluation for tiny populations to keep behavior deterministic.
         """
 
+        # Resolve every candidate's evidence before consulting the comparison
+        # cache. Missing or corrupt required artifacts are evaluation failures,
+        # never permission to reuse a text-only judgment.
+        comparison_items = [
+            self._idea_payload_for_comparison(idea) for idea in ideas
+        ]
+        if comparison_cache is None:
+            comparison_cache = self._tournament_evidence_cache
+
         # Handle edge case: if there's only one idea or no ideas, return appropriate ranking
         if len(ideas) <= 1:
-            return {0: 1500} if len(ideas) == 1 else {}
+            return {0: self._initial_tournament_rating(ideas[0])} if len(ideas) == 1 else {}
 
         if rounds <= 0:
             rounds = 1
 
-        ranks = {i: 1500 for i in range(len(ideas))}
+        ranks = {i: self._initial_tournament_rating(idea) for i, idea in enumerate(ideas)}
+        comparison_signature = self._tournament_comparison_signature(idea_type)
+        idea_cache_keys = [self._idea_cache_key(idea) for idea in ideas]
+        latest_ratings = {}
+        application_sequence = 0
+        for entry in comparison_cache.values():
+            if not isinstance(entry, dict) or entry.get("signature") != comparison_signature:
+                continue
+            sequence = self._safe_int(entry.get("application_sequence"))
+            application_sequence = max(application_sequence, sequence)
+            for key, rating in (entry.get("post_ratings") or {}).items():
+                try:
+                    rating = float(rating)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(rating):
+                    continue
+                if sequence >= latest_ratings.get(key, (-1, None))[0]:
+                    latest_ratings[key] = (sequence, rating)
+        for index, key in enumerate(idea_cache_keys):
+            digest = key.rsplit(":", 1)[-1]
+            if digest in latest_ratings:
+                ranks[index] = latest_ratings[digest][1]
+                if isinstance(ideas[index], dict):
+                    ratings = dict(ideas[index].get("ratings") or {})
+                    ratings["auto"] = ranks[index]
+                    ideas[index]["ratings"] = ratings
+                    ideas[index]["elo"] = ranks[index]
 
         # Decide whether to enable parallel evaluation
         enable_parallel = (
@@ -1141,7 +2187,6 @@ class Critic(LLMWrapper):
         expected_pairs_per_round = len(ideas) // 2
         total_pairs = expected_pairs_per_round * rounds
         completed_pairs = 0
-
         def report_progress():
             if progress_callback:
                 try:
@@ -1173,11 +2218,15 @@ class Critic(LLMWrapper):
                     "b_id": b_meta["id"],
                     "a_title": a_meta["title"],
                     "b_title": b_meta["title"],
+                    "cached": False,
+                    "winner_source": "llm",
+                    "applied_this_run": False,
                 })
 
             round_record = {
                 "round": _round + 1,
                 "pairs": round_pairs,
+                "ratings_committed": False,
             }
             if segment_rounds:
                 round_record["tournament_index"] = (_round // segment_rounds) + 1
@@ -1197,50 +2246,208 @@ class Critic(LLMWrapper):
             if not pairs:
                 continue
 
-            if enable_parallel:
+            results_map: Dict[Tuple[int, int], Optional[str]] = {}
+            cached_pair_flags: Dict[Tuple[int, int], bool] = {}
+            missing_pairs: List[Tuple[int, int, int]] = []
+
+            for pair_index, (idx_a, idx_b) in enumerate(pairs):
+                if idea_cache_keys[idx_a].rsplit(":", 1)[-1] == idea_cache_keys[idx_b].rsplit(":", 1)[-1]:
+                    # Comparing identical content supplies no new observation.
+                    results_map[(idx_a, idx_b)] = "tie"
+                    cached_pair_flags[(idx_a, idx_b)] = True
+                    round_pairs[pair_index].update(winner="tie", cached=True, winner_source="identical_content")
+                    completed_pairs += 1
+                    report_progress()
+                    continue
+                cached_winner = self._get_cached_comparison(
+                    comparison_cache,
+                    comparison_signature,
+                    idea_cache_keys[idx_a],
+                    idea_cache_keys[idx_b],
+                )
+                if cached_winner is None:
+                    missing_pairs.append((pair_index, idx_a, idx_b))
+                    continue
+
+                results_map[(idx_a, idx_b)] = cached_winner
+                cached_pair_flags[(idx_a, idx_b)] = True
+                if pair_index < len(round_pairs):
+                    round_pairs[pair_index]["winner"] = cached_winner
+                    round_pairs[pair_index]["cached"] = True
+                    round_pairs[pair_index]["winner_source"] = "cache"
+                completed_pairs += 1
+                report_progress()
+
+            if enable_parallel and missing_pairs:
                 def on_pair_complete(_c, _t):
                     nonlocal completed_pairs
                     completed_pairs += 1
                     report_progress()
 
+                pairs_to_evaluate = [(idx_a, idx_b) for _, idx_a, idx_b in missing_pairs]
                 results = parallel_evaluate_pairs(
-                    pairs=pairs,
-                    items=ideas,
+                    pairs=pairs_to_evaluate,
+                    items=comparison_items,
                     compare_fn=self.compare_ideas,
                     idea_type=idea_type,
                     concurrency=self._max_workers,
                     randomize_presentation=True,
                     progress_callback=on_pair_complete,
                     should_stop=should_stop,
+                    failure_details=(pair_failure_details := {}),
                 )
 
-                # Update ranks in the deterministic order of generated pairs
-                results_map = {(a, b): w for a, b, w in results}
-                for pair_index, (idx_a, idx_b) in enumerate(pairs):
-                    winner = results_map.get((idx_a, idx_b))
-                    if details is not None and pair_index < len(round_pairs):
+                evaluated_map = {(a, b): w for a, b, w in results}
+                for pair_index, idx_a, idx_b in missing_pairs:
+                    winner = evaluated_map.get((idx_a, idx_b))
+                    results_map[(idx_a, idx_b)] = winner
+                    cached_pair_flags[(idx_a, idx_b)] = False
+                    self._store_comparison_cache_result(
+                        comparison_cache,
+                        comparison_signature,
+                        idea_cache_keys[idx_a],
+                        idea_cache_keys[idx_b],
+                        winner,
+                    )
+                    if pair_index < len(round_pairs):
                         round_pairs[pair_index]["winner"] = winner
-                    elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
-                    ranks[idx_a] = elo_a
-                    ranks[idx_b] = elo_b
+                        if winner is None:
+                            round_pairs[pair_index]["winner_source"] = "failed"
+                            round_pairs[pair_index]["error"] = pair_failure_details.get(
+                                (idx_a, idx_b),
+                                "comparison did not produce a valid winner",
+                            )
             else:
-                for pair_index, (idx_a, idx_b) in enumerate(pairs):
-                    idea_a = ideas[idx_a]
-                    idea_b = ideas[idx_b]
-                    idea_a_obj = idea_a["idea"] if isinstance(idea_a, dict) and "idea" in idea_a else idea_a
-                    idea_b_obj = idea_b["idea"] if isinstance(idea_b, dict) and "idea" in idea_b else idea_b
-                    idea_a_dict = idea_a_obj.dict() if hasattr(idea_a_obj, 'dict') else idea_a_obj
-                    idea_b_dict = idea_b_obj.dict() if hasattr(idea_b_obj, 'dict') else idea_b_obj
+                pair_failure_details = {}
+                for pair_index, idx_a, idx_b in missing_pairs:
+                    if callable(should_stop) and should_stop():
+                        break
+                    idea_a_dict = comparison_items[idx_a]
+                    idea_b_dict = comparison_items[idx_b]
 
                     # Deterministic orientation in sequential mode to keep tests stable
                     winner = self.compare_ideas(idea_a_dict, idea_b_dict, idea_type)
-                    if details is not None and pair_index < len(round_pairs):
+                    results_map[(idx_a, idx_b)] = winner
+                    cached_pair_flags[(idx_a, idx_b)] = False
+                    self._store_comparison_cache_result(
+                        comparison_cache,
+                        comparison_signature,
+                        idea_cache_keys[idx_a],
+                        idea_cache_keys[idx_b],
+                        winner,
+                    )
+                    if pair_index < len(round_pairs):
                         round_pairs[pair_index]["winner"] = winner
-                    elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
-                    ranks[idx_a] = elo_a
-                    ranks[idx_b] = elo_b
+                        if winner not in {"A", "B", "tie"}:
+                            round_pairs[pair_index]["winner_source"] = "failed"
+                            round_pairs[pair_index]["error"] = (
+                                "comparison did not produce a valid winner"
+                            )
+                    if winner not in {"A", "B", "tie"}:
+                        pair_failure_details[(idx_a, idx_b)] = (
+                            f"invalid comparison winner: {winner!r}"
+                        )
                     completed_pairs += 1
                     report_progress()
+
+            if callable(should_stop) and should_stop():
+                round_record["cancelled"] = True
+                round_record["cancellation_reason"] = "stop_requested"
+                # Preserve ratings from fully completed earlier rounds only.
+                # Completed observations remain cached as unapplied evidence;
+                # no rating changes are committed for this unfinished round.
+                return ranks
+
+            failed_pairs = [
+                (idx_a, idx_b)
+                for idx_a, idx_b in pairs
+                if results_map.get((idx_a, idx_b)) not in {"A", "B", "tie"}
+            ]
+            if failed_pairs:
+                failure_summary = "; ".join(
+                    f"{idx_a}-{idx_b}: "
+                    f"{pair_failure_details.get((idx_a, idx_b), 'comparison failed')}"
+                    for idx_a, idx_b in failed_pairs
+                )
+                raise PairEvaluationError(
+                    "pairwise judge failed to produce valid evidence: " + failure_summary
+                )
+
+            # Update ranks in the deterministic order of generated pairs.
+            for pair_index, (idx_a, idx_b) in enumerate(pairs):
+                winner = results_map.get((idx_a, idx_b))
+                is_cached = bool(cached_pair_flags.get((idx_a, idx_b), False))
+                if idea_cache_keys[idx_a].rsplit(":", 1)[-1] == idea_cache_keys[idx_b].rsplit(":", 1)[-1]:
+                    continue
+                cache_entry = None
+                if isinstance(comparison_cache, dict):
+                    cache_entry = comparison_cache.get(self._comparison_cache_key(
+                        comparison_signature, idea_cache_keys[idx_a], idea_cache_keys[idx_b]
+                    ))
+                # Legacy cache entries accompanied persisted ratings. Reusing an
+                # observation is evidence retrieval, not another independent win.
+                if is_cached and isinstance(cache_entry, dict) and cache_entry.get("applied", True):
+                    continue
+                for index in (idx_a, idx_b):
+                    digest = idea_cache_keys[index].rsplit(":", 1)[-1]
+                    if digest in latest_ratings:
+                        ranks[index] = latest_ratings[digest][1]
+                elo_a, elo_b = self._elo_update(ranks[idx_a], ranks[idx_b], winner)
+                ranks[idx_a] = elo_a
+                ranks[idx_b] = elo_b
+                for index in (idx_a, idx_b):
+                    if isinstance(ideas[index], dict):
+                        ratings = dict(ideas[index].get("ratings") or {})
+                        ratings["auto"] = ranks[index]
+                        ideas[index]["ratings"] = ratings
+                        ideas[index]["elo"] = ranks[index]
+                if isinstance(cache_entry, dict):
+                    cache_entry["applied"] = True
+                    application_sequence += 1
+                    cache_entry["application_sequence"] = application_sequence
+                    cache_entry["post_ratings"] = {
+                        idea_cache_keys[idx_a].rsplit(":", 1)[-1]: elo_a,
+                        idea_cache_keys[idx_b].rsplit(":", 1)[-1]: elo_b,
+                    }
+                    for key, rating in cache_entry["post_ratings"].items():
+                        latest_ratings[key] = (application_sequence, rating)
+                self._record_tournament_evaluation(
+                    ideas[idx_a],
+                    cached=is_cached,
+                    evaluation_generation=evaluation_generation,
+                )
+                self._record_tournament_evaluation(
+                    ideas[idx_b],
+                    cached=is_cached,
+                    evaluation_generation=evaluation_generation,
+                )
+                round_pairs[pair_index].update(
+                    applied_this_run=True,
+                    new_elo_a=elo_a,
+                    new_elo_b=elo_b,
+                )
+
+            # Content aliases share a rating even when only one instance was
+            # paired in this round (for example after island migration).
+            for index, key in enumerate(idea_cache_keys):
+                digest = key.rsplit(":", 1)[-1]
+                if digest in latest_ratings:
+                    ranks[index] = latest_ratings[digest][1]
+                    if isinstance(ideas[index], dict):
+                        ratings = dict(ideas[index].get("ratings") or {})
+                        ratings["auto"] = ranks[index]
+                        ideas[index]["ratings"] = ratings
+                        ideas[index]["elo"] = ranks[index]
+
+            # Observing a winner is not an Elo commit. Consumers must wait for
+            # this marker and use the recorded application rather than replay
+            # cached winners as new evidence.
+            round_record["ratings_committed"] = True
+            report_progress()
+
+            # The legacy early_stop_top_n argument is accepted for saved-run
+            # compatibility. Hybrid stochastic selection requires all configured
+            # evidence; unchanged Elo membership is not a stopping criterion.
 
         return ranks
 
@@ -1260,17 +2467,41 @@ class Critic(LLMWrapper):
         # loader (YAMLTemplateWrapper ensures a default is available).
         prompt_template = prompts.COMPARISON_PROMPT
 
-        prompt = prompt_template.format(
+        prompt = render_prompt(prompt_template,
             item_type=item_type,
             criteria=", ".join(criteria),
             idea_a_title=idea_a.get('title', 'Untitled'),
             idea_a_content=idea_a.get('content', ''),
             idea_b_title=idea_b.get('title', 'Untitled'),
-            idea_b_content=idea_b.get('content', '')
+            idea_b_content=idea_b.get('content', ''),
+            idea_a=f"Title: {idea_a.get('title', 'Untitled')}\nContent: {idea_a.get('content', '')}",
+            idea_b=f"Title: {idea_b.get('title', 'Untitled')}\nContent: {idea_b.get('content', '')}",
         )
 
-        # Cache by model, temperature, and prompt hash to avoid duplicate calls
-        cache_key = f"{self.model_name}|{self.temperature}|{sha256(prompt.encode('utf-8')).hexdigest()}"
+        images_a = idea_a.get("images", []) if isinstance(idea_a, dict) else []
+        images_b = idea_b.get("images", []) if isinstance(idea_b, dict) else []
+        image_identity = [
+            {
+                "candidate": candidate_label,
+                "role": str(image.get("role") or ""),
+                "sha256": str(image.get("sha256") or ""),
+            }
+            for candidate_label, images in (("A", images_a), ("B", images_b))
+            for image in images
+            if isinstance(image, dict)
+        ]
+
+        # Include artifact digests so visually different implementations with
+        # identical prose can never share a text-only cache entry.
+        cache_payload = json.dumps(
+            {"prompt": prompt, "images": image_identity},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        cache_key = (
+            f"{self.model_name}|{self.temperature}|"
+            f"{sha256(cache_payload.encode('utf-8')).hexdigest()}"
+        )
         with self._cache_lock:
             if cache_key in self._compare_cache:
                 result_cached = self._compare_cache.pop(cache_key)
@@ -1278,25 +2509,59 @@ class Critic(LLMWrapper):
                 return result_cached
 
         try:
-            # Use the configured temperature for comparisons
-            response = self.generate_text(prompt)
-            result = response.strip().upper()
+            # A single model call receives the comparison text and both
+            # candidates' images, with explicit labels preserving ownership.
+            contents: Any = prompt
+            if images_a or images_b:
+                contents = [types.Part.from_text(text=prompt)]
+                for candidate_label, images in (("A", images_a), ("B", images_b)):
+                    for image_index, image in enumerate(images, start=1):
+                        if not isinstance(image, dict):
+                            raise PairEvaluationInputError(
+                                "prepared comparison image must be a mapping"
+                            )
+                        data = image.get("data")
+                        media_type = image.get("media_type")
+                        if not isinstance(data, bytes) or media_type != "image/png":
+                            raise PairEvaluationInputError(
+                                "prepared comparison image must contain PNG bytes"
+                            )
+                        contents.append(
+                            types.Part.from_text(
+                                text=(
+                                    f"Candidate {candidate_label} visualization "
+                                    f"{image_index}:"
+                                )
+                            )
+                        )
+                        contents.append(
+                            types.Part.from_bytes(data=data, mime_type=media_type)
+                        )
+
+            # Use the configured temperature for comparisons.
+            response = self.generate_text(contents)
+            result = response.strip()
 
             print(f"LLM comparison response: {result}")
 
-            # More robust parsing
-            if "RESULT: A" in result or "Result: A" in result:
-                return "A"
-            elif "RESULT: B" in result or "Result: B" in result:
-                return "B"
-            elif "RESULT: TIE" in result or "Result: tie" in result:
-                return "tie"
-            elif "A" in result and "B" not in result:
-                return "A"
-            elif "B" in result and "A" not in result:
-                return "B"
-            else:
-                winner = "tie"
+            # A vague prose response is not neutral evidence.  Require one
+            # explicit standalone directive so malformed output follows the
+            # typed evaluation-failure path instead of mutating Elo as a tie.
+            directive_pattern = r"(?i)\bRESULT\s*:\s*(A|B|TIE)\b"
+            directives = re.findall(directive_pattern, result)
+            last_nonempty_line = next(
+                (line for line in reversed(result.splitlines()) if line.strip()),
+                "",
+            )
+            final_directives = re.findall(directive_pattern, last_nonempty_line)
+            if len(directives) != 1 or len(final_directives) != 1:
+                self._increment_diagnostic(
+                    "invalid_comparison_responses",
+                    detail=result[:400],
+                )
+                return None
+            directive = final_directives[0].upper()
+            winner = "tie" if directive == "TIE" else directive
 
             # Update cache (LRU eviction)
             with self._cache_lock:
@@ -1305,6 +2570,8 @@ class Critic(LLMWrapper):
                     # pop oldest
                     self._compare_cache.popitem(last=False)
             return winner
+        except PairEvaluationInputError:
+            raise
         except Exception as e:
             self._increment_diagnostic("compare_ideas_errors", detail=str(e))
             print(f"Error in compare_ideas: {e}")
@@ -1327,6 +2594,8 @@ class Breeder(LLMWrapper):
         self.mutation_rate = mutation_rate
         self.seed_context_pool_size = seed_context_pool_size
         self._thread_local = threading.local()
+        self._genotype_cache = OrderedDict()
+        self._genotype_lock = threading.Lock()
         print(f"Breeder initialized with mutation_rate={mutation_rate}")
 
     def _get_thread_ideator(self) -> Ideator:
@@ -1337,6 +2606,8 @@ class Breeder(LLMWrapper):
                 model_name=self.model_name,
                 temperature=self.temperature,
                 top_p=self.top_p,
+                thinking_budget=self.thinking_budget,
+                thinking_level=self.thinking_level,
                 api_key=self.api_key,
                 random_seed=self._random_randbits(64),
                 seed_context_pool_size=self.seed_context_pool_size,
@@ -1344,6 +2615,10 @@ class Breeder(LLMWrapper):
             for template_id, template_data in self._iter_custom_templates():
                 ideator.register_custom_template(template_id, template_data)
             self._thread_local.ideator = ideator
+            # Charge helper calls immediately, including usage from a partial breed.
+            ideator._usage_sink = self
+        ideator.cancel_event = getattr(self, "cancel_event", None)
+        ideator.cancel_check = getattr(self, "cancel_check", None)
         return ideator
 
     def register_custom_template(self, template_id: str, template_data: Dict[str, Any]) -> None:
@@ -1352,23 +2627,21 @@ class Breeder(LLMWrapper):
         if ideator is not None:
             ideator.register_custom_template(template_id, template_data)
 
-    def encode_to_genotype(self, idea: str, idea_type: str) -> str:
-        """
-        Convert a full idea (phenotype) to its basic elements (genotype)
-
-        Args:
-            idea: The full idea to encode (can be dict with 'idea' key or string)
-            idea_type: Type of idea for customization
-
-        Returns:
-            A genotype string representing the basic elements
-        """
-        # Extract idea text if it's a dictionary
-        idea_text = idea["idea"] if isinstance(idea, dict) and "idea" in idea else idea
+    def _genotype_prompt_and_fingerprint(self, idea: Any, idea_type: str) -> tuple[str, str]:
+        """Keep observation reuse identical to the existing encoding cache key."""
+        # Wire snapshots, formatted Idea objects and flat records describe the
+        # same phenotype. Never include extension metadata in the identity.
+        idea_text = idea.to_candidate_dict() if hasattr(idea, "to_candidate_dict") else idea
+        while isinstance(idea_text, dict) and "idea" in idea_text:
+            idea_text = idea_text["idea"]
 
         # Get the idea object if it's a formatted idea
         if hasattr(idea_text, 'title') and hasattr(idea_text, 'content'):
             idea_content = f"Title: {idea_text.title}\nContent: {idea_text.content}"
+        elif isinstance(idea_text, dict) and "content" in idea_text:
+            idea_content = f"Title: {idea_text.get('title')}\nContent: {idea_text['content']}"
+        elif isinstance(idea_text, dict):
+            raise ValueError("Candidate has no textual phenotype")
         else:
             idea_content = str(idea_text)
 
@@ -1378,15 +2651,82 @@ class Breeder(LLMWrapper):
         # Get genotype encoding prompt from template
         prompt_template = prompts.GENOTYPE_ENCODE_PROMPT
 
-        prompt = prompt_template.format(idea_content=idea_content)
+        prompt = extraction_gene_prompt(render_prompt(prompt_template, idea_content=idea_content))
+        identity = json.dumps({"version": 2, "provider": self.provider,
+            "model": self.model_name, "temperature": self.temperature,
+            "top_p": self.top_p, "thinking_budget": self.thinking_budget,
+            "thinking_level": self.thinking_level, "prompt": prompt}, sort_keys=True)
+        cache_key = sha256(identity.encode("utf-8")).hexdigest()
+        return prompt, cache_key
 
-        response = self.generate_text(prompt)
+    def observe_genes(self, candidate: Any, idea_type: str) -> Dict[str, Any]:
+        """Observe a phenotype freely; failed annotation never rejects an idea.
 
-        # Clean up the response
-        genotype = response.strip()
-        if genotype.startswith("Genotype:"):
-            genotype = genotype[9:].strip()
+        Canonical catalogue labels are deliberately absent from extraction. The
+        raw genotype can subsequently be reused by breeding, including on resume.
+        """
+        import copy
+        from idea.genes import GENE_OBSERVATION_VERSION, parse_genotype, valid_gene_observation
 
+        fingerprint = None
+        metadata = {
+            "version": GENE_OBSERVATION_VERSION,
+            "provider": self.provider,
+            "model": self.model_name,
+        }
+        try:
+            _, fingerprint = self._genotype_prompt_and_fingerprint(candidate, idea_type)
+            saved = candidate.get("gene_observation") if isinstance(candidate, dict) else None
+            if valid_gene_observation(saved, fingerprint):
+                observation = copy.deepcopy(saved)
+            else:
+                genotype = self.encode_to_genotype(candidate, idea_type)
+                observation = {
+                    "version": GENE_OBSERVATION_VERSION,
+                    "status": "ok",
+                    "fingerprint": fingerprint,
+                    "genotype": genotype,
+                    "genes": [{"text": text, "gene_id": None} for text in parse_genotype(genotype)],
+                    "extraction": metadata,
+                    "error": None,
+                    "mapping_status": "pending",
+                }
+        except Exception:
+            # Provider exceptions can include request data or credentials. Store
+            # a fixed explanation, and let a later observation retry the call.
+            observation = {
+                "version": GENE_OBSERVATION_VERSION,
+                "status": "failed",
+                "fingerprint": fingerprint,
+                "genotype": None,
+                "genes": [],
+                "extraction": metadata,
+                "error": "Gene extraction failed; the candidate remains available.",
+                "mapping_status": "pending",
+            }
+        if isinstance(candidate, dict):
+            candidate["gene_observation"] = observation
+        return observation
+
+    def encode_to_genotype(self, idea: str, idea_type: str) -> str:
+        """Convert a phenotype to free-text genes, reusing valid observations."""
+        from idea.genes import normalize_genotype_response, valid_gene_observation
+
+        prompt, cache_key = self._genotype_prompt_and_fingerprint(idea, idea_type)
+        saved = idea.get("gene_observation") if isinstance(idea, dict) else None
+        if valid_gene_observation(saved, cache_key):
+            return saved["genotype"]
+        # Serialize cache fills so concurrent siblings do not pay to encode the
+        # same immutable parent twice. The lock is used in worker threads only.
+        with self._genotype_lock:
+            if cache_key in self._genotype_cache:
+                self._genotype_cache.move_to_end(cache_key)
+                return self._genotype_cache[cache_key]
+            response = self.generate_text(prompt)
+            genotype = normalize_genotype_response(response)
+            self._genotype_cache[cache_key] = genotype
+            if len(self._genotype_cache) > 1024:
+                self._genotype_cache.popitem(last=False)
         print(f"Encoded genotype: {genotype}")
         return genotype
 
@@ -1396,8 +2736,8 @@ class Breeder(LLMWrapper):
         This follows the same pattern as initial idea generation:
         1. Get concepts from the parents (their genotypes) and combine them
         2. Sample 50% at random (in python code)
-        3. Using the sample to ask LLM to create specific prompt
-        4. Generate an idea from specific prompt
+        3. Use the sample to ask the LLM to create a direction prompt
+        4. Generate an idea from that direction prompt
 
         Args:
             ideas: List of parent ideas that have already been selected in the main evolution loop
@@ -1414,39 +2754,71 @@ class Breeder(LLMWrapper):
 
         # Step 1: Get concepts from the parents (their genotypes) and combine them
         parent_genotypes = []
+        parent_genotype_records = []
         for parent in ideas:
-            genotype = self.encode_to_genotype(parent, idea_type)
+            from idea.gene_pool import valid_gene_projection
+            encoder = getattr(self, "gene_encoder", None) or self
+            raw_genotype = encoder.encode_to_genotype(parent, idea_type)
+            projection = parent.get("gene_projection") if isinstance(parent, dict) else None
+            # Encoding validates the current phenotype/settings before a projection
+            # is eligible. Raw extraction never calls this breeding-only path.
+            saved = parent.get("gene_observation") if isinstance(parent, dict) else None
+            use_projection = False
+            if valid_gene_projection(parent):
+                _, fingerprint = encoder._genotype_prompt_and_fingerprint(parent, idea_type)
+                use_projection = (saved.get("fingerprint") == fingerprint
+                                  and saved.get("genotype") == raw_genotype)
+            genotype = projection["genotype"] if use_projection else raw_genotype
             parent_genotypes.append(genotype)
+            parent_id = parent.get("id") if isinstance(parent, dict) else None
+            parent_genotype_records.append(
+                {
+                    "parent_id": str(parent_id) if parent_id is not None else None,
+                    "genotype": genotype,
+                    "raw_genotype": raw_genotype,
+                    "source": "consolidated" if use_projection else "raw",
+                    "gene_pool_revision": projection["revision"] if use_projection else None,
+                }
+            )
 
         # Reuse one helper ideator per worker thread to avoid repeated client setup.
         ideator = self._get_thread_ideator()
 
         # Step 2: Sample 50% at random (handled in generate_context_from_parents)
-        # Step 3 & 4: Using the sample to create specific prompt and generate idea
+        # Step 3 & 4: Use the sample to create a direction prompt and generate an idea.
 
-        # Generate fresh context for mutation if enabled
-        mutation_context_pool = ""
+        # Mutation uses the same ingredient representation as extracted parent
+        # genes, never the richer context prompt used to seed complete ideas.
+        mutation_context_pool = []
         if self.mutation_rate > 0:
-            print("Generating fresh context for mutation...")
-            mutation_context_pool = ideator.generate_context(idea_type)
+            print("Generating fresh genes for mutation...")
+            mutation_context_pool = ideator.generate_mutation_genes(idea_type, parent_genotypes)
 
         context_pool = ideator.generate_context_from_parents(
             parent_genotypes,
             mutation_rate=self.mutation_rate,
             mutation_context_pool=mutation_context_pool
         )
-        new_idea, specific_prompt = ideator.generate_idea_from_context(context_pool, idea_type)
+        generate_child = getattr(ideator, "generate_child_from_context", None)
+        if callable(generate_child):
+            new_idea, specific_prompt = generate_child(context_pool, idea_type)
+        else:
+            # Compatibility for existing external helper adapters.
+            new_idea, specific_prompt = ideator.generate_idea_from_context(context_pool, idea_type)
 
         print(f"Generated new idea from parent concepts: {new_idea[:100]}...")
-        print(f"Using specific prompt: {specific_prompt[:100]}...")
+        print(f"Using direction prompt: {specific_prompt[:100]}...")
 
         # Create a new idea with a unique ID and parent IDs
-        # Also include the specific prompt used for breeding
+        # Also include the direction prompt used for breeding.
         return {
             "id": uuid.uuid4(),
             "idea": new_idea,
             "parent_ids": parent_ids,
-            "specific_prompt": specific_prompt  # Store the specific prompt for later display
+            "specific_prompt": specific_prompt,  # Stored under the legacy key for persistence.
+            "parent_genotypes": parent_genotype_records,
+            "birth_type": "single_parent" if len(ideas) == 1 else "crossover",
+            "mutation_details": getattr(ideator, "last_mutation_details", {}),
         }
 
 
@@ -1486,12 +2858,21 @@ class Oracle(LLMWrapper):
     def _build_analysis_prompt(self, history: List[List[str]], idea_type: str) -> str:
         """Build the comprehensive analysis prompt for the Oracle"""
 
-        # Format all historical ideas by generation
+        # Summarize each immutable design once. Repeated survivors should not
+        # occupy most of the Oracle context just because they lasted longer.
         history_text = ""
+        seen = set()
         for gen_idx, generation in enumerate(history):
             history_text += f"\n--- GENERATION {gen_idx} ---\n"
             for idea_idx, idea in enumerate(generation):
-                idea_content = self._extract_idea_content(idea)
+                original = self._extract_idea_content(idea)
+                identity = sha256(original.encode()).hexdigest()
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                summary = idea.get("diversity_summary") if isinstance(idea, dict) else None
+                values = summary.get("summaries") if isinstance(summary, dict) else None
+                idea_content = "\n".join(values) if isinstance(values, list) and all(isinstance(v, str) for v in values) else original
                 history_text += f"Idea {gen_idx}.{idea_idx}: {idea_content}\n"
 
         # Get prompts for the idea type
@@ -1500,11 +2881,11 @@ class Oracle(LLMWrapper):
         # Get Oracle-specific prompts from the template
         mode_instruction = prompts.ORACLE_INSTRUCTION
         format_instructions = prompts.ORACLE_FORMAT_INSTRUCTIONS
-        example_idea_prompts = getattr(prompts, 'EXAMPLE_IDEA_PROMPTS', '')
+        example_idea_prompts = str(getattr(prompts, 'EXAMPLE_IDEA_PROMPTS', ''))
 
         # Build the Oracle's comprehensive prompt using the template
-        oracle_constraints = getattr(prompts, 'ORACLE_CONSTRAINTS', '')
-        prompt = prompts.ORACLE_MAIN_PROMPT.format(
+        oracle_constraints = str(getattr(prompts, 'ORACLE_CONSTRAINTS', ''))
+        prompt = render_prompt(prompts.ORACLE_MAIN_PROMPT,
             idea_type=idea_type,
             history_text=history_text,
             mode_instruction=mode_instruction,
@@ -1513,27 +2894,23 @@ class Oracle(LLMWrapper):
             example_idea_prompts=example_idea_prompts
         )
 
-        return prompt
+        build = getattr(prompts, "build_oracle_prompt", None)
+        return build(prompt) if callable(build) else prompt
 
     def _extract_idea_content(self, idea) -> str:
         """Extract readable content from an idea object for analysis"""
-        # Handle different idea formats
-        if isinstance(idea, dict) and "idea" in idea:
-            idea_obj = idea["idea"]
-            # If the idea object has title and content attributes
-            if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'content'):
-                return f"Title: {idea_obj.title}\nContent: {idea_obj.content}"
-            # If the idea object is a string
-            elif isinstance(idea_obj, str):
-                return idea_obj
-            # If the idea object is already a dict
-            elif isinstance(idea_obj, dict):
-                title = idea_obj.get('title', 'Untitled')
-                content = idea_obj.get('content', str(idea_obj))
-                return f"Title: {title}\nContent: {content}"
-
-        # Fallback: treat as string
-        return str(idea)
+        # Flat exports carry observational metadata alongside prose. Keep it
+        # out of both the Oracle prompt and the history deduplication identity.
+        idea_obj = idea.to_candidate_dict() if hasattr(idea, "to_candidate_dict") else idea
+        while isinstance(idea_obj, dict) and "idea" in idea_obj:
+            idea_obj = idea_obj["idea"]
+        if hasattr(idea_obj, "title") and hasattr(idea_obj, "content"):
+            return f"Title: {idea_obj.title}\nContent: {idea_obj.content}"
+        if isinstance(idea_obj, dict):
+            title = idea_obj.get("title", "Untitled")
+            content = idea_obj.get("content", "")
+            return f"Title: {title}\nContent: {content}"
+        return str(idea_obj)
 
 
     def _parse_oracle_response(self, response: str) -> dict:

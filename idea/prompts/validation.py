@@ -3,7 +3,7 @@ Validation for YAML prompt templates
 """
 
 from typing import Dict, List, Any, Optional
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
 import yaml
 from datetime import datetime
 
@@ -13,11 +13,42 @@ class PromptMetadata(BaseModel):
     item_type: str = Field(..., description="Type of items generated (e.g., 'stories', 'game designs')")
 
 
+class TemplateEvaluationCapabilities(BaseModel):
+    """Managed evaluation features a template may request."""
+
+    artifact_generation: bool = False
+    fitness_score: bool = False
+
+
+class OutputWordCount(BaseModel):
+    """Requested body length, excluding the title. Equal bounds mean exactly."""
+
+    model_config = ConfigDict(extra="forbid")
+    min: Optional[int] = Field(None, gt=0, strict=True)
+    max: Optional[int] = Field(None, gt=0, strict=True)
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        if self.min is None and self.max is None:
+            raise ValueError("Word count needs a minimum or maximum.")
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError("Minimum word count cannot exceed maximum word count.")
+        return self
+
+
+class TemplateOutput(BaseModel):
+    """Content guidance for the app's fixed title/content result structure."""
+
+    model_config = ConfigDict(extra="forbid")
+    title: StrictStr = ""
+    content: StrictStr = ""
+    word_count: Optional[OutputWordCount] = None
+
+
 class PromptSet(BaseModel):
     """Set of prompts required for idea generation"""
     context: str = Field(..., description="Prompt for generating contextual concepts")
-    idea: str = Field(..., description="Prompt for generating initial ideas")
-    specific_prompt: str = Field(..., description="Prompt for generating specific idea prompts from context")
+    specific_prompt: str = Field(..., description="Prompt for turning contextual concepts into concrete idea directions")
 
     format: str = Field(..., description="Prompt for formatting raw ideas")
     critique: str = Field(..., description="Prompt for critiquing ideas")
@@ -26,6 +57,8 @@ class PromptSet(BaseModel):
     genotype_encode: str = Field(..., description="Prompt for encoding ideas to genotypes")
     # Optional comparison prompt - will be generated dynamically if not provided
     comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas (optional - auto-generated)")
+    oracle_constraints: Optional[str] = Field(None, description="Template-specific goals and boundaries for Oracle diversity analysis")
+    example_idea_prompts: Optional[str] = Field(None, description="Illustrative directions for Oracle analysis")
 
 
 class PromptTemplate(BaseModel):
@@ -37,15 +70,41 @@ class PromptTemplate(BaseModel):
     created_date: str = Field(..., description="Creation date (YYYY-MM-DD)")
 
     metadata: PromptMetadata = Field(..., description="Template metadata")
+    evaluation: TemplateEvaluationCapabilities = Field(
+        default_factory=TemplateEvaluationCapabilities,
+        description="Managed evaluation features used by this template",
+    )
     prompts: PromptSet = Field(..., description="Set of prompts")
-    comparison_criteria: List[str] = Field(..., description="Criteria for comparing generated ideas")
+    comparison_criteria: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional criteria for the legacy pairwise LLM evaluator. "
+            "Templates that use other evaluators do not need to define them."
+        ),
+    )
     # Optional comparison prompt at root level for backward compatibility
     comparison_prompt: Optional[str] = Field(None, description="Prompt for comparing ideas (optional - auto-generated)")
 
     # Special requirements for this template type
     special_requirements: Optional[str] = Field(None, description="Special requirements for this template type")
+    requirements: List[StrictStr] = Field(
+        default_factory=list,
+        description="Individual content and domain requirements applied throughout evolution",
+    )
+    output: Optional[TemplateOutput] = Field(
+        None,
+        description="Title/body guidance and requested body length; the app owns the transport format",
+    )
 
-    @validator('version')
+    @field_validator('requirements')
+    @classmethod
+    def validate_requirements(cls, value):
+        if any(not rule.strip() for rule in value):
+            raise ValueError('Requirements must be non-empty strings')
+        return [rule.strip() for rule in value]
+
+    @field_validator('version')
+    @classmethod
     def validate_version(cls, v):
         """Validate semantic versioning format"""
         parts = v.split('.')
@@ -56,7 +115,8 @@ class PromptTemplate(BaseModel):
                 raise ValueError('Version parts must be numeric')
         return v
 
-    @validator('created_date')
+    @field_validator('created_date')
+    @classmethod
     def validate_date(cls, v):
         """Validate date format"""
         try:
@@ -65,11 +125,14 @@ class PromptTemplate(BaseModel):
         except ValueError:
             raise ValueError('Date must be in YYYY-MM-DD format')
 
-    @validator('comparison_criteria')
+    @field_validator('comparison_criteria')
+    @classmethod
     def validate_criteria(cls, v):
-        """Ensure at least one comparison criterion"""
-        if not v or len(v) == 0:
-            raise ValueError('At least one comparison criterion is required')
+        """Reject blank criteria while allowing non-LLM evaluation templates."""
+        if v is None:
+            return []
+        if any(not isinstance(criterion, str) or not criterion.strip() for criterion in v):
+            raise ValueError('Comparison criteria must be non-empty strings')
         return v
 
 
@@ -106,7 +169,7 @@ class TemplateValidator:
         warnings = []
 
         # Check for missing format placeholders
-        prompts_dict = template.prompts.dict()
+        prompts_dict = template.prompts.model_dump()
 
         # Check format prompt for {input_text}
         if '{input_text}' not in prompts_dict['format']:
@@ -128,10 +191,10 @@ class TemplateValidator:
             warnings.append("Breed prompt missing {ideas} placeholder")
 
         # Check for template-specific requirements interpolation
-        if template.special_requirements:
-            for prompt_name, prompt_text in prompts_dict.items():
-                if prompt_text and '{requirements}' in prompt_text and not template.special_requirements:
-                    warnings.append(f"{prompt_name} references requirements but it's not defined")
+        has_requirements = bool(template.special_requirements or template.requirements or template.output)
+        for prompt_name, prompt_text in prompts_dict.items():
+            if prompt_text and any(token in prompt_text for token in ('{requirements}', '{requirements_digest}')) and not has_requirements:
+                warnings.append(f"{prompt_name} references requirements but none are defined")
 
         return warnings
 

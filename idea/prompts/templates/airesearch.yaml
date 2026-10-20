@@ -1,24 +1,24 @@
 name: "GPU Poor AI Research Proposals"
 description: "Generate practical AI research proposals feasible for a single researcher with a single GPU"
-version: "1.2.0"
+version: "1.5.0"
 author: "Original Idea App"
 created_date: "2024-01-15"
 
 metadata:
   item_type: "GPU poor AI research proposals"
 
-special_requirements: |
-  Proposal constraints:
-  - Feasible for one researcher using one consumer GPU (RTX 4090 class or similar).
-  - Realistic 3-6 month scope with explicit compute/data assumptions.
-  - Favor efficient methods, pre-trained models, and small-to-medium datasets.
-  - Integrate 3-4 concrete technical concepts into one coherent plan.
-  - Include: hypothesis, method, evaluation plan, key risks, and expected outcomes.
-  - Write markdown content with clear headings and concise bullets where useful.
-  - Avoid filler or generic survey prose.
-  - Return exactly two labeled fields:
-    Title: [concise proposal title]
-    Content: [full markdown proposal]
+requirements:
+  - "Keep the proposal feasible for one researcher using one consumer GPU (RTX 4090 class or similar)."
+  - "Use a realistic 3–6 month scope with explicit compute and data assumptions."
+  - "Favor efficient methods, pre-trained models, and small-to-medium datasets."
+  - "Integrate 3–4 concrete technical concepts into one coherent plan."
+  - "Avoid filler or generic survey prose."
+
+output:
+  title: "A concise research proposal title."
+  content: |
+    The full research proposal in markdown, with clear headings for hypothesis, method, evaluation plan, key risks, and expected outcomes. Keep compute, data scale, and timeline explicit; use concise bullets where useful.
+  word_count: null
 
 prompts:
   context: |
@@ -60,18 +60,8 @@ prompts:
     - "Write a proposal for evaluating synthetic data generation for training small computer-vision models in specialized domains."
     - "Write a proposal for dataset curation via pruning redundant samples using teacher-student learning dynamics."
 
-  idea: |
-    Generate one GPU-constrained AI research proposal from the selected direction.
-    Apply all constraints below:
-    {requirements}
-
   format: |
-    You are a formatting assistant. Convert the input research proposal into a JSON object with "title" and "content" fields.
-
-    The "content" field should contain the full proposal in markdown.
-    Ensure feasibility details (compute, data scale, timeline) remain explicit.
-
-    If the input has a clear title, use it. Otherwise, generate a suitable title.
+    Preserve the original title and full research proposal, including markdown, compute assumptions, data scale, and timeline. Do not invent or rewrite feasibility details.
 
     Input to format:
     {input_text}
@@ -89,9 +79,6 @@ prompts:
     - Novelty beyond obvious baseline combinations
     - Failure modes and mitigation quality
 
-    Use these constraints as the baseline:
-    {requirements_digest}
-
     No additional text, just the critique.
 
   refine: |
@@ -103,43 +90,19 @@ prompts:
 
     Produce an improved proposal. It may be a refinement or a fresh take, but it must preserve feasibility and improve novelty/clarity.
 
-    {requirements}
-
   breed: |
     {ideas}
-    Generate one new proposal while following all constraints below:
-    {requirements}
+    Generate one new proposal.
 
   genotype_encode: |
-    You are an expert at analyzing GPU-constrained AI research proposals and extracting their core genetic elements.
+    For AI research, consider the task, application domain, model family and learning approach, alongside distinctive methods and evaluation approaches. Use established technical terms; a standard named method can be more useful than a particular model or dataset name.
 
-    Capture:
-    - Core method/technique
-    - Problem domain
-    - Key innovation
-    - Application area
-    - Technical training/adaptation approach
-    - Evaluation method
-    - Constraint profile (compute/data/time)
-
-    Preserve hard constraints as explicit genotype tags:
-    {requirements_digest}
-
-    Extract only fundamental elements. Strip away elaboration and implementation detail.
-    Format as a condensed semicolon-separated list.
-
-    Example 1:
-    Input: "A novel transformer architecture for multimodal medical image analysis that combines CT and MRI scans to improve diagnostic accuracy for neurological conditions using attention-based fusion mechanisms"
-    Output: "transformer architecture; multimodal learning; medical imaging; CT/MRI fusion; neurological diagnosis; attention fusion; diagnostic accuracy"
-
-    Example 2:
-    Input: "Parameter-efficient fine-tuning of pre-trained vision transformers for few-shot medical image classification using LoRA adapters on a single RTX 4090"
-    Output: "parameter-efficient fine-tuning; LoRA adapters; vision transformer; few-shot learning; medical imaging; single GPU; transfer learning"
+    One illustrative decomposition, not a vocabulary to copy:
+    Input: "Study whether low-rank adapters improve few-shot document classification with a pretrained language model, testing transfer to unfamiliar subject areas."
+    Output: "document classification; pretrained language model; low-rank adaptation; few-shot learning; cross-domain evaluation"
 
     Research proposal to encode:
     {idea_content}
-
-    Genotype:
 
 comparison_criteria:
   - computational feasibility and resource efficiency for a single-GPU researcher
