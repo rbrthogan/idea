@@ -2563,7 +2563,7 @@ small {
 }
 
 .evolution-progress-card.complete {
-  border-color: var(--accent);
+  border-color: var(--mint);
 }
 
 .evolution-progress-card.stopped {
@@ -2598,14 +2598,14 @@ small {
 }
 
 .evolution-spinner.complete {
-  border-color: var(--accent);
-  background-color: var(--accent);
+  border-color: var(--mint);
+  background-color: var(--success-light);
   animation: evolution-complete-pulse 0.5s ease-out;
 }
 
 .evolution-spinner.complete::after {
   content: '✓';
-  color: white;
+  color: #205c48;
   font-size: 12px;
   font-weight: bold;
   display: flex;
@@ -2723,7 +2723,18 @@ small {
 }
 
 .evolution-progress-card.complete .progress-percentage {
-  color: var(--accent);
+  color: var(--success);
+  text-shadow: none;
+}
+
+.evolution-progress-card.complete #evolution-status-text {
+  color: #205c48;
+}
+
+.evolution-progress-card.complete .progress-bar {
+  background: var(--success);
+  animation: none;
+  box-shadow: none;
 }
 
 .evolution-progress-card.stopped .progress-percentage {
@@ -2836,8 +2847,8 @@ small {
 }
 
 .activity-item.activity-success {
-  border-left-color: var(--accent);
-  background-color: rgba(16, 185, 129, 0.08);
+  border-left-color: var(--success);
+  background-color: var(--success-light);
 }
 
 .activity-item.activity-warning {
@@ -3570,8 +3581,8 @@ small {
 
 /* Status badge colors */
 .badge-status-complete {
-  background-color: var(--accent-light);
-  color: var(--accent);
+  background-color: var(--success-light);
+  color: #205c48;
 }
 
 .badge-status-paused,

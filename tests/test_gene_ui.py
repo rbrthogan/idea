@@ -437,9 +437,9 @@ const keyboard=state.pinnedGeneId==='c';
 clearGeneExplorerSelection(state);
 const cleared=changeGeneExplorerFocus(state,'a',0);
 state.candidateId='story';
-const dnaBlocked=!changeGeneExplorerFocus(state,'b',1);
+const dnaPreview=changeGeneExplorerFocus(state,'b',1)&&state.candidateId==='story'&&state.previewGeneId==='b';
 changeGeneExplorerFocus(state,'b',1,'pin');
-process.stdout.write(JSON.stringify({blocked,keyboard,cleared,dnaBlocked,pinClearsStory:state.candidateId===null}));
+process.stdout.write(JSON.stringify({blocked,keyboard,cleared,dnaPreview,pinClearsStory:state.candidateId===null}));
 ''')
     assert all(result.values())
 
@@ -505,3 +505,61 @@ process.stdout.write(JSON.stringify(carriers.map(c=>({id:c.id,first:c.firstGener
         {'id':'later','first':1,'last':2,'genes':['g']},
         {'id':'new','first':2,'last':2,'genes':['g']},
     ]
+
+
+def test_idea_search_covers_history_and_keeps_dna_when_previewing_an_unrelated_gene():
+    result = run_gene_js('''
+const getIdeaData=x=>x;
+const c=(id,title,genes)=>({id,title,gene_observation:{status:'ok',genes:genes.map(gene_id=>({gene_id}))}});
+const a=c('a','Ledger of Erasure',['g']),b=c('b','Copper Moon',['other']);
+const gens=[[a,b],[{...a,title:'Ledger revised'},c('c','Ledger of Erasure',['third'])]];
+const state={focusId:'other',ideaSearch:'  LEDGER ',candidateId:null};
+const found=geneExplorerCandidates(gens,{id:'other'},state);
+state.candidateId='a';state.candidateGeneration=1;state.candidateGeneId='g';
+const candidate=geneExplorerCandidate(gens,state);
+changeGeneExplorerFocus(state,'other',0);
+const preview=geneExplorerHeading({id:'other',label:'Unrelated'},[candidate],state);
+state.ideaSearch='';
+const anchored=geneExplorerCandidates(gens,{id:'other'},state);
+const ended=endGeneExplorerPreview(state);
+const restored=geneExplorerHeading({id:state.focusId,label:'Original'},[candidate],state);
+state.ideaSearch='absent';
+const empty=geneExplorerCandidates(gens,{id:'other'},state);
+process.stdout.write(JSON.stringify({
+ found:found.map(x=>({id:x.id,title:x.idea.title,first:x.firstGeneration})),
+ retained:state.candidateId, dna:[...geneStoryIds(candidate)],
+ preview, anchored:anchored.map(c=>c.id),restored,ended,restoredFocus:state.focusId,empty:empty.length
+}));
+''')
+    assert result['found'] == [
+        {'id': 'a', 'title': 'Ledger revised', 'first': 0},
+        {'id': 'c', 'title': 'Ledger of Erasure', 'first': 1},
+    ]
+    assert result['retained'] == 'a' and result['dna'] == ['g']
+    assert result['preview'] == {'name': 'Unrelated', 'summary': 'Not in selected idea · Ledger revised'}
+    assert result['anchored'] == ['a']
+    assert result['restored']['name'] == 'Ledger revised'
+    assert result['ended'] and result['restoredFocus'] == 'g'
+    assert result['empty'] == 0
+
+
+def test_idea_search_markup_is_escaped_and_survives_gene_preview():
+    escape_start = SOURCE.index('function escapeHtml(')
+    escape_end = SOURCE.index('function getTournamentEntryForGeneration(', escape_start)
+    result = run_gene_js(SOURCE[escape_start:escape_end] + '''
+let selectedGeneId=null;
+const getIdeaData=x=>x;
+const idea={id:'a',title:'<Story>',gene_observation:{status:'ok',genes:[{gene_id:'g'}]}};
+const gens=[[idea]];
+const history=buildGeneHistory(gens,{genes:[{id:'g',label:'Gene'}]});
+const state={search:'',ideaSearch:'"<Story>',focusId:'g'};
+const html=renderGeneHistory(history,state,gens);
+const list=renderGeneStories([{id:'a',idea,firstGeneration:0}],history.rows[0],state);
+process.stdout.write(JSON.stringify({
+ search:html.includes('id="gene-idea-search"'),
+ escaped:html.includes('value="&quot;&lt;Story&gt;"'),
+ title:list.includes('&lt;Story&gt;')&&!list.includes('<Story>'),
+ empty:html.includes('No matching ideas.')
+}));
+''')
+    assert all(result.values())
