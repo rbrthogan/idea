@@ -3408,7 +3408,7 @@ function renderGeneHistory(history, state, gens = []) {
                 <path id="gene-thread-time-guide" class="gene-thread-time-guide" d="M${model.x(generation)},24V${model.bottom}"/>
             </svg><p class="gene-thread-hint" id="gene-thread-hint">${query ? `${matches.size} matching · all ${model.tracks.length} visible` : ''}</p>
         </div><aside class="gene-thread-detail" id="gene-thread-detail" aria-label="Selected gene trends">${renderGeneThreadDetail(active, generation)}</aside></div>
-        <p class="gene-history-footer">Click a gene to pin · Select an idea to see its DNA <span>Width = occupancy</span></p>
+        <p class="gene-history-footer">Click a gene to pin · Select an idea to see its DNA <span title="Each gene keeps the same accent color across views. Colors repeat; they do not encode generation or fitness.">Color = gene · Width = occupancy</span></p>
     </section>`;
 }
 
@@ -3695,27 +3695,31 @@ function renderIdeaModalGenes(idea) {
         const unresolved = uniqueTerms(decisions.map(d => d.unresolved));
         const notes = uniqueTerms(decisions.filter(d => typeof d.reason === 'string' && !unchanged.has(normalize(d.reason))
             && [d.source, d.input].some(term => term && normalize(term) !== normalize(label))).map(d => d.reason));
-        if (notes.length) reasoning.push({label, notes});
-        const count = canonical ? geneHistoryCarriers(history, canonical.id).length : 0;
+        if (sources.length || unresolved.length || notes.length) reasoning.push({label, sources, unresolved, notes});
+        const carriers = canonical ? geneHistoryCarriers(history, canonical.id) : [];
+        const count = carriers.length;
+        const first = count ? Math.min(...carriers.map(carrier => carrier.firstGeneration)) : null;
         const content = `<span class="gene-inspector-dot" aria-hidden="true"></span><span class="gene-inspector-name">${escapeHtml(label)}</span>
-            ${count ? `<span class="gene-inspector-count" title="Unique ideas across saved history">${count} idea${count === 1 ? '' : 's'}</span>` : ''}`;
+            ${count ? `<span class="gene-inspector-count" title="First observed in generation ${first}; ${count} unique ideas across saved history">First G${first} · ${count} idea${count === 1 ? '' : 's'}</span>` : ''}`;
         return `<li style="--gene-color:${geneThreadColor(canonical?.id || label)}">
-            ${canonical ? `<button type="button" class="gene-inspector-link" data-candidate-gene="${index}" aria-label="${escapeHtml(label)}${count ? `, ${count} idea${count === 1 ? '' : 's'} across history` : ''}. Explore gene">${content}</button>` : `<div class="gene-inspector-link">${content}<span class="gene-inspector-count">Unmapped</span></div>`}
-            ${sources.length ? `<p class="gene-inspector-source"><span>From</span> ${sources.map(escapeHtml).join(' · ')}</p>` : ''}
-            ${unresolved.length ? `<p class="gene-inspector-review">Review: ${unresolved.map(escapeHtml).join(' · ')}</p>` : ''}
+            ${canonical ? `<button type="button" class="gene-inspector-link" data-candidate-gene="${index}" aria-label="${escapeHtml(label)}${count ? `, first seen in generation ${first}, ${count} idea${count === 1 ? '' : 's'} across history` : ''}. Explore gene">${content}</button>` : `<div class="gene-inspector-link">${content}<span class="gene-inspector-count">Unmapped</span></div>`}
         </li>`;
     });
-    // Original terms already shown inline need no duplicate raw-text drawer.
+    // Keep provenance available once, outside the main gene list.
     const raw = typeof (observation.raw_genotype ?? observation.genotype) === 'string'
         ? (observation.raw_genotype ?? observation.genotype).trim() : '';
     const extraRaw = raw && raw.split(';').some(term => normalize(term) && !visibleTerms.has(normalize(term)));
     panel.innerHTML = items.length ? `<div class="gene-inspector-heading"><span>${items.length} gene${items.length === 1 ? '' : 's'}</span>
         ${observation.mapping_status === 'failed' ? '<span>Mapping incomplete</span>' : ''}</div>
-        <ul class="candidate-gene-list">${items.join('')}</ul>` : '<p class="gene-explanation">No genes were extracted.</p>';
+        <ul class="candidate-gene-list">${items.join('')}</ul><p class="gene-inspector-legend" title="Accent colors repeat and do not encode generation or fitness.">Colors match the gene timeline.</p>` : '<p class="gene-explanation">No genes were extracted.</p>';
     if (reasoning.length || extraRaw) {
-        panel.innerHTML += `<details class="gene-inspector-details"><summary>Extraction details</summary>
+        panel.innerHTML += `<details class="gene-inspector-details"><summary>Mapping details</summary>
             ${extraRaw ? `<p class="gene-inspector-original">${escapeHtml(raw)}</p>` : ''}
-            ${reasoning.map(({label, notes}) => `<p><strong>${escapeHtml(label)}</strong> ${notes.map(escapeHtml).join(' · ')}</p>`).join('')}
+            ${reasoning.map(({label, sources, unresolved, notes}) => `<p><strong>${escapeHtml(label)}</strong>${[
+                sources.length ? `From ${sources.map(escapeHtml).join(' · ')}` : '',
+                ...notes.map(escapeHtml),
+                ...unresolved.map(note => `Review: ${escapeHtml(note)}`),
+            ].filter(Boolean).join('<br>')}</p>`).join('')}
         </details>`;
     }
     panel.querySelectorAll('[data-candidate-gene]').forEach(button => button.addEventListener('click', () => {
@@ -4355,42 +4359,37 @@ function renderIdeaModalEvaluations(idea) {
         ? idea.selection_metrics
         : null;
     const diversitySummary = idea?.diversity_summary;
-    const hasDiversitySummary = Array.isArray(diversitySummary?.summaries);
-    if (entries.length === 0 && !selection && !hasDiversitySummary && !idea?.birth_type) return false;
+    const hasDiversitySummary = Array.isArray(diversitySummary?.summaries) && diversitySummary.summaries.length > 0;
+    if (entries.length === 0 && !selection && !hasDiversitySummary) return false;
 
-    if (idea?.birth_type) {
-        const origin = document.createElement('p');
-        origin.textContent = `Birth type: ${String(idea.birth_type).replaceAll('_', ' ')}`;
-        panel.appendChild(origin);
-    }
+    const explanation = document.createElement('p');
+    explanation.className = 'idea-evaluation-note';
+    explanation.textContent = 'Scoring evidence used to rank this idea.';
+    panel.appendChild(explanation);
     if (hasDiversitySummary) {
+        const disclosure = document.createElement('details');
+        disclosure.className = 'idea-evaluation-disclosure';
+        const toggle = document.createElement('summary');
+        toggle.textContent = 'Diversity descriptions';
         const section = document.createElement('article');
         section.className = 'idea-evaluation-card';
-        const heading = document.createElement('h3');
-        heading.textContent = 'Descriptions used for diversity';
+        const heading = document.createElement('p');
+        heading.className = 'idea-evaluation-note';
+        heading.textContent = 'These descriptions are compared to estimate how different this idea is from the population.';
         const descriptions = document.createElement('dl');
         diversitySummary.summaries.forEach((summary, index) => {
             appendEvaluationDetail(descriptions, diversitySummary.criteria?.[index] || `Criterion ${index+1}`, summary);
         });
         section.append(heading, descriptions);
-        panel.appendChild(section);
-    }
-
-    if (selection) {
-        const summary = document.createElement('div');
-        summary.className = 'idea-evaluation-summary';
-        const fitness = Number(selection.fitness);
-        summary.textContent = Number.isFinite(fitness)
-            ? `Aggregate fitness: ${fitness.toFixed(4)}`
-            : 'Aggregate selection evidence';
-        panel.appendChild(summary);
+        disclosure.append(toggle, section);
+        panel.appendChild(disclosure);
     }
 
     entries.forEach(([componentId, record]) => {
         const card = document.createElement('article');
         card.className = 'idea-evaluation-card';
         const heading = document.createElement('h3');
-        heading.textContent = componentId;
+        heading.textContent = componentId.replaceAll('_', ' ');
         const details = document.createElement('dl');
         appendEvaluationDetail(details, 'Status', record?.status || 'unknown');
         const metrics = record?.metrics && typeof record.metrics === 'object'

@@ -53,7 +53,7 @@ def test_identity_genes_have_compact_rows_and_no_empty_or_redundant_details():
     result = render(idea, catalogue, [[idea], [idea]])
     assert "2 genes" in result["html"]
     assert result["html"].count('class="gene-inspector-count"') == 2
-    assert result["html"].count(">1 idea</span>") == 2
+    assert result["html"].count("First G0 · 1 idea</span>") == 2
     assert "<details" not in result["html"]
     assert "gene-inspector-source" not in result["html"]
     assert "Source &amp; reasoning" not in result["html"]
@@ -68,12 +68,12 @@ def test_duplicate_mappings_share_one_row_and_count_unique_historical_carriers()
     b = observed("b", [{"gene_id": "g", "text": "deadpan humor"}])
     result = render(a, {"genes": [{"id": "g", "label": "deadpan humor"}]}, [[a, b], [a]])
     assert result["html"].count("<li ") == 1
-    assert ">2 ideas</span>" in result["html"]
+    assert "First G0 · 2 ideas</span>" in result["html"]
     assert "deadpan tone" in result["html"]
     assert result["opened"] == ["g"]
 
 
-def test_factoring_shows_original_terms_inline_and_collects_meaningful_rationale_once():
+def test_factoring_provenance_is_hidden_in_one_mapping_disclosure():
     raw = {"status": "ok", "fingerprint": "fp", "genotype": "space western", "genes": []}
     projection = {"version": 1, "status": "ok", "revision": 8, "raw_fingerprint": "fp",
                   "genotype": "western; space setting", "genes": [
@@ -86,8 +86,9 @@ def test_factoring_shows_original_terms_inline_and_collects_meaningful_rationale
     idea = {"id": "a", "gene_observation": raw, "gene_projection": projection}
     result = render(idea, {"genes": [{"id": "west", "label": "western"}, {"id": "space", "label": "space setting"}]})
     assert result["html"].count("<details") == 1
-    assert "<summary>Extraction details</summary>" in result["html"]
-    assert result["html"].count('<span>From</span> space western') == 2
+    assert "<summary>Mapping details</summary>" in result["html"]
+    assert result["html"].count("From space western") == 2
+    assert "space western" not in result["html"].split("<details")[0]
     assert "Split genre and setting." in result["html"]
     assert "Carried forward unchanged" not in result["html"]
     assert "gene-inspector-original" not in result["html"]
@@ -101,7 +102,8 @@ def test_unknown_mapping_retains_source_and_review_without_inventing_a_link_or_c
     assert "Unmapped" in result["html"] and "Mapping incomplete" in result["html"]
     assert "Review: Check whether the genre is supported." in result["html"]
     assert "data-candidate-gene" not in result["html"]
-    assert "<details" not in result["html"]
+    assert "<details" in result["html"]
+    assert "Check whether" not in result["html"].split("<details")[0]
     assert result["opened"] == []
 
 

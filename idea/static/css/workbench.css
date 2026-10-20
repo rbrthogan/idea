@@ -697,9 +697,10 @@ button.gene-inspector-link:focus-visible { outline: 2px solid var(--primary); ou
 .gene-inspector-dot { flex: 0 0 7px; height: 7px; border-radius: 50%; background: var(--gene-color); }
 .gene-inspector-name { flex: 1; min-width: 0; }
 .gene-inspector-count { flex: 0 0 auto; color: var(--text-secondary); font-size: .69rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.candidate-gene-list .gene-inspector-source, .candidate-gene-list .gene-inspector-review { margin: 0 0 5px 16px; color: var(--text-secondary); font-size: .7rem; line-height: 1.45; }
-.gene-inspector-source > span { opacity: .8; }
-.candidate-gene-list .gene-inspector-review { color: var(--text-primary); }
+.gene-inspector-legend { margin: 8px 0; color: var(--text-secondary); font-size: .68rem; }
+.idea-evaluation-note { color: var(--text-secondary); font-size: .76rem; line-height: 1.5; }
+.idea-evaluation-disclosure { margin: 12px 0; font-size: .76rem; }
+.idea-evaluation-disclosure > summary { cursor: pointer; color: var(--text-secondary); padding: 6px 0; }
 .gene-inspector-details { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border); font-size: .72rem; line-height: 1.5; }
 .gene-inspector-details summary { padding: 5px 0; color: var(--text-secondary); cursor: pointer; }
 .gene-inspector-details p { margin: 8px 0; overflow-wrap: anywhere; }
