@@ -10194,7 +10194,7 @@ async function checkSettingsStatus() {
         const status = document.getElementById('settingsStatus');
         if (status) { status.hidden = true; status.style.display = 'none'; }
         renderApiKeyProviderStatus(data);
-        return true;
+        return data;
     } catch (error) {
         if (version !== settingsStatusVersion) return false;
         console.error('Error checking settings:', error);
@@ -10264,7 +10264,6 @@ async function saveSettings() {
 
     settingsSaveInFlight = true;
     const provider = selectedApiKeyProvider();
-    const providerName = apiKeyProviderName(provider);
     const btn = document.getElementById('saveSettingsBtn');
     const originalText = btn.innerHTML;
     const providerSelect = document.getElementById('apiKeyProviderSelect');
@@ -10287,8 +10286,8 @@ async function saveSettings() {
             keyInput.value = '';
             // Refresh status to switch view
             const refreshed = await checkSettingsStatus();
-            if (refreshed) showStatusInSettings(`${providerName} API key saved.`, 'success');
-            else showStatusInSettings(`${providerName} key was saved, but its status could not be refreshed. Reopen Settings to retry.`, 'warning');
+            const notice = window.IdeaWorkbench.providerKeySaveNotice(provider, refreshed);
+            showStatusInSettings(notice.message, notice.type);
             if (typeof window.checkApiKeyStatus === 'function') {
                 await window.checkApiKeyStatus();
             }

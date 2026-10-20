@@ -8,7 +8,9 @@
   <title>IDEA — Evolution studio</title>
 
   <!-- Favicon -->
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="/static/img/favicon.ico?v=0.2.0-rc.11" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="/static/img/favicon.svg?v=0.2.0-rc.11" type="image/svg+xml" sizes="any">
+  <link rel="apple-touch-icon" href="/static/img/apple-touch-icon.png?v=0.2.0-rc.11">
 
   <!-- Google Font -->
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -20,8 +22,8 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
 
   <!-- Custom CSS -->
-  <link rel="stylesheet" href="/static/css/viewer.css?v=0.2.0-rc.10" />
-  <link rel="stylesheet" href="/static/css/workbench.css?v=0.2.0-rc.10" />
+  <link rel="stylesheet" href="/static/css/viewer.css?v=0.2.0-rc.11" />
+  <link rel="stylesheet" href="/static/css/workbench.css?v=0.2.0-rc.11" />
 
   <!-- Firebase SDK (for cloud deployment) -->
   <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
@@ -1355,57 +1357,6 @@
 
       // Check status
       checkSettingsStatus();
-    }
-
-    async function checkSettingsStatus() {
-      try {
-        const response = await fetch('/api/settings/status');
-        const data = await response.json();
-
-        if (data.masked_key) {
-          document.getElementById('apiKeyInput').placeholder = "API Key is set (" + data.masked_key + ")";
-        }
-      } catch (e) {
-        console.error("Error checking settings:", e);
-      }
-    }
-
-    async function saveSettings() {
-      const key = document.getElementById('apiKeyInput').value.trim();
-      if (!key) {
-        showStatusInSettings('Please enter an API key', 'warning');
-        return;
-      }
-
-      const btn = document.getElementById('saveSettingsBtn');
-      const originalText = btn.innerHTML;
-      btn.disabled = true;
-      btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Saving...';
-
-      try {
-        const response = await fetch('/api/settings/api-key', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ api_key: key })
-        });
-
-        const data = await response.json();
-
-        if (data.status === 'success') {
-          showStatusInSettings('API Key saved successfully! Reloading...', 'success');
-          setTimeout(() => {
-            window.location.reload();
-          }, 1500);
-        } else {
-          showStatusInSettings('Error: ' + data.message, 'danger');
-          btn.disabled = false;
-          btn.innerHTML = originalText;
-        }
-      } catch (e) {
-        showStatusInSettings('Error: ' + e.message, 'danger');
-        btn.disabled = false;
-        btn.innerHTML = originalText;
-      }
     }
 
     function showStatusInSettings(msg, type) {
@@ -2978,15 +2929,15 @@
   </div>
 
   <!-- Include original viewer.js for evolution functionality -->
-  <script src="/static/js/auth.js?v=0.2.0-rc.10"></script>
+  <script src="/static/js/auth.js?v=0.2.0-rc.11"></script>
   <script>
     window.IDEA_DEV_AUTH = {{ dev_auth_config | tojson }};
     window.IDEA_DEFAULT_MODEL = {{ default_model | tojson }};
     window.IDEA_THINKING_MODEL_CONFIG = {{ thinking_config | tojson }};
   </script>
-  <script src="/static/js/workbench.js?v=0.2.0-rc.10"></script>
-  <script src="/static/js/auth_logic.js?v=0.2.0-rc.10"></script>
-  <script src="/static/js/viewer.js?v=0.2.0-rc.10"></script>
+  <script src="/static/js/workbench.js?v=0.2.0-rc.11"></script>
+  <script src="/static/js/auth_logic.js?v=0.2.0-rc.11"></script>
+  <script src="/static/js/viewer.js?v=0.2.0-rc.11"></script>
 </body>
 
 </html>

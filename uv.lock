@@ -701,7 +701,7 @@ wheels = [
 
 [[package]]
 name = "idea-evolution"
-version = "0.2.0rc10"
+version = "0.2.0rc11"
 source = { virtual = "." }
 dependencies = [
     { name = "cryptography" },

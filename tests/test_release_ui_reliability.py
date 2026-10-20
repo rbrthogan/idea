@@ -59,7 +59,7 @@ function showStatusInSettings(message,type){nodes.settingsStatus.textContent=mes
 ''' + helper + '''
 (async()=>{const refreshed=await checkSettingsStatus();process.stdout.write(JSON.stringify({refreshed,input:nodes.apiKeyInputContainer.style.display,configured:nodes.apiKeyConfiguredContainer.style.display,disabled:nodes.saveSettingsBtn.disabled,hidden:nodes.settingsStatus.hidden,message:nodes.settingsStatus.textContent}));})().catch(error=>{console.error(error);process.exit(1);});
 ''')
-    assert result['refreshed'] is True
+    assert result['refreshed']['api_keys']['google_generative_ai']['configured'] is False
     assert result['input'] == 'block' and result['configured'] == 'none'
     assert result['disabled'] is False and result['hidden'] is False
     assert 'replacement' in result['message']
