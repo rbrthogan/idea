@@ -46,3 +46,13 @@ def test_thinking_low_and_custom_budget_options_have_distinct_containers():
     assert 'id="thinkingCustomBudgetOption"' in html
     assert html.index('id="thinkingLowOption"') < html.index('id="thinkingCustomBudgetOption"')
     assert html.index('id="thinkingCustomBudgetOption"') < html.index('id="thinkingCustomBudget"')
+
+
+def test_openai_reasoning_options_include_xhigh_and_max():
+    html = VIEWER_HTML.read_text()
+    javascript = VIEWER_JS.read_text()
+
+    assert 'id="thinkingXHigh"' in html
+    assert 'id="thinkingMax"' in html
+    assert "allowedLevels.includes('xhigh')" in javascript
+    assert "allowedLevels.includes('max')" in javascript

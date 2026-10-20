@@ -1,33 +1,75 @@
 import os
 import hashlib
 import math
+import threading
+import httpx
 import numpy as np
 from typing import List, Dict, Any, Optional
 from google import genai
 from google.genai import types
 import asyncio
+from idea.provider_execution import await_provider_call
 import logging
 from idea.config import DEFAULT_EMBEDDING_MODEL, embedding_prices_per_million_tokens
+
+OPENAI_DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
+def mean_pairwise_euclidean_distance(embeddings: List[np.ndarray]) -> float:
+    """Exact mean distance without an n-by-n-by-dimensions temporary tensor."""
+    if len(embeddings) < 2:
+        return 0.0
+
+    # Vectorized pairwise Euclidean distance computation.
+    matrix = np.array(embeddings)
+    if matrix.ndim != 2 or matrix.shape[0] < 2:
+        return 0.0
+    squared_lengths = np.sum(matrix * matrix, axis=1)
+    total = 0.0
+    count = 0
+    for offset in range(0, len(matrix), 256):
+        rows = matrix[offset:offset + 256]
+        squared = squared_lengths[offset:offset + len(rows), None] + squared_lengths[None, :] - 2 * rows @ matrix.T
+        distances = np.sqrt(np.maximum(squared, 0.0))
+        for row_index, row in enumerate(distances):
+            peers = row[offset + row_index + 1:]
+            total += float(peers.sum())
+            count += peers.size
+    return total / count if count else 0.0
+
+
 class DiversityCalculator:
     """
-    Calculates population diversity using Gemini embeddings and mean square distance.
+    Calculates population diversity using provider embeddings and mean square distance.
 
     This class generates embeddings for ideas and computes diversity metrics
     to track how the evolutionary algorithm's population changes over time.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
-        """Initialize the diversity calculator with Gemini client."""
-        # Use provided key or fallback to environment variable
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        self.embedding_model = os.environ.get("GEMINI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        provider: str = "google_generative_ai",
+    ):
+        """Initialize the diversity calculator with the selected provider."""
+        self.provider = provider
+        if provider == "openai":
+            self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+            self.embedding_model = os.environ.get(
+                "OPENAI_EMBEDDING_MODEL", OPENAI_DEFAULT_EMBEDDING_MODEL
+            )
+            api_key_name = "OPENAI_API_KEY"
+        else:
+            self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+            self.embedding_model = os.environ.get(
+                "GEMINI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
+            )
+            api_key_name = "GEMINI_API_KEY"
 
         if not self.api_key:
-            logger.warning("GEMINI_API_KEY not found. Diversity calculation will be disabled.")
+            logger.warning("%s not found. Diversity calculation will be disabled.", api_key_name)
             self.client = None
         else:
             timeout_raw = os.environ.get("GENAI_HTTP_TIMEOUT_MS", "60000")
@@ -41,13 +83,26 @@ class DiversityCalculator:
                     http_timeout_ms,
                 )
             try:
-                self.client = genai.Client(
-                    api_key=self.api_key,
-                    http_options=types.HttpOptions(timeout=http_timeout_ms),
-                )
+                if provider == "openai":
+                    base_url = os.environ.get(
+                        "OPENAI_BASE_URL", "https://api.openai.com"
+                    ).rstrip("/")
+                    self.client = httpx.Client(
+                        base_url=base_url,
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=http_timeout_ms / 1000,
+                    )
+                else:
+                    self.client = genai.Client(
+                        api_key=self.api_key,
+                        http_options=types.HttpOptions(timeout=http_timeout_ms),
+                    )
                 logger.debug("DiversityCalculator initialized successfully")
             except Exception as e:
-                logger.error(f"Failed to initialize Gemini client: {e}")
+                logger.error("Failed to initialize %s embedding client: %s", provider, e)
                 self.client = None
 
         # Cache for embeddings to avoid re-computing for same content
@@ -59,19 +114,12 @@ class DiversityCalculator:
         self.estimated_input_token_count = 0
         self.embedding_request_count = 0
         self.embedding_token_counts_by_model: Dict[str, Dict[str, float]] = {}
-        # Fallback models to try if the primary model fails or returns no embeddings
-        fallback_models = [
-            "models/gemini-embedding-2",
-            "gemini-embedding-2",
-            "models/gemini-embedding-001",
-            "gemini-embedding-001",
-            "models/text-embedding-004",
-            "text-embedding-004",
-            "gemini-embedding-exp-03-07",
-        ]
-        self._embedding_models = [self.embedding_model] + [
-            model for model in fallback_models if model != self.embedding_model
-        ]
+        self._usage_lock = threading.Lock()
+        # Embedding spaces cannot be mixed per text. Fail visibly on an
+        # unavailable model; a model change requires re-embedding the set.
+        self._embedding_models = [self.embedding_model]
+        self._embedding_dimensions = None
+        self._batch_size = 32
 
     def is_enabled(self) -> bool:
         """Check if diversity calculation is available."""
@@ -83,7 +131,7 @@ class DiversityCalculator:
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:
-        # Gemini embedding responses do not always expose usage metadata. This
+        # Some embedding responses do not expose usage metadata. This
         # conservative estimate keeps embedding spend visible instead of free.
         return max(1, math.ceil(len(text or "") / 4))
 
@@ -100,9 +148,9 @@ class DiversityCalculator:
                 continue
             try:
                 numeric = int(value)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
-            if numeric >= 0:
+            if numeric >= 0 and not isinstance(value, bool):
                 return numeric
         return None
 
@@ -117,7 +165,11 @@ class DiversityCalculator:
         )
 
     def _record_embedding_usage(self, model_name: str, text: str, result: Any) -> None:
-        usage = (
+        with self._usage_lock:
+            self._record_embedding_usage_unlocked(model_name, text, result)
+
+    def _record_embedding_usage_unlocked(self, model_name: str, text: str, result: Any) -> None:
+        usage = result.get("usage") if isinstance(result, dict) else (
             getattr(result, "usage_metadata", None)
             or getattr(result, "usageMetadata", None)
             or getattr(result, "metadata", None)
@@ -125,6 +177,8 @@ class DiversityCalculator:
         input_tokens = self._get_usage_value(
             usage,
             "prompt_token_count",
+            "prompt_tokens",
+            "input_tokens",
             "input_token_count",
             "text_token_count",
             "total_token_count",
@@ -158,9 +212,24 @@ class DiversityCalculator:
         model_counts["requests"] += 1
         if used_estimate:
             model_counts["estimated_input"] += input_tokens
+        from idea.billing import record_price_usage
+        from idea.config import MODEL_CATALOG_VERIFIED_AT
+        snapshots = model_counts.setdefault("_usage_by_price", {})
+        record_price_usage(snapshots, {
+            "total_cost": input_cost, "input_rate": self._embedding_input_price(normalized),
+            "pricing_known": normalized in embedding_prices_per_million_tokens,
+            "price_version": MODEL_CATALOG_VERIFIED_AT,
+            "price_effective_date": MODEL_CATALOG_VERIFIED_AT,
+            "price_source": "https://ai.google.dev/gemini-api/docs/pricing" if self.provider == "google_generative_ai" else "https://developers.openai.com/api/docs/pricing/",
+            "pricing_regime": "standard",
+        }, {"input": input_tokens, "estimated_input": input_tokens if used_estimate else 0})
 
     def get_token_usage_summary(self) -> Dict[str, Any]:
         """Return embedding token usage in the same shape as LLM components."""
+        with self._usage_lock:
+            return self._token_usage_summary_unlocked()
+
+    def _token_usage_summary_unlocked(self) -> Dict[str, Any]:
         total_cost = sum(
             float(model_counts.get("cost", 0.0))
             for model_counts in self.embedding_token_counts_by_model.values()
@@ -174,11 +243,13 @@ class DiversityCalculator:
             "input": int(self.input_token_count),
             "output": int(self.output_token_count),
             "model": model_name,
+            "provider": self.provider,
             "cost": total_cost,
             "input_cost": total_cost,
             "output_cost": 0.0,
             "estimated_input": int(self.estimated_input_token_count),
             "requests": int(self.embedding_request_count),
+            "missing_usage_requests": sum(int(counts.get("missing_usage_requests", 0)) for counts in self.embedding_token_counts_by_model.values()),
             "per_model": {
                 model: {
                     "input": int(counts.get("input", 0)),
@@ -186,6 +257,9 @@ class DiversityCalculator:
                     "cost": float(counts.get("cost", 0.0)),
                     "requests": int(counts.get("requests", 0)),
                     "estimated_input": int(counts.get("estimated_input", 0)),
+                    "missing_usage_requests": int(counts.get("missing_usage_requests", 0)),
+                    "usage_by_price": [dict(row) for row in counts.get("_usage_by_price", {}).values()],
+                    "usage_basis": "includes_local_estimates" if counts.get("estimated_input") else "provider_reported",
                 }
                 for model, counts in self.embedding_token_counts_by_model.items()
             },
@@ -205,6 +279,10 @@ class DiversityCalculator:
             # Handle different idea dictionary formats
             if "idea" in idea_dict:
                 idea_obj = idea_dict["idea"]
+                if isinstance(idea_obj, str):
+                    return idea_obj.strip()
+                if isinstance(idea_obj, dict):
+                    return f"{idea_obj.get('title') or ''}\n\n{idea_obj.get('content') or ''}".strip()
                 if hasattr(idea_obj, 'title') and hasattr(idea_obj, 'content'):
                     title = idea_obj.title or ""
                     content = idea_obj.content or ""
@@ -225,146 +303,97 @@ class DiversityCalculator:
             logger.warning(f"Error extracting text from idea: {e}")
             return str(idea_dict)
 
-    async def _get_embedding(self, text: str) -> Optional[np.ndarray]:
-        """
-        Get embedding for a text using Gemini API with caching.
+    def _cache_key(self, text: str) -> str:
+        identity = f"v2|{self.provider}|{self.embedding_model}|{text}"
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
-        Args:
-            text: Text to embed
-
-        Returns:
-            Numpy array of embedding values, or None if failed
-        """
-        if not self.client:
-            return None
-
-        cleaned_text = (text or "").strip()
-        if not cleaned_text:
-            return None
-
-        # Use stable text hash as cache key
-        cache_key = hashlib.sha256(cleaned_text.encode("utf-8")).hexdigest()
-        if cache_key in self._embedding_cache:
-            return self._embedding_cache[cache_key]
-
-        def _extract_embedding(result) -> Optional[np.ndarray]:
-            if result is None:
-                return None
-            # Newer responses may include embeddings list
-            embeddings = getattr(result, "embeddings", None)
-            if embeddings:
-                candidate = embeddings[0]
-                values = getattr(candidate, "values", None)
-                if values is None and isinstance(candidate, dict):
-                    values = candidate.get("values")
-                if values is None:
-                    values = candidate
-                return np.array(values)
-            # Some responses may include a single embedding field
-            embedding = getattr(result, "embedding", None)
-            if embedding is not None:
-                values = getattr(embedding, "values", None)
-                if values is None and isinstance(embedding, dict):
-                    values = embedding.get("values")
-                if values is None:
-                    values = embedding
-                return np.array(values)
-            return None
-
-        def _embedding_config_for_model(model_name: str):
-            bare_model_name = model_name.removeprefix("models/")
-            if bare_model_name == "gemini-embedding-2":
-                return None
-            return types.EmbedContentConfig(task_type="CLUSTERING")
-
+    def _embed_batch_sync(self, texts: List[str]) -> List[Optional[np.ndarray]]:
+        """One pinned-space provider request, executed outside the event loop."""
+        cancel_event = getattr(self, "cancel_event", None)
+        cancel_check = getattr(self, "cancel_check", None)
+        if ((cancel_event is not None and cancel_event.is_set()) or
+                (callable(cancel_check) and cancel_check())):
+            return [None] * len(texts)
+        request_started = usage_recorded = False
         try:
-            last_error = None
-            for model_name in self._embedding_models:
-                try:
-                    request_config = _embedding_config_for_model(model_name)
-                    request_kwargs = {
-                        "model": model_name,
-                        "contents": cleaned_text,
-                    }
-                    if request_config is not None:
-                        request_kwargs["config"] = request_config
-
-                    # Try embedding call with single string
-                    result = self.client.models.embed_content(**request_kwargs)
-                    embedding = _extract_embedding(result)
-                    if embedding is None:
-                        # Some SDK versions expect a list of contents
-                        request_kwargs["contents"] = [cleaned_text]
-                        result = self.client.models.embed_content(**request_kwargs)
-                        embedding = _extract_embedding(result)
-                    if embedding is not None:
-                        self._record_embedding_usage(model_name, cleaned_text, result)
-                        self._embedding_cache[cache_key] = embedding
-                        return embedding
-                except Exception as e:
-                    last_error = e
-                    continue
-            if last_error:
-                logger.error(f"Error getting embedding from Gemini: {last_error}")
+            request_input = texts[0] if len(texts) == 1 else texts
+            if self.provider == "openai":
+                request_started = True
+                response = self.client.post("/v1/embeddings", json={
+                    "model": self.embedding_model, "input": request_input})
+                response.raise_for_status()
+                result = response.json()
+                data = result.get("data", [])
+                if any("index" in item for item in data):
+                    data = sorted(data, key=lambda item: item.get("index", 0))
+                values = [item.get("embedding") for item in data]
             else:
-                logger.warning("No embeddings returned from Gemini API")
-            return None
-
-        except Exception as e:
-            logger.error(f"Unexpected error getting embedding from Gemini: {e}")
-            return None
-
-    async def _get_embeddings_batch(self, texts: List[str]) -> List[Optional[np.ndarray]]:
-        """
-        Get embeddings for multiple texts concurrently.
-
-        Args:
-            texts: List of texts to embed
-
-        Returns:
-            List of embedding arrays (or None for failed embeddings)
-        """
-        if not self.client:
+                kwargs = {"model": self.embedding_model, "contents": request_input}
+                if self.embedding_model.removeprefix("models/").startswith("gemini-embedding-2"):
+                    # Embedding 2 aggregates list[str] into one multimodal item.
+                    # Explicit Content objects preserve one vector per candidate.
+                    kwargs["contents"] = [types.Content(parts=[types.Part.from_text(text=text)]) for text in texts]
+                else:
+                    kwargs["config"] = types.EmbedContentConfig(task_type="CLUSTERING")
+                request_started = True
+                result = self.client.models.embed_content(**kwargs)
+                values = getattr(result, "embeddings", None)
+                if not values:
+                    value = getattr(result, "embedding", None)
+                    values = [value] if value is not None else []
+                values = [value.get("values") if isinstance(value, dict)
+                          else getattr(value, "values", value) for value in values]
+            # A successful provider response may already have incurred spend,
+            # even when its vectors subsequently fail validation.
+            self._record_embedding_usage(self.embedding_model, "\n".join(texts), result)
+            usage_recorded = True
+            if len(values) != len(texts):
+                raise ValueError("Embedding response count did not match request")
+            embeddings = [np.asarray(value, dtype=float) for value in values]
+            dimensions = {embedding.size for embedding in embeddings}
+            if len(dimensions) != 1 or any(embedding.ndim != 1 or not embedding.size
+                or not np.isfinite(embedding).all() for embedding in embeddings):
+                raise ValueError("Invalid or inconsistent embedding vectors")
+            dimension = dimensions.pop()
+            if self._embedding_dimensions is not None and dimension != self._embedding_dimensions:
+                raise ValueError("Embedding dimensions changed within the pinned model")
+            self._embedding_dimensions = dimension
+            return embeddings
+        except Exception as exc:
+            if request_started and not usage_recorded:
+                with self._usage_lock:
+                    model = self._normalize_embedding_model_name(self.embedding_model)
+                    counts = self.embedding_token_counts_by_model.setdefault(model, {
+                        "input": 0, "total": 0, "cost": 0.0, "requests": 0, "estimated_input": 0,
+                    })
+                    counts["missing_usage_requests"] = counts.get("missing_usage_requests", 0) + 1
+            logger.error("Embedding request failed for %s: %s", self.embedding_model, exc)
             return [None] * len(texts)
 
-        # Process embeddings concurrently
-        tasks = [self._get_embedding(text) for text in texts]
-        embeddings = await asyncio.gather(*tasks, return_exceptions=True)
+    async def _get_embedding(self, text: str) -> Optional[np.ndarray]:
+        return (await self._get_embeddings_batch([text]))[0]
 
-        # Handle exceptions in results
-        result_embeddings = []
-        for i, embedding in enumerate(embeddings):
-            if isinstance(embedding, Exception):
-                logger.warning(f"Failed to get embedding for text {i}: {embedding}")
-                result_embeddings.append(None)
-            else:
-                result_embeddings.append(embedding)
-
-        return result_embeddings
+    async def _get_embeddings_batch(self, texts: List[str]) -> List[Optional[np.ndarray]]:
+        if not self.client:
+            return [None] * len(texts)
+        cleaned = [(text or "").strip() for text in texts]
+        missing = list(dict.fromkeys(text for text in cleaned if text
+            and self._cache_key(text) not in self._embedding_cache))
+        # Bounded provider batches keep request size and worker count predictable.
+        for offset in range(0, len(missing), self._batch_size):
+            batch = missing[offset:offset + self._batch_size]
+            embeddings = await await_provider_call(self._embed_batch_sync, batch)
+            for text, embedding in zip(batch, embeddings):
+                if embedding is not None:
+                    self._embedding_cache[self._cache_key(text)] = embedding
+            while len(self._embedding_cache) > 10000:
+                self._embedding_cache.pop(next(iter(self._embedding_cache)))
+        return [self._embedding_cache.get(self._cache_key(text)) if text else None
+                for text in cleaned]
 
     def _calculate_mean_square_distance(self, embeddings: List[np.ndarray]) -> float:
-        """
-        Calculate Euclidean distance between all pairs of embeddings and return the mean.
-
-        Args:
-            embeddings: List of embedding vectors
-
-        Returns:
-            Mean Euclidean distance value
-        """
-        if len(embeddings) < 2:
-            return 0.0
-
-        # Vectorized pairwise Euclidean distance computation.
-        matrix = np.array(embeddings)
-        if matrix.ndim != 2 or matrix.shape[0] < 2:
-            return 0.0
-        deltas = matrix[:, None, :] - matrix[None, :, :]
-        distances = np.linalg.norm(deltas, axis=2)
-        upper = np.triu_indices(matrix.shape[0], k=1)
-        if upper[0].size == 0:
-            return 0.0
-        return float(np.mean(distances[upper]))
+        """Compatibility name for the exact mean Euclidean distance."""
+        return mean_pairwise_euclidean_distance(embeddings)
 
     def _calculate_inter_generation_diversity(self, history_embeddings: List[List[np.ndarray]]) -> Optional[float]:
         """
@@ -412,7 +441,7 @@ class DiversityCalculator:
         if not self.is_enabled():
             return {
                 "enabled": False,
-                "reason": "Gemini API key not available",
+                "reason": f"{self.provider} API key not available",
                 "diversity_score": 0.0,
                 "total_ideas": 0,
                 "generation_diversities": []
@@ -465,7 +494,7 @@ class DiversityCalculator:
                 }
 
             # Calculate overall diversity
-            overall_diversity = self._calculate_mean_square_distance(valid_embeddings)
+            overall_diversity = await await_provider_call(self._calculate_mean_square_distance, valid_embeddings)
 
             # Calculate per-generation diversity and organize embeddings by generation
             generation_diversities = []
@@ -483,7 +512,8 @@ class DiversityCalculator:
                 history_embeddings.append(gen_embeddings)
 
                 if len(gen_embeddings) >= 2:
-                    gen_diversity = self._calculate_mean_square_distance(gen_embeddings)
+                    gen_diversity = (overall_diversity if len(history) == 1 else
+                        await await_provider_call(self._calculate_mean_square_distance, gen_embeddings))
                 else:
                     gen_diversity = 0.0
 
@@ -495,7 +525,7 @@ class DiversityCalculator:
                 })
 
             # Calculate inter-generation diversity
-            inter_generation_diversity = self._calculate_inter_generation_diversity(history_embeddings)
+            inter_generation_diversity = await await_provider_call(self._calculate_inter_generation_diversity, history_embeddings)
 
             diversity_result = {
                 "enabled": True,
@@ -547,6 +577,9 @@ class DiversityCalculator:
         else:
             print("Inter-Generation Diversity: N/A (requires 2+ generations)")
         print(f"Total Ideas Analyzed: {diversity_data['total_ideas']}")
+        sampling = diversity_data.get("history_sampling")
+        if sampling:
+            print(f"Historical vector sample: {sampling['sample_size']}/{sampling['total_size']} unique revisions")
         print(f"Valid Embeddings: {diversity_data['valid_embeddings']}")
         print(f"Embedding Success Rate: {diversity_data['embedding_success_rate']:.1%}")
 

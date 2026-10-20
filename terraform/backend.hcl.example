@@ -1,0 +1,4 @@
+# Non-secret configuration for the separate, explicit state migration.
+# Replace this with a pre-existing bucket dedicated to infrastructure state.
+bucket = "YOUR-PROJECT-terraform-state"
+prefix = "idea/production"

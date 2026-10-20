@@ -153,6 +153,12 @@ class LLMPairwiseEvaluator:
     ):
         self.config = config
         self.artifact_loader = artifact_loader
+        self._artifact_evidence_enabled = True
+
+    def set_artifact_evidence_enabled(self, enabled: bool) -> None:
+        """Enable required images or temporarily degrade this judge to text."""
+
+        self._artifact_evidence_enabled = bool(enabled)
 
     def evaluate_population(
         self,
@@ -171,11 +177,13 @@ class LLMPairwiseEvaluator:
     ) -> PopulationEvaluationResult:
         resolved_rounds = self.config.rounds or rounds
         try:
-            required_artifact_roles = [
-                requirement.split(".", 1)[1]
-                for requirement in self.config.requires
-                if requirement.startswith("artifact.")
-            ]
+            required_artifact_roles = []
+            if self._artifact_evidence_enabled:
+                required_artifact_roles = [
+                    requirement.split(".", 1)[1]
+                    for requirement in self.config.requires
+                    if requirement.startswith("artifact.")
+                ]
             configure_artifacts = getattr(
                 critic,
                 "configure_artifact_evidence",

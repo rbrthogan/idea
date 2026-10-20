@@ -354,3 +354,25 @@ def test_repository_does_not_swallow_stale_save_conflict():
         asyncio.run(EvolutionRepository.save_checkpoint(engine))
 
     assert engine.persistence_revision == "revision-1"
+
+
+def test_draft_checkpoint_roundtrip_preserves_candidate_types_and_provenance():
+    import json
+    with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
+        engine = EvolutionEngine(pop_size=2, generations=1, user_id='u')
+    candidate = {'id': uuid.uuid4(), 'idea': Idea(title='Saved child', content='Finished prose'),
+                 'parent_ids': [uuid.uuid4()], 'parent_genotypes': [{'genotype': 'space; western'}]}
+    engine.generation_draft = {'version': 1, 'generation': 1, 'islands': {'0': {
+        'island_id': None, 'capacity': 2, 'survivors': [candidate], 'fallback': [],
+        'plans': [{'operator': 'crossover', 'parents': [candidate]}],
+        'results': [{'candidate': candidate, 'prompt': 'saved prompt'}], 'tournament_rounds': []}}}
+    state = json.loads(json.dumps(EvolutionSerializer.to_checkpoint_state(engine)))
+    with patch('idea.llm.LLMWrapper._setup_provider', return_value=None):
+        restored = EvolutionEngine(pop_size=2, generations=1, user_id='u')
+    EvolutionSerializer.restore_runtime_state(restored, state)
+    result = restored.generation_draft['islands']['0']['results'][0]
+    assert result['candidate'] == candidate
+    assert result['prompt'] == 'saved prompt'
+    assert restored.population == [] and restored.current_generation == 0
+    restored.generation_draft['islands']['0']['results'][0]['prompt'] = 'edited'
+    assert state['generation_draft']['islands']['0']['results'][0]['prompt'] == 'saved prompt'

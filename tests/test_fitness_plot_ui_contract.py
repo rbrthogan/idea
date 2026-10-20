@@ -39,6 +39,7 @@ process.stdout.write(JSON.stringify({{
   labels: processed.labels,
   metrics: processed.metrics,
   latest: processed.latest,
+  historySampling: processed.historySampling,
   islandDiversity: processed.islandDiversity
 }}));
 """
@@ -78,8 +79,17 @@ process.stdout.write(JSON.stringify(captured));
 def _restore_completed_evolution_from_local_storage(stored_state, progress_response):
     script = VIEWER_JS.read_text()
     bundle = _extract_function_bundle(script, "restoreCurrentEvolution", "function setupDownloadButton")
+    gene_start = script.index("function applyGeneCatalogue(")
+    gene_helpers = script[gene_start:script.index("function renderGeneCatalogue(", gene_start)]
+    repair_start = script.index("const repairedEvolutionCacheIds")
+    repair_helpers = script[repair_start:script.index("async function repairCurrentEvolutionIfNewer", repair_start)]
     node_script = f"""
+let isEvolutionRunning = false;
 let currentEvolutionData = null;
+let geneCatalogue = null;
+let selectedGeneId = null;
+let geneScope = 'current';
+const safeSignature = JSON.stringify;
 let currentEvolutionId = 'stale-evolution';
 let currentEvolutionName = 'Stale evolution';
 let contexts = [];
@@ -92,10 +102,12 @@ let tournamentHistory = [];
 let renderedHistory = null;
 let chartArgs = null;
 let pollingStarted = false;
-global.fetch = async () => ({{
-  ok: true,
-  json: async () => ({json.dumps(progress_response)})
-}});
+const repairRequests = [];
+global.window = {{ currentUser: {{ uid: 'test-user' }} }};
+global.fetch = async (url, options) => {{
+  if (url.endsWith('/repair')) repairRequests.push(JSON.parse(options.body).data);
+  return {{ ok: true, status: 200, json: async () => ({json.dumps(progress_response)}) }};
+}};
 global.localStorage = {{
   getItem: () => JSON.stringify({json.dumps(stored_state)}),
   removeItem: () => {{}}
@@ -116,6 +128,8 @@ function renderTournamentDetails() {{}}
 function displayTokenCounts() {{}}
 function setupDownloadButton() {{}}
 function startPollingActiveEvolution() {{ pollingStarted = true; }}
+{gene_helpers}
+{repair_helpers}
 {bundle}
 restoreCurrentEvolution().then((restored) => {{
   process.stdout.write(JSON.stringify({{
@@ -124,6 +138,7 @@ restoreCurrentEvolution().then((restored) => {{
     chartArgs,
     pollingStarted,
     currentEvolutionData,
+    repairRequests,
     currentEvolutionId,
     currentEvolutionName
   }}));
@@ -279,6 +294,7 @@ def test_completed_evolution_restore_uses_local_storage_without_active_run():
     stored_state = {
         "evolution_id": "saved-evolution",
         "evolution_name": "Saved evolution",
+        "gene_catalogue": {"version": 1, "revision": 1, "genes": [{"id": "g1", "label": "Timing"}]},
         "history": [[{"generation_metrics": {"0": {"fitness": 0.5, "elo": 1500, "diversity": 0.2}}}]],
         "history_version": 4,
         "diversity_history": [{"generation": 0, "diversity_score": 0.2}],
@@ -298,6 +314,21 @@ def test_completed_evolution_restore_uses_local_storage_without_active_run():
     assert restored["pollingStarted"] is False
     assert restored["currentEvolutionId"] == "saved-evolution"
     assert restored["currentEvolutionName"] == "Saved evolution"
+    assert restored["currentEvolutionData"]["is_running"] is False
+    assert restored["currentEvolutionData"]["gene_catalogue"] == stored_state["gene_catalogue"]
+    assert len(restored["repairRequests"]) == 1
+    assert restored["repairRequests"][0]["is_running"] is False
+
+
+def test_active_evolution_restore_defers_client_repair_before_starting_polling():
+    stored_state = {"evolution_id": "active-evolution", "history": [[{"id": "candidate"}]]}
+    restored = _restore_completed_evolution_from_local_storage(
+        stored_state, {"is_running": True, "evolution_id": "active-evolution"},
+    )
+    assert restored["restored"] is True
+    assert restored["pollingStarted"] is True
+    assert restored["currentEvolutionData"]["is_running"] is True
+    assert restored["repairRequests"] == []
 
 
 def test_fitness_plot_preserves_island_diversity_series():
@@ -350,3 +381,43 @@ def test_fitness_plot_html_exposes_metric_toggle():
     assert 'data-fitness-metric="diversity"' in html
     assert 'data-fitness-scope="population"' in html
     assert 'data-fitness-scope="islands"' in html
+
+
+def test_deferred_chart_initialization_keeps_loaded_labels_and_scope():
+    bundle = _extract_function_bundle(VIEWER_JS.read_text(), 'initializeDiversityChart', 'toFiniteDiversityNumber')
+    result = subprocess.run(['node', '-e', '''
+let canvas={getContext:()=>({})};
+const document={getElementById:()=>canvas,querySelector:()=>null};
+const window={devicePixelRatio:1};
+let diversityChart=null,lastDiversityRenderSignature='',diversityPlotSized=false;
+let diversityData={labels:['0','1','2']},fitnessPlotMetric='diversity',fitnessPlotScope='islands';
+let created=0,destroyed=0,scopeUsed;
+const getDiversityChartDatasets=(data,metric,scope)=>{scopeUsed=scope;return [{data:[.2,.3,.4]}];};
+const getDiversityChartScales=()=>({});
+const getViewerChartTheme=()=>({});
+function Chart(ctx,config){created++;this.canvas=canvas;this.data=config.data;this.destroy=()=>destroyed++;}
+''' + bundle + '''
+initializeDiversityChart();
+const original=diversityChart;
+diversityChart.data.labels.push('3');
+initializeDiversityChart();
+const preserved=diversityChart===original&&diversityChart.data.labels.length===4;
+canvas={getContext:()=>({})};initializeDiversityChart();
+process.stdout.write(JSON.stringify({preserved,created,destroyed,labels:diversityChart.data.labels,scopeUsed}));
+'''],check=True,capture_output=True,text=True)
+    assert json.loads(result.stdout) == {'preserved':True,'created':2,'destroyed':1,
+                                       'labels':['0','1','2'],'scopeUsed':'islands'}
+
+
+def test_failed_diversity_is_missing_not_zero_but_real_zero_is_preserved():
+    processed = _process_fitness_plot([], [[
+        {'generation_metrics':{'0':{'diversity':0}},
+         'evaluations':{'diversity':{'generation':0,'status':'failed'}}},
+        {'generation_metrics':{'0':{'diversity':0}},
+         'evaluations':{'diversity':{'generation':0,'status':'ok'}}},
+        {'generation_metrics':{'0':{'diversity':.4}},
+         'evaluations':{'diversity':{'generation':1,'status':'failed'}}},
+    ]])
+    assert processed['metrics']['diversity']['count'] == [2]
+    assert processed['metrics']['diversity']['average'] == [.2]
+    assert processed['metrics']['diversity']['low'] == [0]

@@ -22,6 +22,7 @@ from idea.evaluation import (
     parse_gemini_code_execution_interaction,
 )
 from idea.evolution import EvolutionEngine
+from idea.evaluation.local_artifacts import LocalArtifactExecutionError
 from idea.evolution_persistence import EvolutionSerializer
 from idea.llm import Critic
 from idea.ratings import PairEvaluationInputError
@@ -47,7 +48,13 @@ class _FakeGeminiClient:
         self.interactions = _FakeInteractions(interaction)
 
 
-def _interaction(*, image_data=None, image_type="image/png"):
+def _interaction(*, image_data=None, image_type="image/png", usage=None):
+    if usage is None:
+        usage = {
+            "total_input_tokens": 123,
+            "total_output_tokens": 45,
+            "total_tokens": 168,
+        }
     return {
         "id": "interaction-123",
         "status": "completed",
@@ -63,11 +70,7 @@ def _interaction(*, image_data=None, image_type="image/png"):
                 "data": image_data or base64.b64encode(PNG_BYTES).decode("ascii"),
             },
         ],
-        "usage": {
-            "total_input_tokens": 123,
-            "total_output_tokens": 45,
-            "total_tokens": 168,
-        },
+        "usage": usage,
     }
 
 
@@ -148,10 +151,74 @@ def test_gemini_runner_is_opt_in_and_uses_only_code_execution_tool():
     assert "<candidate-json>" in call["input"]
 
 
-def test_engine_budget_summary_includes_artifact_runner_usage(tmp_path):
+def test_gemini_runner_prices_interactions_code_execution_usage():
     runner = GeminiCodeExecutionRunner(
         enabled=True,
         client=_FakeGeminiClient(_interaction()),
+    )
+    runner._record_usage(
+        {
+            "total_input_tokens": 8_204,
+            "total_output_tokens": 14_995,
+            "total_thought_tokens": 4_237,
+            "total_cached_tokens": 1_260,
+            "total_tool_use_tokens": 99_955,
+            "total_tokens": 127_391,
+        }
+    )
+    runner._record_usage(
+        {
+            "total_input_tokens": 7_169,
+            "total_output_tokens": 17_915,
+            "total_thought_tokens": 3_939,
+            "total_cached_tokens": 3_385,
+            "total_tool_use_tokens": 166_532,
+            "total_tokens": 195_555,
+        }
+    )
+
+    summary = runner.get_token_usage_summary()
+
+    assert summary["input"] == 15_373
+    assert summary["output"] == 32_910
+    assert summary["thoughts"] == 8_176
+    assert summary["cached_input"] == 4_645
+    assert summary["tool_input"] == 266_487
+    assert summary["uncached_input"] == 277_215
+    assert summary["total"] == 322_946
+    assert summary["requests"] == 2
+
+    from idea.config import resolve_model_token_prices
+    from idea.evaluation.artifacts import GEMINI_CODE_EXECUTION_MODEL
+    prices = resolve_model_token_prices(GEMINI_CODE_EXECUTION_MODEL)
+    expected_uncached_input_cost = 277_215 * prices["input"] / 1_000_000
+    expected_cached_input_cost = 4_645 * prices["cached_input"] / 1_000_000
+    expected_output_cost = 32_910 * prices["output"] / 1_000_000
+    expected_thought_cost = 8_176 * prices["output"] / 1_000_000
+    assert summary["uncached_input_cost"] == pytest.approx(expected_uncached_input_cost)
+    assert summary["cached_input_cost"] == pytest.approx(expected_cached_input_cost)
+    assert summary["output_cost"] == pytest.approx(expected_output_cost)
+    assert summary["thought_cost"] == pytest.approx(expected_thought_cost)
+    assert summary["cost"] == pytest.approx(
+        expected_uncached_input_cost
+        + expected_cached_input_cost
+        + expected_output_cost
+        + expected_thought_cost
+    )
+
+
+def test_engine_budget_summary_includes_artifact_runner_usage(tmp_path):
+    interaction_usage = {
+        "total_input_tokens": 8_204,
+        "total_output_tokens": 14_995,
+        "total_thought_tokens": 4_237,
+        "total_cached_tokens": 1_260,
+        "total_tool_use_tokens": 99_955,
+        "total_tokens": 127_391,
+    }
+    runner = GeminiCodeExecutionRunner(
+        enabled=True,
+        client=_FakeGeminiClient(_interaction(usage=interaction_usage)),
     )
     engine = EvolutionEngine(
         pop_size=1,
@@ -173,10 +240,18 @@ def test_engine_budget_summary_includes_artifact_runner_usage(tmp_path):
 
     token_counts = engine.get_total_token_count()
 
-    assert token_counts["artifact_render"]["total"] == 168
+    assert token_counts["artifact_render"]["total"] == 127_391
+    assert token_counts["artifact_render"]["thoughts"] == 4_237
+    assert token_counts["artifact_render"]["tool_input"] == 99_955
+    assert token_counts["artifact_render"]["cached_input"] == 1_260
     assert token_counts["artifact_render"]["requests"] == 1
     assert token_counts["models"]["artifact_render"] == "gemini-3.6-flash"
-    assert token_counts["cost"]["total_cost"] >= token_counts["artifact_render"]["cost"]
+    assert token_counts["total_thoughts"] == 4_237
+    assert token_counts["total_tool_input"] == 99_955
+    assert token_counts["total_cached_input"] == 1_260
+    assert token_counts["cost"]["total_cost"] == pytest.approx(
+        token_counts["artifact_render"]["cost"]
+    )
 
 
 def test_artifact_production_stops_before_next_candidate_after_budget_limit(tmp_path):
@@ -282,7 +357,7 @@ def test_interaction_parser_rejects_wrong_type_and_ambiguous_images(interaction,
 
 
 def test_interaction_parser_selects_final_image_from_multiple_code_attempts():
-    final_png = PNG_BYTES + b"\x00"
+    final_png = PNG_BYTES
     interaction = {
         "id": "multi-attempt",
         "status": "completed",
@@ -331,6 +406,17 @@ def test_interaction_parser_rejects_oversized_decoded_png_before_accepting_it():
         )
 
 
+def test_interaction_parser_rejects_signature_only_malformed_png():
+    malformed = base64.b64encode(b"\x89PNG\r\n\x1a\nnot-an-image").decode("ascii")
+
+    with pytest.raises(ArtifactOutputError, match="malformed PNG"):
+        parse_gemini_code_execution_interaction(
+            _interaction(image_data=malformed),
+            max_png_bytes=1024,
+            max_source_bytes=1024,
+        )
+
+
 class _ProducerRunner:
     def __init__(self, events=None):
         self.events = events
@@ -367,6 +453,115 @@ class _ComputedAfterArtifactRunner:
 class _FailingProducerRunner:
     async def run(self, candidate, **kwargs):
         raise RuntimeError("provider rejected the artifact request")
+
+
+class _DiagnosticFailingProducerRunner:
+    async def run(self, candidate, **kwargs):
+        raise LocalArtifactExecutionError(
+            "local artifact script failed: ValueError: invalid shape",
+            diagnostics={
+                "stage": "generated_source_execution",
+                "container_exit_code": 1,
+                "execution_attempts": 1,
+                "repair_attempts": 0,
+            },
+        )
+
+
+def test_artifact_failure_preserves_per_candidate_execution_diagnostics(tmp_path):
+    engine = EvolutionEngine(
+        pop_size=1,
+        generations=1,
+        evaluation_config={
+            "allow_generated_code_execution": True,
+            "components": [_artifact_config(failure_policy="omit")],
+            "fitness": {"enabled": False, "metrics": []},
+        },
+        evaluation_runners={"render": _DiagnosticFailingProducerRunner()},
+        artifact_store=ArtifactStore(tmp_path / "diagnostic-store"),
+    )
+    population = [
+        {"id": "candidate-a", "idea": {"title": "A", "content": "alpha"}},
+    ]
+
+    result = asyncio.run(
+        engine._prepare_population_for_judging(
+            population,
+            evaluation_generation=0,
+        )
+    )
+
+    record = result.records[0]
+    assert record.status == EvaluationStatus.FAILED
+    assert record.metadata["execution"] == {
+        "stage": "generated_source_execution",
+        "container_exit_code": 1,
+        "execution_attempts": 1,
+        "repair_attempts": 0,
+    }
+    assert population[0]["evaluations"]["render"]["metadata"]["execution"] == (
+        record.metadata["execution"]
+    )
+
+
+def test_candidate_specific_render_failure_does_not_suppress_other_candidates(
+    tmp_path,
+):
+    class _MixedRunner:
+        def __init__(self):
+            self.calls = []
+
+        async def run(self, candidate, **kwargs):
+            self.calls.append(kwargs["candidate_id"])
+            if len(self.calls) == 1:
+                raise LocalArtifactExecutionError(
+                    "local artifact script failed: ValueError: invalid shape",
+                    diagnostics={
+                        "stage": "generated_source_execution",
+                        "container_exit_code": 1,
+                    },
+                )
+            return CodeArtifactRunnerResult(
+                source_code="print('valid')\n",
+                png_bytes=PNG_BYTES,
+            )
+
+    runner = _MixedRunner()
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        evaluation_config={
+            "allow_generated_code_execution": True,
+            "components": [
+                _artifact_config(
+                    failure_policy="omit",
+                    metadata={"stop_after_first_failure": True},
+                )
+            ],
+            "fitness": {"enabled": False, "metrics": []},
+        },
+        evaluation_runners={"render": runner},
+        artifact_store=ArtifactStore(tmp_path / "candidate-failure-store"),
+    )
+    population = [
+        {"id": "candidate-a", "idea": {"title": "A", "content": "alpha"}},
+        {"id": "candidate-b", "idea": {"title": "B", "content": "beta"}},
+    ]
+
+    result = asyncio.run(
+        engine._prepare_population_for_judging(
+            population,
+            evaluation_generation=0,
+        )
+    )
+
+    assert runner.calls == ["candidate-a", "candidate-b"]
+    assert [record.status for record in result.records] == [
+        EvaluationStatus.FAILED,
+        EvaluationStatus.OK,
+    ]
+    assert population[0]["artifact_refs"] == []
+    assert len(population[1]["artifact_refs"]) == 3
 
 
 def _artifact_engine(tmp_path: Path, *, events=None):
@@ -542,6 +737,42 @@ def test_rerunning_producer_replaces_same_producer_refs_and_ids(tmp_path):
     assert len(candidate["artifact_refs"]) == 3
 
 
+def test_unchanged_candidate_reuses_integrity_checked_render(tmp_path):
+    events = []
+    engine = _artifact_engine(tmp_path, events=events)
+    candidate = {
+        "id": "candidate-a",
+        "idea": {"title": "A", "content": "unchanged"},
+    }
+
+    first = asyncio.run(
+        engine._prepare_population_for_judging(
+            [candidate],
+            evaluation_generation=0,
+        )
+    )
+    first_ids = [ref["id"] for ref in candidate["artifact_refs"]]
+    events.clear()
+    second = asyncio.run(
+        engine._prepare_population_for_judging(
+            [candidate],
+            evaluation_generation=1,
+        )
+    )
+
+    assert events == [("computed", "candidate-a")]
+    assert [record.status for record in first.records] == [
+        EvaluationStatus.OK,
+        EvaluationStatus.OK,
+    ]
+    assert [record.status for record in second.records] == [
+        EvaluationStatus.CACHED,
+        EvaluationStatus.OK,
+    ]
+    assert [ref["id"] for ref in candidate["artifact_refs"]] == first_ids
+    assert len(second.artifacts) == 3
+
+
 def test_required_artifact_from_prior_candidate_version_is_rejected(tmp_path):
     engine = _artifact_engine(tmp_path)
     candidate = {
@@ -689,6 +920,79 @@ def test_engine_artifact_pairwise_and_aggregation_pipeline_is_end_to_end(tmp_pat
         population[index]["evaluations"]["quality"]["status"] == "ok"
         for index in range(2)
     )
+
+
+def test_optional_render_failure_stops_cost_and_degrades_judge_to_text(tmp_path):
+    class _CountingFailingRunner:
+        def __init__(self):
+            self.candidate_ids = []
+
+        async def run(self, _candidate, **kwargs):
+            self.candidate_ids.append(kwargs["candidate_id"])
+            raise RuntimeError("remote render timed out")
+
+    runner = _CountingFailingRunner()
+    engine = EvolutionEngine(
+        pop_size=2,
+        generations=1,
+        evaluation_config={
+            "allow_generated_code_execution": True,
+            "components": [
+                _artifact_config(
+                    failure_policy="omit",
+                    metadata={"stop_after_first_failure": True},
+                ),
+                {
+                    "id": "quality",
+                    "kind": "llm_pairwise",
+                    "requires": ["artifact.primary"],
+                    "metric_name": "quality_elo",
+                },
+            ],
+            "fitness": {"enabled": False, "metrics": []},
+        },
+        evaluation_runners={"render": runner},
+        artifact_store=ArtifactStore(tmp_path / "fallback-store"),
+    )
+    population = [
+        {"id": "candidate-a", "idea": {"title": "A", "content": "alpha"}},
+        {"id": "candidate-b", "idea": {"title": "B", "content": "beta"}},
+    ]
+
+    prepared = asyncio.run(
+        engine._prepare_population_for_judging(
+            population,
+            evaluation_generation=0,
+        )
+    )
+
+    assert runner.candidate_ids == ["candidate-a"]
+    assert [record.status for record in prepared.records] == [
+        EvaluationStatus.FAILED,
+        EvaluationStatus.SKIPPED,
+    ]
+    assert prepared.metadata["artifact_evidence_degraded"] is True
+    assert "earlier failure" in population[1]["evaluations"]["render"]["metadata"]["reason"]
+
+    captured = []
+    engine.critic.generate_text = lambda contents: captured.append(contents) or "RESULT: A"
+    quality = engine.quality_evaluator.evaluate_population(
+        engine.critic,
+        population,
+        engine.idea_type,
+        rounds=1,
+        progress_callback=None,
+        details=[],
+        full_tournament_rounds=1,
+        should_stop=lambda: False,
+        comparison_cache={},
+        evaluation_generation=0,
+    )
+
+    assert set(quality.scores) == {0, 1}
+    assert len(captured) == 1
+    assert isinstance(captured[0], str)
+    assert all(record.status == EvaluationStatus.OK for record in quality.batch.records)
 
 
 def test_required_missing_artifact_becomes_typed_pairwise_failure():

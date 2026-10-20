@@ -1,128 +1,102 @@
-# YAML Prompt Templates
+# Template authoring
 
-This directory contains YAML-based prompt templates for the Idea Evolution system. These templates provide a user-friendly way to create and share new prompt configurations without requiring Python programming knowledge.
+Use **Browse templates → Create manually** or **Create with AI** in the app.
+For a bundled template, copy one of the YAML files in this directory and edit
+it. Built-ins cover Drabble, Game Design, Arcade Game Design and AI research.
 
-## Template Structure
+A run saves its own template snapshot. Later edits do not replace those authored
+instructions, although shared runtime rules apply when the run is processed again.
 
-Each YAML template follows this structure:
+## The three main fields
+
+| Field | What belongs here |
+| --- | --- |
+| `requirements` | Individual content constraints: feasibility, form or domain rules |
+| `output` | Title/body presentation, required sections and optional body word count |
+| `comparison_criteria` | Ordered quality preferences for pairwise judging |
+
+The app owns the title/content response structure. Do not put a JSON envelope or
+`Title:`/`Content:` transport labels in requirements. Word counts are model
+instructions, not a guarantee that every result complies. The formatter preserves
+the actual result rather than rewriting it to appear compliant.
+
+## Minimal example
 
 ```yaml
-name: "Template Name"
-description: "What this template generates"
-version: "1.0.0"  # Semantic versioning
-author: "Your Name"
-created_date: "2024-01-15"  # YYYY-MM-DD format
-
+name: Small research proposals
+description: Experiments one researcher can run
+version: '1.0.0'
+author: Your name
+created_date: '2026-10-20'
 metadata:
-  item_type: "Type of items generated (e.g., 'stories', 'game designs')"
-
-# Special requirements for this template type (optional)
-special_requirements: |
-  Special constraints, formatting rules, or requirements for this template.
-  These will be automatically inserted into prompts using {requirements} placeholder.
-  For example: word count limits, complexity constraints, formatting rules, etc.
-
+  item_type: research proposals
+requirements:
+  - Use one consumer GPU and publicly available data.
+  - Distinguish predictions from evidence; do not invent findings.
+output:
+  title: A concise research question.
+  content: Include a hypothesis, method, evaluation and risks.
+  word_count: {min: 400, max: 600}
 prompts:
-  context: |
-    Prompt for generating contextual concepts/inspiration
-
-  specific_prompt: |
-    Prompt for turning sampled concepts into the concrete direction used to generate an idea
-    Must include {context_pool} placeholder
-
-  format: |
-    Prompt for formatting raw ideas
-    Must include {input_text} placeholder
-
-  critique: |
-    Prompt for critiquing ideas
-    Must include {idea} placeholder
-
-  refine: |
-    Prompt for refining ideas based on critique
-    Must include {idea} and {critique} placeholders
-    Can reference {requirements} for template-specific constraints
-
-  breed: |
-    Prompt for breeding/combining ideas
-    Must include {ideas} placeholder
-    Can reference {requirements} for template-specific constraints
-
-comparison_criteria:  # Optional; used by the legacy pairwise LLM evaluator
-  - "First criterion (most important)"
-  - "Second criterion"
-  - "Additional criteria..."
+  context: 'Generate varied research concepts. Return CONCEPTS: followed by the list.'
+  specific_prompt: 'Develop a testable direction from {context_pool}.'
+  format: 'Preserve the original title and body from {input_text}.'
+  critique: 'Assess the experimental design of {idea}.'
+  refine: 'Improve {idea} using this critique: {critique}.'
+  breed: 'Develop one coherent new proposal from these ingredients: {ideas}.'
+  genotype_encode: |
+    Identify the task, domain, method, model family and evaluation approach.
+    Proposal: {idea_content}
+comparison_criteria:
+  - Scientific value
+  - Experimental design
+  - Originality
 ```
 
-## Available Templates
+`requirements` defaults to `[]`. `output` may be omitted or null. Word-count
+bounds are positive integers; use equal bounds for an exact requested length,
+just `min` or `max` for one bound, or omit `word_count` for no requested length.
+The title is excluded. Names, description, semantic version, author, date,
+metadata and the seven prompt fields above are required.
 
-- **drabble.yaml**: Generate 100-word short stories
-- **airesearch.yaml**: Generate GPU poor AI research proposals
-- **game_design.yaml**: Generate browser game design concepts
+## Prompt roles
 
-## Creating New Templates
+| Prompt | Required variables |
+| --- | --- |
+| `context` | None |
+| `specific_prompt` | `{context_pool}` |
+| `format` | `{input_text}` |
+| `critique` | `{idea}` |
+| `refine` | `{idea}`, `{critique}` |
+| `breed` | `{ideas}` |
+| `genotype_encode` | `{idea_content}` |
 
-1. Use the Template Manager UI at `/templates` for an easy visual interface
-2. Or copy an existing template as a starting point
-3. Modify the metadata and prompts for your domain
-4. Use the `special_requirements` field for template-specific constraints
-5. Test your template using the validation tools
-6. Save with a descriptive filename (e.g., `business_ideas.yaml`)
+Optional `oracle_constraints` and `example_idea_prompts` guide Oracle proposals.
+An optional `prompts.comparison_prompt` customizes judging; the runtime still
+supplies both candidates and the verdict protocol. Unknown variables are
+rejected. Use doubled braces, such as `{{name}}`, for literal braces in variable
+prompts. Requirements, output and context prose remain literal text.
 
-## Validation
+The runtime supplies requirements/output guidance to generation, refinement and
+breeding, and supplies the candidate contract to critique and comparison.
+Breeding receives sampled ingredients and the child direction, not full parent
+drafts. Genotype extraction receives its separate domain guidance.
 
-Templates are automatically validated when loaded. The system checks for:
+## Keep genes reusable
 
-- Required fields and structure
-- Proper placeholder usage in prompts
-- Valid semantic versioning
-- Proper date formatting
+[`gene_prompts.py`](../../gene_prompts.py) owns the shared ingredient rules used
+by extraction and mutation. In `genotype_encode`, describe relevant domain traits
+and include `{idea_content}`. Optionally give one small decomposition example;
+do not repeat the shared rules or prescribe a fixed vocabulary.
 
-`comparison_criteria` is optional. Define it when a run may use the pairwise
-LLM evaluator; deterministic/script-only evaluation templates can omit it.
+Prefer traits that stand on their own, combining broad and distinctive concepts.
+A whole plot or design compressed into one phrase is difficult to recombine.
+The generation-boundary manager can merge synonyms and split bundles into shared
+concepts plus meaningful remainders; see [gene records](../../../docs/GeneCatalogue.md).
 
-## Template Placeholders (required at authoring time)
+## Compatibility
 
-### Required Placeholders
-- `{context_pool}` in direction builder prompts (`specific_prompt`)
-- `{input_text}` in format prompts
-- `{idea}` in critique prompts
-- `{idea}` and `{critique}` in refine prompts
-- `{ideas}` in breed prompts
-
-### Optional Interpolation
-- `{requirements}` in refine/breed prompts is replaced with the `special_requirements` block if present
-
-## Special Requirements
-
-The `special_requirements` field is used to specify template-specific constraints. Examples:
-
-- **Story templates**: "Must be exactly 100 words with a complete narrative arc"
-- **Game templates**: "Should be implementable as a simple browser game"
-- **Business templates**: "Focus on B2B SaaS solutions with clear revenue models"
-- **Research templates**: "Should include methodology, expected outcomes, and feasibility assessment"
-
-Use the `{requirements}` placeholder in your prompts to automatically include these constraints.
-
-## Using Templates
-
-Templates are automatically loaded by the system when available. The loader will:
-
-1. Look for YAML templates first
-2. Fall back to Python modules if no YAML template exists
-3. Validate templates on loading
-4. Report any warnings or errors
-
-## Contributing Templates
-
-To contribute a new template:
-
-1. Create your YAML template following the structure above
-2. Use the Template Manager UI for easy creation and testing
-3. Test it thoroughly with the validation system
-4. Submit a pull request with your template
-5. Include examples of the types of ideas it generates
-
-## Backward Compatibility
-
-The YAML system is fully backward compatible with existing Python prompt modules. The system will automatically use YAML templates when available, but fall back to Python modules for existing functionality.
+Save validates YAML types, word-count bounds, version/date and prompt variables.
+Legacy `special_requirements`, `{requirements}` and `{requirements_digest}` remain
+readable; new templates use structured fields. Existing snapshots are preserved.
+The exact field schema is in [`validation.py`](../validation.py).

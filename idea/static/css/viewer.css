@@ -1,67 +1,48 @@
-/* Modern SaaS UI styling for the Idea Evolution Viewer */
+/* Core components for the IDEA research workbench. */
 
 :root {
-  /* Modern Professional Color Palette (Indigo/Slate) */
-  --primary: #4F46E5;
-  /* Indigo 600 */
-  --primary-hover: #4338CA;
-  /* Indigo 700 */
-  --primary-light: #E0E7FF;
-  /* Indigo 100 */
-  --primary-subtle: #EEF2FF;
-  /* Indigo 50 */
-
-  --secondary: #64748B;
-  /* Slate 500 */
-  --secondary-hover: #475569;
-  /* Slate 600 */
-  --secondary-light: #F1F5F9;
-  /* Slate 100 */
-
-  --accent: #10B981;
-  /* Emerald 500 */
-  --accent-hover: #059669;
-  /* Emerald 600 */
-  --accent-light: #D1FAE5;
-  /* Emerald 100 */
-
-  --danger: #EF4444;
-  /* Red 500 */
-  --danger-hover: #DC2626;
-  /* Red 600 */
-  --danger-light: #FEE2E2;
-  /* Red 100 */
-
-  --warning: #F59E0B;
-  /* Amber 500 */
-  --warning-light: #FEF3C7;
-  /* Amber 100 */
-
-  --info: #3B82F6;
-  /* Blue 500 */
-  --info-light: #DBEAFE;
-  /* Blue 100 */
-
-  /* Neutral Colors */
-  --background: #F8FAFC;
-  /* Slate 50 */
-  --surface: #FFFFFF;
-  /* White */
-  --surface-alt: #F1F5F9;
-  /* Slate 100 */
-
-  --border: #E2E8F0;
-  /* Slate 200 */
-  --border-focus: #CBD5E1;
-  /* Slate 300 */
-
-  --text-primary: #0F172A;
-  /* Slate 900 */
-  --text-secondary: #475569;
-  /* Slate 600 */
-  --text-muted: #94A3B8;
-  /* Slate 400 */
-  --text-on-primary: #FFFFFF;
+  /* Cream, violet, and playful color accents. */
+  --primary: #7146d8;
+  --primary-hover: #5730b0;
+  --primary-light: #ede6fc;
+  --primary-subtle: #f5effd;
+  --secondary: #756782;
+  --secondary-hover: #554264;
+  --secondary-light: #f3eef9;
+  --accent: #c45d28;
+  --accent-hover: #a54619;
+  --accent-light: #fff0e4;
+  --coral: #ff975e;
+  --mint: #acdec7;
+  --lemon: #f4dc86;
+  --success: #27836a;
+  --success-light: #e2f3eb;
+  --danger: #b43c53;
+  --danger-hover: #922b3f;
+  --danger-light: #fce8ed;
+  --warning: #9b7019;
+  --warning-light: #fff4d1;
+  --info: #4378b8;
+  --info-light: #e8effa;
+  --background: #fcf9f5;
+  --surface: #fffdfa;
+  --surface-alt: #f3eef9;
+  --sidebar-surface: #f5effd;
+  --border: #e3dcea;
+  --border-focus: #b9a8d4;
+  --text-primary: #342151;
+  --text-secondary: #695878;
+  --text-muted: #756782;
+  --text-on-primary: #fffdfa;
+  --chart-average: #7146d8;
+  --chart-best: #27836a;
+  --chart-lowest: #c45d28;
+  --chart-muted: #756782;
+  --chart-violet: #7146d8;
+  --chart-coral: #c45d28;
+  --chart-green: #27836a;
+  --chart-amber: #9b7019;
+  --chart-blue: #4378b8;
 
   /* Shadows */
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
@@ -80,14 +61,14 @@
   --radius-xl: 1rem;
 
   /* Layout */
-  --sidebar-width: 280px;
+  --sidebar-width: 288px;
   --sidebar-width-expanded: 360px;
-  --sidebar-collapsed-width: 70px;
+  --sidebar-collapsed-width: 0px;
   --header-height: 64px;
 }
 
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  font-family: 'Figtree', 'Segoe UI', sans-serif;
   color: var(--text-primary);
   background-color: var(--background);
   line-height: 1.5;
@@ -285,7 +266,7 @@ body {
   width: 28px;
   height: 28px;
   object-fit: contain;
-  filter: drop-shadow(0 1px 2px rgba(79, 70, 229, 0.15));
+  filter: drop-shadow(0 1px 2px rgba(113, 70, 216, 0.15));
 }
 
 .app-header h2 {
@@ -507,7 +488,7 @@ body {
 .main-header .app-logo {
   width: 40px;
   height: 40px;
-  filter: drop-shadow(0 2px 4px rgba(79, 70, 229, 0.2));
+  filter: drop-shadow(0 2px 4px rgba(113, 70, 216, 0.2));
 }
 
 .main-header h1 {
@@ -609,16 +590,16 @@ small {
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #818CF8 0%, #6366F1 100%);
+  background: var(--primary);
   color: white !important;
-  box-shadow: 0 2px 4px rgba(79, 70, 229, 0.25);
+  box-shadow: 0 2px 4px rgba(113, 70, 216, 0.25);
   border: none;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #A5B4FC 0%, #818CF8 100%);
+  background: var(--primary-hover);
   color: white !important;
-  box-shadow: 0 4px 8px rgba(79, 70, 229, 0.35);
+  box-shadow: 0 4px 8px rgba(113, 70, 216, 0.35);
   transform: translateY(-1px);
 }
 
@@ -688,9 +669,9 @@ small {
 }
 
 .nav-buttons .btn.btn-primary {
-  background: linear-gradient(135deg, var(--primary) 0%, #6366F1 100%);
+  background: var(--primary);
   color: white;
-  box-shadow: 0 2px 4px rgba(79, 70, 229, 0.25);
+  box-shadow: 0 2px 4px rgba(113, 70, 216, 0.25);
   font-weight: 600;
 }
 
@@ -1105,9 +1086,9 @@ small {
 }
 
 .evolution-rank-chip.rank-current {
-  color: var(--success, #059669);
-  border-color: color-mix(in srgb, var(--success, #059669) 30%, var(--border));
-  background: color-mix(in srgb, var(--success, #059669) 10%, var(--surface));
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, var(--border));
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
 }
 
 .evolution-rank-chip.rank-historical {
@@ -1350,7 +1331,7 @@ small {
 }
 
 .evolution-tree-node.tree-survivor-step {
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, #059669 18%, transparent);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--success) 18%, transparent);
 }
 
 .evolution-tree-node.tree-oracle,
@@ -1380,7 +1361,7 @@ small {
 }
 
 .evolution-tree-node.tree-descendant {
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, #059669 48%, transparent);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--success) 48%, transparent);
 }
 
 .evolution-tree-node.tree-muted {
@@ -1464,17 +1445,17 @@ small {
 }
 
 .tree-connector-migration {
-  stroke: #d97706;
+  stroke: var(--chart-amber);
   stroke-dasharray: 7 5;
 }
 
 .tree-connector-survivor_refinement {
-  stroke: #7c3aed;
+  stroke: var(--primary);
   stroke-dasharray: 3 4;
 }
 
 .tree-connector-continuation {
-  stroke: #059669;
+  stroke: var(--success);
   stroke-width: 2.2;
   stroke-linecap: butt;
   stroke-dasharray: 3 5;
@@ -1488,7 +1469,7 @@ small {
 }
 
 .tree-connector-lineage-descendant {
-  stroke: #059669;
+  stroke: var(--success);
   stroke-width: 3;
   opacity: 0.86;
 }
@@ -1947,15 +1928,13 @@ small {
 }
 
 :root {
-  --oracle-color: #a21caf;
-  --oracle-bg: rgba(162, 28, 175, 0.1);
+  --oracle-color: #9c3677;
+  --oracle-bg: #f7e7f1;
 }
 
 .gen-card.oracle-card {
   border-left-color: var(--oracle-color);
-  background:
-    linear-gradient(90deg, rgba(162, 28, 175, 0.07), rgba(162, 28, 175, 0) 42%),
-    var(--surface);
+  background: color-mix(in srgb, var(--oracle-bg) 45%, var(--surface));
 }
 
 .gen-card.oracle-card::before {
@@ -1963,28 +1942,28 @@ small {
 }
 
 .island-0 {
-  --island-color: #2563eb;
-  --island-bg: rgba(37, 99, 235, 0.1);
+  --island-color: #7146d8;
+  --island-bg: rgba(113, 70, 216, 0.10);
 }
 
 .island-1 {
-  --island-color: #059669;
-  --island-bg: rgba(5, 150, 105, 0.1);
+  --island-color: #c45d28;
+  --island-bg: rgba(196, 93, 40, 0.10);
 }
 
 .island-2 {
-  --island-color: #dc2626;
-  --island-bg: rgba(220, 38, 38, 0.1);
+  --island-color: #4378b8;
+  --island-bg: rgba(67, 120, 184, 0.1);
 }
 
 .island-3 {
-  --island-color: #7c3aed;
-  --island-bg: rgba(124, 58, 237, 0.1);
+  --island-color: #27836a;
+  --island-bg: rgba(39, 131, 106, 0.1);
 }
 
 .island-4 {
-  --island-color: #d97706;
-  --island-bg: rgba(217, 119, 6, 0.1);
+  --island-color: #9b7019;
+  --island-bg: rgba(155, 112, 25, 0.1);
 }
 
 .idea-card-meta {
@@ -2202,7 +2181,7 @@ small {
 /* Elite Idea Styling */
 .card[data-elite="true"] {
   border-color: var(--warning);
-  background: linear-gradient(to bottom right, #FFFBEB, #FFFFFF);
+  background: linear-gradient(to bottom right, #FFFBEB, #fcfbf6);
 }
 
 .card[data-elite="true"]::after {
@@ -2313,7 +2292,7 @@ small {
   flex-wrap: wrap;
   padding: 0.5rem;
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(79, 70, 229, 0.06) 0%, rgba(79, 70, 229, 0.02) 100%);
+  background: linear-gradient(180deg, rgba(113, 70, 216, 0.06) 0%, rgba(113, 70, 216, 0.02) 100%);
 }
 
 .template-flow-toggle .btn {
@@ -2721,7 +2700,7 @@ small {
   );
   background-size: 200% 200%;
   animation: progress-gradient-shift 3s ease infinite;
-  box-shadow: 0 2px 4px rgba(79, 70, 229, 0.3);
+  box-shadow: 0 2px 4px rgba(113, 70, 216, 0.3);
   border-radius: 10px;
 }
 
@@ -2740,7 +2719,7 @@ small {
   text-align: right;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
-  text-shadow: 0 1px 2px rgba(79, 70, 229, 0.1);
+  text-shadow: 0 1px 2px rgba(113, 70, 216, 0.1);
 }
 
 .evolution-progress-card.complete .progress-percentage {
@@ -3150,6 +3129,25 @@ small {
   object-fit: cover;
 }
 
+.idea-card-artifact-failure {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  margin: 0.75rem 0;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--danger);
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  color: var(--text-primary);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.idea-card-artifact-failure i {
+  margin-top: 0.15rem;
+  color: var(--danger);
+}
+
 .artifact-badge {
   display: inline-flex;
   align-items: center;
@@ -3245,7 +3243,7 @@ small {
 }
 
 .template-library-card {
-  border: 1px solid rgba(79, 70, 229, 0.22);
+  border: 1px solid rgba(113, 70, 216, 0.22);
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
@@ -3334,7 +3332,7 @@ small {
 .template-library-controls .form-control:focus,
 .template-library-controls .form-select:focus {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+  box-shadow: 0 0 0 3px rgba(113, 70, 216, 0.12);
 }
 
 .template-library-table-wrap {
@@ -3359,7 +3357,7 @@ small {
 }
 
 .template-library-grid-head span {
-  color: #475569;
+  color: #526057;
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -3396,7 +3394,7 @@ small {
 }
 
 .template-library-row.template-row-selected {
-  background: linear-gradient(90deg, rgba(79, 70, 229, 0.12) 0%, rgba(79, 70, 229, 0.03) 100%);
+  background: linear-gradient(90deg, rgba(113, 70, 216, 0.12) 0%, rgba(113, 70, 216, 0.03) 100%);
   box-shadow: inset 4px 0 0 var(--primary);
 }
 
@@ -3419,7 +3417,7 @@ small {
 }
 
 .template-library-row:hover {
-  background-color: rgba(79, 70, 229, 0.06);
+  background-color: rgba(113, 70, 216, 0.06);
 }
 
 .template-library-row:focus-visible {

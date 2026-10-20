@@ -1,91 +1,89 @@
-# Evolution Engine Overview
+# How evolution works
 
-This document describes the main algorithm implemented across `idea/evolution.py` and `idea/evolution_orchestrator.py`, and how the supporting components interact.
+A run starts with generated ideas and evolves them over several generations.
+Templates supply the domain, requirements and judging criteria; the engine
+supplies the shared generation, evaluation and breeding machinery.
 
-![Evolution Engine Overview](evolution_overview.png)
+## The loop
 
-## Key Components
+1. **Generate and refine** the initial population from varied context seeds.
+2. **Evaluate** candidates with pairwise LLM comparisons and embedding
+   diversity. Comparisons update Elo; diversity measures distance from nearby
+   peers using summaries of the judging criteria.
+3. **Select** survivors and parents using combined quality/diversity fitness.
+   Age decay affects survival. Islands evolve separately with migration.
+4. **Create replacements** through independent births, single-parent variants
+   or crossover. Breeding samples saved ingredients; mutation replaces some
+   ingredients with new ones. An optional Oracle proposes alternatives.
+5. **Commit the full generation**, extract new genes and consolidate the pool
+   for the next breeding round. Save evidence, lineage, usage and progress.
 
-- **Ideator** (`llm.py`)
-  - Generates initial context and specific prompts; seeds Gen 0 ideas.
-- **Formatter** (`llm.py`)
-  - Converts raw LLM output into structured `Idea` objects.
-- **Critic** (`llm.py`)
-  - Critiques, refines, and runs pairwise comparisons; updates ELO.
-- **Breeder** (`llm.py`)
-  - Encodes to genotypes and breeds new ideas via a prompt‑driven pipeline.
-- **Hybrid Fitness + Survival** (`evolution.py`)
-  - Computes per-idea fitness from normalized Elo and normalized diversity.
-  - Selects survivors using age-decayed fitness (older ideas get gradually lower survival odds).
-- **Oracle** (`llm.py`)
-  - Analyzes all generations and proposes a replacement prompt to diversify.
-- **DiversityCalculator** (`diversity.py`)
-  - Uses Gemini embeddings for diversity metrics and centroid calculations.
+Defaults are two islands, 50% replacement, 30% mutation and a birth mix of
+50% independent / 25% single-parent / 25% crossover. Very small populations
+reduce the island count so breeding remains possible. Saved run configuration
+is the authority for an individual experiment.
 
-These agents are wrapped around Gemini models and share token accounting.
+Default fitness combines normalized Elo and diversity:
 
-Below is a simplified outline of how ideas move through the engine each generation.
+```text
+fitness = alpha × quality + (1 − alpha) × diversity
+```
 
-## Algorithm Flow
+The default `alpha` is 0.7. Selection is probabilistic; a below-average idea can
+survive or reproduce. A gene's carrier fitness is an association, not an
+estimate of its causal value. Gene occupancy itself does not affect selection.
+See [evaluator contracts](PluggableEvaluators.md) for custom metrics and failures.
 
-1. **Seeding**
-   - The engine generates `pop_size` context pools using the Ideator.
-   - Each context pool is turned into a specific prompt and an initial idea.
-   - Critic refines each idea and the Formatter structures it. The results form generation 0.
-   - Diversity metrics are computed for the initial population.
+## Genes
 
-2. **Evolution Loop** (`generations` iterations)
-   - **Tournament Ranking**: ideas are compared via the Critic to update Elo.
-   - **Fitness Scoring**:
-     - Diversity is computed per idea as distance from the current population centroid.
-     - Elo and diversity are normalized with running cross-generation statistics.
-     - Hybrid fitness is computed as:
-       - `fitness = alpha * elo_norm + (1 - alpha) * diversity_norm`
-   - **Survivor Selection**:
-     - Only a fraction of ideas are replaced each generation (`replacement_rate`).
-     - Survivors are sampled by age-decayed fitness:
-       - `survival_score = fitness * (floor + (1 - floor) * exp(-age_decay_rate * age))`
-     - This avoids hard-killing old ideas while still encouraging turnover.
-   - **Parent Allocation + Breeding**:
-     - Child slots are filled using fitness-weighted parent selection with slot caps to avoid dominance.
-     - Children are bred, then refined + formatted.
-     - Mutation applies to newly bred children via the Breeder mutation setting.
-   - **Oracle Diversification**: Oracle generates a replacement prompt; the least interesting idea (closest to the all‑history centroid) is replaced and then refined + formatted.
-   - **Diversity Calculation**: metrics recorded every generation; embeddings cached.
-   - Progress updates go to the UI throughout.
+Each candidate keeps its raw extraction and a normalized genotype. The manager
+receives the current committed vocabulary, current normalized candidates and
+new observations, then returns grouped changes only. It can merge synonyms or
+split bundles into shared concepts and meaningful remainders.
 
-3. **Completion**
-   - When all generations are finished (or a stop is requested) a final update is sent including diversity statistics and token counts for each agent.
+There is one pass per changed population boundary, shared across islands.
+Old raw observations and merge explanations stay local to the saved record;
+they are not replayed into every manager prompt. Breeding uses saved factors
+and records its exact parent inputs. Invalid consolidation leaves the last
+valid representation available.
 
-## Diversity and Embeddings
+The UI projects history through the latest vocabulary. Historical occupancy
+can therefore change after consolidation, while the actual input used for an
+old birth remains unchanged. See [gene records and history](GeneCatalogue.md).
 
-The engine stores Gemini embeddings for every idea. These are used for:
+## Persistence and execution
 
-- Computing overall and per-generation diversity scores.
-- Finding the population centroid to choose which idea the Oracle should replace.
-- Computing per-idea diversity distances used in hybrid fitness.
+Local runs use a supervised task. Production dispatches evolutions to a
+Cloud Run Job; web and worker share Firestore, the encryption secret and private
+artifact storage. An ownership token and renewable lease fence progress,
+checkpoint and completion writes, preventing replaced workers from publishing
+over a successor.
 
-Embeddings are cached so that centroid calculations across all generations are efficient.
+Completed children are saved in a generation draft. The visible committed
+history remains at the last full generation until all slots are ready. Resume
+reuses finished slots, selection and parent plans. Abrupt termination can lose
+an unfinished provider response; a failed checkpoint is not successful saving.
+Auto-rating still runs in the web process and can lose unfinished work on
+termination.
 
-## File Locations
+Usage records preserve reported tokens and price snapshots. The app's budget
+is based on recorded estimates, not provider billing enforcement. Missing usage,
+in-flight requests, infrastructure and unrelated provider activity limit that
+estimate. Costs and model capabilities are defined in
+[`idea/config.py`](../idea/config.py); runtime behavior uses
+[`idea/provider_execution.py`](../idea/provider_execution.py).
 
-- `idea/evolution.py` – main engine implementing the above steps.
-- `idea/evolution_orchestrator.py` – canonical generation loop (new runs + resume/continue).
-- `idea/llm.py` – contains agent classes used by the engine.
-- `idea/diversity.py` – helper for calculating diversity and embeddings.
-- `idea/prompts/` – YAML templates that define prompts for each idea type.
-- `idea/viewer.py` – FastAPI app providing the UI and progress updates.
+## Code map
 
-Reading these files together will give a full picture of how ideas evolve over time.
-
-## Practical Tips
-
-- Use the Template section on the main page to generate or pick a template.
-- Increase creative temperature and top_p for more exploration.
-- Tune `replacementRate`, `fitnessAlpha`, and `ageDecayRate` together:
-  - Lower `replacementRate` preserves more lineage continuity.
-  - Lower `fitnessAlpha` increases diversity pressure.
-  - Higher `ageDecayRate` increases turnover of older ideas.
-- Save results and use the Rater to compare runs; auto‑rating shows estimated LLM token costs.
-
-Note: the UI visualizes progress and diversity live.
+| Area | Entry point |
+| --- | --- |
+| Web app and API | [`idea/viewer.py`](../idea/viewer.py) |
+| Validated run configuration | [`idea/evolution_types.py`](../idea/evolution_types.py), [`idea/run_requests.py`](../idea/run_requests.py) |
+| Generation loop | [`idea/evolution_orchestrator.py`](../idea/evolution_orchestrator.py) |
+| Selection and population state | [`idea/evolution.py`](../idea/evolution.py) |
+| Agents and provider calls | [`idea/llm.py`](../idea/llm.py) |
+| Gene extraction and consolidation | [`idea/genes.py`](../idea/genes.py), [`idea/gene_pool.py`](../idea/gene_pool.py) |
+| Evaluation and diversity | [`idea/evaluation/`](../idea/evaluation/), [`idea/diversity.py`](../idea/diversity.py) |
+| Ownership and workers | [`idea/run_service.py`](../idea/run_service.py), [`idea/worker.py`](../idea/worker.py) |
+| Saved records | [`idea/database.py`](../idea/database.py), [`idea/evolution_persistence.py`](../idea/evolution_persistence.py) |
+| Browser UI | [`idea/static/`](../idea/static/) |

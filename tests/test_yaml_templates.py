@@ -169,6 +169,13 @@ class TestTemplateManagerCompatibility:
             assert 'type' in template_info
             assert template_info['type'] == 'yaml'
 
+    def test_archived_prime_visualization_is_absent_from_active_catalog(self):
+        assert "prime_visualization" not in list_available_templates()
+        assert list_available_templates()["drabble"]["evaluation"] == {
+            "artifact_generation": False,
+            "fitness_score": False,
+        }
+
     def test_missing_comparison_prompt_uses_default(self, tmp_path):
         """Templates without comparison_prompt should still load with a default"""
         template_path = Path('idea/prompts/templates/drabble.yaml')
@@ -204,11 +211,8 @@ class TestPrimeVisualizationTemplate:
     """Contract tests for the artifact-ready prime experiment preset."""
 
     def test_prime_visualization_template_validates_and_loads(self):
-        is_valid, warnings = validate_template('prime_visualization')
-        assert is_valid
-        assert warnings == []
-
-        prompts = get_prompts('prime_visualization', use_yaml=True)
+        data = yaml.safe_load(Path('archive/prime-visualization/idea/prompts/templates/prime_visualization.yaml').read_text())
+        prompts = YAMLTemplateWrapper(TemplateValidator.validate_dict(data))
         assert prompts.ITEM_TYPE == 'prime visualization experiment proposals'
         assert prompts.get_info()['version'] == '1.2.0'
 
@@ -225,7 +229,7 @@ class TestPrimeVisualizationTemplate:
             assert getattr(prompts, prompt_name).strip()
 
     def test_prime_visualization_contract_is_explicit_and_honest(self):
-        template_path = Path('idea/prompts/templates/prime_visualization.yaml')
+        template_path = Path('archive/prime-visualization/idea/prompts/templates/prime_visualization.yaml')
         data = yaml.safe_load(template_path.read_text())
         requirements = data['special_requirements']
         all_prompts = '\n'.join(data['prompts'].values())
@@ -268,14 +272,11 @@ class TestPrimeVisualizationTemplate:
         assert '{context_pool}' in data['prompts']['specific_prompt']
         assert '{input_text}' in data['prompts']['format']
 
-    def test_prime_visualization_is_catalogued_with_opt_in_llm_criteria(self):
+    def test_archived_prime_visualization_retains_its_original_llm_criteria(self):
         templates = list_available_templates()
-        template_info = templates['prime_visualization']
-        assert template_info['type'] == 'yaml'
-        assert template_info['name'] == 'Prime Visualization Experiments'
-        assert template_info['warnings'] == []
-
-        prompts = get_prompts('prime_visualization', use_yaml=True)
+        assert 'prime_visualization' not in templates
+        data = yaml.safe_load(Path('archive/prime-visualization/idea/prompts/templates/prime_visualization.yaml').read_text())
+        prompts = YAMLTemplateWrapper(TemplateValidator.validate_dict(data))
         assert len(prompts.COMPARISON_CRITERIA) >= 5
         assert any('cited precedents' in criterion for criterion in prompts.COMPARISON_CRITERIA)
         assert any('abstracted precedent principle' in criterion for criterion in prompts.COMPARISON_CRITERIA)

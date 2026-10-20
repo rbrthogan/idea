@@ -8,6 +8,7 @@ import hashlib
 import logging
 import time
 import uuid
+import threading
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from cryptography.fernet import Fernet, InvalidToken
@@ -15,18 +16,33 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from google.cloud import firestore
+from google.api_core.retry import Retry
+from idea.blocking_io import offload_sync_sdk
 
 logger = logging.getLogger(__name__)
 
+
+def _rpc(method, *args, **kwargs):
+    """Bound critical Firestore RPCs while preserving injected repository fakes."""
+    if getattr(method, "__module__", "").startswith("google.cloud.firestore"):
+        kwargs.setdefault("timeout", 20)
+        kwargs.setdefault("retry", Retry(deadline=30))
+    return method(*args, **kwargs)
+
 # Firestore client (lazy initialization)
 _db = None
+_db_lock = threading.Lock()
 
 
 def get_db() -> firestore.Client:
-    """Get or create Firestore client."""
+    """Get the shared client, optionally targeting a separately restored database."""
     global _db
-    if _db is None:
-        _db = firestore.Client()
+    with _db_lock:
+        if _db is None:
+            database_id = os.getenv("IDEA_FIRESTORE_DATABASE", "(default)").strip()
+            if not database_id:
+                raise ValueError("IDEA_FIRESTORE_DATABASE must not be empty")
+            _db = firestore.Client(database=database_id)
     return _db
 
 
@@ -49,83 +65,127 @@ def _global_lock_ref(db: firestore.Client):
     return db.collection("system").document(GLOBAL_RUN_LOCK_DOC_ID)
 
 
+@offload_sync_sdk
 async def get_active_run(user_id: str) -> Optional[Dict[str, Any]]:
     """Get the active run state for a user (if any)."""
     db = get_db()
-    doc = _run_doc_ref(db, user_id).get()
+    doc = _rpc(_run_doc_ref(db, user_id).get)
     if doc.exists:
         return doc.to_dict()
     return None
 
 
+class RunOwnershipLost(RuntimeError):
+    """The worker's claim was replaced or expired; it must stop execution."""
+
+
+@offload_sync_sdk
 async def update_active_run(user_id: str, updates: Dict[str, Any], lease_seconds: Optional[int] = None,
-                           owner_id: Optional[str] = None) -> None:
-    """Update active run state (merge). Optionally refresh the lease."""
+                           owner_id: Optional[str] = None, *, run_token: Optional[str] = None,
+                           require_live_lease: bool = False, require_expired_lease: bool = False) -> bool:
+    """Compare-and-update a claim without letting a stale worker replace its owner.
+
+    Owner workers pass their unique run token and require a live lease. Remote
+    commands pass the observed token without refreshing the lease. Legacy
+    tokenless records remain usable, but cannot mutate a token-bearing claim.
+    """
     db = get_db()
-    now_ms = _now_ms()
-    update_data = dict(updates)
-    update_data["updated_at_ms"] = now_ms
-    if owner_id:
-        update_data["owner_id"] = owner_id
-    if lease_seconds is not None:
-        update_data["heartbeat_at_ms"] = now_ms
-        update_data["lease_expires_at_ms"] = now_ms + int(lease_seconds * 1000)
-    _run_doc_ref(db, user_id).set(update_data, merge=True)
+    doc_ref = _run_doc_ref(db, user_id)
+    @firestore.transactional
+    def _update(transaction):
+        snapshot = _rpc(doc_ref.get, transaction=transaction)
+        now_ms = _now_ms()
+        if not snapshot.exists:
+            return False
+        existing = snapshot.to_dict() or {}
+        if owner_id is not None and existing.get("owner_id") != owner_id:
+            return False
+        if existing.get("run_token") != run_token:
+            return False
+        live = existing.get("lease_expires_at_ms", 0) > now_ms
+        if (require_live_lease and not live) or (require_expired_lease and live):
+            return False
+        update_data = dict(updates)
+        update_data["updated_at_ms"] = now_ms
+        update_data.pop("owner_id", None)
+        update_data.pop("run_token", None)
+        if lease_seconds is not None:
+            update_data["heartbeat_at_ms"] = now_ms
+            update_data["lease_expires_at_ms"] = now_ms + int(lease_seconds * 1000)
+        # A progress callback must never erase a remote cancellation command.
+        if existing.get("stop_requested") and update_data.get("status") in {
+            "starting", "in_progress", "resuming", "continuing"
+        }:
+            update_data["status"] = "stopping"
+        transaction.set(doc_ref, update_data, merge=True)
+        return True
+
+    return _update(db.transaction())
 
 
+@offload_sync_sdk
 async def claim_active_run(user_id: str, run_data: Dict[str, Any], lease_seconds: int,
                            owner_id: str) -> Dict[str, Any]:
     """
     Claim the user's active run slot. Returns {"ok": bool, "data": existing_or_new}.
     """
     db = get_db()
-    now_ms = _now_ms()
-    lease_expires_at_ms = now_ms + int(lease_seconds * 1000)
     doc_ref = _run_doc_ref(db, user_id)
-    active_statuses = {"starting", "in_progress", "resuming", "continuing", "stopping"}
+    active_statuses = {"starting", "queued", "in_progress", "resuming", "continuing", "stopping"}
 
     @firestore.transactional
     def _claim(transaction):
-        doc = doc_ref.get(transaction=transaction)
+        doc = _rpc(doc_ref.get, transaction=transaction)
+        now_ms = _now_ms()
+        lease_expires_at_ms = now_ms + int(lease_seconds * 1000)
         if doc.exists:
             existing = doc.to_dict()
             existing_status = existing.get("status")
             existing_lease = existing.get("lease_expires_at_ms", 0)
-            if existing_status in active_statuses and existing_lease > now_ms:
+            # Progress may publish a terminal status before checkpoint/finalizer
+            # cleanup completes. The live owner retains its slot until it
+            # explicitly clears active/running or the lease expires.
+            owned = (existing_status in active_statuses or existing.get("active")
+                     or existing.get("is_running"))
+            if owned and existing_lease > now_ms:
                 return {"ok": False, "data": existing}
 
         data = dict(run_data)
         data.update({
             "owner_id": owner_id,
+            "run_token": data.get("run_token") or uuid.uuid4().hex,
             "status": data.get("status") or "in_progress",
             "is_running": True,
             "active": True,
             # Always reset stale stop flags when claiming a fresh run slot.
             "stop_requested": False,
+            "force_stop_requested": False,
+            "cancel_acknowledged": False,
             "heartbeat_at_ms": now_ms,
             "lease_expires_at_ms": lease_expires_at_ms,
             "updated_at_ms": now_ms,
             "created_at_ms": data.get("created_at_ms") or now_ms,
         })
-        transaction.set(doc_ref, data, merge=True)
+        transaction.set(doc_ref, data)
         return {"ok": True, "data": data}
 
     return _claim(db.transaction())
 
 
+@offload_sync_sdk
 async def claim_global_run_lock(owner_id: str, user_id: str, evolution_id: str,
-                                lease_seconds: int) -> Dict[str, Any]:
+                                lease_seconds: int, *, run_token: Optional[str] = None) -> Dict[str, Any]:
     """
     Claim the global run lock (single slot). Returns {"ok": bool, "data": existing_or_new}.
     """
     db = get_db()
-    now_ms = _now_ms()
-    lease_expires_at_ms = now_ms + int(lease_seconds * 1000)
     doc_ref = _global_lock_ref(db)
 
     @firestore.transactional
     def _claim(transaction):
-        doc = doc_ref.get(transaction=transaction)
+        doc = _rpc(doc_ref.get, transaction=transaction)
+        now_ms = _now_ms()
+        lease_expires_at_ms = now_ms + int(lease_seconds * 1000)
         if doc.exists:
             existing = doc.to_dict()
             existing_lease = existing.get("lease_expires_at_ms", 0)
@@ -134,6 +194,7 @@ async def claim_global_run_lock(owner_id: str, user_id: str, evolution_id: str,
 
         data = {
             "owner_id": owner_id,
+            "run_token": run_token,
             "owner_user_id": user_id,
             "evolution_id": evolution_id,
             "heartbeat_at_ms": now_ms,
@@ -147,39 +208,81 @@ async def claim_global_run_lock(owner_id: str, user_id: str, evolution_id: str,
     return _claim(db.transaction())
 
 
-async def refresh_global_run_lock(owner_id: str, lease_seconds: int) -> None:
+@offload_sync_sdk
+async def adopt_active_run(user_id: str, evolution_id: str, run_token: str, owner_id: str,
+                           lease_seconds: int, *, transfer_global_lock: bool = False) -> bool:
+    """Atomically adopt a queued job once, transferring its optional global slot."""
+    db = get_db()
+    doc_ref = _run_doc_ref(db, user_id)
+    global_ref = _global_lock_ref(db)
+
+    @firestore.transactional
+    def _adopt(transaction):
+        snapshot = _rpc(doc_ref.get, transaction=transaction)
+        data = snapshot.to_dict() if snapshot.exists else {}
+        lock = {}
+        if transfer_global_lock:
+            lock_doc = _rpc(global_ref.get, transaction=transaction)
+            lock = lock_doc.to_dict() if lock_doc.exists else {}
+        now_ms = _now_ms()
+        if (data.get("run_token") != run_token or data.get("evolution_id") != evolution_id
+                or data.get("status") != "queued" or data.get("stop_requested")
+                or data.get("lease_expires_at_ms", 0) <= now_ms):
+            return False
+        if transfer_global_lock:
+            if lock.get("run_token") != run_token or lock.get("lease_expires_at_ms", 0) <= now_ms:
+                return False
+        lease = {"owner_id": owner_id, "heartbeat_at_ms": now_ms,
+                 "lease_expires_at_ms": now_ms + lease_seconds * 1000, "updated_at_ms": now_ms}
+        transaction.set(doc_ref, {**lease, "status": "in_progress", "status_message": "Worker started"}, merge=True)
+        if transfer_global_lock:
+            transaction.set(global_ref, lease, merge=True)
+        return True
+
+    return _adopt(db.transaction())
+
+
+@offload_sync_sdk
+async def refresh_global_run_lock(owner_id: str, lease_seconds: int, *, run_token: Optional[str] = None) -> bool:
     """Refresh the global run lock lease if owned by this instance."""
     db = get_db()
-    now_ms = _now_ms()
     doc_ref = _global_lock_ref(db)
-    doc = doc_ref.get()
-    if not doc.exists:
-        return
-    data = doc.to_dict()
-    if data.get("owner_id") != owner_id:
-        return
-    doc_ref.set({
-        "heartbeat_at_ms": now_ms,
-        "lease_expires_at_ms": now_ms + int(lease_seconds * 1000),
-        "updated_at_ms": now_ms,
-    }, merge=True)
+    @firestore.transactional
+    def _refresh(transaction):
+        doc = _rpc(doc_ref.get, transaction=transaction)
+        data = doc.to_dict() if doc.exists else {}
+        now_ms = _now_ms()
+        if data.get("owner_id") != owner_id or data.get("run_token") != run_token:
+            return False
+        if data.get("lease_expires_at_ms", 0) <= now_ms:
+            return False
+        transaction.set(doc_ref, {
+            "heartbeat_at_ms": now_ms,
+            "lease_expires_at_ms": now_ms + int(lease_seconds * 1000),
+            "updated_at_ms": now_ms,
+        }, merge=True)
+        return True
+    return _refresh(db.transaction())
 
 
-async def release_global_run_lock(owner_id: str) -> None:
+@offload_sync_sdk
+async def release_global_run_lock(owner_id: str, *, run_token: Optional[str] = None) -> bool:
     """Release the global run lock if owned by this instance."""
     db = get_db()
     doc_ref = _global_lock_ref(db)
-    doc = doc_ref.get()
-    if not doc.exists:
-        return
-    data = doc.to_dict()
-    if data.get("owner_id") != owner_id:
-        return
-    now_ms = _now_ms()
-    doc_ref.set({
-        "lease_expires_at_ms": now_ms,
-        "updated_at_ms": now_ms,
-    }, merge=True)
+    @firestore.transactional
+    def _release(transaction):
+        doc = _rpc(doc_ref.get, transaction=transaction)
+        data = doc.to_dict() if doc.exists else {}
+        if data.get("owner_id") != owner_id or data.get("run_token") != run_token:
+            return False
+        now_ms = _now_ms()
+        transaction.set(doc_ref, {
+            "lease_expires_at_ms": now_ms,
+            "updated_at_ms": now_ms,
+        }, merge=True)
+        return True
+    return _release(db.transaction())
 
 
 # --- Encryption utilities for API keys ---
@@ -231,10 +334,26 @@ def decrypt_api_key(encrypted_key: str) -> str:
 
 # --- User Settings ---
 
+API_KEY_PROVIDERS = {"google_generative_ai", "openai"}
+
+
+def _api_key_fields(provider: str) -> tuple[str, str]:
+    """Return the encrypted-value and status fields for a provider.
+
+    Gemini keeps the original field names so existing saved credentials remain
+    usable without a migration job.
+    """
+    if provider == "google_generative_ai":
+        return "api_key_encrypted", "api_key_set"
+    if provider == "openai":
+        return "openai_api_key_encrypted", "openai_api_key_set"
+    raise ValueError(f"Unsupported API-key provider: {provider!r}")
+
+@offload_sync_sdk
 async def get_user_settings(user_id: str) -> Dict[str, Any]:
     """Get user settings including encrypted API key."""
     db = get_db()
-    doc = db.collection("users").document(user_id).collection("settings").document("main").get()
+    doc = _rpc(db.collection("users").document(user_id).collection("settings").document("main").get)
 
     if doc.exists:
         data = doc.to_dict()
@@ -243,10 +362,16 @@ async def get_user_settings(user_id: str) -> Dict[str, Any]:
     return {}
 
 
-async def save_user_api_key(user_id: str, api_key: str) -> None:
-    """Save encrypted API key for user."""
+@offload_sync_sdk
+async def save_user_api_key(
+    user_id: str,
+    api_key: str,
+    provider: str = "google_generative_ai",
+) -> None:
+    """Save an encrypted, provider-scoped API key for a user."""
     db = get_db()
     encrypted = encrypt_api_key(api_key)
+    encrypted_field, status_field = _api_key_fields(provider)
 
     # Ensure parent user document exists (required for admin listing)
     user_ref = db.collection("users").document(user_id)
@@ -262,16 +387,45 @@ async def save_user_api_key(user_id: str, api_key: str) -> None:
         })
 
     db.collection("users").document(user_id).collection("settings").document("main").set({
-        "api_key_encrypted": encrypted,
-        "api_key_set": True,
+        encrypted_field: encrypted,
+        status_field: True,
         "updated_at": datetime.utcnow().isoformat()
     }, merge=True)
 
 
-async def get_user_api_key(user_id: str) -> Optional[str]:
-    """Get decrypted API key for user."""
+@offload_sync_sdk
+async def save_user_execution_preference(user_id: str, execution_mode: str) -> None:
+    """Persist the user's managed evaluation execution location."""
+    if execution_mode not in {"local", "remote"}:
+        raise ValueError("execution_mode must be 'local' or 'remote'")
+
+    db = get_db()
+    now = datetime.utcnow().isoformat()
+    user_ref = db.collection("users").document(user_id)
+    user_doc = user_ref.get()
+    if not user_doc.exists:
+        user_ref.set({"created_at": now, "last_activity": now})
+    else:
+        user_ref.update({"last_activity": now})
+
+    user_ref.collection("settings").document("main").set(
+        {
+            "execution_preference": execution_mode,
+            "updated_at": now,
+        },
+        merge=True,
+    )
+
+
+@offload_sync_sdk
+async def get_user_api_key(
+    user_id: str,
+    provider: str = "google_generative_ai",
+) -> Optional[str]:
+    """Get a user's decrypted API key for one provider."""
     settings = await get_user_settings(user_id)
-    encrypted = settings.get("api_key_encrypted")
+    encrypted_field, _ = _api_key_fields(provider)
+    encrypted = settings.get(encrypted_field)
     if encrypted:
         try:
             return decrypt_api_key(encrypted)
@@ -279,17 +433,22 @@ async def get_user_api_key(user_id: str) -> Optional[str]:
             raise
         except (InvalidToken, UnicodeDecodeError, ValueError, TypeError) as exc:
             raise APIKeyDecryptionError(
-                f"Stored API key for user {user_id!r} cannot be decrypted"
+                "The stored provider key cannot be decrypted"
             ) from exc
     return None
 
 
-async def delete_user_api_key(user_id: str) -> None:
-    """Delete user's API key."""
+@offload_sync_sdk
+async def delete_user_api_key(
+    user_id: str,
+    provider: str = "google_generative_ai",
+) -> None:
+    """Delete one provider's API key for a user."""
     db = get_db()
+    encrypted_field, status_field = _api_key_fields(provider)
     db.collection("users").document(user_id).collection("settings").document("main").update({
-        "api_key_encrypted": firestore.DELETE_FIELD,
-        "api_key_set": False,
+        encrypted_field: firestore.DELETE_FIELD,
+        status_field: False,
         "updated_at": datetime.utcnow().isoformat()
     })
 
@@ -310,6 +469,23 @@ class EvolutionSaveConflict(RuntimeError):
     """Raised when a stale evolution save loses an optimistic publish race."""
 
 
+class ActiveEvolutionWriteConflict(EvolutionSaveConflict):
+    """An unfenced editor tried to replace an actively owned worker snapshot."""
+
+
+def _active_evolution_claim(claim: Dict[str, Any], evolution_id: str) -> bool:
+    return (claim.get("evolution_id") == evolution_id
+            and claim.get("lease_expires_at_ms", 0) > _now_ms()
+            and (claim.get("is_running") or claim.get("active") or claim.get("status") in {
+                "starting", "queued", "in_progress", "resuming", "continuing", "stopping"}))
+
+
+async def ensure_evolution_editable(user_id: str, evolution_id: str) -> None:
+    """Early UI guard; manifest publication repeats it transactionally."""
+    if _active_evolution_claim(await get_active_run(user_id) or {}, evolution_id):
+        raise ActiveEvolutionWriteConflict("An active evolution can only be saved by its owning worker. Stop it before editing or repairing.")
+
+
 class EvolutionStorageIntegrityError(RuntimeError):
     """Raised when a published evolution cannot be reconstructed exactly."""
 
@@ -328,6 +504,9 @@ EVOLUTION_JSON_FIELDS = [
     'breeding_prompts',           # may contain nested structures
     'tournament_history',         # pairwise comparison details
     'comparison_cache',           # comparison cache map
+    'quality_archive',            # bounded historical best candidates
+    'generation_draft',          # uncommitted offspring and saved birth plans
+    'gene_catalogue',             # observational vocabulary; uncapped, chunked
     'token_counts',               # dict with nested diagnostics
     'config',                     # dict with config values
     'fitness_elo_stats',
@@ -348,6 +527,9 @@ EVOLUTION_EXTERNALIZED_FIELDS = {
     'breeding_prompts',
     'tournament_history',
     'comparison_cache',
+    'quality_archive',
+    'generation_draft',          # uncommitted offspring and saved birth plans
+    'gene_catalogue',
     'token_counts',
 }
 
@@ -378,6 +560,9 @@ def _prepare_evolution_save_data(
     save_data = dict(data)
     save_data["updated_at"] = updated_at
     save_data["user_id"] = user_id
+    if "token_counts" in save_data:
+        from idea.billing import compact_usage
+        save_data["_billing_summary"] = compact_usage(save_data["token_counts"])
 
     if "history" in save_data:
         save_data["_history_summary"] = _summarize_history(save_data.get("history"))
@@ -658,6 +843,10 @@ def _publish_evolution_manifest(
     save_data: Dict[str, Any],
     expected_revision: Optional[str],
     tombstone_ref: Optional[Any] = None,
+    claim_ref: Optional[Any] = None,
+    run_token: Optional[str] = None,
+    billing_ref: Optional[Any] = None,
+    billing_data: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Atomically publish a manifest only if its base revision is still current."""
 
@@ -666,7 +855,11 @@ def _publish_evolution_manifest(
     published_at_ms = _now_ms()
 
     def _read_publish_inputs(transaction: Optional[Any] = None):
-        current_doc = doc_ref.get(transaction=transaction)
+        claim = None
+        if claim_ref is not None:
+            claim_doc = _rpc(claim_ref.get, transaction=transaction)
+            claim = claim_doc.to_dict() if claim_doc.exists else {}
+        current_doc = _rpc(doc_ref.get, transaction=transaction)
         tombstone_doc = (
             tombstone_ref.get(transaction=transaction)
             if tombstone_ref is not None
@@ -676,6 +869,13 @@ def _publish_evolution_manifest(
             version: _chunk_version_ref(doc_ref, version).get(transaction=transaction)
             for version in new_versions
         }
+        if claim is not None:
+            if run_token is not None:
+                if (claim.get("run_token") != run_token or claim.get("lease_expires_at_ms", 0) <= _now_ms()
+                        or (claim.get("evolution_id") is not None and claim.get("evolution_id") != save_data.get("evolution_id"))):
+                    raise RunOwnershipLost("Checkpoint worker no longer owns a live run claim")
+            elif _active_evolution_claim(claim, str(save_data.get("evolution_id") or "")):
+                raise ActiveEvolutionWriteConflict("An active evolution can only be saved by its owning worker. Stop it before editing or repairing.")
         return current_doc, tombstone_doc, staged_versions
 
     def _can_publish(current_doc, tombstone_doc, staged_versions) -> bool:
@@ -713,6 +913,23 @@ def _publish_evolution_manifest(
         }
         return current_versions, current_update, retired_update
 
+    def _publication_data(current_data: Dict[str, Any]):
+        manifest = dict(save_data)
+        billing = dict(billing_data or {})
+        # Renaming is independent metadata: a live worker or rating request
+        # legitimately holds the same snapshot revision with an older name.
+        # Read the latest override inside the publication transaction so a
+        # checkpoint cannot undo a successful rename.
+        renamed = current_data.get("_name_override")
+        if isinstance(renamed, str) and renamed:
+            manifest.update({"name": renamed, "_name_override": renamed})
+            billing["name"] = renamed
+            if "evolution_name" in manifest:
+                manifest["evolution_name"] = renamed
+            if "evolution_name" in billing:
+                billing["evolution_name"] = renamed
+        return manifest, billing
+
     # Minimal in-memory test doubles do not implement transactions. Production
     # Firestore clients always do; the fallback keeps pure serialization tests
     # lightweight without weakening the deployed path.
@@ -724,7 +941,10 @@ def _publish_evolution_manifest(
         current_versions, current_update, retired_update = _version_updates(
             current_data
         )
-        doc_ref.set(save_data)
+        manifest, billing = _publication_data(current_data)
+        doc_ref.set(manifest)
+        if billing_ref is not None:
+            billing_ref.set(billing)
         for version in new_versions:
             _chunk_version_ref(doc_ref, version).set(current_update, merge=True)
         for version in current_versions - new_versions:
@@ -740,7 +960,10 @@ def _publish_evolution_manifest(
         current_versions, current_update, retired_update = _version_updates(
             current_data
         )
-        transaction.set(doc_ref, save_data)
+        manifest, billing = _publication_data(current_data)
+        transaction.set(doc_ref, manifest)
+        if billing_ref is not None:
+            transaction.set(billing_ref, billing)
         for version in new_versions:
             transaction.set(
                 _chunk_version_ref(doc_ref, version),
@@ -758,7 +981,68 @@ def _publish_evolution_manifest(
     return bool(_publish(db.transaction()))
 
 
-def _delete_stale_evolution_chunks(doc_ref: Any) -> None:
+def _claim_chunk_version_for_deletion(
+    doc_ref: Any,
+    chunk_version: str,
+    cutoff_ms: int,
+    *,
+    db: Optional[Any] = None,
+    untracked_created_at_ms: Optional[int] = None,
+) -> bool:
+    """Fence garbage collection against a concurrent manifest publication.
+
+    Both this transaction and publication read the manifest and lifecycle doc.
+    Whichever commits first prevents the other from deleting/publishing a live
+    version. The deleting marker also permits a later cleanup after interruption.
+    """
+    version_ref = _chunk_version_ref(doc_ref, chunk_version)
+
+    def _claim(transaction=None):
+        current_doc = _rpc(doc_ref.get, transaction=transaction)
+        version_doc = _rpc(version_ref.get, transaction=transaction)
+        current_data = current_doc.to_dict() if current_doc.exists else {}
+        if chunk_version in _manifest_chunk_versions(current_data):
+            return False
+        version_data = version_doc.to_dict() if version_doc.exists else {}
+        if version_doc.exists:
+            if str(version_data.get("chunk_version") or chunk_version) != chunk_version:
+                return False
+            state = version_data.get("state")
+            if state == "deleting":
+                return True
+            if state == "retired":
+                retired_at = version_data.get("retired_at")
+                lifecycle_ms = (
+                    int(retired_at.timestamp() * 1000)
+                    if isinstance(retired_at, datetime)
+                    else version_data.get("retired_at_ms")
+                )
+            elif state == "staged":
+                lifecycle_ms = version_data.get("created_at_ms")
+            else:
+                return False
+        else:
+            lifecycle_ms = untracked_created_at_ms
+        try:
+            if int(lifecycle_ms) > cutoff_ms:
+                return False
+        except (TypeError, ValueError):
+            return False
+        update = {"chunk_version": chunk_version, "state": "deleting", "updated_at_ms": _now_ms()}
+        if transaction is None:
+            version_ref.set(update, merge=True)
+        else:
+            transaction.set(version_ref, update, merge=True)
+        return True
+
+    # Production references carry their client; explicit db supports test fakes.
+    client = db if db is not None else getattr(doc_ref, "_client", None)
+    if not callable(getattr(client, "transaction", None)):
+        return _claim()
+    return bool(firestore.transactional(_claim)(client.transaction()))
+
+
+def _delete_stale_evolution_chunks(doc_ref: Any, *, db: Optional[Any] = None) -> None:
     """Delete retired/abandoned versions only after their lifecycle grace period."""
     current_doc = doc_ref.get()
     current_data = current_doc.to_dict() if current_doc.exists else {}
@@ -827,6 +1111,16 @@ def _delete_stale_evolution_chunks(doc_ref: Any) -> None:
     if not eligible_versions:
         return
 
+    eligible_versions = {
+        version for version in eligible_versions
+        if _claim_chunk_version_for_deletion(
+            doc_ref, version, cutoff_ms, db=db,
+            untracked_created_at_ms=untracked_created_at.get(version),
+        )
+    }
+    if not eligible_versions:
+        return
+
     for chunk_doc in chunk_collection.stream():
         chunk_data = chunk_doc.to_dict() or {}
         if chunk_data.get("chunk_version") in eligible_versions:
@@ -835,12 +1129,14 @@ def _delete_stale_evolution_chunks(doc_ref: Any) -> None:
         version_collection.document(chunk_version).delete()
 
 
+@offload_sync_sdk
 async def save_evolution(
     user_id: str,
     evolution_id: str,
     data: Dict[str, Any],
     *,
     expected_revision: Any = _EXPECTED_REVISION_UNSET,
+    run_token: Optional[str] = None,
 ) -> str:
     """Save an evolution for a user.
 
@@ -850,6 +1146,7 @@ async def save_evolution(
     """
     db = get_db()
     updated_at = datetime.utcnow().isoformat()
+    data = {**data, "evolution_id": data.get("evolution_id") or evolution_id}
     if expected_revision is _EXPECTED_REVISION_UNSET:
         expected_revision = data.get("_save_revision")
     if expected_revision is not None:
@@ -859,6 +1156,10 @@ async def save_evolution(
     chunk_version = str(save_data["_save_revision"])
 
     doc_ref = db.collection("users").document(user_id).collection("evolutions").document(evolution_id)
+    billing_id = str(data.get("evolution_id") or evolution_id)
+    billing_ref = db.collection("users").document(user_id).collection("billing_runs").document(billing_id)
+    billing_data = {key: save_data[key] for key in ("evolution_id", "evolution_name", "name", "status", "updated_at", "_billing_summary") if key in save_data}
+    billing_data["id"] = billing_id
     tombstone_ref = _evolution_tombstone_ref(db, user_id, evolution_id)
     chunk_collection = doc_ref.collection(EVOLUTION_CHUNKS_COLLECTION)
     staged_chunk_ids: List[str] = []
@@ -886,6 +1187,10 @@ async def save_evolution(
             save_data,
             expected_revision,
             tombstone_ref=tombstone_ref,
+            claim_ref=_run_doc_ref(db, user_id),
+            run_token=run_token,
+            billing_ref=billing_ref if "_billing_summary" in save_data else None,
+            billing_data=billing_data,
         )
     except Exception:
         # A transport error can be ambiguous: Firestore may have committed the
@@ -903,7 +1208,7 @@ async def save_evolution(
             f"Evolution {evolution_id!r} changed while this save was being published"
         )
     try:
-        _delete_stale_evolution_chunks(doc_ref)
+        _delete_stale_evolution_chunks(doc_ref, db=db)
     except Exception:
         logger.exception(
             "Evolution %s was published but stale chunk cleanup failed",
@@ -912,6 +1217,7 @@ async def save_evolution(
     return chunk_version
 
 
+@offload_sync_sdk
 async def get_evolution(user_id: str, evolution_id: str) -> Optional[Dict[str, Any]]:
     """Get a specific evolution for a user."""
     db = get_db()
@@ -947,6 +1253,7 @@ async def get_evolution(user_id: str, evolution_id: str) -> Optional[Dict[str, A
     return data
 
 
+@offload_sync_sdk
 async def list_evolutions(user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
     """List all evolutions for a user."""
     db = get_db()
@@ -966,6 +1273,79 @@ async def list_evolutions(user_id: str, limit: int = 50) -> List[Dict[str, Any]]
         _deserialize_evolution_json_fields(data)
         evolutions.append(data)
     return evolutions
+
+
+def _retain_billing_summary(client: Any, source_ref: Any, billing_ref: Any, data: Dict[str, Any]) -> None:
+    """Backfill legacy costs only while the source revision remains unchanged."""
+    if not callable(getattr(client, "transaction", None)):
+        return  # Small repository fakes use the computed summary without backfilling.
+    @firestore.transactional
+    def _backfill(transaction):
+        current = _rpc(source_ref.get, transaction=transaction)
+        previous = _rpc(billing_ref.get, transaction=transaction)
+        source = current.to_dict() if current.exists else {}
+        old = previous.to_dict() if previous.exists else {}
+        if not current.exists or source.get("_deleted") or source.get("_save_revision") != data.get("_save_revision"):
+            return
+        if old and str(old.get("updated_at", "")) >= str(data.get("updated_at", "")):
+            return
+        transaction.set(billing_ref, {key: data[key] for key in ("id", "evolution_id", "evolution_name", "name", "status", "updated_at", "_billing_summary") if key in data})
+    _backfill(client.transaction())
+
+
+@offload_sync_sdk
+async def list_billing_records(user_id: str, limit: int = 500) -> Dict[str, Any]:
+    """Read owner manifests; legacy fallback fetches usage chunks only."""
+    client = get_db()
+    owner = client.collection("users").document(user_id)
+    retained = list(_rpc(owner.collection("billing_runs").order_by(
+        "updated_at", direction=firestore.Query.DESCENDING).limit(limit + 1).stream))
+    docs = list(_rpc(owner.collection("evolutions").order_by(
+        "updated_at", direction=firestore.Query.DESCENDING).limit(limit + 1).stream))
+    runs = [{**(doc.to_dict() or {}), "id": doc.id} for doc in retained[:limit]]
+    retained_updates = {str(row.get("evolution_id") or row["id"]): str(row.get("updated_at", "")) for row in runs}
+    for doc in docs[:limit]:
+        data = doc.to_dict() or {}
+        if data.get("_deleted"):
+            continue
+        data["id"] = doc.id
+        if not isinstance(data.get("_billing_summary"), dict):
+            meta = data.get("_externalized_fields") or {}
+            usage_data = {"_save_revision": data.get("_save_revision")}
+            if "token_counts" in data:
+                usage_data["token_counts"] = data["token_counts"]
+            elif isinstance(meta, dict) and "token_counts" in meta:
+                usage_data["_externalized_fields"] = {"token_counts": meta["token_counts"]}
+                try:
+                    _load_externalized_evolution_fields(owner.collection("evolutions").document(doc.id), usage_data)
+                except EvolutionStorageIntegrityError:
+                    # A collected historical chunk must show a gap, not fabricated spend.
+                    usage_data = {}
+                    data["billing_usage_unavailable"] = True
+            _deserialize_evolution_json_fields(usage_data)
+            from idea.billing import compact_usage
+            data["_billing_summary"] = compact_usage(usage_data.get("token_counts"))
+        billing_id = str(data.get("evolution_id") or doc.id)
+        if data["_billing_summary"].get("estimated_cost") is not None and retained_updates.get(billing_id, "") < str(data.get("updated_at", "")):
+            _retain_billing_summary(client, owner.collection("evolutions").document(doc.id),
+                                   owner.collection("billing_runs").document(billing_id), data)
+        runs.append({key: data[key] for key in ("id", "evolution_id", "evolution_name", "name", "status", "updated_at", "_billing_summary") if key in data})
+    events = list(_rpc(owner.collection("billing_events").order_by(
+        "created_at", direction=firestore.Query.DESCENDING).limit(limit + 1).stream))
+    return {"runs": runs, "events": [{**(doc.to_dict() or {}), "id": doc.id} for doc in events[:limit]],
+            "truncated": len(docs) > limit or len(events) > limit or len(retained) > limit}
+
+
+@offload_sync_sdk
+async def save_billing_event(user_id: str, event_id: str, data: Dict[str, Any]) -> bool:
+    """Immutable request id prevents a retry from charging a rerating twice."""
+    from google.api_core.exceptions import AlreadyExists
+    ref = get_db().collection("users").document(user_id).collection("billing_events").document(event_id)
+    try:
+        _rpc(ref.create, {**data, "user_id": user_id, "created_at": datetime.utcnow().isoformat()})
+        return True
+    except AlreadyExists:
+        return False
 
 
 def _publish_evolution_tombstone(
@@ -1011,6 +1391,7 @@ def _publish_evolution_tombstone(
     return bool(_delete(db.transaction()))
 
 
+@offload_sync_sdk
 async def delete_evolution(user_id: str, evolution_id: str) -> bool:
     """Delete an evolution without allowing an in-flight stale save to revive it."""
     db = get_db()
@@ -1041,6 +1422,7 @@ async def delete_evolution(user_id: str, evolution_id: str) -> bool:
     return False
 
 
+@offload_sync_sdk
 async def rename_evolution(user_id: str, evolution_id: str, new_name: str) -> bool:
     """Rename an evolution."""
     db = get_db()
@@ -1049,6 +1431,7 @@ async def rename_evolution(user_id: str, evolution_id: str, new_name: str) -> bo
     if doc.exists:
         doc_ref.update({
             "name": new_name,
+            "_name_override": new_name,
             "updated_at": datetime.utcnow().isoformat()
         })
         return True
@@ -1057,6 +1440,7 @@ async def rename_evolution(user_id: str, evolution_id: str, new_name: str) -> bo
 
 # --- Checkpoints ---
 
+@offload_sync_sdk
 async def save_checkpoint(user_id: str, checkpoint_id: str, data: Dict[str, Any]) -> None:
     """Save a checkpoint for a user."""
     db = get_db()
@@ -1066,16 +1450,46 @@ async def save_checkpoint(user_id: str, checkpoint_id: str, data: Dict[str, Any]
     db.collection("users").document(user_id).collection("checkpoints").document(checkpoint_id).set(data)
 
 
+def _normalize_checkpoint_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Decode legacy JSON fields consistently for listing, viewing and restore."""
+    normalized = dict(data)
+    _deserialize_evolution_json_fields(normalized, strict=True)
+    if not isinstance(normalized.get("config", {}), dict):
+        raise EvolutionStorageIntegrityError("stored checkpoint config must be an object")
+    return normalized
+
+
+@offload_sync_sdk
 async def get_checkpoint(user_id: str, checkpoint_id: str) -> Optional[Dict[str, Any]]:
     """Get a specific checkpoint for a user."""
     db = get_db()
     doc = db.collection("users").document(user_id).collection("checkpoints").document(checkpoint_id).get()
 
     if doc.exists:
-        return doc.to_dict()
+        return _normalize_checkpoint_data(doc.to_dict())
     return None
 
 
+async def get_evolution_for_restore(user_id: str, identifier: str) -> Optional[Dict[str, Any]]:
+    """Read unified storage first, then a legacy checkpoint without modifying it.
+
+    Legacy checkpoints are separate snapshots, not aliases for the evolution ID
+    embedded in their payload. The repository gives a restored copy a new ID.
+    """
+    state = await get_evolution(user_id, identifier)
+    if state is not None:
+        return state
+    checkpoint = await get_checkpoint(user_id, identifier)
+    if checkpoint is None:
+        return None
+    state = dict(checkpoint)
+    state["_legacy_checkpoint_id"] = identifier
+    state["user_id"] = user_id
+    state.pop("_save_revision", None)
+    return state
+
+
+@offload_sync_sdk
 async def list_checkpoints(user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     """List all checkpoints for a user."""
     db = get_db()
@@ -1086,12 +1500,17 @@ async def list_checkpoints(user_id: str, limit: int = 20) -> List[Dict[str, Any]
 
     checkpoints = []
     for doc in docs:
-        data = doc.to_dict()
+        try:
+            data = _normalize_checkpoint_data(doc.to_dict())
+        except (EvolutionStorageIntegrityError, TypeError, ValueError):
+            logger.warning("Skipping malformed legacy checkpoint %s in listing", doc.id)
+            continue
         data["id"] = doc.id
         checkpoints.append(data)
     return checkpoints
 
 
+@offload_sync_sdk
 async def delete_checkpoint(user_id: str, checkpoint_id: str) -> bool:
     """Delete a checkpoint."""
     db = get_db()
@@ -1105,6 +1524,7 @@ async def delete_checkpoint(user_id: str, checkpoint_id: str) -> bool:
 
 # --- User Templates ---
 
+@offload_sync_sdk
 async def save_user_template(user_id: str, template_id: str, data: Dict[str, Any]) -> None:
     """Save a custom template for a user."""
     db = get_db()
@@ -1114,6 +1534,7 @@ async def save_user_template(user_id: str, template_id: str, data: Dict[str, Any
     db.collection("users").document(user_id).collection("templates").document(template_id).set(data)
 
 
+@offload_sync_sdk
 async def get_user_template(user_id: str, template_id: str) -> Optional[Dict[str, Any]]:
     """Get a specific template for a user."""
     db = get_db()
@@ -1124,6 +1545,7 @@ async def get_user_template(user_id: str, template_id: str) -> Optional[Dict[str
     return None
 
 
+@offload_sync_sdk
 async def list_user_templates(user_id: str) -> List[Dict[str, Any]]:
     """List all custom templates for a user."""
     db = get_db()
@@ -1137,6 +1559,7 @@ async def list_user_templates(user_id: str) -> List[Dict[str, Any]]:
     return templates
 
 
+@offload_sync_sdk
 async def delete_user_template(user_id: str, template_id: str) -> bool:
     """Delete a user template."""
     db = get_db()
@@ -1149,6 +1572,7 @@ async def delete_user_template(user_id: str, template_id: str) -> bool:
 
 # --- Admin functions ---
 
+@offload_sync_sdk
 async def get_all_users_summary() -> List[Dict[str, Any]]:
     """Get summary of all users for admin view."""
     db = get_db()
@@ -1178,12 +1602,17 @@ async def get_all_users_summary() -> List[Dict[str, Any]]:
         if settings.exists:
             last_activity = settings.to_dict().get("updated_at")
 
+        settings_data = settings.to_dict() if settings.exists else {}
+
         users.append({
             "user_id": user_id,
             "evolution_count": total_evolution_count,
             "template_count": template_count,
             "last_activity": last_activity,
-            "has_api_key": settings.exists and settings.to_dict().get("api_key_set", False)
+            "has_api_key": bool(
+                settings_data.get("api_key_set", False)
+                or settings_data.get("openai_api_key_set", False)
+            )
         })
 
     return users

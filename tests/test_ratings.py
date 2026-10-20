@@ -84,3 +84,35 @@ def test_parallel_evaluate_pairs_rejects_invalid_winner_instead_of_tie():
 
     assert results == [(0, 1, None)]
     assert "invalid comparison winner" in failure_details[(0, 1)]
+
+
+def test_stopping_drains_started_calls_before_returning():
+    import threading
+    started = threading.Event()
+    finished = threading.Event()
+    stop = threading.Event()
+    def compare(*args):
+        started.set()
+        time.sleep(.05)
+        finished.set()
+        return 'A'
+    def should_stop():
+        if started.is_set(): stop.set()
+        return stop.is_set()
+    results = parallel_evaluate_pairs([(0, 1), (2, 3)], [{'title': str(i)} for i in range(4)],
+                                      compare, 'airesearch', concurrency=1, should_stop=should_stop)
+    assert finished.is_set()
+    assert len(results) == 2
+    assert results[-1] == (2, 3, None)
+
+
+def test_pair_deadline_applies_to_each_submitted_window():
+    def compare(*args):
+        time.sleep(.35)
+        return 'A'
+    pairs = [(0, 1), (2, 3), (4, 5), (6, 7)]
+    with patch.dict('os.environ', {'PAIR_EVAL_TIMEOUT_SECONDS': '1'}):
+        results = parallel_evaluate_pairs(pairs, [{'title': str(i)} for i in range(8)], compare,
+                                          'airesearch', concurrency=1, randomize_presentation=False)
+    assert len(results) == 4
+    assert all(winner == 'A' for _, _, winner in results)

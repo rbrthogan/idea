@@ -18,22 +18,20 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-ENABLE_VISUAL_ARTIFACTS=false
+LOCAL_LAUNCH_ARGS=("$@")
 
 show_help() {
-    echo "Usage: ./run_local.sh [--visual-artifacts]"
+    echo "Usage: ./run_local.sh"
     echo ""
     echo "Options:"
-    echo "  --visual-artifacts  Enable and preselect the Gemini visualization-artifact workflow."
-    echo "                      Uses IDEA_ARTIFACT_STORE_ROOT when set, otherwise"
-    echo "                      stores artifacts under \$PWD/data/artifacts."
     echo "  -h, --help          Show this help message."
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --visual-artifacts)
-            ENABLE_VISUAL_ARTIFACTS=true
+            echo "Visualization execution is archived; see archive/prime-visualization/README.md." >&2
+            exit 2
             ;;
         -h|--help)
             show_help
@@ -55,6 +53,13 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
+# Parse dotenv through uv before setting defaults or validating encryption.
+# Re-exec preserves arguments and never treats .env contents as shell code.
+if [ -f .env ] && [ "${IDEA_LOCAL_ENV_LOADED:-0}" != 1 ]; then
+    export IDEA_LOCAL_ENV_LOADED=1
+    exec uv run --no-project --no-sync --env-file .env bash "$0" "${LOCAL_LAUNCH_ARGS[@]}"
+fi
+
 # Check if using emulator
 USE_EMULATOR=true
 
@@ -68,13 +73,6 @@ fi
 # only after we know whether storage is the disposable local emulator.
 export ENCRYPTION_SALT="${ENCRYPTION_SALT:-idea-evolution-salt}"
 export ADMIN_EMAILS="${ADMIN_EMAILS:-}"
-
-if [ "$ENABLE_VISUAL_ARTIFACTS" = true ]; then
-    export IDEA_ENABLE_GEMINI_CODE_ARTIFACTS=true
-    export IDEA_ARTIFACT_STORE_ROOT="${IDEA_ARTIFACT_STORE_ROOT:-${PWD}/data/artifacts}"
-    echo -e "${GREEN}Visualization artifacts enabled.${NC}"
-    echo -e "${GREEN}Artifact store: ${IDEA_ARTIFACT_STORE_ROOT}${NC}"
-fi
 
 # If using emulator, start it
 if [ "$USE_EMULATOR" = true ]; then
@@ -108,7 +106,13 @@ if [ "$USE_EMULATOR" = true ]; then
             fi
 
             # Start emulator in background
-            firebase emulators:start --only firestore --project "$GOOGLE_CLOUD_PROJECT" &
+            LOCAL_EMULATOR_DATA="${IDEA_EMULATOR_DATA_DIR:-${PWD}/data/firestore-emulator}"
+            LOCAL_EMULATOR_IMPORT_ARGS=()
+            if [ -f "$LOCAL_EMULATOR_DATA/firebase-export-metadata.json" ]; then
+                LOCAL_EMULATOR_IMPORT_ARGS=(--import "$LOCAL_EMULATOR_DATA")
+            fi
+            firebase emulators:start --only firestore --project "$GOOGLE_CLOUD_PROJECT" \
+                --export-on-exit="$LOCAL_EMULATOR_DATA" "${LOCAL_EMULATOR_IMPORT_ARGS[@]}" &
             EMULATOR_PID=$!
 
             cleanup_emulator() {
@@ -169,4 +173,8 @@ echo ""
 
 # Run the application
 IDEA_BIND_HOST="${IDEA_BIND_HOST:-127.0.0.1}"
-uv run uvicorn idea.viewer:app --reload --host "$IDEA_BIND_HOST" --port 8000
+LOCAL_ENV_FILE_ARGS=()
+if [ -f .env ]; then
+    LOCAL_ENV_FILE_ARGS=(--env-file .env)
+fi
+uv run uvicorn idea.viewer:app --reload --host "$IDEA_BIND_HOST" --port 8000 "${LOCAL_ENV_FILE_ARGS[@]}"

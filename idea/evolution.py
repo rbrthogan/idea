@@ -6,18 +6,23 @@ import numpy as np
 import asyncio
 import uuid
 import math
+import json
 from pathlib import Path
 from datetime import datetime
 from idea.models import Idea
 from idea.config import (
+    DEFAULT_MODEL,
     DEFAULT_CREATIVE_TEMP,
     DEFAULT_TOP_P,
     PROGRESS_JITTER_MAX_SECONDS,
     estimate_generation_token_cost,
+    get_model_provider,
 )
 from idea.llm import Ideator, Formatter, Critic, Breeder, Oracle
 from idea.prompts.loader import list_available_templates, get_prompts, get_prompts_from_dict
-from idea.diversity import DiversityCalculator
+from idea.diversity import DiversityCalculator, mean_pairwise_euclidean_distance
+from idea.provider_execution import await_provider_call
+from idea.billing import usage_components
 from idea.evaluation import (
     ComponentKind,
     ComputedEvaluator,
@@ -37,6 +42,14 @@ from idea.evaluation import (
     resolve_evaluation_suite,
 )
 from idea import database as db  # noqa: F401 - compatibility seam for tests and external patches
+
+class ParentSlotQuotas(dict):
+    """Generation contribution limits with the number of unplanned children."""
+
+    def __init__(self, children):
+        super().__init__()
+        self.remaining_children = children
+
 
 # Legacy filesystem storage directories (kept for backwards compatibility with local dev)
 # These are not used on Cloud Run - all data goes to Firestore
@@ -64,7 +77,7 @@ class EvolutionEngine:
         idea_type=None,
         pop_size: int = 5,
         generations: int = 3,
-        model_type: str = "gemini-2.0-flash",
+        model_type: str = DEFAULT_MODEL,
         creative_temp: float = DEFAULT_CREATIVE_TEMP,
         top_p: float = DEFAULT_TOP_P,
         random_seed: Optional[int] = None,
@@ -74,7 +87,11 @@ class EvolutionEngine:
         thinking_budget: Optional[int] = None,
         thinking_level: Optional[str] = None,
         max_budget: Optional[float] = None,
-        mutation_rate: float = 0.2,
+        mutation_rate: float = 0.3,
+        independent_birth_rate: float = 0.5,
+        single_parent_birth_rate: float = 0.25,
+        diversity_representation: str = "criterion_summaries",
+        novelty_neighbors: int = 3,
         seed_context_pool_size: Optional[int] = None,
         refine_all_ideas: bool = False,
         survivor_refinement_rate: float = 0.1,
@@ -94,6 +111,37 @@ class EvolutionEngine:
         evaluation_runners: Optional[Dict[str, Any]] = None,
         artifact_store: Optional[Any] = None,
     ):
+        # Normalize legacy constructor input before any provider or RNG is
+        # initialized. Every consumer uses the same settings that we persist.
+        from idea.evolution_types import EvolutionRunConfig
+
+        config = EvolutionRunConfig.from_engine_kwargs(locals())
+        idea_type = config.idea_type
+        pop_size = config.pop_size
+        generations = config.generations
+        model_type = config.model_type
+        creative_temp = config.creative_temp
+        top_p = config.top_p
+        random_seed = config.random_seed
+        tournament_rounds = config.tournament_rounds
+        tournament_count = config.tournament_count
+        full_tournament_rounds = config.full_tournament_rounds
+        thinking_budget = config.thinking_budget
+        thinking_level = config.thinking_level
+        max_budget = config.max_budget
+        mutation_rate = config.mutation_rate
+        seed_context_pool_size = config.seed_context_pool_size
+        refine_all_ideas = config.refine_all_ideas
+        survivor_refinement_rate = config.survivor_refinement_rate
+        island_count = config.island_count
+        migration_rate = config.migration_rate
+        migration_novelty_protection_quantile = config.migration_novelty_protection_quantile
+        replacement_rate = config.replacement_rate
+        fitness_alpha = config.fitness_alpha
+        age_decay_rate = config.age_decay_rate
+        age_decay_floor = config.age_decay_floor
+        context_novelty_threshold = config.context_novelty_threshold
+        context_novelty_max_attempts = config.context_novelty_max_attempts
         self.user_id = user_id  # User ID for scoped storage
         self.idea_type = idea_type or get_default_template_id()
         self.template_data = template_data  # Store custom template data for LLM agents
@@ -122,6 +170,10 @@ class EvolutionEngine:
         )
         self.max_budget = max_budget
         self.mutation_rate = mutation_rate
+        self.independent_birth_rate = config.independent_birth_rate
+        self.single_parent_birth_rate = config.single_parent_birth_rate
+        self.diversity_representation = config.diversity_representation
+        self.novelty_neighbors = config.novelty_neighbors
         try:
             self.seed_context_pool_size = (
                 max(1, int(seed_context_pool_size))
@@ -137,12 +189,15 @@ class EvolutionEngine:
         self.context_novelty_threshold = max(0.0, min(1.0, float(context_novelty_threshold)))
         self.context_novelty_max_attempts = max(0, int(context_novelty_max_attempts))
         self.api_key = api_key
+        self.provider = get_model_provider(model_type)
         self.refine_all_ideas = self._coerce_bool(refine_all_ideas, default=False)
         try:
             self.survivor_refinement_rate = max(0.0, min(1.0, float(survivor_refinement_rate)))
         except (TypeError, ValueError):
             self.survivor_refinement_rate = 0.1
-        self.random_seed = int(random_seed) if random_seed is not None else int(secrets.randbits(64))
+        # Root seeds travel through browser JSON; keep new seeds exactly representable
+        # by JavaScript numbers. Existing explicit 64-bit seeds remain reproducible.
+        self.random_seed = int(random_seed) if random_seed is not None else int(secrets.randbits(53))
         self._py_rng = random.Random(self.random_seed)
         self._np_rng = np.random.default_rng(self.random_seed)
         self._py_rng_lock = threading.Lock()
@@ -157,7 +212,7 @@ class EvolutionEngine:
         )
 
         self.ideator = Ideator(
-            provider="google_generative_ai",
+            provider=self.provider,
             model_name=model_type,
             temperature=creative_temp,
             top_p=top_p,
@@ -168,18 +223,23 @@ class EvolutionEngine:
             seed_context_pool_size=self.seed_context_pool_size,
         )
 
-        # Always use 2.5 Flash for formatting as it has better instruction following for structured output
-        # than 2.0 Flash or older models
+        # Keep the Gemini formatter upgrade, but do not cross providers when the
+        # selected credential belongs to OpenAI.
+        formatter_model = (
+            "gemini-2.5-flash"
+            if self.provider == "google_generative_ai"
+            else model_type
+        )
         self.formatter = Formatter(
-            provider="google_generative_ai",
-            model_name="gemini-2.5-flash",
+            provider=self.provider,
+            model_name=formatter_model,
             api_key=api_key,
             random_seed=self._random_randbits(64),
         )
 
         critic_model_name = "gemini-2.5-flash" if model_type == "gemini-2.5-pro" else model_type
         self.critic = Critic(
-            provider="google_generative_ai",
+            provider=self.provider,
             model_name=critic_model_name,
             temperature=creative_temp,
             top_p=top_p,
@@ -189,7 +249,7 @@ class EvolutionEngine:
             random_seed=self._random_randbits(64),
         )
         self.breeder = Breeder(
-            provider="google_generative_ai",
+            provider=self.provider,
             model_name=model_type,
             temperature=creative_temp,
             top_p=top_p,
@@ -201,8 +261,22 @@ class EvolutionEngine:
             random_seed=self._random_randbits(64),
         )
 
+        # Gene analysis is an analytical role, independent of creative sampling.
+        # Stay within the configured credential's provider; Google uses the
+        # manager validated on saved gene pools, OpenAI keeps the selected model.
+        gene_model = "gemini-4-argon" if self.provider == "google_generative_ai" else model_type
+        from idea.config import THINKING_MODEL_CONFIG
+        gene_capabilities = THINKING_MODEL_CONFIG.get(gene_model, {})
+        gene_level = ("medium" if "medium" in gene_capabilities.get("allowed_levels", [])
+                      else gene_capabilities.get("default_level"))
+        self.gene_manager = Breeder(
+            provider=self.provider, model_name=gene_model, temperature=0.2, top_p=1.0,
+            thinking_level=gene_level, api_key=api_key,
+        )
+        self.breeder.gene_encoder = self.gene_manager
+
         self.oracle = Oracle(
-            provider="google_generative_ai",
+            provider=self.provider,
             model_name=model_type,
             temperature=creative_temp,
             top_p=top_p,
@@ -218,6 +292,7 @@ class EvolutionEngine:
             self.formatter.register_custom_template(self.idea_type, self.template_data)
             self.critic.register_custom_template(self.idea_type, self.template_data)
             self.breeder.register_custom_template(self.idea_type, self.template_data)
+            self.gene_manager.register_custom_template(self.idea_type, self.template_data)
             self.oracle.register_custom_template(self.idea_type, self.template_data)
 
         self.history = []  # List[List[Idea]]
@@ -227,7 +302,10 @@ class EvolutionEngine:
         self.tournament_history = []  # List of tournament details per generation
 
         # Initialize diversity calculator
-        self.diversity_calculator = DiversityCalculator(api_key=api_key)
+        self.diversity_calculator = DiversityCalculator(
+            api_key=api_key,
+            provider=self.provider,
+        )
         self.diversity_history = []  # List of diversity metrics for each generation
         self.island_diversity_history = []  # List of per-island diversity snapshots
         self.migration_history = []  # List of cross-island migration events
@@ -275,6 +353,9 @@ class EvolutionEngine:
             "diversity.diversity": self.fitness_diversity_stats,
         }
         self.comparison_cache: Dict[str, Any] = {}
+        from idea.genes import empty_gene_catalogue
+        self.gene_catalogue = empty_gene_catalogue()
+        self.generation_draft = None
         self._configure_evaluation(
             evaluation_config,
             evaluation_runners,
@@ -404,7 +485,8 @@ class EvolutionEngine:
             count = int(value)
         except (TypeError, ValueError):
             count = 1
-        max_count = max(1, int(pop_size or 1))
+        # Crossover needs at least two distinct candidates per island.
+        max_count = max(1, int(pop_size or 1) // 2)
         return max(1, min(max_count, count))
 
     def _random_randbits(self, bits: int) -> int:
@@ -461,7 +543,7 @@ class EvolutionEngine:
                 try:
                     # Check for stop before starting
                     if self.stop_requested:
-                        return None
+                        return index, None
 
                     # Small stagger to prevent "thundering herd" completion where all parallel tasks
                     # finish at the exact same millisecond, causing the UI to jump from 0% to 100% instantly.
@@ -472,38 +554,38 @@ class EvolutionEngine:
                     result = await task_func()
                     return index, result
                 except Exception as e:
+                    from idea.evolution_persistence import EvolutionPersistenceError
+                    if isinstance(e, (EvolutionPersistenceError, db.EvolutionSaveConflict, db.RunOwnershipLost)):
+                        raise
                     print(f"Error in task {index}: {e}")
                     return index, None
 
-        # Create coroutines
-        coroutines = [wrapped_task(i, task) for i, task in enumerate(tasks)]
-
-        # Run as completed to update progress
-        for future in asyncio.as_completed(coroutines):
-            if self.stop_requested:
-                break
-
-            index, result = await future
-            results[index] = result
-            completed_count += 1
-
-            # Calculate progress
-            current_step = start_step + completed_count
-            progress_percent = (current_step / total_steps) * 100
-
-            # Update status
-            status_message = description_template.format(
-                completed=completed_count,
-                total=len(tasks)
-            )
-
-            update_data = base_progress_info.copy()
-            update_data.update({
-                "progress": progress_percent,
-                "status_message": status_message
-            })
-
-            await progress_callback(update_data)
+        pending = {asyncio.create_task(wrapped_task(i, task)) for i, task in enumerate(tasks)}
+        all_tasks = set(pending)
+        try:
+            while pending and not self.stop_requested:
+                # A short bounded wait makes stop responsive even if no
+                # provider finishes. wait() creates no unawaited iterator.
+                done, pending = await asyncio.wait(
+                    pending, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    index, result = task.result()
+                    results[index] = result
+                    completed_count += 1
+                    update_data = base_progress_info.copy()
+                    update_data.update({
+                        "progress": min(100, (start_step + completed_count) / max(1, total_steps) * 100),
+                        "status_message": description_template.format(
+                            completed=completed_count, total=len(tasks)
+                        ),
+                    })
+                    await progress_callback(update_data)
+        finally:
+            for task in all_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*all_tasks, return_exceptions=True)
 
         return results
 
@@ -511,6 +593,9 @@ class EvolutionEngine:
         """Generate contexts for the initial population"""
         self.contexts = []
         for _ in range(self.pop_size):
+            if self.stop_requested or self.check_budget():
+                self.stop_requested = True
+                break
             context = self.ideator.generate_context(self.idea_type)
             self.contexts.append(context)
         return self.contexts
@@ -564,6 +649,8 @@ class EvolutionEngine:
             island_diversity_history=self.island_diversity_history,
             migration_history=self.migration_history,
             comparison_cache=self.comparison_cache,
+            gene_catalogue=self.gene_catalogue,
+            generation_draft=self.generation_draft,
             avg_idea_cost=self.avg_idea_cost,
             avg_tournament_cost=self.avg_tournament_cost,
             stop_requested=self.stop_requested,
@@ -758,16 +845,7 @@ class EvolutionEngine:
 
     @staticmethod
     def _embedding_mean_distance(embeddings: List[np.ndarray]) -> float:
-        valid_embeddings = EvolutionEngine._valid_embedding_list(embeddings)
-        if len(valid_embeddings) < 2:
-            return 0.0
-        matrix = np.array(valid_embeddings)
-        if matrix.ndim != 2 or matrix.shape[0] < 2:
-            return 0.0
-        deltas = matrix[:, None, :] - matrix[None, :, :]
-        distances = np.linalg.norm(deltas, axis=2)
-        upper = np.triu_indices(matrix.shape[0], k=1)
-        return float(np.mean(distances[upper])) if upper[0].size else 0.0
+        return mean_pairwise_euclidean_distance(EvolutionEngine._valid_embedding_list(embeddings))
 
     @staticmethod
     def _embedding_centroid(embeddings: List[np.ndarray]) -> Optional[np.ndarray]:
@@ -879,116 +957,121 @@ class EvolutionEngine:
             "island_separation_ratio": island_separation_ratio,
         }
 
-    async def _calculate_and_store_diversity(self) -> Dict[str, Any]:
-        """
-        Calculate diversity metrics for the current population history and store them.
-        Also populates our embedding storage for efficient centroid computation.
+    @staticmethod
+    def _history_sampling_key(candidate: Any) -> str:
+        from hashlib import sha256
+        if isinstance(candidate, dict) and candidate.get("id"):
+            identity = str(candidate["id"])
+        else:
+            import json
+            identity = json.dumps(candidate, sort_keys=True, default=str)
+        return sha256(identity.encode("utf-8")).hexdigest()
 
-        Returns:
-            Dictionary containing diversity metrics
+    def _bounded_history_sample(self, limit: int = 256) -> tuple[List[Any], int]:
+        """Bottom-k stable hashes: old exclusions cannot re-enter as history grows."""
+        import heapq
+        unique = {}
+        for generation in self.history:
+            for candidate in generation:
+                unique.setdefault(self._history_sampling_key(candidate), candidate)
+        selected = heapq.nsmallest(limit, unique)
+        return [unique[key] for key in selected], len(unique)
+
+    def _prune_embedding_cache(self, references: List[Any]) -> None:
+        keep_ids = {str(candidate.get("id")) for candidate in references
+                    if isinstance(candidate, dict) and candidate.get("id")}
+        kept = [(key, value) for key, value in self.idea_embeddings.items() if key in keep_ids]
+        self.idea_embeddings = dict(kept)
+        self.all_embeddings = [value for _, value in kept]
+        self.embedding_id_to_index = {key: index for index, (key, _) in enumerate(kept)}
+        calculator = self.diversity_calculator
+        cache = getattr(calculator, "_embedding_cache", None)
+        if isinstance(cache, dict):
+            keep_text_keys = {calculator._cache_key(calculator._get_idea_text(candidate))
+                              for candidate in references}
+            for candidate in references:
+                summary = candidate.get("diversity_summary") if isinstance(candidate, dict) else None
+                if isinstance(summary, dict):
+                    keep_text_keys.update(calculator._cache_key(value)
+                                          for value in summary.get("summaries", []))
+            calculator._embedding_cache = {key: value for key, value in cache.items()
+                                           if key in keep_text_keys}
+
+    async def _calculate_and_store_diversity(self) -> Dict[str, Any]:
+        """Exact current metrics and a labelled, bounded historical sample.
+
+        Candidate histories and previous scalar generation measurements are
+        preserved; historical vectors neither grow forever nor get re-embedded
+        on every checkpoint. The fixed bottom-k sampler is order independent.
         """
         try:
             if not self.history:
                 return {"enabled": False, "reason": "No history available"}
-
-            print("🔍 Calculating population diversity...")
-
-            # Flatten all ideas from all generations to populate embedding storage
-            all_ideas = []
-            for generation in self.history:
-                all_ideas.extend(generation)
-
-            precomputed_embeddings = None
-            # Ensure we have embeddings for all ideas (this will populate our storage)
-            if all_ideas:
-                precomputed_embeddings = await self._get_or_compute_embeddings_for_ideas(all_ideas)
-                print(f"📦 Embedding storage now contains {len(self.all_embeddings)} embeddings")
-
-            # Calculate diversity using the standard diversity calculator
-            diversity_data = await self.diversity_calculator.calculate_diversity(
-                self.history,
-                precomputed_embeddings=precomputed_embeddings,
-            )
-            diversity_analytics = self._build_diversity_analytics(
-                self.history,
-                precomputed_embeddings,
-                diversity_data,
-            )
-            diversity_data["analytics"] = diversity_analytics
-            diversity_data["current_generation"] = diversity_analytics["current_generation"]
-            diversity_data["current_generation_diversity"] = diversity_analytics[
-                "current_generation_diversity"
-            ]
-            diversity_data["mean_island_diversity"] = diversity_analytics[
-                "mean_island_diversity"
-            ]
-            diversity_data["inter_island_diversity"] = diversity_analytics[
-                "inter_island_diversity"
-            ]
-            diversity_data["island_separation_ratio"] = diversity_analytics[
-                "island_separation_ratio"
-            ]
-            diversity_data["current_island_diversities"] = diversity_analytics["islands"]
+            current = self.history[-1]
+            current_embeddings = await self._get_or_compute_embeddings_for_ideas(current)
+            sample, unique_count = self._bounded_history_sample()
+            sampled_embeddings = await self._get_or_compute_embeddings_for_ideas(sample)
+            data = await self.diversity_calculator.calculate_diversity(
+                [sample], precomputed_embeddings=sampled_embeddings)
+            generation_index = len(self.history)-1
+            current_valid = self._valid_embedding_list(current_embeddings)
+            rows = {}
+            for snapshot in self.diversity_history:
+                for row in snapshot.get("generation_diversities", []):
+                    rows[row["generation"]] = row
+            rows[generation_index] = {"generation": generation_index,
+                "diversity_score": 0.0,
+                "idea_count": len(current), "valid_embeddings": len(current_valid)}
+            data["generation_diversities"] = [rows[index] for index in sorted(rows)]
+            total_slots = sum(len(generation) for generation in self.history)
+            metadata = {"method": "bottom_sha256_unique_candidate_v1",
+                "sample_size": len(sample), "total_size": unique_count,
+                "total_history_slots": total_slots, "truncated": unique_count > len(sample)}
+            data["history_sampling"] = metadata
+            metric_version = 3 if getattr(self, "diversity_representation", "full_text") == "criterion_summaries" else 2
+            data["metadata"] = {"history_sampling": metadata, "metric_version": metric_version,
+                                "embedding_scope": "historical_sample"}
+            data["metric_version"] = metric_version
+            data["representation"] = getattr(self, "diversity_representation", "full_text")
+            data["criterion_aggregation"] = "equal_mean_cosine_distance" if metric_version == 3 else None
+            data["embedding_scope"] = "historical_sample"
+            data["total_ideas"] = total_slots
+            data["inter_generation_diversity"] = None
+            data["inter_generation_diversity_reason"] = "bounded sample does not establish generation centroids"
+            # Only the last slice needs vectors for current/island analytics.
+            preceding_slots = total_slots-len(current)
+            aligned = [None]*preceding_slots + current_embeddings
+            analytics = await await_provider_call(self._build_diversity_analytics, self.history, aligned, data)
+            rows[generation_index]["diversity_score"] = analytics["current_generation_diversity"]
+            analytics["cumulative_diversity_scope"] = metadata
+            data["analytics"] = analytics
+            for key in ("current_generation", "current_generation_diversity",
+                        "mean_island_diversity", "inter_island_diversity", "island_separation_ratio"):
+                data[key] = analytics[key]
+            data["current_island_diversities"] = analytics["islands"]
             if self.island_count > 1:
-                island_diversities = []
-                for island_id in range(self.island_count):
-                    island_history: List[List[Any]] = []
-                    for generation in self.history:
-                        fallback_ids = self._initial_island_ids(len(generation))
-                        island_generation = [
-                            idea
-                            for idx, idea in enumerate(generation)
-                            if self._get_idea_island_id(
-                                idea,
-                                fallback=fallback_ids[idx] if idx < len(fallback_ids) else 0,
-                            )
-                            == island_id
-                        ]
-                        island_history.append(island_generation)
-
-                    flat_island_ideas = [
-                        idea for generation in island_history for idea in generation
-                    ]
-                    island_embeddings = None
-                    if flat_island_ideas:
-                        island_embeddings = await self._get_or_compute_embeddings_for_ideas(
-                            flat_island_ideas
-                        )
-                    island_data = await self.diversity_calculator.calculate_diversity(
-                        island_history,
-                        precomputed_embeddings=island_embeddings,
-                    )
-                    island_data["island_id"] = island_id
-                    island_data["idea_count"] = len(flat_island_ideas)
-                    island_diversities.append(island_data)
-
-                diversity_data["island_diversities"] = island_diversities
-                self.island_diversity_history.append(
-                    {
-                        "generation": len(self.history) - 1,
-                        "inter_island_diversity": diversity_analytics[
-                            "inter_island_diversity"
-                        ],
-                        "mean_island_diversity": diversity_analytics[
-                            "mean_island_diversity"
-                        ],
-                        "island_separation_ratio": diversity_analytics[
-                            "island_separation_ratio"
-                        ],
-                        "islands": island_diversities,
-                        "current_islands": diversity_analytics["islands"],
-                    }
-                )
-            self.diversity_history.append(diversity_data)
-
-            # Print diversity summary to logs
-            self.diversity_calculator.print_diversity_summary(diversity_data)
-
-            return diversity_data
-
-        except Exception as e:
-            print(f"Warning: Diversity calculation failed: {e}")
-            return {"enabled": True, "error": str(e)}
+                # Retain scalar island trends without duplicating historical
+                # high-dimensional vectors in every generation's snapshot.
+                islands = []
+                for row in analytics["islands"]:
+                    islands.append({**row, "enabled": data.get("enabled", False),
+                        "generation_diversities": [{"generation": generation_index, **row}],
+                        "embedding_scope": "current_generation"})
+                data["island_diversities"] = islands
+                self.island_diversity_history.append({
+                    "generation": generation_index, "islands": islands,
+                    "current_islands": analytics["islands"],
+                    "inter_island_diversity": analytics["inter_island_diversity"],
+                    "mean_island_diversity": analytics["mean_island_diversity"],
+                    "island_separation_ratio": analytics["island_separation_ratio"]})
+            self.diversity_history.append(data)
+            retained = current + sample + list(getattr(self, "quality_archive", []))
+            self._prune_embedding_cache(retained)
+            self.diversity_calculator.print_diversity_summary(data)
+            return data
+        except Exception as exc:
+            print(f"Warning: Diversity calculation failed: {exc}")
+            return {"enabled": True, "error": str(exc)}
 
     def _set_tournament_history(self, generation: int, rounds: List[Dict[str, Any]]) -> None:
         """
@@ -1011,157 +1094,14 @@ class EvolutionEngine:
             self.tournament_history.append(entry)
         self.tournament_history.sort(key=lambda e: e.get("generation", 0))
 
-    async def _find_least_interesting_idea_idx(self, current_generation: List[str]) -> int:
-        """
-        Find the index of the least interesting idea in the current generation using embedding-based centroid distance.
+    async def _find_least_interesting_idea_idx(self, current_generation: List[Any]) -> int:
+        """Find the least novel current peer; historical caches have no vote."""
+        scores = await self._calculate_population_diversity_scores(current_generation)
+        return min(scores, key=scores.get) if scores else 0
 
-        The "interesting-ness" score is computed as the distance of each idea to the POPULATION centroid
-        (computed from ALL historical ideas across ALL generations).
-        The idea with the lowest score (closest to centroid) is considered least interesting.
-
-        Args:
-            current_generation: List of ideas in the current generation
-
-        Returns:
-            Index of the least interesting idea (0-based)
-        """
-        try:
-            if not self.diversity_calculator.is_enabled():
-                print("Diversity calculator not enabled, defaulting to first idea for replacement")
-                return 0
-
-            if len(current_generation) <= 1:
-                return 0
-
-            print(f"🎯 Calculating embedding-based interesting-ness scores for {len(current_generation)} ideas...")
-            print(f"🎯 Population has {len(self.all_embeddings)} total embeddings for centroid calculation")
-
-            # Get or compute embeddings for current generation ideas
-            embeddings = await self._get_or_compute_embeddings_for_ideas(current_generation)
-
-            # Filter out failed embeddings and track their indices
-            valid_embeddings = []
-            valid_indices = []
-            for idx, embedding in enumerate(embeddings):
-                if embedding is not None:
-                    valid_embeddings.append(embedding)
-                    valid_indices.append(idx)
-
-            if len(valid_embeddings) == 0:
-                print("No valid embeddings for current generation, defaulting to first idea")
-                return 0
-
-            # Compute population centroid from ALL historical embeddings
-            population_centroid = await self._compute_population_centroid()
-            if population_centroid is None:
-                print("No population centroid available, defaulting to first idea")
-                return 0
-
-            # Calculate distance from each current generation idea to the population centroid
-            import numpy as np
-            distances = []
-            for i, embedding in enumerate(valid_embeddings):
-                distance = np.sqrt(np.sum((embedding - population_centroid) ** 2))
-                distances.append(distance)
-
-            # Find the index of the idea with minimum distance (least interesting)
-            min_distance_idx = np.argmin(distances)
-            least_interesting_original_idx = valid_indices[min_distance_idx]
-
-            # Extract title for logging
-            least_interesting_idea = current_generation[least_interesting_original_idx]
-            title = "Unknown"
-            if isinstance(least_interesting_idea, dict) and "idea" in least_interesting_idea:
-                idea_obj = least_interesting_idea["idea"]
-                if hasattr(idea_obj, 'title'):
-                    title = idea_obj.title
-
-            print(f"🎯 Least interesting idea (closest to population centroid): '{title}' at index {least_interesting_original_idx}")
-            print(f"   Distance to population centroid: {distances[min_distance_idx]:.4f}")
-            print(f"   Population centroid computed from {len(self.all_embeddings)} historical embeddings")
-
-            return least_interesting_original_idx
-
-        except Exception as e:
-            print(f"Error calculating interesting-ness scores: {e}")
-            print("Defaulting to first idea for replacement")
-            return 0
-
-    async def _find_most_diverse_idea_idx(self, current_generation: List[str]) -> int:
-        """
-        Find the index of the most diverse idea in the current generation using embedding-based centroid distance.
-
-        The diversity score is computed as the distance of each idea to the POPULATION centroid
-        (computed from ALL historical ideas across ALL generations).
-        The idea with the highest score (farthest from centroid) is considered most diverse.
-
-        Args:
-            current_generation: List of ideas in the current generation
-
-        Returns:
-            Index of the most diverse idea (0-based)
-        """
-        try:
-            if not self.diversity_calculator.is_enabled():
-                print("Diversity calculator not enabled, defaulting to first idea for creative selection")
-                return 0
-
-            if len(current_generation) <= 1:
-                return 0
-
-            print(f"🌟 Calculating embedding-based diversity scores for {len(current_generation)} ideas...")
-            print(f"🌟 Population has {len(self.all_embeddings)} total embeddings for centroid calculation")
-
-            # Get or compute embeddings for current generation ideas
-            embeddings = await self._get_or_compute_embeddings_for_ideas(current_generation)
-
-            # Filter out failed embeddings and track their indices
-            valid_embeddings = []
-            valid_indices = []
-            for idx, embedding in enumerate(embeddings):
-                if embedding is not None:
-                    valid_embeddings.append(embedding)
-                    valid_indices.append(idx)
-
-            if len(valid_embeddings) == 0:
-                print("No valid embeddings for current generation, defaulting to first idea")
-                return 0
-
-            # Compute population centroid from ALL historical embeddings
-            population_centroid = await self._compute_population_centroid()
-            if population_centroid is None:
-                print("No population centroid available, defaulting to first idea")
-                return 0
-
-            # Calculate distance from each current generation idea to the population centroid
-            import numpy as np
-            distances = []
-            for i, embedding in enumerate(valid_embeddings):
-                distance = np.sqrt(np.sum((embedding - population_centroid) ** 2))
-                distances.append(distance)
-
-            # Find the index of the idea with maximum distance (most diverse)
-            max_distance_idx = np.argmax(distances)
-            most_diverse_original_idx = valid_indices[max_distance_idx]
-
-            # Extract title for logging
-            most_diverse_idea = current_generation[most_diverse_original_idx]
-            title = "Unknown"
-            if isinstance(most_diverse_idea, dict) and "idea" in most_diverse_idea:
-                idea_obj = most_diverse_idea["idea"]
-                if hasattr(idea_obj, 'title'):
-                    title = idea_obj.title
-
-            print(f"🌟 Most diverse idea (farthest from population centroid): '{title}' at index {most_diverse_original_idx}")
-            print(f"   Distance to population centroid: {distances[max_distance_idx]:.4f}")
-            print(f"   Population centroid computed from {len(self.all_embeddings)} historical embeddings")
-
-            return most_diverse_original_idx
-
-        except Exception as e:
-            print(f"Error calculating diversity scores: {e}")
-            print("Defaulting to first idea for creative selection")
-            return 0
+    async def _find_most_diverse_idea_idx(self, current_generation: List[Any]) -> int:
+        scores = await self._calculate_population_diversity_scores(current_generation)
+        return max(scores, key=scores.get) if scores else 0
 
     def check_budget(self) -> bool:
         """
@@ -1219,11 +1159,18 @@ class EvolutionEngine:
                 component_output = safe_int(summary.get("output"))
                 component_thoughts = safe_int(summary.get("thoughts"))
                 component_cached_input = safe_int(summary.get("cached_input"))
+                component_cache_write_input = safe_int(summary.get("cache_write_input"))
                 component_tool_input = safe_int(summary.get("tool_input"))
                 component_uncached_input = (
                     safe_int(summary.get("uncached_input"))
                     if "uncached_input" in summary
-                    else max(component_input + component_tool_input - component_cached_input, 0)
+                    else max(
+                        component_input
+                        + component_tool_input
+                        - component_cached_input
+                        - component_cache_write_input,
+                        0,
+                    )
                 )
                 component_total = safe_int(summary.get("total")) or (
                     component_input + component_output + component_thoughts + component_tool_input
@@ -1233,11 +1180,14 @@ class EvolutionEngine:
                 if "input_cost" not in summary and component_cost:
                     component_input_cost = component_cost
                 component_cached_input_cost = safe_float(summary.get("cached_input_cost"))
+                component_cache_write_input_cost = safe_float(
+                    summary.get("cache_write_input_cost")
+                )
                 component_uncached_input_cost = safe_float(summary.get("uncached_input_cost"))
                 component_output_cost = safe_float(summary.get("output_cost"))
                 component_thought_cost = safe_float(summary.get("thought_cost"))
                 component_model = summary.get("model") or getattr(component, "model_name", "unknown")
-                if component_name not in required_components and component_total == 0 and component_cost == 0:
+                if component_name not in required_components and component_total == 0 and component_cost == 0 and not summary.get("missing_usage_requests"):
                     return None
                 data = {
                     "total": component_total,
@@ -1245,12 +1195,14 @@ class EvolutionEngine:
                     "output": component_output,
                     "thoughts": component_thoughts,
                     "cached_input": component_cached_input,
+                    "cache_write_input": component_cache_write_input,
                     "uncached_input": component_uncached_input,
                     "tool_input": component_tool_input,
                     "model": component_model,
                     "cost": component_cost,
                     "_input_cost": component_input_cost,
                     "_cached_input_cost": component_cached_input_cost,
+                    "_cache_write_input_cost": component_cache_write_input_cost,
                     "_uncached_input_cost": component_uncached_input_cost,
                     "_output_cost": component_output_cost,
                     "_thought_cost": component_thought_cost,
@@ -1260,6 +1212,8 @@ class EvolutionEngine:
                     "requests",
                     "large_prompt_requests",
                     "per_model",
+                    "provider", "usage_by_price", "cache_savings", "usage_basis",
+                    "missing_usage_requests", "pricing_known",
                 ):
                     if optional_key in summary:
                         data[optional_key] = summary[optional_key]
@@ -1271,6 +1225,9 @@ class EvolutionEngine:
                 getattr(component, "thought_token_count", getattr(component, "thinking_token_count", 0))
             )
             component_cached_input = safe_int(getattr(component, "cached_input_token_count", 0))
+            component_cache_write_input = safe_int(
+                getattr(component, "cache_write_input_token_count", 0)
+            )
             component_tool_input = safe_int(getattr(component, "tool_input_token_count", 0))
             component_total = safe_int(
                 getattr(
@@ -1288,6 +1245,7 @@ class EvolutionEngine:
                 output_tokens=component_output,
                 thought_tokens=component_thoughts,
                 cached_input_tokens=component_cached_input,
+                cache_write_input_tokens=component_cache_write_input,
                 tool_input_tokens=component_tool_input,
             )
             component_uncached_input = safe_int(
@@ -1297,6 +1255,7 @@ class EvolutionEngine:
             component_input_cost = usage_cost["input_cost"]
             component_uncached_input_cost = usage_cost["uncached_input_cost"]
             component_cached_input_cost = usage_cost["cached_input_cost"]
+            component_cache_write_input_cost = usage_cost["cache_write_input_cost"]
             component_output_cost = usage_cost["output_cost"]
             component_thought_cost = usage_cost["thought_cost"]
             component_cost = usage_cost["total_cost"]
@@ -1308,12 +1267,14 @@ class EvolutionEngine:
                 "output": component_output,
                 "thoughts": component_thoughts,
                 "cached_input": component_cached_input,
+                "cache_write_input": component_cache_write_input,
                 "uncached_input": component_uncached_input,
                 "tool_input": component_tool_input,
                 "model": component_model,
                 "cost": component_cost,
                 "_input_cost": component_input_cost,
                 "_cached_input_cost": component_cached_input_cost,
+                "_cache_write_input_cost": component_cache_write_input_cost,
                 "_uncached_input_cost": component_uncached_input_cost,
                 "_output_cost": component_output_cost,
                 "_thought_cost": component_thought_cost,
@@ -1324,6 +1285,7 @@ class EvolutionEngine:
             ("formatter", getattr(self, "formatter", None)),
             ("critic", getattr(self, "critic", None)),
             ("breeder", getattr(self, "breeder", None)),
+            ("gene_manager", getattr(self, "gene_manager", None)),
             ("genotype_encoder", getattr(self, "genotype_encoder", None)),
             ("diversity_embeddings", getattr(self, "diversity_calculator", None)),
             ("oracle", getattr(self, "oracle", None)),
@@ -1345,12 +1307,14 @@ class EvolutionEngine:
         total_output = 0
         total_thoughts = 0
         total_cached_input = 0
+        total_cache_write_input = 0
         total_uncached_input = 0
         total_tool_input = 0
         total_provider_tokens = 0
         total_input_cost = 0.0
         total_uncached_input_cost = 0.0
         total_cached_input_cost = 0.0
+        total_cache_write_input_cost = 0.0
         total_output_cost = 0.0
         total_thought_cost = 0.0
 
@@ -1364,11 +1328,15 @@ class EvolutionEngine:
             total_output += safe_int(summary.get("output"))
             total_thoughts += safe_int(summary.get("thoughts"))
             total_cached_input += safe_int(summary.get("cached_input"))
+            total_cache_write_input += safe_int(summary.get("cache_write_input"))
             total_uncached_input += safe_int(summary.get("uncached_input"))
             total_tool_input += safe_int(summary.get("tool_input"))
             total_input_cost += safe_float(summary.pop("_input_cost", 0.0))
             total_uncached_input_cost += safe_float(summary.pop("_uncached_input_cost", 0.0))
             total_cached_input_cost += safe_float(summary.pop("_cached_input_cost", 0.0))
+            total_cache_write_input_cost += safe_float(
+                summary.pop("_cache_write_input_cost", 0.0)
+            )
             total_output_cost += safe_float(summary.pop("_output_cost", 0.0))
             total_thought_cost += safe_float(summary.pop("_thought_cost", 0.0))
             models[component_name] = summary.get("model", "unknown")
@@ -1388,8 +1356,12 @@ class EvolutionEngine:
             prior_output = safe_int(persisted.get("total_output"))
             prior_thoughts = safe_int(persisted.get("total_thoughts"))
             prior_cached = safe_int(persisted.get("total_cached_input"))
+            prior_cache_write = safe_int(persisted.get("total_cache_write_input"))
             prior_uncached = safe_int(
-                persisted.get("total_uncached_input", max(prior_input - prior_cached, 0))
+                persisted.get(
+                    "total_uncached_input",
+                    max(prior_input - prior_cached - prior_cache_write, 0),
+                )
             )
             prior_tool = safe_int(persisted.get("total_tool_input"))
             prior_input_cost = safe_float(persisted_cost.get("input_cost"))
@@ -1407,6 +1379,7 @@ class EvolutionEngine:
                 total_output += prior_output
                 total_thoughts += prior_thoughts
                 total_cached_input += prior_cached
+                total_cache_write_input += prior_cache_write
                 total_uncached_input += prior_uncached
                 total_tool_input += prior_tool
                 total_input_cost += prior_input_cost
@@ -1416,6 +1389,9 @@ class EvolutionEngine:
                 total_cached_input_cost += safe_float(
                     persisted_cost.get("cached_input_cost")
                 )
+                total_cache_write_input_cost += safe_float(
+                    persisted_cost.get("cache_write_input_cost")
+                )
                 total_output_cost += prior_output_cost
                 total_thought_cost += prior_thought_cost
                 token_data["restored_usage"] = {
@@ -1424,10 +1400,12 @@ class EvolutionEngine:
                     "output": prior_output,
                     "thoughts": prior_thoughts,
                     "cached_input": prior_cached,
+                    "cache_write_input": prior_cache_write,
                     "uncached_input": prior_uncached,
                     "tool_input": prior_tool,
                     "model": "checkpoint aggregate",
                     "cost": prior_total_cost,
+                    "components": usage_components(persisted),
                 }
                 models["restored_usage"] = "checkpoint aggregate"
 
@@ -1441,6 +1419,7 @@ class EvolutionEngine:
                 "total_output": total_output,
                 "total_thoughts": total_thoughts,
                 "total_cached_input": total_cached_input,
+                "total_cache_write_input": total_cache_write_input,
                 "total_uncached_input": total_uncached_input,
                 "total_tool_input": total_tool_input,
                 "total_billable_output": total_output + total_thoughts,
@@ -1448,6 +1427,7 @@ class EvolutionEngine:
                     "input_cost": total_input_cost,
                     "uncached_input_cost": total_uncached_input_cost,
                     "cached_input_cost": total_cached_input_cost,
+                    "cache_write_input_cost": total_cache_write_input_cost,
                     "output_cost": total_output_cost,
                     "thought_cost": total_thought_cost,
                     "billable_output_cost": total_output_cost + total_thought_cost,
@@ -1483,6 +1463,7 @@ class EvolutionEngine:
                 output_tokens=total_output,
                 thought_tokens=total_thoughts,
                 cached_input_tokens=total_cached_input,
+                cache_write_input_tokens=total_cache_write_input,
                 tool_input_tokens=total_tool_input,
             )
             estimates[model_id] = {'name': model_name, 'cost': cost_estimate["total_cost"]}
@@ -1573,8 +1554,11 @@ class EvolutionEngine:
         # Compute missing embeddings
         if new_embeddings_needed:
             print(f"Computing {len(new_embeddings_needed)} new embeddings...")
-            texts = [self.diversity_calculator._get_idea_text(idea) for idea in new_embeddings_needed]
-            new_embeddings = await self.diversity_calculator._get_embeddings_batch(texts)
+            if getattr(self, "diversity_representation", "full_text") == "criterion_summaries":
+                new_embeddings = await self._get_criterion_summary_embeddings(new_embeddings_needed)
+            else:
+                texts = [self.diversity_calculator._get_idea_text(idea) for idea in new_embeddings_needed]
+                new_embeddings = await self.diversity_calculator._get_embeddings_batch(texts)
 
             # Store and assign new embeddings
             for i, (idea, embedding) in enumerate(zip(new_embeddings_needed, new_embeddings)):
@@ -1588,6 +1572,77 @@ class EvolutionEngine:
                         await self._store_embedding(idea_id, embedding)
 
         return embeddings
+
+    async def _get_criterion_summary_embeddings(self, ideas):
+        from idea.diversity_summaries import (
+            SUMMARY_VERSION, CriterionSummaryResponse, summary_identity, summary_prompt, parse_summaries,
+            combine_criterion_embeddings,
+        )
+        criteria = list(getattr(self._get_template_prompts(), "COMPARISON_CRITERIA", []) or
+                        ["core actions and consequences", "constraints and decisions",
+                         "form and interaction", "distinctive relationships", "first test"])
+        cache = getattr(self, "_diversity_summary_cache", None)
+        if cache is None:
+            cache = self._diversity_summary_cache = {}
+        limiter = asyncio.Semaphore(4)
+
+        async def summarize(candidate):
+            text = self.diversity_calculator._get_idea_text(candidate)
+            identity = summary_identity(text, criteria, self.formatter)
+            saved = candidate.get("diversity_summary") if isinstance(candidate, dict) else None
+            if identity not in cache and isinstance(saved, dict) and saved.get("identity") == identity:
+                try:
+                    cache[identity] = parse_summaries(
+                        json.dumps({"summaries": saved.get("summaries")}), len(criteria))
+                except (ValueError, TypeError):
+                    pass
+            if identity not in cache:
+                # Cache the in-flight task too: copies of unchanged candidates
+                # in history/migration share one paid extraction.
+                async def extract():
+                    async with limiter:
+                        if self.stop_requested or self.check_budget():
+                            return None
+                        try:
+                            response = await await_provider_call(
+                                self.formatter.generate_text, summary_prompt(text, criteria),
+                                response_schema=CriterionSummaryResponse)
+                            return parse_summaries(response, len(criteria))
+                        except Exception as exc:
+                            print(f"Criterion summary failed: {exc}")
+                            return None
+                cache[identity] = asyncio.create_task(extract())
+            values = cache[identity]
+            if isinstance(values, asyncio.Task):
+                try:
+                    values = await values
+                except BaseException:
+                    cache.pop(identity, None)
+                    raise
+                cache[identity] = values
+            if values is not None and isinstance(candidate, dict):
+                candidate["diversity_summary"] = {
+                    "version": SUMMARY_VERSION, "identity": identity,
+                    "criteria": criteria, "summaries": list(values),
+                    "model": getattr(self.formatter, "model_name", None),
+                }
+            return values
+
+        summaries = await asyncio.gather(*(summarize(candidate) for candidate in ideas))
+        valid = [(idx, values) for idx, values in enumerate(summaries) if values is not None]
+        vectors = await self.diversity_calculator._get_embeddings_batch(
+            [value for _, values in valid for value in values]) if valid else []
+        result = [None] * len(ideas)
+        offset = 0
+        for idx, values in valid:
+            result[idx] = combine_criterion_embeddings(vectors[offset:offset+len(values)])
+            offset += len(values)
+        # Bound extraction memory; persisted candidate summaries remain reusable.
+        if len(cache) > 1024:
+            for key in list(cache)[:len(cache)-1024]:
+                if not isinstance(cache[key], asyncio.Task):
+                    del cache[key]
+        return result
 
     @staticmethod
     def _update_running_stats(stats: Dict[str, float], values: List[float]) -> None:
@@ -1703,7 +1758,7 @@ class EvolutionEngine:
         if size <= 0:
             return []
 
-        count = max(1, min(int(getattr(self, "island_count", 2) or 2), size))
+        count = self._coerce_island_count(getattr(self, "island_count", 2), pop_size=size)
         base_size = size // count
         remainder = size % count
         return [
@@ -1759,10 +1814,13 @@ class EvolutionEngine:
         return groups
 
     async def _calculate_population_diversity_scores(
-        self, population: List[Any]
+        self, population: List[Any], *, novelty_archive: Optional[List[Any]] = None
     ) -> Dict[int, float]:
         """
-        Compute per-idea diversity as distance from the current population centroid.
+        Mean cosine distance to configured nearest peers (legacy default five).
+
+        An optional bounded archive is explicit; cached historical embeddings do
+        not become selection evidence merely because they have been loaded.
 
         Returns:
             Dict mapping population index -> raw diversity distance.
@@ -1770,7 +1828,15 @@ class EvolutionEngine:
         if not population:
             return {}
 
-        default_scores = {idx: 0.0 for idx in range(len(population))}
+        if novelty_archive is None and getattr(self, "diversity_representation", "full_text") == "criterion_summaries":
+            local_ids = {str(candidate.get("id")) for candidate in population if isinstance(candidate, dict)}
+            # Compare local breeding pools against the rest of this generation
+            # too. Persisted histories are not implicitly selection evidence.
+            novelty_archive = [candidate for candidate in getattr(self, "population", [])
+                               if isinstance(candidate, dict) and str(candidate.get("id")) not in local_ids]
+
+        # Missing embeddings are failed evidence, not measured zero novelty.
+        default_scores = {}
         if not self.diversity_calculator.is_enabled():
             return default_scores
 
@@ -1786,14 +1852,25 @@ class EvolutionEngine:
         if not valid_embeddings:
             return default_scores
 
-        centroid = await self._compute_population_centroid()
-        if centroid is None:
-            centroid = np.mean(valid_embeddings, axis=0)
+        archive_embeddings = []
+        if novelty_archive:
+            archive_embeddings = [embedding for embedding in
+                await self._get_or_compute_embeddings_for_ideas(novelty_archive[-100:])
+                if embedding is not None]
+        matrix = np.asarray(valid_embeddings, dtype=float)
+        lengths = np.linalg.norm(matrix, axis=1, keepdims=True)
+        unit = matrix / np.maximum(lengths, 1e-12)
+        distances = np.clip(1.0 - unit @ unit.T, 0.0, 2.0)
+        np.fill_diagonal(distances, np.inf)
+        if archive_embeddings:
+            archive = np.asarray(archive_embeddings, dtype=float)
+            archive /= np.maximum(np.linalg.norm(archive, axis=1, keepdims=True), 1e-12)
+            distances = np.concatenate((distances, np.clip(1.0-unit @ archive.T, 0.0, 2.0)), axis=1)
         diversity_scores = default_scores.copy()
         for emb_idx, pop_idx in enumerate(valid_indices):
-            embedding = valid_embeddings[emb_idx]
-            distance = float(np.sqrt(np.sum((embedding - centroid) ** 2)))
-            diversity_scores[pop_idx] = distance
+            peers = distances[emb_idx][np.isfinite(distances[emb_idx])]
+            neighbors = getattr(self, "novelty_neighbors", 5)
+            diversity_scores[pop_idx] = float(np.mean(np.sort(peers)[:neighbors])) if peers.size else 0.0
 
         return diversity_scores
 
@@ -1825,6 +1902,14 @@ class EvolutionEngine:
         )
         records: List[EvaluationRecord] = []
         artifacts_by_id = {}
+        artifact_evidence_degraded = False
+        set_artifact_evidence_enabled = getattr(
+            self.quality_evaluator,
+            "set_artifact_evidence_enabled",
+            None,
+        )
+        if callable(set_artifact_evidence_enabled):
+            set_artifact_evidence_enabled(True)
         for evaluator, runner in self.pre_judge_evaluators:
             result = await evaluator.evaluate_population(
                 population,
@@ -1859,12 +1944,30 @@ class EvolutionEngine:
                     f"pre-judge evaluator {evaluator.config.id!r} failed for "
                     f"candidate {first.candidate_id!r}: {detail}"
                 )
+            incomplete_artifact_records = [
+                record
+                for record in result.batch.records
+                if record.status not in {
+                    EvaluationStatus.OK,
+                    EvaluationStatus.CACHED,
+                }
+            ]
+            if (
+                evaluator.config.kind == ComponentKind.LLM_CODE_ARTIFACT
+                and incomplete_artifact_records
+            ):
+                artifact_evidence_degraded = True
+                if callable(set_artifact_evidence_enabled):
+                    set_artifact_evidence_enabled(False)
 
         batch = EvaluationBatch(
             generation=generation,
             records=records,
             artifacts=list(artifacts_by_id.values()),
-            metadata={"phase": "pre_judge"},
+            metadata={
+                "phase": "pre_judge",
+                "artifact_evidence_degraded": artifact_evidence_degraded,
+            },
         )
         self.pre_judge_evaluation_batch = batch
         self._pre_judge_candidate_ids = tuple(
@@ -2030,6 +2133,16 @@ class EvolutionEngine:
                     )
                 records.append(record)
 
+        if self.diversity_evaluator is not None:
+            for record in records:
+                if record.component_id == self.diversity_evaluator.config.id:
+                    representation = getattr(self, "diversity_representation", "full_text")
+                    record.metadata.update({
+                        "representation": representation,
+                        "metric_version": 3 if representation == "criterion_summaries" else 2,
+                        "neighbors": getattr(self, "novelty_neighbors", 5),
+                        "reference_scope": "global_population" if representation == "criterion_summaries" else "selection_pool",
+                    })
         self._apply_stateful_metric_normalization(records)
         records_by_candidate: Dict[str, List[EvaluationRecord]] = {}
         for record in records:
@@ -2198,7 +2311,7 @@ class EvolutionEngine:
                 if i == 0:  # Winner
                     caps.append(min(base_cap, max(1, total_slots // 3)))
                 elif i < 3:  # Top 3
-                    caps.append(min(base_cap // 2, max(1, total_slots // 5)))
+                    caps.append(min(max(1, base_cap // 2), max(1, total_slots // 5)))
                 elif i < num_ideas // 2:  # Top half
                     caps.append(max(1, total_slots // 8))
                 else:  # Bottom half
@@ -2208,7 +2321,7 @@ class EvolutionEngine:
         caps = caps[:num_ideas]
 
         # Allocate slots with caps
-        allocation = {}
+        allocation = ParentSlotQuotas(ideas_to_breed)
         remaining_slots = total_slots
 
         # First pass: allocate slots respecting caps
@@ -2224,6 +2337,20 @@ class EvolutionEngine:
 
             allocation[idea_idx] = slots_to_allocate
             remaining_slots -= slots_to_allocate
+
+        # Quotas must cover every parent slot. Redistribute rounding shortfalls
+        # across ranks, with no candidate used more than once per child.
+        while remaining_slots > 0:
+            progressed = False
+            for idea_idx, _ in sorted_ideas:
+                if allocation.get(idea_idx, 0) < ideas_to_breed:
+                    allocation[idea_idx] = allocation.get(idea_idx, 0) + 1
+                    remaining_slots -= 1
+                    progressed = True
+                    if remaining_slots == 0:
+                        break
+            if not progressed:
+                break
 
         # Second pass: distribute remaining slots if any, starting from top
         if remaining_slots > 0:
@@ -2259,46 +2386,25 @@ class EvolutionEngine:
         if not parent_slots:
             return []
 
-        # Create a weighted pool based on allocated slots
-        parent_pool = []
-        for idea_idx, slots in parent_slots.items():
-            if idea_idx in available_indices:
-                parent_pool.extend([idea_idx] * slots)
+        # Consume generation-level quotas, prioritizing candidates whose quota
+        # cannot fit in the remaining children unless used in this child.
+        positive = [idx for idx in available_indices if parent_slots.get(idx, 0) > 0]
+        if positive:
+            selected = []
+            remaining_children = getattr(parent_slots, "remaining_children", max(1, math.ceil(sum(parent_slots.values()) / self.breeder.parent_count)))
+            mandatory = [idx for idx in positive if parent_slots[idx] >= remaining_children]
+            for idx in mandatory[:self.breeder.parent_count]:
+                selected.append(idx)
+            while len(selected) < self.breeder.parent_count:
+                pool = [idx for idx in positive if idx not in selected]
+                if not pool:
+                    break
+                weights = np.asarray([parent_slots[idx] for idx in pool], dtype=float)
+                selected.append(int(self.random_choice(pool, p=weights/weights.sum())))
+            for idx in selected:
+                parent_slots[idx] -= 1
+            if hasattr(parent_slots, "remaining_children"):
+                parent_slots.remaining_children -= 1
+            return selected
 
-        if len(parent_pool) < self.breeder.parent_count:
-            # Fallback: if not enough parents in pool, use available indices
-            print(f"Warning: Only {len(parent_pool)} parents in pool, need {self.breeder.parent_count}")
-            return self.random_choice(
-                available_indices,
-                size=min(self.breeder.parent_count, len(available_indices)),
-                replace=False,
-            ).tolist()
-
-        # Simple random selection without replacement
-        selected_parents = []
-        pool_copy = parent_pool.copy()
-
-        for _ in range(self.breeder.parent_count):
-            if not pool_copy:
-                break
-
-            # Select random parent from pool
-            selected_idx = self.random_choice(len(pool_copy))
-            parent_idx = pool_copy.pop(selected_idx)
-
-            # Avoid selecting the same parent twice for this breeding
-            if parent_idx not in selected_parents:
-                selected_parents.append(parent_idx)
-            else:
-                # If we selected a duplicate, try to find a different one
-                available_alternatives = [p for p in set(pool_copy) if p not in selected_parents]
-                if available_alternatives:
-                    alternative = self.random_choice(available_alternatives)
-                    selected_parents.append(alternative)
-                    # Remove the alternative from pool
-                    pool_copy = [p for p in pool_copy if p != alternative]
-                else:
-                    # If no alternatives, allow the duplicate (shouldn't happen often)
-                    selected_parents.append(parent_idx)
-
-        return selected_parents
+        return []

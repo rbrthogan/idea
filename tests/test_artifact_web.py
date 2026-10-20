@@ -1,10 +1,13 @@
+import asyncio
 import base64
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+import pytest
 
 from idea.artifact_store import ArtifactStore
+from idea.artifact_store import ArtifactStoreError
 from idea.auth import UserInfo
 from idea.evaluation import LLMCodeArtifactComponentConfig
 from idea.models import Idea
@@ -12,8 +15,11 @@ from idea.user_state import UserEvolutionState
 from idea.viewer import (
     ARTIFACT_STORE_ROOT_ENV,
     ENABLE_GEMINI_CODE_ARTIFACTS_ENV,
+    ENABLE_LOCAL_ARTIFACT_REPAIR_ENV,
+    ENABLE_LOCAL_ARTIFACTS_ENV,
     _artifact_store_for_evolution,
     _delete_owned_artifact_objects,
+    _stored_evolution_artifact_context,
     _web_artifact_runtime,
     _web_evaluation_component_available,
     app,
@@ -95,26 +101,70 @@ def test_evolution_artifact_cleanup_deletes_only_referenced_objects(tmp_path):
     assert store.delete(reference["storage_key"]) is False
 
 
-def test_web_artifact_runtime_is_explicitly_opt_in(tmp_path, monkeypatch):
-    component = LLMCodeArtifactComponentConfig(
-        id="render",
-        execution_profile="gemini-code-execution-v1",
-    )
-    monkeypatch.delenv(ENABLE_GEMINI_CODE_ARTIFACTS_ENV, raising=False)
+@pytest.mark.parametrize("mode,provider", [("remote", "google_generative_ai"),
+    ("local", "google_generative_ai"), ("local", "openai"), ("remote", "openai")])
+def test_archived_runtime_cannot_be_reenabled_by_legacy_flags(tmp_path, monkeypatch, mode, provider):
+    component = LLMCodeArtifactComponentConfig(id="render", execution_profile="gemini-code-execution-v1")
+    for flag in (ENABLE_GEMINI_CODE_ARTIFACTS_ENV, ENABLE_LOCAL_ARTIFACTS_ENV, ENABLE_LOCAL_ARTIFACT_REPAIR_ENV):
+        monkeypatch.setenv(flag, "true")
+    store_root = tmp_path / "stores"
+    monkeypatch.setenv(ARTIFACT_STORE_ROOT_ENV, str(store_root))
     assert _web_evaluation_component_available(component) is False
+    with pytest.raises(ArtifactStoreError, match="archived"):
+        _web_artifact_runtime(user_id="user-1", evolution_id="evolution-1", api_key="synthetic-key",
+                              execution_mode=mode, model_provider=provider)
+    assert not store_root.exists()
 
+
+def test_restored_evolution_resolves_artifact_source_provider_from_saved_model():
+    with patch(
+        "idea.viewer.db.get_evolution",
+        new=AsyncMock(
+            return_value={
+                "config": {
+                    "model_type": "gpt-5.6-luna",
+                    "evaluation": {
+                        "components": [
+                            {"kind": "llm_code_artifact", "enabled": True}
+                        ]
+                    },
+                }
+            }
+        ),
+    ):
+        provider, has_artifact_producer = asyncio.run(
+            _stored_evolution_artifact_context("user-1", "evolution-1")
+        )
+
+    assert provider == "openai"
+    assert has_artifact_producer is True
+
+
+def test_execution_preferences_are_archived_even_with_legacy_flags(monkeypatch):
     monkeypatch.setenv(ENABLE_GEMINI_CODE_ARTIFACTS_ENV, "true")
-    monkeypatch.setenv(ARTIFACT_STORE_ROOT_ENV, str(tmp_path / "stores"))
-    runners, store = _web_artifact_runtime(
-        user_id="user-1",
-        evolution_id="evolution-1",
-        api_key="test-key",
-    )
-
-    assert _web_evaluation_component_available(component) is True
-    assert runners["llm_code_artifact"].enabled is True
-    assert isinstance(store, ArtifactStore)
-    assert "user-1" not in str(store.root)
+    monkeypatch.setenv(ENABLE_LOCAL_ARTIFACTS_ENV, "true")
+    async def authenticated_user():
+        return UserInfo(uid="user-1", email="user@example.com", is_admin=False)
+    app.dependency_overrides[require_auth] = authenticated_user
+    save_preference = AsyncMock()
+    settings = AsyncMock()
+    try:
+        with patch("idea.viewer.db.get_user_api_key", new=AsyncMock(return_value="synthetic-key")), \
+             patch("idea.viewer.db.get_user_settings", new=settings), \
+             patch("idea.viewer.db.save_user_execution_preference", new=save_preference):
+            client = TestClient(app)
+            status = client.get("/api/settings/status")
+            saved = client.post("/api/settings/execution", json={"execution_mode": "local"})
+    finally:
+        app.dependency_overrides.pop(require_auth, None)
+    assert status.status_code == 200
+    assert status.json()["execution_options"]["archived"] is True
+    assert status.json()["execution_options"]["local"]["available"] is False
+    assert status.json()["execution_options"]["remote"]["available"] is False
+    assert saved.status_code == 410
+    assert saved.json()["code"] == "feature_archived"
+    save_preference.assert_not_awaited()
+    settings.assert_not_awaited()
 
 
 def test_live_json_adapter_preserves_artifacts_and_evaluations():
@@ -144,32 +194,33 @@ def test_idea_inspector_exposes_capability_driven_rich_tabs():
     assert "getIdeaArtifactSignature" in viewer_js
     assert "output.textContent = source" in viewer_js
     assert "renderIdeaModalEvaluations" in viewer_js
+    assert "Failure stage" in viewer_js
+    assert "Execution attempts" in viewer_js
+    assert "Repair attempts" in viewer_js
+    assert "Visualization unavailable:" in viewer_js
+    assert "getArtifactEvaluationFailure" in viewer_js
 
 
-def test_viewer_exposes_server_gated_artifact_opt_in(monkeypatch):
-    client = TestClient(app)
-
-    monkeypatch.delenv(ENABLE_GEMINI_CODE_ARTIFACTS_ENV, raising=False)
-    disabled = client.get("/")
-    assert disabled.status_code == 200
-    assert 'id="enableVisualizationArtifacts"' in disabled.text
-    artifact_switch = disabled.text.split(
-        'id="enableVisualizationArtifacts"', 1
-    )[1].split(">", 1)[0]
-    assert "disabled" in artifact_switch
-    assert "checked" not in artifact_switch
-
-    monkeypatch.setenv(ENABLE_GEMINI_CODE_ARTIFACTS_ENV, "true")
-    enabled = client.get("/")
-    artifact_switch = enabled.text.split(
-        'id="enableVisualizationArtifacts"', 1
-    )[1].split(">", 1)[0]
-    assert "disabled" not in artifact_switch
-    assert "checked" in artifact_switch
-
+def test_cards_surface_failed_or_missing_primary_artifacts():
     viewer_js = Path("idea/static/js/viewer.js").read_text()
-    assert "buildVisualizationArtifactEvaluation" in viewer_js
-    assert "requestBody.evaluation" in viewer_js
+    viewer_css = Path("idea/static/css/viewer.css").read_text()
+
+    assert "record.component_kind === 'llm_code_artifact'" in viewer_js
+    assert "['ok', 'cached'].includes(record.status)" in viewer_js
+    assert 'class="idea-card-artifact-failure" role="status"' in viewer_js
+    assert "failure.setAttribute('role', 'status')" in viewer_js
+    assert ".idea-card-artifact-failure" in viewer_css
+
+
+def test_viewer_has_no_archived_execution_controls(monkeypatch):
+    client = TestClient(app)
+    monkeypatch.setenv(ENABLE_GEMINI_CODE_ARTIFACTS_ENV, "true")
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'id="enableVisualizationArtifacts"' not in response.text
+    assert 'id="executionPreferenceSelect"' not in response.text
+    viewer_js = Path("idea/static/js/viewer.js").read_text()
+    assert "buildVisualizationArtifactEvaluation" not in viewer_js
 
 
 def test_saved_evolution_identity_is_set_before_artifact_cards_render():
@@ -182,4 +233,11 @@ def test_saved_evolution_identity_is_set_before_artifact_cards_render():
     assert history_loader.index(identity_assignment) < history_loader.index(
         "renderGenerations(evolutionData.history);"
     )
-    assert "requires: ['artifact.primary']" in viewer_js
+
+
+def test_token_details_include_dynamic_artifact_usage_components():
+    viewer_js = Path("idea/static/js/viewer.js").read_text()
+
+    assert "Object.keys(tokenCounts.models || {})" in viewer_js
+    assert "Artifact Render / Code Execution" in viewer_js
+    assert "Tool/intermediate input" in viewer_js

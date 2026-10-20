@@ -148,6 +148,7 @@ def test_get_current_user_decodes_firebase_token(monkeypatch):
     decoded_token = {
         "uid": "firebase-user",
         "email": "admin@example.com",
+        "email_verified": True,
         "name": "Admin User",
     }
 
@@ -164,6 +165,19 @@ def test_get_current_user_decodes_firebase_token(monkeypatch):
         "display_name": "Admin User",
         "is_admin": True,
     }
+
+
+@pytest.mark.parametrize("verified", [False, None, "true"])
+def test_unverified_admin_address_cannot_grant_admin_access(monkeypatch, verified):
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="token")
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+    monkeypatch.setattr(auth, "ADMIN_EMAILS", {"admin@example.com"})
+    monkeypatch.setattr(auth.auth, "verify_id_token", lambda token: {
+        "uid": "unverified-user", "email": "admin@example.com", "email_verified": verified,
+    })
+    user = asyncio.run(get_current_user(credentials))
+    assert user is not None
+    assert user.is_admin is False
 
 
 def test_get_current_user_returns_none_for_invalid_token(monkeypatch):

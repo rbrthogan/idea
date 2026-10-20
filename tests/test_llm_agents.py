@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from idea.llm import Breeder, Critic, Formatter, Ideator, Oracle
+from idea.models import Idea
 from idea.ratings import PairEvaluationError
 
 
@@ -43,6 +44,35 @@ def create_formatter():
         return Formatter()
 
 
+def test_argon_has_model_deadline_and_does_not_duplicate_timed_out_requests(monkeypatch):
+    import httpx
+    from unittest.mock import Mock
+    from idea.llm import GenerationResponseDeadlineError
+    monkeypatch.delenv("GENAI_HTTP_TIMEOUT_MS", raising=False)
+    ideator = create_ideator(model_name="gemini-4-argon", thinking_level="low")
+    assert ideator._http_timeout_ms == 900000
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=Mock(side_effect=httpx.ReadTimeout("response deadline"))))
+    with patch.object(ideator, "_get_client", return_value=client):
+        with pytest.raises(GenerationResponseDeadlineError):
+            ideator.generate_text("A small structured idea")
+    assert client.models.generate_content.call_count == 1
+    config = client.models.generate_content.call_args.kwargs["config"]
+    assert config.max_output_tokens == 32768
+    assert config.temperature is None and config.top_p is None
+    assert ideator.get_token_usage_summary()["missing_usage_requests"] == 1
+
+
+def test_prefixed_openai_model_is_canonicalized_only_in_outgoing_request():
+    from unittest.mock import Mock
+    ideator = create_ideator(provider="openai", model_name="models/gpt-6-luna", thinking_level="none")
+    response = SimpleNamespace(raise_for_status=lambda:None, json=lambda:{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":2}})
+    client = SimpleNamespace(post=Mock(return_value=response))
+    with patch.object(ideator, "_get_client", return_value=client):
+        assert ideator.generate_text("Test") == "ok"
+    assert client.post.call_args.kwargs["json"]["model"] == "gpt-6-luna"
+    assert ideator.model_name == "models/gpt-6-luna"
+
+
 def test_elo_update_cases():
     critic = create_critic()
     elo_a, elo_b = critic._elo_update(1500, 1500, "A")
@@ -56,6 +86,197 @@ def test_elo_update_cases():
     elo_a_tie, elo_b_tie = critic._elo_update(1500, 1500, "tie")
     assert elo_a_tie == 1500
     assert elo_b_tie == 1500
+
+
+@pytest.mark.parametrize("total_tokens", [30, 35])
+def test_inconsistent_openai_reasoning_does_not_expand_billable_output(total_tokens):
+    ideator = create_ideator(provider="openai", model_name="gpt-6-luna")
+    ideator._record_openai_generation_usage({
+        "input_tokens": 20,
+        "output_tokens": 10,
+        "output_tokens_details": {"reasoning_tokens": 15},
+        "total_tokens": total_tokens,
+    })
+    usage = ideator.get_token_usage_summary()
+    assert usage["output"] == 0
+    assert usage["thoughts"] == 10
+    assert usage["output"] + usage["thoughts"] == 10
+    assert usage["requests"] == 1
+    assert usage["missing_usage_requests"] == 1
+    assert usage["cost"] == pytest.approx((20 * 0.1 + 10 * 0.5) / 1_000_000)
+
+
+def test_gemini_thoughts_remain_separate_from_visible_output():
+    ideator = create_ideator(model_name="gemini-3.8-flash")
+    ideator._record_generation_usage({
+        "prompt_token_count": 7,
+        "candidates_token_count": 20,
+        "thoughts_token_count": 22,
+        "total_token_count": 49,
+    })
+    usage = ideator.get_token_usage_summary()
+    assert usage["total"] == 49
+    assert usage["output"] == 20
+    assert usage["thoughts"] == 22
+    assert usage["missing_usage_requests"] == 0
+    price = usage["usage_by_price"][0]
+    assert usage["cost"] == pytest.approx((7 * price["input_rate"] + 42 * price["output_rate"]) / 1_000_000)
+
+
+def test_gemini_gene_schema_survives_sdk_wire_serialization():
+    import json
+
+    import httpx
+    from google import genai
+    from google.genai import types
+    from idea.genes import GeneMatchResponse, parse_gene_matches
+
+    captured = []
+    output = '{"groups":[{"existing_gene_id":null,"input_indices":[0,1]}]}'
+
+    def respond(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"role": "model", "parts": [{"text": output}]}}],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 5,
+                              "totalTokenCount": 10},
+        })
+
+    ideator = create_ideator(model_name="gemini-3.5-flash-lite")
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
+        with genai.Client(api_key="unit-test-key", http_options=types.HttpOptions(
+            httpx_client=http_client,
+        )) as client:
+            with patch.object(ideator, "_get_client", return_value=client):
+                result = ideator.generate_text("Group equivalent input genes", response_schema=GeneMatchResponse)
+
+    assert result == output
+    assert len(captured) == 1
+    generation = captured[0]["generationConfig"]
+    assert generation["responseMimeType"] == "application/json"
+    assert "responseSchema" not in generation
+    schema = generation["responseJsonSchema"]
+    assert schema == GeneMatchResponse.model_json_schema()
+    assert schema["additionalProperties"] is False
+    assert schema["$defs"]["GeneMatchGroup"]["additionalProperties"] is False
+    assert schema["$defs"]["GeneMatchGroup"]["properties"]["existing_gene_id"]["anyOf"] == [
+        {"type": "string"}, {"type": "null"},
+    ]
+    assert parse_gene_matches(result, 2, set())[0].input_indices == [0, 1]
+
+
+def test_openai_gene_schema_keeps_nested_strict_validation():
+    from idea.genes import GeneMatchResponse
+    from idea.llm import _openai_strict_json_schema
+
+    schema = _openai_strict_json_schema(GeneMatchResponse)
+    group = schema["$defs"]["GeneMatchGroup"]
+    assert schema["additionalProperties"] is False
+    assert group["additionalProperties"] is False
+    assert group["required"] == ["existing_gene_id", "input_indices"]
+
+
+def test_openai_responses_request_uses_reasoning_and_strict_json_schema():
+    ideator = create_ideator(
+        provider="openai",
+        model_name="gpt-5.6-luna",
+        thinking_level="high",
+        temperature=1.5,
+        top_p=0.9,
+    )
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"title":"T","content":"C"}'}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
+                    "output_tokens": 40,
+                    "output_tokens_details": {"reasoning_tokens": 15},
+                    "total_tokens": 140,
+                },
+            }
+
+    class _FakeClient:
+        def post(self, path, json):
+            captured["path"] = path
+            captured["json"] = json
+            return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        result = ideator._generate_openai_response("prompt", None, None, Idea)
+
+    assert result == '{"title":"T","content":"C"}'
+    assert captured["path"] == "/v1/responses"
+    request = captured["json"]
+    assert request["reasoning"] == {"effort": "high"}
+    assert "temperature" not in request
+    assert "top_p" not in request
+
+    response_format = request["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["strict"] is True
+    assert response_format["schema"]["additionalProperties"] is False
+    assert response_format["schema"]["required"] == ["title", "content"]
+    assert "default" not in response_format["schema"]["properties"]["title"]
+
+    usage = ideator.get_token_usage_summary()
+    assert usage["total"] == 140
+    assert usage["input"] == 100
+    assert usage["cached_input"] == 20
+    assert usage["cache_write_input"] == 10
+    assert usage["output"] == 25
+    assert usage["thoughts"] == 15
+    assert usage["cost"] == (
+        70 * 0.20 / 1_000_000
+        + 20 * 0.02 / 1_000_000
+        + 10 * 0.25 / 1_000_000
+        + 25 * 1.20 / 1_000_000
+        + 15 * 1.20 / 1_000_000
+    )
+
+
+def test_openai_none_reasoning_enables_sampling_parameters():
+    ideator = create_ideator(
+        provider="openai",
+        model_name="gpt-5.6-luna",
+        thinking_level="none",
+        temperature=1.4,
+        top_p=0.8,
+    )
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "output": [{"content": [{"type": "output_text", "text": "done"}]}],
+            }
+
+    class _FakeClient:
+        def post(self, _path, json):
+            captured.update(json)
+            return _FakeResponse()
+
+    with patch.object(ideator, "_get_client", return_value=_FakeClient()):
+        assert ideator._generate_openai_response("prompt", None, None, None) == "done"
+
+    assert captured["reasoning"] == {"effort": "none"}
+    assert captured["temperature"] == 1.4
+    assert captured["top_p"] == 0.8
 
 
 def test_get_tournament_ranks_deterministic():
@@ -185,7 +406,10 @@ def test_tournament_reuses_cached_pair_without_rejudging_reversed_order():
     assert reversed_ranks[1] > reversed_ranks[0]
     assert reversed_details[0]["pairs"][0]["cached"] is True
     assert reversed_details[0]["pairs"][0]["winner_source"] == "cache"
-    assert reversed_details[0]["pairs"][0]["winner"] == "B"
+    pair = reversed_details[0]["pairs"][0]
+    winner_id = pair["a_id"] if pair["winner"] == "A" else pair["b_id"]
+    assert winner_id == "a"
+    assert reversed_ranks[1] == first_ranks[0]
 
 
 def test_tournament_records_evaluation_metadata_on_ideas():
@@ -318,7 +542,7 @@ def test_multi_tournament_segmentation_resets_pairing_state():
     assert observed_match_history_sizes[2] == 0
 
 
-def test_tournament_stops_early_when_survivor_boundary_is_stable():
+def test_tournament_completes_evidence_budget_despite_stable_elo_boundary():
     critic = create_critic()
     ideas = [
         {"id": "a", "idea": "a", "selection_metrics": {"elo": 1800}},
@@ -339,10 +563,9 @@ def test_tournament_stops_early_when_survivor_boundary_is_stable():
             early_stop_min_rounds=2,
         )
 
-    assert compare.call_count < 10
-    assert len(details) == 2
-    assert details[-1]["early_stopped"] is True
-    assert details[-1]["early_stop_reason"] == "stable_survivor_boundary"
+    assert compare.call_count == 6
+    assert len(details) == 5
+    assert not any(detail.get("early_stopped") for detail in details)
 
 
 def test_breeder_keeps_mutation_context_per_child():
@@ -350,13 +573,12 @@ def test_breeder_keeps_mutation_context_per_child():
         breeder = Breeder(mutation_rate=0.5)
 
     fake_ideator = SimpleNamespace(
-        generate_context=patch,
+        generate_context=Mock(side_effect=AssertionError("Seed context must not supply mutation")),
         generate_context_from_parents=lambda parent_genotypes, mutation_rate, mutation_context_pool: "ctx",
         generate_idea_from_context=lambda context_pool, idea_type: ("child idea", "child prompt"),
     )
 
     # Replace methods with deterministic fakes
-    fake_ideator.generate_context = lambda idea_type: f"mutation-{idea_type}"
     breeder._get_thread_ideator = lambda: fake_ideator
     breeder.encode_to_genotype = lambda parent, idea_type: "gene"
 
@@ -367,16 +589,18 @@ def test_breeder_keeps_mutation_context_per_child():
 
     # Track mutation-context calls across two child generations
     calls = {"count": 0}
-    def counting_generate_context(idea_type):
+    def counting_generate_mutation_genes(idea_type, parent_genotypes):
+        assert idea_type == "airesearch" and parent_genotypes == ["gene", "gene"]
         calls["count"] += 1
-        return f"mutation-{calls['count']}"
+        return [f"mutation-{calls['count']}"]
 
-    fake_ideator.generate_context = counting_generate_context
+    fake_ideator.generate_mutation_genes = counting_generate_mutation_genes
 
     breeder.breed(parents, "airesearch")
     breeder.breed(parents, "airesearch")
 
     assert calls["count"] == 2
+    fake_ideator.generate_context.assert_not_called()
 
 
 def test_breeder_returns_parent_genotypes_for_display():
@@ -399,8 +623,8 @@ def test_breeder_returns_parent_genotypes_for_display():
     result = breeder.breed(parents, "airesearch")
 
     assert result["parent_genotypes"] == [
-        {"parent_id": "p1", "genotype": "gene-p1"},
-        {"parent_id": "p2", "genotype": "gene-p2"},
+        {"parent_id": "p1", "genotype": "gene-p1", "raw_genotype": "gene-p1", "source": "raw", "gene_pool_revision": None},
+        {"parent_id": "p2", "genotype": "gene-p2", "raw_genotype": "gene-p2", "source": "raw", "gene_pool_revision": None},
     ]
 
 
@@ -421,8 +645,10 @@ def test_context_from_parents_uses_weighted_parent_mix_and_non_overlapping_mutat
     concepts = [c.strip() for c in context_pool.split(",") if c.strip()]
 
     # target_child_size = 4, primary ratio = 50% => 2 from parent 1, then 2 from parent 2.
-    # secondary overlap on "beta" is filtered and not backfilled, then one mutation is injected.
-    assert concepts == ["alpha", "beta", "delta", "omega"]
+    # Secondary overlap reduces inherited size to three; the only fresh gene
+    # replaces alpha. Mutation must not grow the three-concept context.
+    assert concepts == ["omega", "beta", "delta"]
+    assert ideator.last_mutation_details["removed"] == ["alpha"]
 
 
 def test_oracle_response_parsing():

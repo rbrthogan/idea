@@ -1,0 +1,6 @@
+# Example only: Terraform ignores this extension.
+# Read docs/InfrastructureRecovery.md before copying to backend.tf and migrating.
+# The state bucket must already exist with restricted IAM and object versioning.
+terraform {
+  backend "gcs" {}
+}

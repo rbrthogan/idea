@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import copy
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 from idea import database as db
+from idea.evolution_progress import terminal_status_fields
 from idea.evolution_types import EvolutionRunConfig
-from idea.models import candidate_from_wire, candidate_to_wire
+from idea.models import candidate_from_wire, candidate_to_wire, encode_json_safe
 from idea.prompts.loader import list_available_templates
+from idea.genes import empty_gene_catalogue
+
+
+class EvolutionPersistenceError(RuntimeError):
+    """A checkpoint was not durably saved; callers must surface the failure."""
 
 # Legacy filesystem storage directories (kept for backwards compatibility with local dev)
 EVOLUTIONS_DIR = Path("data/evolutions")
@@ -54,6 +62,10 @@ class EvolutionSerializer:
             "island_diversity_history": getattr(engine, "island_diversity_history", []),
             "migration_history": getattr(engine, "migration_history", []),
             "comparison_cache": getattr(engine, "comparison_cache", {}),
+            "algorithm_evidence_version": getattr(engine, "algorithm_evidence_version", 2),
+            "quality_archive": [cls.serialize_idea(idea) for idea in getattr(engine, "quality_archive", [])],
+            "gene_catalogue": getattr(engine, "gene_catalogue", empty_gene_catalogue()),
+            "generation_draft": encode_json_safe(getattr(engine, "generation_draft", None)),
             "avg_idea_cost": engine.avg_idea_cost,
             "avg_tournament_cost": engine.avg_tournament_cost,
             "fitness_elo_stats": engine.fitness_elo_stats,
@@ -63,6 +75,8 @@ class EvolutionSerializer:
         }
         if engine.template_data:
             state["template_data"] = engine.template_data
+        if getattr(engine, "source_checkpoint_id", None):
+            state["source_checkpoint_id"] = engine.source_checkpoint_id
         persistence_revision = getattr(engine, "persistence_revision", None)
         if persistence_revision is not None:
             state["_save_revision"] = persistence_revision
@@ -88,6 +102,7 @@ class EvolutionSerializer:
 
         engine.evolution_id = state.get("evolution_id")
         engine.evolution_name = state.get("name")
+        engine.source_checkpoint_id = state.get("source_checkpoint_id")
         engine.created_at = state.get("created_at")
         engine.updated_at = state.get("updated_at")
         persistence_revision = state.get("_save_revision")
@@ -110,6 +125,43 @@ class EvolutionSerializer:
         engine.migration_history = state.get("migration_history", [])
         comparison_cache = state.get("comparison_cache", {})
         engine.comparison_cache = comparison_cache if isinstance(comparison_cache, dict) else {}
+        version = state.get("algorithm_evidence_version", 1)
+        if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2}:
+            raise ValueError("Unsupported algorithm evidence version")
+        engine.algorithm_evidence_version = version
+        archive = state.get("quality_archive", [])
+        engine.quality_archive = [cls.deserialize_idea(idea) for idea in archive] if isinstance(archive, list) else []
+        catalogue = state.get("gene_catalogue")
+        engine.gene_catalogue = catalogue if isinstance(catalogue, dict) else empty_gene_catalogue()
+        draft = state.get("generation_draft")
+        if draft is not None and (not isinstance(draft, dict) or draft.get("version") != 1
+                                  or not isinstance(draft.get("islands"), dict)
+                                  or draft.get("generation") != engine.current_generation + 1):
+            raise ValueError("Invalid pending generation draft")
+        draft = copy.deepcopy(draft)
+        if draft is not None:
+            for entry in draft["islands"].values():
+                if (not isinstance(entry, dict) or not isinstance(entry.get("plans"), list)
+                        or not isinstance(entry.get("results"), list)
+                        or len(entry["plans"]) != len(entry["results"])
+                        or not isinstance(entry.get("capacity"), int)
+                        or not isinstance(entry.get("survivors"), list)
+                        or not isinstance(entry.get("fallback"), list)):
+                    raise ValueError("Invalid pending generation island")
+                for key in ("survivors", "fallback"):
+                    entry[key] = [cls.deserialize_idea(c) for c in entry[key]]
+                for plan in entry["plans"]:
+                    if (not isinstance(plan, dict) or plan.get("operator") not in
+                            {"independent", "single_parent", "crossover"}
+                            or not isinstance(plan.get("parents"), list)):
+                        raise ValueError("Invalid pending birth plan")
+                    plan["parents"] = [cls.deserialize_idea(c) for c in plan["parents"]]
+                for result in entry["results"]:
+                    if result is not None:
+                        if not isinstance(result, dict) or "candidate" not in result or "prompt" not in result:
+                            raise ValueError("Invalid saved offspring")
+                        result["candidate"] = cls.deserialize_idea(result["candidate"])
+        engine.generation_draft = draft
         engine.avg_idea_cost = state.get("avg_idea_cost", 0.0)
         engine.avg_tournament_cost = state.get("avg_tournament_cost", 0.0)
         saved_token_counts = state.get("token_counts")
@@ -152,8 +204,7 @@ class EvolutionRepository:
     async def save_checkpoint(engine: Any, status: str = "in_progress") -> Optional[str]:
         try:
             if not engine.user_id:
-                print("❌ Cannot save evolution: user_id not set")
-                return None
+                raise EvolutionPersistenceError("Cannot save evolution without a user id")
 
             if not engine.evolution_id:
                 engine.initialize_evolution()
@@ -163,6 +214,11 @@ class EvolutionRepository:
             state["evolution_id"] = engine.evolution_id
             state["name"] = engine.evolution_name
             state["status"] = status
+            check_budget = getattr(engine, "check_budget", None)
+            state.update(terminal_status_fields(
+                status,
+                budget_reached=status == "paused" and callable(check_budget) and check_budget(),
+            ))
             state["created_at"] = engine.created_at
             state["updated_at"] = engine.updated_at
 
@@ -171,20 +227,19 @@ class EvolutionRepository:
                 engine.evolution_id,
                 state,
                 expected_revision=getattr(engine, "persistence_revision", None),
+                **({"run_token": engine._run_token} if getattr(engine, "_run_token", None) else {}),
             )
             engine.persistence_revision = new_revision
+            engine.last_save_error = None
             print(f"💾 Evolution saved to Firestore: {engine.evolution_name} ({engine.evolution_id})")
             return engine.evolution_id
-        except db.EvolutionSaveConflict:
+        except (db.EvolutionSaveConflict, db.RunOwnershipLost):
             # A stale engine must never report a successful checkpoint or
             # silently overwrite a newer process's state.
             raise
         except Exception as exc:
-            print(f"❌ Failed to save evolution: {exc}")
-            import traceback
-
-            traceback.print_exc()
-            return None
+            engine.last_save_error = "Checkpoint could not be durably saved"
+            raise EvolutionPersistenceError("Checkpoint could not be durably saved") from exc
 
     @staticmethod
     async def list_evolutions_for_user(user_id: str) -> List[Dict[str, Any]]:
@@ -242,7 +297,7 @@ class EvolutionRepository:
                 config = data.get("config", {})
                 result.append(
                     {
-                        "id": data.get("checkpoint_id") or data.get("id"),
+                        "id": data.get("id") or data.get("checkpoint_id"),
                         "time": data.get("checkpoint_time") or data.get("updated_at"),
                         "status": data.get("status", "unknown"),
                         "generation": data.get("current_generation", 0),
@@ -268,10 +323,25 @@ class EvolutionRepository:
         artifact_store: Optional[Any] = None,
     ) -> Optional[Any]:
         try:
-            state = await db.get_evolution(user_id, evolution_id)
+            state = await db.get_evolution_for_restore(user_id, evolution_id)
             if not state:
                 print(f"❌ Evolution not found: {evolution_id}")
                 return None
+
+            legacy_checkpoint_id = state.pop("_legacy_checkpoint_id", None)
+            if legacy_checkpoint_id:
+                # A legacy snapshot may name a newer evolution or carry an old
+                # revision. Restore it as a distinct experiment; never replace
+                # either the source checkpoint or the newer evolution.
+                new_id = str(uuid.uuid4())
+                state.update({
+                    "evolution_id": new_id,
+                    "checkpoint_id": new_id[:18].replace("-", ""),
+                    "source_checkpoint_id": legacy_checkpoint_id,
+                    "name": state.get("name") or f"Checkpoint {legacy_checkpoint_id}",
+                    "created_at": datetime.now().isoformat(),
+                })
+                state.pop("_save_revision", None)
 
             config = state.get("config", {})
             idea_type = config.get("idea_type")

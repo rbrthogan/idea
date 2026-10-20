@@ -56,3 +56,43 @@ def test_get_user_api_key_reports_invalid_ciphertext(monkeypatch):
 
     with pytest.raises(database.APIKeyDecryptionError, match="cannot be decrypted"):
         asyncio.run(database.get_user_api_key("user-1"))
+
+
+def test_provider_key_fields_keep_legacy_gemini_slot_and_separate_openai_slot():
+    assert database._api_key_fields("google_generative_ai") == (
+        "api_key_encrypted",
+        "api_key_set",
+    )
+    assert database._api_key_fields("openai") == (
+        "openai_api_key_encrypted",
+        "openai_api_key_set",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported"):
+        database._api_key_fields("unknown")
+
+
+def test_get_user_openai_key_does_not_fall_back_to_gemini(monkeypatch):
+    async def fake_settings(_user_id):
+        return {
+            "api_key_encrypted": "gemini-ciphertext",
+            "openai_api_key_encrypted": "openai-ciphertext",
+        }
+
+    monkeypatch.setattr(database, "get_user_settings", fake_settings)
+    monkeypatch.setattr(
+        database,
+        "decrypt_api_key",
+        lambda encrypted: {
+            "gemini-ciphertext": "gemini-secret",
+            "openai-ciphertext": "openai-secret",
+        }[encrypted],
+    )
+
+    import asyncio
+
+    assert asyncio.run(database.get_user_api_key("user-1", "openai")) == "openai-secret"
+    assert (
+        asyncio.run(database.get_user_api_key("user-1", "google_generative_ai"))
+        == "gemini-secret"
+    )

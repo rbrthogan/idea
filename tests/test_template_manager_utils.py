@@ -48,7 +48,7 @@ def test_generate_unique_template_id_avoids_collisions():
     assert template_id == "my_template_4"
 
 
-def test_generate_template_uses_gemini_31_pro_with_high_thinking_level():
+def test_generate_template_defaults_to_argon_with_high_thinking_level():
     captured_kwargs = {}
 
     class FakeLLM:
@@ -71,7 +71,7 @@ Genotype Encode Prompt: Extract reusable research DNA from {idea_content}.
 Comparison Criteria: novelty, feasibility, scientific value
 """
 
-    async def fake_get_user_api_key(_uid):
+    async def fake_get_user_api_key(_uid, _provider=None):
         return "test-key"
 
     with patch("idea.template_manager.db.get_user_api_key", side_effect=fake_get_user_api_key), patch(
@@ -86,7 +86,7 @@ Comparison Criteria: novelty, feasibility, scientific value
         )
 
     assert response.status_code == 200
-    assert captured_kwargs["model_name"] == "gemini-3.1-pro-preview"
+    assert captured_kwargs["model_name"] == "gemini-4-argon"
     assert captured_kwargs["thinking_budget"] is None
     assert captured_kwargs["thinking_level"] == "high"
 
@@ -125,7 +125,7 @@ Genotype Encode Prompt: Extract the core research pattern from {idea_content}.
 Comparison Criteria: novelty, feasibility, relevance to source paper
 """
 
-    async def fake_get_user_api_key(_uid):
+    async def fake_get_user_api_key(_uid, _provider=None):
         return "test-key"
 
     context_file = TemplateContextFile(
@@ -192,11 +192,11 @@ def test_parse_multipart_template_generation_request_without_extra_parser_depend
         async def body(self):
             return body
 
-    idea_type, context_file = asyncio.run(
+    inputs, context_file = asyncio.run(
         _parse_multipart_template_generation_request(FakeRequest())
     )
 
-    assert idea_type == "Follow-up paper ideas"
+    assert inputs.idea_type_suggestion == "Follow-up paper ideas"
     assert context_file == TemplateContextFile(
         filename="paper.pdf",
         content_type="application/pdf",

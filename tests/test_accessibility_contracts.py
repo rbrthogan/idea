@@ -34,6 +34,7 @@ def test_core_view_switcher_has_roving_tabs_and_named_panels():
         "cards": "generations-container",
         "tree": "evolution-tree-container",
         "ranked": "evolution-ranked-container",
+        "genes": "evolution-genes-container",
     }
     for mode, panel_id in expected_tabs.items():
         tab_tag = re.search(
@@ -48,7 +49,7 @@ def test_core_view_switcher_has_roving_tabs_and_named_panels():
         assert 'role="tabpanel"' in panel_tag.group(0)
         assert f'aria-labelledby="evolution-view-tab-{mode}"' in panel_tag.group(0)
 
-    assert html.count('class="evolution-view-toggle-btn') == 3
+    assert html.count('class="evolution-view-toggle-btn') == 4
     assert html.count('role="tab"') >= 3
     assert html.count('tabindex="0"') >= 1
     assert html.count('tabindex="-1"') >= 2
@@ -90,7 +91,11 @@ def test_core_dynamic_selection_controls_are_native_buttons():
     rater_js = RATER_JS.read_text()
 
     assert '<span class="example-link"' not in viewer_html
-    assert viewer_html.count('<button type="button" class="example-link"') == 5
+    example_controls = re.findall(r'<button\b[^>]*data-template-brief-example="([^"]+)"[^>]*>', viewer_html)
+    assert set(example_controls) == {"everyday", "writing", "learning", "work", "community", "research", "play", "making"}
+    assert len(example_controls) == 8
+    example_tags = re.findall(r'<[^>]+data-template-brief-example="[^"]+"[^>]*>', viewer_html)
+    assert all(tag.startswith('<button ') and 'type="button"' in tag and 'aria-pressed=' in tag for tag in example_tags)
     assert '<button type="button" class="template-list-select"' in viewer_js
     assert '<button type="button" class="history-item-select"' in viewer_js
     assert "container.querySelectorAll('.history-item-select')" in viewer_js

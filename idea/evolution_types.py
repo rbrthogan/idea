@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Literal
 
 from pydantic import (
     BaseModel,
@@ -13,6 +13,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from idea.config import DEFAULT_MODEL
 
 
 class EvolutionRunConfig(BaseModel):
@@ -38,23 +40,27 @@ class EvolutionRunConfig(BaseModel):
     )
 
     idea_type: str = DEFAULT_IDEA_TYPE
-    pop_size: int = Field(default=5, ge=1)
-    generations: int = Field(default=3, ge=1)
-    model_type: str = "gemini-2.0-flash"
+    pop_size: int = Field(default=5, ge=1, le=100)
+    generations: int = Field(default=3, ge=1, le=500)
+    model_type: str = DEFAULT_MODEL
     creative_temp: float = Field(default=1.5, ge=0.0, le=2.0)
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     random_seed: Optional[int] = Field(default=None, ge=0, le=(2**64) - 1)
-    tournament_rounds: int = Field(default=1, ge=1)
-    tournament_count: Optional[float] = Field(default=None, ge=0.0)
-    full_tournament_rounds: Optional[int] = Field(default=None, ge=1)
-    thinking_budget: Optional[int] = None
+    tournament_rounds: int = Field(default=1, ge=1, le=1000)
+    tournament_count: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+    full_tournament_rounds: Optional[int] = Field(default=None, ge=1, le=1000)
+    thinking_budget: Optional[int] = Field(default=None, ge=-1, le=131072)
     thinking_level: Optional[str] = None
     max_budget: Optional[float] = Field(default=None, ge=0.0)
-    mutation_rate: float = Field(default=0.2, ge=0.0, le=1.0)
-    seed_context_pool_size: Optional[int] = Field(default=None, ge=1)
+    mutation_rate: float = Field(default=0.3, ge=0.0, le=1.0)
+    independent_birth_rate: float = Field(default=0.5, ge=0.0, le=1.0)
+    single_parent_birth_rate: float = Field(default=0.25, ge=0.0, le=1.0)
+    diversity_representation: Literal["criterion_summaries", "full_text"] = "criterion_summaries"
+    novelty_neighbors: int = Field(default=3, ge=1, le=10)
+    seed_context_pool_size: Optional[int] = Field(default=None, ge=1, le=8)
     refine_all_ideas: bool = False
     survivor_refinement_rate: float = Field(default=0.1, ge=0.0, le=1.0)
-    island_count: int = Field(default=2, ge=1)
+    island_count: int = Field(default=2, ge=1, le=5)
     migration_rate: float = Field(default=0.05, ge=0.0, le=1.0)
     migration_novelty_protection_quantile: float = Field(
         default=0.8,
@@ -63,10 +69,10 @@ class EvolutionRunConfig(BaseModel):
     )
     replacement_rate: float = Field(default=0.5, ge=0.0, le=1.0)
     fitness_alpha: float = Field(default=0.7, ge=0.0, le=1.0)
-    age_decay_rate: float = Field(default=0.25, ge=0.0)
+    age_decay_rate: float = Field(default=0.25, ge=0.0, le=10.0)
     age_decay_floor: float = Field(default=0.35, ge=0.0, le=1.0)
     context_novelty_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
-    context_novelty_max_attempts: int = Field(default=2, ge=0)
+    context_novelty_max_attempts: int = Field(default=2, ge=0, le=10)
     evaluation: Optional[Dict[str, Any]] = None
 
     @staticmethod
@@ -101,9 +107,9 @@ class EvolutionRunConfig(BaseModel):
     @classmethod
     def normalize_model_type(cls, value: Any) -> str:
         if value is None:
-            return "gemini-2.0-flash"
+            return DEFAULT_MODEL
         normalized = str(value).strip()
-        return normalized or "gemini-2.0-flash"
+        return normalized or DEFAULT_MODEL
 
     @field_validator("pop_size", "generations", mode="before")
     @classmethod
@@ -136,7 +142,7 @@ class EvolutionRunConfig(BaseModel):
     def coerce_unit_intervals(cls, value: Any, info: ValidationInfo) -> float:
         defaults = {
             "top_p": 0.9,
-            "mutation_rate": 0.2,
+            "mutation_rate": 0.3,
             "survivor_refinement_rate": 0.1,
             "migration_rate": 0.05,
             "migration_novelty_protection_quantile": 0.8,
@@ -251,7 +257,7 @@ class EvolutionRunConfig(BaseModel):
     @classmethod
     def coerce_island_count(cls, value: Any) -> int:
         try:
-            return max(1, int(value))
+            return max(1, min(5, int(value)))
         except (TypeError, ValueError):
             return 1
 
@@ -283,13 +289,15 @@ class EvolutionRunConfig(BaseModel):
 
     @model_validator(mode="after")
     def derive_population_dependent_settings(self) -> "EvolutionRunConfig":
+        if self.independent_birth_rate + self.single_parent_birth_rate > 1.0 + 1e-12:
+            raise ValueError("Independent and single-parent birth rates must sum to at most 1")
         if self.full_tournament_rounds is None:
             self.full_tournament_rounds = max(1, self.pop_size - 1)
         if self.tournament_count is None:
             self.tournament_count = (
                 self.tournament_rounds / self.full_tournament_rounds
             )
-        self.island_count = max(1, min(self.pop_size, self.island_count))
+        self.island_count = max(1, min(max(1, self.pop_size // 2), self.island_count))
         return self
 
     @classmethod
@@ -302,6 +310,12 @@ class EvolutionRunConfig(BaseModel):
         """
 
         source = dict(stored or {})
+        # Raising the new-run default must not alter legacy runs on resume.
+        source.setdefault("mutation_rate", 0.2)
+        # Legacy vectors and running normalization must keep their original
+        # meaning on resume. New runs default to criterion summaries.
+        source.setdefault("diversity_representation", "full_text")
+        source.setdefault("novelty_neighbors", 5)
         if "evaluation" not in source and "evaluation_config" in source:
             source["evaluation"] = source["evaluation_config"]
         known = {
@@ -387,6 +401,10 @@ class EvolutionRuntimeState:
     island_diversity_history: List[Dict[str, Any]] = field(default_factory=list)
     migration_history: List[Dict[str, Any]] = field(default_factory=list)
     comparison_cache: Dict[str, Any] = field(default_factory=dict)
+    algorithm_evidence_version: int = 2
+    quality_archive: List[Any] = field(default_factory=list)
+    gene_catalogue: Dict[str, Any] = field(default_factory=dict)
+    generation_draft: Optional[Dict[str, Any]] = None
     avg_idea_cost: float = 0.0
     avg_tournament_cost: float = 0.0
     stop_requested: bool = False

@@ -42,8 +42,11 @@ def test_settings_status_never_returns_the_decrypted_api_key():
         '@app.post("/api/contact")',
     )
 
-    assert '"masked_key": masked_key' in endpoint
+    assert '"masked_key": masked' in endpoint
+    assert '"api_keys": api_keys' in endpoint
     assert '"api_key": api_key' not in endpoint
+    assert '"api_key": gemini_key' not in endpoint
+    assert '"api_key": openai_key' not in endpoint
     assert "fullApiKey" not in (ROOT / "idea" / "static" / "js" / "viewer.js").read_text()
     assert 'id="copyApiKeyBtn"' not in VIEWER_HTML.read_text()
 
@@ -88,7 +91,7 @@ process.stdout.write(JSON.stringify({{
         "https://app.example/avatar.png",
         "https://images.example/avatar.png",
     ]
-    assert result["images"][2:] == ["/static/img/logo.png"] * 6
+    assert result["images"][2:] == [None] * 6
     assert result["internal"] == [True, True, False, False, False, False, False]
 
 
@@ -171,7 +174,7 @@ process.stdout.write(JSON.stringify(getTemplatePreviewDisplay({json.dumps(payloa
     assert result["name"] == payload["name"]
     assert result["description"] == payload["description"]
     assert result["itemType"] == payload["metadata"]["item_type"]
-    assert result["criteria"] == "safe, <iframe srcdoc=x>..."
+    assert result["criteria"] == "safe · <iframe srcdoc=x> · third"
 
 
 def test_viewer_preview_mounts_malicious_generated_values_as_text_in_node():
@@ -186,28 +189,41 @@ def test_viewer_preview_mounts_malicious_generated_values_as_text_in_node():
         "description": "</p><svg onload=alert(2)>",
         "metadata": {"item_type": "</small><script>alert(3)</script>"},
         "comparison_criteria": ["<iframe srcdoc=x>", "safe"],
+        "output": {"title": "<img src=x>", "content": "<svg onload=alert(4)>", "word_count": {"min": 100, "max": 100}},
+        "requirements": ["<script>alert(5)</script>"],
+        "special_requirements": "<iframe srcdoc=x>",
     }
     node_script = f"""
 const fields = Object.fromEntries([
   '.template-preview-name',
   '.template-preview-description',
   '.template-preview-item-type',
-  '.template-preview-criteria'
+  '.template-preview-criteria',
+  '.template-preview-output-title',
+  '.template-preview-output-content',
+  '.template-preview-word-count'
 ].map(key => [key, {{ textContent: '' }}]));
+const requirementItems = [];
+fields['.template-preview-requirements'] = {{ querySelector: () => ({{ appendChild: item => requirementItems.push(item.textContent) }}) }};
+const guidance = {{ textContent: '' }};
+fields['.template-preview-guidance'] = {{ querySelector: () => guidance }};
 const content = {{
   innerHTML: '',
   querySelector(selector) {{ return fields[selector]; }}
 }};
 const preview = {{ style: {{ display: 'none' }} }};
+const currentTemplateFlowMode = 'generate';
+function updateTemplateDraftControls() {{}}
 global.document = {{
-  getElementById(id) {{ return id === 'templatePreview' ? preview : content; }}
+  getElementById(id) {{ return id === 'templatePreview' ? preview : content; }},
+  createElement() {{ return {{ textContent: '' }}; }}
 }};
 {bundle}
 showTemplatePreview({json.dumps(payload)});
 process.stdout.write(JSON.stringify({{
   shell: content.innerHTML,
   texts: Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.textContent])),
-  display: preview.style.display
+  display: preview.style.display, requirements: requirementItems, guidance: guidance.textContent
 }}));
 """
     result = json.loads(_node_eval(node_script))
@@ -218,6 +234,12 @@ process.stdout.write(JSON.stringify({{
     assert result["texts"][".template-preview-description"] == payload["description"]
     assert result["texts"][".template-preview-item-type"] == payload["metadata"]["item_type"]
     assert result["display"] == "block"
+    assert result["texts"][".template-preview-output-title"] == payload["output"]["title"]
+    assert result["texts"][".template-preview-output-content"] == payload["output"]["content"]
+    assert result["texts"][".template-preview-word-count"] == "Exactly 100 words"
+    assert result["requirements"] == payload["requirements"]
+    assert result["guidance"] == payload["special_requirements"]
+    assert payload["requirements"][0] not in result["shell"]
 
 
 def test_admin_user_rows_use_text_content_for_all_server_fields():

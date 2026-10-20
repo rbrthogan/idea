@@ -2,7 +2,9 @@
 # Optimized for Cloud Run deployment
 
 # Build stage
-FROM python:3.11-slim as builder
+FROM ghcr.io/astral-sh/uv:0.11.16 AS uv
+FROM python:3.11-slim-bookworm AS python-base
+FROM python-base AS builder
 
 WORKDIR /app
 
@@ -11,21 +13,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY requirements.txt .
-RUN pip wheel --no-cache-dir --wheel-dir /app/wheels -r requirements.txt
+# Resolve exactly the same versions as development, excluding test tools.
+COPY --from=uv /uv /bin/uv
+COPY pyproject.toml uv.lock ./
+ENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
+RUN uv sync --locked --no-dev --no-install-project
 
 # Runtime stage
-FROM python:3.11-slim
+FROM python-base AS runtime
 
 WORKDIR /app
 
 # Create non-root user
 RUN useradd --create-home appuser
 
-# Copy wheels from builder
-COPY --from=builder /app/wheels /wheels
-RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
+COPY --from=builder /app/.venv /app/.venv
+ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 # Copy application code
 COPY idea/ ./idea/
@@ -44,7 +47,7 @@ ENV PORT=8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/')" || exit 1
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://localhost:' + os.environ.get('PORT', '8080') + '/', timeout=2)" || exit 1
 
 # Run with production settings
-CMD ["uvicorn", "idea.viewer:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "exec uvicorn idea.viewer:app --host 0.0.0.0 --port \"${PORT:-8080}\""]

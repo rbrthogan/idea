@@ -93,6 +93,70 @@ class FakeTransaction:
         doc_ref.delete()
 
 
+def test_compact_billing_is_transactional_and_survives_candidate_deletion(monkeypatch):
+    fake_db = FakeFirestore()
+    fake_db.transaction = lambda: FakeTransaction(fake_db)
+    monkeypatch.setattr(database, "get_db", lambda: fake_db)
+    monkeypatch.setattr(database.firestore, "transactional", lambda function: lambda transaction: function(transaction))
+    payload = {"evolution_id": "e", "status": "complete", "token_counts": {
+        "total_input": 100, "cost": {"total_cost": 7},
+        "critic": {"model": "gemini-historical", "input": 100, "cost": 7}}}
+    revision = asyncio.run(database.save_evolution("owner", "e", payload))
+    billing_path = ("users", "owner", "billing_runs", "e")
+    assert fake_db.store[billing_path]["_billing_summary"]["estimated_cost"] == 7
+    stale = deepcopy(payload)
+    stale["token_counts"]["cost"]["total_cost"] = 1000
+    with pytest.raises(database.EvolutionSaveConflict):
+        asyncio.run(database.save_evolution("owner", "e", stale, expected_revision="stale"))
+    assert fake_db.store[billing_path]["_billing_summary"]["estimated_cost"] == 7
+    fake_db.store.pop(("users", "owner", "evolutions", "e"))
+    records = asyncio.run(database.list_billing_records("owner"))
+    assert records["runs"][0]["_billing_summary"]["estimated_cost"] == 7
+    assert revision
+
+
+def test_browser_repair_cannot_advance_revision_under_active_worker(monkeypatch):
+    fake_db = FakeFirestore()
+    fake_db.transaction = lambda: FakeTransaction(fake_db)
+    monkeypatch.setattr(database, "get_db", lambda: fake_db)
+    monkeypatch.setattr(database, "_now_ms", lambda: 1000)
+    monkeypatch.setattr(database.firestore, "transactional", lambda function: lambda transaction: function(transaction))
+    database._run_doc_ref(fake_db, "owner").set({"evolution_id": "e", "run_token": "worker", "lease_expires_at_ms": 2000, "is_running": True})
+    payload = {"evolution_id": "e", "history": [[{"idea": "worker generation"}]], "current_generation": 0}
+    first = asyncio.run(database.save_evolution("owner", "e", payload, run_token="worker"))
+    browser = {**payload, "history": [*payload["history"], [{"idea": "browser latest generation"}]], "current_generation": 1}
+    with pytest.raises(database.ActiveEvolutionWriteConflict):
+        asyncio.run(database.save_evolution("owner", "e", browser, expected_revision=first))
+    assert fake_db.store[("users", "owner", "evolutions", "e")]["_save_revision"] == first
+    second = asyncio.run(database.save_evolution("owner", "e", browser, expected_revision=first, run_token="worker"))
+    assert second != first
+    # Other evolutions remain editable while this worker owns e.
+    assert asyncio.run(database.save_evolution("owner", "other", {"history": []}))
+    database._run_doc_ref(fake_db, "owner").set({"lease_expires_at_ms": 999}, merge=True)
+    assert asyncio.run(database.save_evolution("owner", "e", browser, expected_revision=second))
+
+
+def test_checkpoint_cannot_undo_a_rename_from_another_revision(monkeypatch):
+    fake_db = FakeFirestore()
+    fake_db.transaction = lambda: FakeTransaction(fake_db)
+    monkeypatch.setattr(database, "get_db", lambda: fake_db)
+    monkeypatch.setattr(database.firestore, "transactional", lambda fn: lambda tx: fn(tx))
+    initial = {"name": "Original", "history": [[{"title": "A", "content": "Alpha"}]],
+               "token_counts": {"cost": {"total_cost": .01}}}
+    revision = asyncio.run(database.save_evolution("u", "e", initial))
+    assert asyncio.run(database.rename_evolution("u", "e", "Renamed"))
+    initial["history"].append([{"title": "B", "content": "Beta"}])
+    revision = asyncio.run(database.save_evolution("u", "e", initial, expected_revision=revision))
+    saved = asyncio.run(database.get_evolution("u", "e"))
+    assert saved["name"] == "Renamed"
+    assert saved["history"] == initial["history"]
+    assert fake_db.store[("users", "u", "billing_runs", "e")]["name"] == "Renamed"
+    # The live engine still has its original display name at the next checkpoint.
+    assert asyncio.run(database.rename_evolution("u", "e", "Final name"))
+    asyncio.run(database.save_evolution("u", "e", initial, expected_revision=revision))
+    assert asyncio.run(database.get_evolution("u", "e"))["name"] == "Final name"
+
+
 def test_save_evolution_externalizes_large_history_and_reconstructs(monkeypatch):
     fake_db = FakeFirestore()
     monkeypatch.setattr(database, "get_db", lambda: fake_db)
@@ -110,6 +174,10 @@ def test_save_evolution_externalizes_large_history_and_reconstructs(monkeypatch)
         "config": {"generations": 1, "pop_size": 1, "idea_type": "game"},
         "history": history,
         "population": history[-1],
+        "gene_catalogue": {"version": 1, "revision": 1, "genes": [
+            {"id": "gene-1", "label": "Delayed consequences", "aliases": ["Deferred effects"],
+             "current_candidate_count": 1, "current_candidate_ids": ["child-a"]},
+        ]},
         "token_counts": {"total": 12, "diagnostics": {"events": [{"message": "x" * 90}]}},
     }
 
@@ -119,6 +187,8 @@ def test_save_evolution_externalizes_large_history_and_reconstructs(monkeypatch)
     saved_doc = fake_db.store[doc_path]
     assert "history" not in saved_doc
     assert saved_doc["_externalized_fields"]["history"]["chunk_count"] > 1
+    assert "gene_catalogue" not in saved_doc
+    assert saved_doc["_externalized_fields"]["gene_catalogue"]["chunk_count"] > 1
     assert saved_doc["_history_summary"] == {
         "generation_count": 2,
         "total_ideas": 2,
@@ -131,6 +201,7 @@ def test_save_evolution_externalizes_large_history_and_reconstructs(monkeypatch)
     loaded = asyncio.run(database.get_evolution("user-1", "evo-1"))
     assert loaded["history"] == history
     assert loaded["population"] == history[-1]
+    assert loaded["gene_catalogue"] == payload["gene_catalogue"]
     assert loaded["token_counts"] == payload["token_counts"]
 
 
@@ -342,6 +413,77 @@ def test_gc_grace_begins_when_version_is_retired_not_when_created(monkeypatch):
     assert _chunk_versions(doc_ref) == {second_revision}
 
 
+@pytest.mark.parametrize("publish_before_fence", [True, False])
+def test_gc_and_staged_publication_cannot_delete_a_live_version(monkeypatch, publish_before_fence):
+    fake_db = FakeFirestore()
+    fake_db.transaction = lambda: FakeTransaction(fake_db)
+    monkeypatch.setattr(database, "get_db", lambda: fake_db)
+    monkeypatch.setattr(database.firestore, "transactional", lambda fn: lambda tx: fn(tx))
+    monkeypatch.setattr(database, "EVOLUTION_FIELD_CHUNK_SIZE", 60)
+    clock = {"now": 1_000}
+    monkeypatch.setattr(database, "_now_ms", lambda: clock["now"])
+    base = {"history": [[{"title": "base", "content": "a" * 100}]]}
+    revision = asyncio.run(database.save_evolution("user-1", "gc-race", base))
+    doc_ref = _evolution_doc_ref(fake_db, "gc-race")
+    replacement = {"history": [[{"title": "replacement", "content": "b" * 100}]]}
+    manifest, chunks = database._prepare_evolution_save_data(replacement, "user-1", "test")
+    version = manifest["_save_revision"]
+    database._chunk_version_ref(doc_ref, version).set({
+        "chunk_version": version, "state": "staged", "created_at_ms": clock["now"],
+    })
+    for chunk_id, payload in chunks.items():
+        doc_ref.collection(database.EVOLUTION_CHUNKS_COLLECTION).document(chunk_id).set(payload)
+    clock["now"] += 600_001
+    claim = database._claim_chunk_version_for_deletion
+    publications = []
+
+    def publish():
+        publications.append(database._publish_evolution_manifest(fake_db, doc_ref, manifest, revision))
+
+    def interleave(*args, **kwargs):
+        if publish_before_fence:
+            publish()
+        result = claim(*args, **kwargs)
+        if not publish_before_fence:
+            publish()
+        return result
+
+    monkeypatch.setattr(database, "_claim_chunk_version_for_deletion", interleave)
+    database._delete_stale_evolution_chunks(doc_ref, db=fake_db)
+    assert publications == [publish_before_fence]
+    loaded = asyncio.run(database.get_evolution("user-1", "gc-race"))
+    assert loaded["history"] == (replacement if publish_before_fence else base)["history"]
+    assert (version in _chunk_versions(doc_ref)) is publish_before_fence
+
+
+def test_interrupted_gc_retains_deletion_fence_and_retries_cleanup(monkeypatch):
+    fake_db = FakeFirestore()
+    monkeypatch.setattr(database, "_now_ms", lambda: 2_000_000)
+    doc_ref = _evolution_doc_ref(fake_db, "gc-interrupted")
+    version_ref = database._chunk_version_ref(doc_ref, "old")
+    version_ref.set({"chunk_version": "old", "state": "staged", "created_at_ms": 1})
+    chunk_ref = doc_ref.collection(database.EVOLUTION_CHUNKS_COLLECTION).document("old-chunk")
+    chunk_ref.set({"chunk_version": "old", "created_at_ms": 1})
+    original_delete = FakeDocumentRef.delete
+
+    def interrupt_delete(ref):
+        if ref.path == chunk_ref.path:
+            raise RuntimeError("simulated shutdown")
+        original_delete(ref)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(FakeDocumentRef, "delete", interrupt_delete)
+        with pytest.raises(RuntimeError, match="simulated shutdown"):
+            database._delete_stale_evolution_chunks(doc_ref)
+    assert version_ref.get().to_dict()["state"] == "deleting"
+    assert database._publish_evolution_manifest(fake_db, doc_ref, {
+        "_save_revision": "old", "_externalized_fields": {"history": {"chunk_version": "old"}},
+    }, None) is False
+    database._delete_stale_evolution_chunks(doc_ref)
+    assert not chunk_ref.get().exists
+    assert not version_ref.get().exists
+
+
 def test_missing_published_chunk_raises_typed_integrity_error(monkeypatch):
     fake_db = FakeFirestore()
     monkeypatch.setattr(database, "get_db", lambda: fake_db)
@@ -529,3 +671,19 @@ def test_ambiguous_publish_error_never_deletes_possibly_current_chunks(monkeypat
 
     loaded = asyncio.run(database.get_evolution("user-1", "evo-ambiguous"))
     assert loaded["history"][0][0]["content"] == "kept"
+
+
+def test_pending_generation_is_chunked_and_survives_roundtrip(monkeypatch):
+    fake_db = FakeFirestore()
+    monkeypatch.setattr(database, 'get_db', lambda: fake_db)
+    monkeypatch.setattr(database, 'EVOLUTION_FIELD_CHUNK_SIZE', 80)
+    draft = {'version': 1, 'generation': 1, 'islands': {'0': {'results': [
+        {'candidate': {'id': 'child', 'idea': {'title': 'Saved', 'content': 'prose ' * 100}}, 'prompt': 'p'}]}}}
+    payload = {'status': 'paused', 'current_generation': 0, 'history': [[{'id': 'parent'}]],
+               'generation_draft': draft, 'config': {'pop_size': 1, 'generations': 2}}
+    asyncio.run(database.save_evolution('owner', 'draft-test', payload))
+    manifest = fake_db.store[('users', 'owner', 'evolutions', 'draft-test')]
+    assert manifest['_externalized_fields']['generation_draft']['chunk_count'] > 1
+    loaded = asyncio.run(database.get_evolution('owner', 'draft-test'))
+    assert loaded['generation_draft'] == draft
+    assert loaded['history'] == payload['history']

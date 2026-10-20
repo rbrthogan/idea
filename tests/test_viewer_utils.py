@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from idea.viewer import (
@@ -117,6 +119,25 @@ def test_idea_to_dict_preserves_breeding_genotypes():
     result = idea_to_dict(input_data)
 
     assert result["breeding_genotypes"] == input_data["breeding_genotypes"]
+
+
+@pytest.mark.parametrize("content", [
+    Idea(title="Parent", content="Rules"),
+    {"title": "Parent", "content": "Rules"},
+    "Rules",
+])
+def test_live_candidate_serialization_preserves_gene_observation(content):
+    observation = {
+        "version": 1, "status": "ok", "genotype": "delayed consequences",
+        "genes": [{"text": "delayed consequences", "gene_id": "gene-1"}],
+        "mapping_status": "ok", "mapping_revision": 2,
+    }
+    candidate = {"id": "parent", "idea": content, "gene_observation": observation}
+
+    published = json.loads(json.dumps(idea_to_dict(candidate)))
+
+    assert published["gene_observation"] == observation
+    assert published["content"] == "Rules"
 
 
 def test_idea_to_dict_preserves_island_metadata():

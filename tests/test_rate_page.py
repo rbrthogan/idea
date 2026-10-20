@@ -45,7 +45,7 @@ class TestRatePageAPI:
         """Test that the rate page loads without errors"""
         response = self.client.get("/rate")
         assert response.status_code == 200
-        assert "Idea Rater" in response.text
+        assert "Compare candidates" in response.text
         assert "evolutionSelect" in response.text
 
     def test_cross_origin_requests_are_not_allowed_by_default(self):
@@ -129,10 +129,15 @@ class TestRatePageAPI:
 
     def test_api_evolution_not_found(self):
         """Test that requesting non-existent evolution returns error"""
-        with authenticated_user(), patch("idea.viewer.db.get_evolution", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = None
+        with authenticated_user(), patch(
+            "idea.viewer.db.get_evolution", new=AsyncMock(return_value=None)
+        ) as mock_get, patch(
+            "idea.viewer.db.get_checkpoint", new=AsyncMock(return_value=None)
+        ) as mock_checkpoint:
             response = self.client.get("/api/evolution/nonexistent")
             assert response.status_code == 404
+            mock_get.assert_awaited_once_with("test-user", "nonexistent")
+            mock_checkpoint.assert_awaited_once_with("test-user", "nonexistent")
 
     def test_checkpoint_read_and_delete_require_authentication(self):
         assert self.client.get("/api/checkpoints/checkpoint-1").status_code == 401
@@ -341,7 +346,7 @@ class TestRatePageAPI:
                 return SimpleNamespace(batch=SimpleNamespace(records=[]))
 
         evolution_data = {
-            "config": {"idea_type": "prime_visualization"},
+            "config": {"idea_type": "drabble"},
             "current_generation": 1,
             "history": [
                 [
@@ -470,7 +475,7 @@ class TestRatePageAPI:
                 json={"apiKey": secret_marker, "popSize": "invalid"},
             )
 
-        assert response.status_code == 500
+        assert response.status_code == 422
         records = [
             record
             for record in caplog.records
@@ -490,7 +495,7 @@ class TestRatePageAPI:
             caplog.at_level(logging.INFO, logger="idea.viewer"):
             response = self.client.post("/api/start-evolution", json=["secret-value"])
 
-        assert response.status_code == 400
+        assert response.status_code == 422
         assert "Received start-evolution request" not in caplog.text
         assert "secret-value" not in caplog.text
 
@@ -768,10 +773,11 @@ class TestEvolutionDataFlow:
 
         assert response.status_code == 404
 
-    def test_opt_in_legacy_rating_read_migrates_to_user_namespace(self):
+    def test_opt_in_legacy_rating_migrates_only_when_user_votes(self):
         evolution_id = "legacy-run_2.5=demo"
         local_path = self.temp_path / f"{evolution_id}.json"
         original = {
+            "_save_revision": "revision-retained-in-legacy-export",
             "history": [[
                 {"id": "a", "title": "A", "content": "Alpha"},
                 {"id": "b", "title": "B", "content": "Beta"},
@@ -791,7 +797,27 @@ class TestEvolutionDataFlow:
                 json={"evolution_id": evolution_id},
             )
 
+            assert response.status_code == 200
+            assert not list((self.temp_path / "local-users").glob(f"user-*/{evolution_id}.json"))
+            pair = response.json()
+            voted = self.client.post("/api/submit-rating", json={
+                "evolution_id": evolution_id,
+                "idea_a_id": pair["idea_a"]["id"],
+                "idea_b_id": pair["idea_b"]["id"],
+                "pair_token": pair["pair_token"],
+                "outcome": "A",
+            })
+            replayed = self.client.post("/api/submit-rating", json={
+                "evolution_id": evolution_id,
+                "idea_a_id": pair["idea_a"]["id"],
+                "idea_b_id": pair["idea_b"]["id"],
+                "pair_token": pair["pair_token"],
+                "outcome": "A",
+            })
+
         assert response.status_code == 200
+        assert voted.status_code == 200
+        assert replayed.status_code == 409
         assert {response.json()["idea_a"]["id"], response.json()["idea_b"]["id"]} == {"a", "b"}
         assert json.loads(local_path.read_text()) == original
         migrated = list((self.temp_path / "local-users").glob(f"user-*/{evolution_id}.json"))

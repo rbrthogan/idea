@@ -38,7 +38,7 @@ const authContainer = document.getElementById('authContainer');
 let loginOverlay = document.getElementById('loginOverlay');
 
 function getSafeUserImageUrl(value, origin = window.location.origin) {
-    const fallback = '/static/img/logo.png';
+    const fallback = null;
     const rawValue = String(value || '').trim();
     if (!rawValue || rawValue.startsWith('//')) {
         return fallback;
@@ -51,7 +51,7 @@ function getSafeUserImageUrl(value, origin = window.location.origin) {
             return parsedUrl.href;
         }
     } catch (_) {
-        // Invalid or active URLs use the local inert fallback.
+        // Invalid or active URLs use initials instead of an image.
     }
     return fallback;
 }
@@ -72,6 +72,7 @@ function isInternalRequestUrl(value, origin = window.location.origin) {
 if (!loginOverlay) {
     loginOverlay = document.createElement('div');
     loginOverlay.id = 'loginOverlay';
+    loginOverlay.className = 'auth-overlay';
     loginOverlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
         background: rgba(255, 255, 255, 0.98); z-index: 10000;
@@ -79,16 +80,14 @@ if (!loginOverlay) {
         backdrop-filter: blur(10px);
     `;
     loginOverlay.innerHTML = `
-        <div class="text-center p-5 bg-white shadow-lg rounded-3 border" style="max-width: 400px;">
-            <img src="/static/img/logo.png" alt="Logo" style="height: 80px; margin-bottom: 25px;">
+        <div class="auth-panel text-center p-5" style="max-width: 440px;">
             <h2 class="mb-3 fw-bold">Idea Evolution</h2>
             <p class="text-muted mb-4">Sign in to access your evolution workspace.</p>
             <button id="googleSignInBtn" class="btn btn-primary btn-lg w-100 shadow-sm">
                 <i class="fab fa-google me-2"></i> Sign in with Google
             </button>
-            <div class="mt-3 text-muted small">
-                By continuing, you agree to the Terms of Service.
-            </div>
+            <p class="mt-3 text-muted small mb-0">Your experiments and provider keys stay in your workspace.</p>
+            <p id="loginError" class="text-danger small mt-3 mb-0" role="alert" hidden></p>
         </div>
     `;
     document.body.appendChild(loginOverlay);
@@ -107,13 +106,33 @@ async function signInWithGoogle() {
         return;
     }
 
-    console.log("Starting Google Sign-In...");
-    const provider = new firebase.auth.GoogleAuthProvider();
+    const button = document.getElementById('googleSignInBtn');
+    let feedback = document.getElementById('loginError');
+    if (!feedback) {
+        feedback = document.createElement('p');
+        feedback.id = 'loginError';
+        feedback.className = 'text-danger small mt-3';
+        feedback.setAttribute('role', 'alert');
+        loginOverlay.appendChild(feedback);
+    }
+    feedback.hidden = true;
+    if (button) button.disabled = true;
     try {
+        if (typeof firebase === 'undefined' || !firebase.apps?.length) {
+            throw new Error('Sign-in is unavailable. Refresh the page and try again.');
+        }
+        const provider = new firebase.auth.GoogleAuthProvider();
         await firebase.auth().signInWithPopup(provider);
     } catch (error) {
-        console.error("Login failed:", error);
-        alert("Login failed: " + error.message);
+        if (error.code === 'auth/popup-closed-by-user' || error.code === 'auth/cancelled-popup-request') return;
+        feedback.textContent = error.code === 'auth/popup-blocked'
+            ? 'Your browser blocked the sign-in window. Allow pop-ups for this site, then try again.'
+            : error.code === 'auth/network-request-failed'
+                ? 'Sign-in could not connect. Check your connection and try again.'
+                : 'Sign-in is unavailable. Refresh the page and try again.';
+        feedback.hidden = false;
+    } finally {
+        if (button) button.disabled = false;
     }
 }
 
@@ -133,13 +152,24 @@ async function signOut() {
 
 // 5. Auth Observer
 async function completeSignIn(user) {
+    if (window.__workspaceUserId && window.__workspaceUserId !== user.uid) {
+        window.location.reload();
+        return;
+    }
+    window.__workspaceUserId = user.uid;
     console.log("User signed in:", user.email);
     window.currentUser = user;
+    idToken = null;
     try {
         idToken = await user.getIdToken();
     } catch (e) {
         console.error("Failed to get ID token", e);
+        completeSignOut();
+        const error = document.getElementById('loginError');
+        if (error) { error.textContent = 'Your session could not connect. Please sign in again.'; error.hidden = false; }
+        return;
     }
+    document.querySelector('.layout-container')?.removeAttribute('inert');
 
     // Hide overlay
     loginOverlay.style.display = 'none';
@@ -173,6 +203,8 @@ function completeSignOut() {
     window.currentUser = null;
     idToken = null;
     window.__refreshTemplatesOnViewerReady = false;
+    document.querySelector('.layout-container')?.setAttribute('inert', '');
+    window.dispatchEvent(new CustomEvent('idea-auth-cleared'));
 
     // Show overlay
     loginOverlay.style.display = 'flex';
@@ -227,7 +259,9 @@ function renderUserUI(user) {
         <div class="dropdown">
             <button class="btn btn-link text-decoration-none dropdown-toggle d-flex align-items-center text-dark"
                     type="button" id="userDropdown" data-bs-toggle="dropdown" aria-expanded="false">
-                <img alt="User" class="rounded-circle me-2 border user-avatar" style="width: 32px; height: 32px; object-fit: cover;">
+                ${photoURL
+                    ? '<img alt="User" class="rounded-circle me-2 border user-avatar" style="width: 32px; height: 32px; object-fit: cover;">'
+                    : '<span class="user-initials me-2" aria-hidden="true"></span>'}
                 <span class="d-none d-md-block fw-bold small user-display-name"></span>
             </button>
             <ul class="dropdown-menu dropdown-menu-end shadow border-0" aria-labelledby="userDropdown">
@@ -237,7 +271,8 @@ function renderUserUI(user) {
             </ul>
         </div>
     `;
-    authContainer.querySelector('.user-avatar').src = photoURL;
+    if (photoURL) authContainer.querySelector('.user-avatar').src = photoURL;
+    else authContainer.querySelector('.user-initials').textContent = name.trim().charAt(0).toUpperCase() || '?';
     authContainer.querySelector('.user-display-name').textContent = name;
     authContainer.querySelector('.user-email').textContent = email;
     authContainer.querySelector('.sign-out-link').addEventListener('click', event => {
@@ -251,70 +286,82 @@ function renderUserUI(user) {
 // 7. Monkey-patch Fetch to inject Token
 const originalFetch = window.fetch;
 window.fetch = async function (url, options = {}) {
-    // Only same-origin requests may receive the bearer token. Substring checks
-    // are unsafe because an attacker URL can include our origin in its path.
     const isInternal = isInternalRequestUrl(url);
+    const user = window.currentUser;
+    if (!isInternal || !user) return originalFetch(url, options);
 
-    if (isInternal && window.currentUser) {
-        // Refresh token if potentially expired? (Firebase SDK handles internal caching, getIdToken() manages refresh)
+    const inherited = typeof Request !== 'undefined' && url instanceof Request ? url.headers : undefined;
+    const headers = new Headers(options.headers === undefined ? inherited : options.headers);
+    try {
+        idToken = await user.getIdToken();
+    } catch (error) {
+        idToken = null;
+        throw new Error('Your session could not be refreshed. Check your connection and sign in again.');
+    }
+    if (window.currentUser !== user) throw new Error('Your account changed. Please try again.');
+    headers.set('Authorization', `Bearer ${idToken}`);
+    // A Request body can only be consumed once. Keep a copy for the one auth retry.
+    const retryRequest = typeof Request !== 'undefined' && url instanceof Request ? url.clone() : url;
+    let response = await originalFetch(url, { ...options, headers });
+    if (window.currentUser !== user) throw new Error('Your account changed. Please try again.');
+    if (response.status === 401 && window.currentUser === user) {
         try {
-            // true = force refresh, false = use cached.
-            // We use cached unless we get 401? For now, just getting it ensures validity.
-            idToken = await window.currentUser.getIdToken();
-        } catch (e) {
-            console.warn("Token fetch error:", e);
+            idToken = await user.getIdToken(true);
+            if (window.currentUser !== user) return response;
+            headers.set('Authorization', `Bearer ${idToken}`);
+            response = await originalFetch(retryRequest, { ...options, headers });
+        } catch (_) {
+            // Preserve the authentication response if token refresh is unavailable.
         }
-
-        if (idToken) {
-            if (!options.headers) {
-                options.headers = {};
-            }
-
-            // Handle Headers object vs plain object
-            if (options.headers instanceof Headers) {
-                options.headers.append('Authorization', `Bearer ${idToken}`);
-            } else {
-                options.headers['Authorization'] = `Bearer ${idToken}`;
-            }
-        }
+        if (response.status === 401) completeSignOut();
     }
-
-    // Call original
-    const response = await originalFetch(url, options);
-
-    // Handle 401 Unauthorized globally
-    if (response.status === 401) {
-        console.warn("Resource Unauthorized. Checking auth state...");
-        // If we get 401, maybe token expired and sdk didn't refresh?
-        // Or user deleted?
-    }
-
+    if (window.currentUser && window.currentUser !== user) throw new Error('Your account changed. Please try again.');
     return response;
 };
 
 // 8. Check API Key Status
+let providerStatusCheckVersion = 0;
 async function checkApiKeyStatus() {
+    const version = ++providerStatusCheckVersion;
+    const startButton = document.getElementById('startButton');
+    const autoRatingButton = document.getElementById('startAutoRating');
+    if (startButton) startButton.disabled = true;
+    if (autoRatingButton && !(typeof autoRatingInProgress !== 'undefined' && autoRatingInProgress)) autoRatingButton.disabled = true;
     try {
-        const response = await fetch('/api/settings/status');
-        const data = await response.json();
+        const data = window.IdeaWorkbench
+            ? await window.IdeaWorkbench.loadProviderSettings()
+            : await fetch('/api/settings/status').then(response => response.json());
+        if (version !== providerStatusCheckVersion) return;
         const banner = document.getElementById('apiKeyAlert');
-        const startButton = document.getElementById('startButton');
+        const modelSelect = document.getElementById('modelType') || document.getElementById('modelSelect');
+        const selectedProvider = window.IdeaWorkbench?.selectedProvider()
+            || modelSelect?.selectedOptions?.[0]?.dataset?.provider || 'google_generative_ai';
+        const providerName = selectedProvider === 'openai' ? 'OpenAI' : 'Gemini';
+        const selectedKeyConfigured = data.api_keys?.[selectedProvider]?.configured
+            ?? (typeof data.api_key_missing === 'boolean' && !data.api_key_missing);
 
-        if (data.api_key_missing) {
+        if (!selectedKeyConfigured) {
             if (banner) banner.style.display = 'block';
             if (startButton) {
                 startButton.disabled = true;
-                startButton.title = "Please configure your Gemini API Key in Settings to start.";
+                startButton.title = data.api_keys?.[selectedProvider]?.error_code === 'stored_key_unreadable'
+                    ? `Your saved ${providerName} key cannot be opened. Enter a replacement in Settings.`
+                    : `Please configure your ${providerName} API key in Settings to start.`;
             }
         } else {
             if (banner) banner.style.display = 'none';
             if (startButton) {
-                startButton.disabled = false;
+                if (!(typeof isEvolutionRunning !== 'undefined' && isEvolutionRunning)) startButton.disabled = false;
                 startButton.title = "Start Evolution";
             }
         }
-        // Also update settings modal state if needed
-        window.hasApiKey = !data.api_key_missing;
+        if (autoRatingButton && !(typeof autoRatingInProgress !== 'undefined' && autoRatingInProgress)) {
+            autoRatingButton.disabled = !selectedKeyConfigured;
+        }
+        window.apiKeyMissing = !selectedKeyConfigured;
+        // Also update settings state for the selected provider.
+        window.hasApiKey = selectedKeyConfigured;
+        window.IdeaWorkbench?.updateProviderReadiness();
 
         // Admin Dashboard Link injection
         if (data.is_admin) {
@@ -331,9 +378,20 @@ async function checkApiKeyStatus() {
             }
         }
     } catch (e) {
+        if (version !== providerStatusCheckVersion) return;
         console.error("Failed to check API key status", e);
+        window.apiKeyMissing = true;
+        window.hasApiKey = false;
+        const banner = document.getElementById('apiKeyAlert');
+        if (banner) banner.style.display = 'block';
+        if (startButton) {
+            startButton.disabled = true;
+            startButton.title = 'Could not check your provider key. Open Settings to retry.';
+        }
+        if (autoRatingButton && !(typeof autoRatingInProgress !== 'undefined' && autoRatingInProgress)) autoRatingButton.disabled = true;
     }
 }
 
 // Export for other modules if needed
 window.checkApiKeyStatus = checkApiKeyStatus;
+window.addEventListener('idea-provider-selection', () => void checkApiKeyStatus());

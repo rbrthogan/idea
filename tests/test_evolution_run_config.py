@@ -68,7 +68,7 @@ def test_run_config_defaults_are_stable_and_complete():
         "idea_type": "airesearch",
         "pop_size": 5,
         "generations": 3,
-        "model_type": "gemini-2.0-flash",
+        "model_type": "gemini-3.5-flash-lite",
         "creative_temp": 1.5,
         "top_p": 0.9,
         "random_seed": None,
@@ -78,7 +78,11 @@ def test_run_config_defaults_are_stable_and_complete():
         "thinking_budget": None,
         "thinking_level": None,
         "max_budget": None,
-        "mutation_rate": 0.2,
+        "mutation_rate": 0.3,
+        "independent_birth_rate": 0.5,
+        "single_parent_birth_rate": 0.25,
+        "diversity_representation": "criterion_summaries",
+        "novelty_neighbors": 3,
         "seed_context_pool_size": None,
         "refine_all_ideas": False,
         "survivor_refinement_rate": 0.1,
@@ -153,7 +157,7 @@ def test_run_config_coerces_and_bounds_current_engine_settings():
     assert config.seed_context_pool_size == 1
     assert config.refine_all_ideas is True
     assert config.survivor_refinement_rate == 1.0
-    assert config.island_count == 3
+    assert config.island_count == 1  # Small populations must not create singleton islands.
     assert config.migration_rate == 0.05
     assert config.migration_novelty_protection_quantile == 0.0
     assert config.replacement_rate == 1.0
@@ -375,6 +379,7 @@ def test_restore_applies_stable_defaults_to_legacy_config():
     assert constructor_kwargs["pop_size"] == 3
     assert constructor_kwargs["generations"] == 2
     assert constructor_kwargs["random_seed"] is None
+    assert constructor_kwargs["mutation_rate"] == 0.2
     assert constructor_kwargs["context_novelty_threshold"] == 0.8
     assert constructor_kwargs["context_novelty_max_attempts"] == 2
     assert constructor_kwargs["evaluation_config"] is None

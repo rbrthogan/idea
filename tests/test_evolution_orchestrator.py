@@ -288,6 +288,13 @@ def test_oracle_replacement_updates_population_and_prompts():
         updates.append(data)
 
     orchestrator = EvolutionOrchestrator(engine, callback)
+    engine.quality_evaluator = SimpleNamespace(config=SimpleNamespace(id="quality_elo"))
+
+    def immigrant_wins(_population, **kwargs):
+        kwargs["details"].append({"pairs": [{"a_idx": 0, "b_idx": 1, "winner": "B"}]})
+        return {0: 1499, 1: 1501}
+
+    orchestrator._get_tournament_ranks = immigrant_wins
     asyncio.run(orchestrator._apply_oracle_if_enabled(gen=0))
 
     assert engine.population[0]["oracle_generated"] is True
@@ -459,6 +466,42 @@ def test_generation_prepares_artifact_evidence_before_pairwise_tournament():
     )
 
     assert events[:2] == [("prepare", 0), ("judge", 0)]
+
+
+def test_degraded_artifact_evidence_records_text_only_diagnostic():
+    engine = _FakeEngine()
+    failed_record = SimpleNamespace(
+        status=SimpleNamespace(value="failed"),
+        error="remote render timed out",
+    )
+
+    async def prepare(_population, *, evaluation_generation):
+        assert evaluation_generation == 0
+        return SimpleNamespace(
+            metadata={"artifact_evidence_degraded": True},
+            records=[failed_record],
+        )
+
+    engine._prepare_population_for_judging = prepare
+    orchestrator = EvolutionOrchestrator(engine, lambda _data: asyncio.sleep(0))
+    diagnostics = []
+    orchestrator._record_generation_diagnostic = (
+        lambda key, detail=None: diagnostics.append((key, detail))
+    )
+
+    asyncio.run(
+        orchestrator._prepare_tournament_evidence(
+            engine.population,
+            evaluation_generation=0,
+        )
+    )
+
+    assert diagnostics == [
+        (
+            "artifact_evidence_degraded",
+            "remote render timed out; tournament continued with text-only judging",
+        )
+    ]
 
 
 def test_island_generation_prepares_artifact_evidence_before_pairwise_tournament():
@@ -919,3 +962,197 @@ def test_island_generation_breeds_locally_and_preserves_island_sizes():
     assert parent_island_sets
     assert all(len(island_set) == 1 for island_set in parent_island_sets)
     assert any(update.get("history") for update in updates)
+
+
+def test_partial_birth_draft_roundtrip_resumes_only_missing_children():
+    import copy
+    import json
+    from idea.evolution_persistence import EvolutionSerializer
+    from idea.models import encode_json_safe
+
+    async def exercise():
+        engine = _FakeEngine()
+        engine.population += [{"id": uuid.uuid4(), "idea": "C", "parent_ids": [], "birth_generation": 0}]
+        engine.history = [copy.deepcopy(engine.population)]
+        original_ids = [str(c['id']) for c in engine.population]
+        saved = []
+        async def save(status="in_progress"):
+            saved.append(json.loads(json.dumps(encode_json_safe(engine.generation_draft))))
+            return 'checkpoint'
+        engine.save_checkpoint = save
+        orchestrator = EvolutionOrchestrator(engine, lambda _: asyncio.sleep(0))
+        tasks = orchestrator._build_birth_tasks(engine.population, {0: 1, 1: 1, 2: 1},
+            ['crossover', 'crossover'], 0, survivors=engine.population[:1], fallback=engine.population)
+        first, _ = await tasks[0]()
+        assert len(saved) == 1 and saved[0]['islands']['0']['results'][0]
+        assert saved[0]['islands']['0']['results'][1] is None
+        assert [str(c['id']) for c in engine.population] == original_ids
+        assert len(engine.history) == 1 and engine.current_generation == 0
+
+        restored = _FakeEngine()
+        EvolutionSerializer.restore_runtime_state(restored, {'current_generation': 0,
+            'generation_draft': saved[0], 'population': encode_json_safe(engine.population),
+            'history': encode_json_safe(engine.history)})
+        resumed = EvolutionOrchestrator(restored, lambda _: asyncio.sleep(0))
+        calls = []
+        original_breed = restored.breeder.breed
+        def breed(parents, idea_type):
+            calls.append([str(c['id']) for c in parents])
+            return original_breed(parents, idea_type)
+        restored.breeder.breed = breed
+        result = await resumed._resume_draft_island(0, resumed._draft_entry(0), {}, 2)
+        assert len(calls) == 1
+        assert calls[0] == [p['id'] for p in saved[0]['islands']['0']['plans'][1]['parents']]
+        assert len(result['population']) == 3
+        retained = next(c for c in result['population'] if str(c['id']) == str(first['id']))
+        assert encode_json_safe(retained) == encode_json_safe(first)
+        await resumed._commit_generation_population(0, result['population'], result['prompts'])
+        assert restored.current_generation == 1 and len(restored.history) == 2
+        assert restored.generation_draft is None
+    asyncio.run(exercise())
+
+
+def test_completed_generation_commits_before_budget_stop():
+    async def exercise():
+        engine = _FakeEngine()
+        engine.max_budget = 1
+        orchestrator = EvolutionOrchestrator(engine, lambda _: asyncio.sleep(0))
+        engine.check_budget = lambda: bool(getattr(engine, 'generation_draft', None)
+            and all(r is not None for r in engine.generation_draft['islands']['0']['results']))
+        # Keep budget true after commit clears the draft.
+        original_commit = orchestrator._commit_generation_population
+        async def commit(*args):
+            budget_reached = engine.check_budget()
+            await original_commit(*args)
+            engine.check_budget = lambda: budget_reached
+        orchestrator._commit_generation_population = commit
+        await orchestrator._evolve_generations(start_generation=0, total_steps=4, step_offset=0,
+            work_state=GenerationWorkState(0, 0, 1, 4, 4), resuming=False)
+        assert engine.stop_requested
+        assert engine.current_generation == 1 and len(engine.history) == 2
+        assert any(c.get('birth_generation') == 1 for c in engine.population)
+        assert engine.generation_draft is None
+    asyncio.run(exercise())
+
+
+def test_completed_island_draft_reused_without_judging_or_breeding():
+    async def exercise():
+        engine = _FakeEngine()
+        orchestrator = EvolutionOrchestrator(engine, lambda _: asyncio.sleep(0))
+        for island_id in (0, 1):
+            tasks = orchestrator._build_birth_tasks(engine.population, {0: 1, 1: 1}, ['crossover'], 0,
+                island_id, survivors=engine.population[:1], fallback=engine.population)
+            if island_id == 0:
+                await tasks[0]()
+        saved_child_id = engine.generation_draft['islands']['0']['results'][0]['candidate']['id']
+        def unexpected(*args, **kwargs):
+            raise AssertionError('completed island was repeated')
+        engine.breeder.breed = unexpected
+        engine.critic.get_tournament_ranks = unexpected
+        result = await orchestrator._evolve_single_island_generation(gen=0, island_id=0,
+            island_population=engine.population, current_gen_start_step=0, total_steps=4,
+            gen_base_progress_info={}, birth_operators=['crossover'])
+        assert len(result['population']) == 2
+        assert result['population'][1]['id'] == saved_child_id
+        assert engine.generation_draft['islands']['1']['results'] == [None]
+    asyncio.run(exercise())
+
+
+def test_batch_surfaces_durable_checkpoint_failure():
+    import pytest
+    from idea.evolution_persistence import EvolutionPersistenceError
+    async def exercise():
+        engine = _FakeEngine()
+        engine.semaphore = asyncio.Semaphore(1)
+        async def failing_save():
+            raise EvolutionPersistenceError('disk full')
+        with pytest.raises(EvolutionPersistenceError, match='disk full'):
+            await EvolutionEngine._run_batch_with_progress(engine, [failing_save],
+                lambda _: asyncio.sleep(0), {}, 0, 1, 'child {completed}/{total}')
+    asyncio.run(exercise())
+
+
+def test_interrupted_generation_resumes_without_repeating_selection():
+    import copy
+    async def exercise():
+        engine = _FakeEngine()
+        engine.population += [{"id": uuid.uuid4(), "idea": title, "parent_ids": [], "birth_generation": 0}
+                              for title in ['C', 'D']]
+        engine.pop_size = 4
+        engine.history = [copy.deepcopy(engine.population)]
+        engine._compute_replacement_count = lambda n: 2
+        normal_batch = engine._run_batch_with_progress
+        async def interrupted_batch(tasks, **kwargs):
+            first = await tasks[0]()
+            engine.stop_requested = True
+            return [first, None]
+        engine._run_batch_with_progress = interrupted_batch
+        state = GenerationWorkState(0, 0, 1, 4, 4)
+        orchestrator = EvolutionOrchestrator(engine, lambda _: asyncio.sleep(0))
+        await orchestrator._evolve_generations(start_generation=0, total_steps=4, step_offset=0,
+            work_state=state, resuming=False)
+        assert engine.current_generation == 0 and len(engine.history) == 1
+        draft = engine.generation_draft
+        first = copy.deepcopy(draft['islands']['0']['results'][0]['candidate'])
+        assert draft['islands']['0']['results'][1] is None
+        engine.stop_requested = False
+        engine._run_batch_with_progress = normal_batch
+        def no_judging(*args, **kwargs):
+            raise AssertionError('source generation already judged')
+        engine.critic.get_tournament_ranks = no_judging
+        engine.max_budget = 1
+        engine.check_budget = lambda: engine.current_generation == 1
+        resumed = EvolutionOrchestrator(engine, lambda _: asyncio.sleep(0))
+        await resumed._evolve_generations(start_generation=0, total_steps=4, step_offset=0,
+            work_state=state, resuming=True)
+        assert engine.current_generation == 1 and len(engine.history) == 2
+        assert len(engine.population) == 4 and engine.generation_draft is None
+        assert next(c for c in engine.population if c['id'] == first['id']) == first
+        assert sum(c.get('birth_generation') == 1 for c in engine.population) == 2
+    asyncio.run(exercise())
+
+
+def test_two_island_pause_preserves_completed_island_and_resumes_other():
+    import copy
+    async def exercise():
+        engine = _FakeEngine()
+        engine.island_count = 2
+        engine.population += [{"id": uuid.uuid4(), "idea": title, "parent_ids": [], "birth_generation": 0}
+                              for title in ['C', 'D']]
+        engine.pop_size = 4
+        for i, c in enumerate(engine.population):
+            c['island_id'] = i // 2
+        engine.history = [copy.deepcopy(engine.population)]
+        normal_batch = engine._run_batch_with_progress
+        batches = []
+        async def interrupt_second_island(tasks, **kwargs):
+            batches.append(1)
+            if len(batches) == 2:
+                engine.stop_requested = True
+                return [None for _ in tasks]
+            return await normal_batch(tasks=tasks, **kwargs)
+        engine._run_batch_with_progress = interrupt_second_island
+        state = GenerationWorkState(0, 0, 1, 6, 6)
+        orchestrator = EvolutionOrchestrator(engine, lambda _: asyncio.sleep(0))
+        await orchestrator._evolve_island_generations(start_generation=0, total_steps=6, step_offset=0,
+            work_state=state, resuming=False)
+        assert engine.current_generation == 0 and len(engine.history) == 1
+        assert len(engine.population) == 4
+        saved = engine.generation_draft['islands']['0']['results'][0]['candidate']['id']
+        assert engine.generation_draft['islands']['1']['results'] == [None]
+        engine.stop_requested = False
+        engine._run_batch_with_progress = normal_batch
+        def unexpected(*args, **kwargs):
+            raise AssertionError('saved islands should not be rejudged')
+        engine.critic.get_tournament_ranks = unexpected
+        engine.max_budget = 1
+        engine.check_budget = lambda: engine.current_generation == 1
+        resumed = EvolutionOrchestrator(engine, lambda _: asyncio.sleep(0))
+        await resumed._evolve_island_generations(start_generation=0, total_steps=6, step_offset=0,
+            work_state=state, resuming=True)
+        assert len(engine.population) == 4 and len(engine.history) == 2
+        assert engine.generation_draft is None and engine.current_generation == 1
+        assert saved in {c['id'] for c in engine.population}
+        assert sum(c.get('birth_generation') == 1 for c in engine.population) == 2
+        assert sorted(c['island_id'] for c in engine.population) == [0, 0, 1, 1]
+    asyncio.run(exercise())

@@ -72,109 +72,90 @@ def parallel_evaluate_pairs(
 
     Returns a list of tuples (idx_a, idx_b, winner) in completion order.
     """
-    futures: Dict[Any, Tuple[int, int]] = {}
     results: List[Tuple[int, int, Optional[str]]] = []
     total_pairs = len(pairs)
     completed_count = 0
-    timeout_raw = os.environ.get("PAIR_EVAL_TIMEOUT_SECONDS", "90")
     try:
-        pair_eval_timeout = max(1.0, float(timeout_raw))
+        pair_timeout = max(1.0, float(os.environ.get("PAIR_EVAL_TIMEOUT_SECONDS", "90")))
     except ValueError:
-        pair_eval_timeout = 90.0
-    poll_seconds = 0.25
+        pair_timeout = 90.0
+    workers = max(1, min(32, int(concurrency)))
+    executor = ThreadPoolExecutor(max_workers=workers)
+    pending = {}
+    remaining_pairs = iter(pairs)
+    exhausted = False
+    stop_reason = None
 
-    executor = ThreadPoolExecutor(max_workers=max(1, int(concurrency)))
-    try:
-        for idx_a, idx_b in pairs:
-            item_a = items[idx_a]
-            item_b = items[idx_b]
-            a_dict = extract_title_content(item_a)
-            b_dict = extract_title_content(item_b)
+    def report(ia, ib, winner, error=None):
+        nonlocal completed_count
+        results.append((ia, ib, winner))
+        if error and failure_details is not None:
+            failure_details[(ia, ib)] = error
+        completed_count += 1
+        if progress_callback:
+            try:
+                progress_callback(completed_count, total_pairs)
+            except Exception as exc:
+                print(f"Error in progress callback: {exc}")
 
+    def fill_window():
+        nonlocal exhausted, stop_reason
+        while not exhausted and len(pending) < workers:
+            if callable(should_stop) and should_stop():
+                stop_reason = "stop requested"
+                return
+            try:
+                ia, ib = next(remaining_pairs)
+            except StopIteration:
+                exhausted = True
+                return
+            a = extract_title_content(items[ia])
+            b = extract_title_content(items[ib])
             swap = random.random() < 0.5 if randomize_presentation else False
+            def compare(a=a, b=b, swap=swap):
+                if callable(should_stop) and should_stop():
+                    return None
+                winner = compare_fn(b, a, idea_type) if swap else compare_fn(a, b, idea_type)
+                if swap and winner in {"A", "B"}:
+                    winner = "B" if winner == "A" else "A"
+                return winner
+            future = executor.submit(compare)
+            pending[future] = (ia, ib, time.monotonic())
 
-            def task(a=a_dict, b=b_dict, s=swap, ia=idx_a, ib=idx_b):
-                if s:
-                    w = compare_fn(b, a, idea_type)
-                    if w == "A":
-                        w = "B"
-                    elif w == "B":
-                        w = "A"
-                else:
-                    w = compare_fn(a, b, idea_type)
-                return ia, ib, w
-
-            future = executor.submit(task)
-            futures[future] = (idx_a, idx_b)
-
-        pending = set(futures.keys())
-        deadline = time.monotonic() + pair_eval_timeout
-        stop_reason = None
-
-        while pending:
+    try:
+        fill_window()
+        while pending and not stop_reason:
             if callable(should_stop) and should_stop():
                 stop_reason = "stop requested"
                 break
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                stop_reason = f"timeout ({pair_eval_timeout:.1f}s)"
+            now = time.monotonic()
+            if any(not future.done() and now - started >= pair_timeout
+                   for future, (_, _, started) in pending.items()):
+                stop_reason = f"timeout ({pair_timeout:.1f}s per comparison)"
                 break
-
-            done, pending = wait(
-                pending,
-                timeout=min(poll_seconds, remaining),
-                return_when=FIRST_COMPLETED,
-            )
-
+            done, _ = wait(tuple(pending), timeout=.1, return_when=FIRST_COMPLETED)
             for future in done:
-                idx_a, idx_b = futures[future]
+                ia, ib, _ = pending.pop(future)
+                error = None
                 try:
-                    out_a, out_b, winner = future.result()
+                    winner = future.result()
                 except Exception as exc:
-                    out_a, out_b, winner = idx_a, idx_b, None
-                    if failure_details is not None:
-                        failure_details[(idx_a, idx_b)] = (
-                            f"{exc.__class__.__name__}: {str(exc) or 'comparison failed'}"
-                        )
-
-                if winner not in {"A", "B", "tie"}:
-                    if failure_details is not None and (idx_a, idx_b) not in failure_details:
-                        failure_details[(idx_a, idx_b)] = (
-                            f"invalid comparison winner: {winner!r}"
-                        )
                     winner = None
-
-                results.append((out_a, out_b, winner))
-                completed_count += 1
-                if progress_callback:
-                    try:
-                        progress_callback(completed_count, total_pairs)
-                    except Exception as e:
-                        print(f"Error in progress callback: {e}")
-
-        if pending:
-            if stop_reason:
-                print(
-                    f"parallel_evaluate_pairs ended early ({stop_reason}); "
-                    f"marking {len(pending)} unfinished comparisons as failed."
-                )
-            for future in pending:
-                idx_a, idx_b = futures[future]
-                future.cancel()
-                results.append((idx_a, idx_b, None))
-                if failure_details is not None:
-                    failure_details[(idx_a, idx_b)] = stop_reason or "comparison unfinished"
-                completed_count += 1
-                if progress_callback:
-                    try:
-                        progress_callback(completed_count, total_pairs)
-                    except Exception as e:
-                        print(f"Error in progress callback: {e}")
+                    error = f"{exc.__class__.__name__}: {str(exc) or 'comparison failed'}"
+                if winner not in {"A", "B", "tie"}:
+                    error = error or f"invalid comparison winner: {winner!r}"
+                    winner = None
+                report(ia, ib, winner, error)
+            fill_window()
+        for future, (ia, ib, _) in pending.items():
+            future.cancel()
+            report(ia, ib, None, stop_reason or "comparison unfinished")
+        for ia, ib in remaining_pairs:
+            report(ia, ib, None, stop_reason or "comparison unfinished")
     finally:
-        # Never block shutdown waiting on worker threads that might be stuck in network calls.
-        executor.shutdown(wait=False, cancel_futures=True)
-
+        # Retain the run's claim until started provider calls finish. Python cannot
+        # kill a running thread; provider transport deadlines bound this drain.
+        executor.shutdown(wait=True, cancel_futures=True)
     return results
 
 

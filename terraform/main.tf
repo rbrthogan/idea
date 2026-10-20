@@ -15,6 +15,13 @@ terraform {
   }
 }
 
+locals {
+  image_repository = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.repo.repository_id}/idea-evolution"
+  deployment_image = var.image_digest != null ? "${local.image_repository}@${var.image_digest}" : "${local.image_repository}:${var.image_tag}"
+  # Existing encrypted provider keys require this exact historical salt.
+  encryption_salt = "idea-evolution-salt"
+}
+
 provider "google" {
   project = var.project_id
   region  = var.region
@@ -36,6 +43,7 @@ resource "google_project_service" "apis" {
     "artifactregistry.googleapis.com",
     "secretmanager.googleapis.com",
     "cloudbuild.googleapis.com",
+    "storage.googleapis.com",
     "serviceusage.googleapis.com"
   ])
   service            = each.key
@@ -48,7 +56,10 @@ resource "google_artifact_registry_repository" "repo" {
   repository_id = "idea-evolution"
   description   = "Docker repository for Idea Evolution"
   format        = "DOCKER"
-  depends_on    = [google_project_service.apis]
+  lifecycle {
+    prevent_destroy = true
+  }
+  depends_on = [google_project_service.apis]
 }
 
 # Service Account for Cloud Run
@@ -65,17 +76,36 @@ resource "google_firestore_database" "database" {
   type                              = "FIRESTORE_NATIVE"
   concurrency_mode                  = "OPTIMISTIC"
   app_engine_integration_mode       = "DISABLED"
-  point_in_time_recovery_enablement = "POINT_IN_TIME_RECOVERY_DISABLED"
-  delete_protection_state           = "DELETE_PROTECTION_DISABLED" # For easier teardown if needed
-  deletion_policy                   = "DELETE"
+  point_in_time_recovery_enablement = var.firestore_pitr_enabled ? "POINT_IN_TIME_RECOVERY_ENABLED" : "POINT_IN_TIME_RECOVERY_DISABLED"
+  delete_protection_state           = "DELETE_PROTECTION_ENABLED"
+  deletion_policy                   = "ABANDON"
+
+  # Database location/name changes require a separate migration, never replacement.
+  lifecycle {
+    prevent_destroy = true
+  }
 
   depends_on = [google_project_service.apis]
+}
+
+resource "google_firestore_backup_schedule" "weekly" {
+  count     = var.firestore_weekly_backups_enabled ? 1 : 0
+  project   = var.project_id
+  database  = google_firestore_database.database.name
+  retention = "2419200s" # Four weeks; native backups, without another scheduler.
+  weekly_recurrence {
+    day = "SUNDAY"
+  }
 }
 
 # Secret for Encryption Key
 resource "random_password" "encryption_key" {
   length  = 32
   special = true
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_secret_manager_secret" "encryption_key" {
@@ -83,12 +113,21 @@ resource "google_secret_manager_secret" "encryption_key" {
   replication {
     auto {}
   }
+  lifecycle {
+    prevent_destroy = true
+  }
   depends_on = [google_project_service.apis]
 }
 
 resource "google_secret_manager_secret_version" "encryption_key_version" {
-  secret      = google_secret_manager_secret.encryption_key.id
-  secret_data = random_password.encryption_key.result
+  secret          = google_secret_manager_secret.encryption_key.id
+  secret_data     = random_password.encryption_key.result
+  deletion_policy = "ABANDON"
+
+  # Existing encrypted provider keys cannot survive a casual key rotation.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Grant Cloud Run SA access to the secret
@@ -108,8 +147,9 @@ resource "google_secret_manager_secret" "smtp_password" {
 }
 
 resource "google_secret_manager_secret_version" "smtp_password_version" {
-  secret      = google_secret_manager_secret.smtp_password.id
-  secret_data = var.smtp_password
+  secret          = google_secret_manager_secret.smtp_password.id
+  secret_data     = var.smtp_password
+  deletion_policy = "ABANDON" # Old revisions retain their pinned credential.
 }
 
 resource "google_secret_manager_secret_iam_member" "smtp_password_access" {
@@ -131,17 +171,35 @@ resource "google_cloud_run_v2_service" "default" {
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
 
-  # We use a placeholder image initially or specific tag if available
-  # In a real flow, we might push the image first, but here we can rely on Terraform to update
-  # safely if image exists, or fail if not.
-  # For the first run, we need the image to exist.
-  # Actually, let's use the 'image_tag' variable provided by user/script.
+  # Build before planning; web and worker deploy the same immutable digest.
   template {
     service_account = google_service_account.idea_sa.email
+    # Template authoring is synchronous; allow margin beyond Argon's 900s
+    # provider deadline and file processing. Evolution runs use the worker job.
+    timeout = "1200s"
     containers {
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.repo.repository_id}/idea-evolution:${var.image_tag}"
+      image = local.deployment_image
+
+      env {
+        name  = "IDEA_RUN_JOB"
+        value = google_cloud_run_v2_job.evolution_worker.id
+      }
+      env {
+        name  = "IDEA_ARTIFACT_BUCKET"
+        value = google_storage_bucket.artifacts.name
+      }
+      env {
+        name  = "IDEA_FIRESTORE_DATABASE"
+        value = var.runtime_firestore_database_id
+      }
+      env {
+        name  = "ENCRYPTION_SALT"
+        value = local.encryption_salt
+      }
 
       resources {
+        # Auto-rating still runs in the web process between requests.
+        cpu_idle = false
         limits = {
           cpu    = "1000m"
           memory = "512Mi"
@@ -154,7 +212,7 @@ resource "google_cloud_run_v2_service" "default" {
       }
 
       env {
-        name = "ADMIN_EMAIL"
+        name  = "ADMIN_EMAIL"
         value = split(",", var.admin_emails)[0]
       }
 
@@ -178,7 +236,7 @@ resource "google_cloud_run_v2_service" "default" {
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.smtp_password.secret_id
-            version = "latest"
+            version = google_secret_manager_secret_version.smtp_password_version.version
           }
         }
       }
@@ -188,7 +246,7 @@ resource "google_cloud_run_v2_service" "default" {
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.encryption_key.secret_id
-            version = "latest"
+            version = google_secret_manager_secret_version.encryption_key_version.version
           }
         }
       }
@@ -201,14 +259,20 @@ resource "google_cloud_run_v2_service" "default" {
 
   depends_on = [
     google_project_service.apis,
-    google_secret_manager_secret_version.encryption_key_version
+    google_secret_manager_secret_version.encryption_key_version,
+    google_secret_manager_secret_iam_member.secret_access,
+    google_secret_manager_secret_version.smtp_password_version,
+    google_secret_manager_secret_iam_member.smtp_password_access,
+    google_project_iam_member.firestore_access,
+    google_cloud_run_v2_job_iam_member.worker_dispatch,
+    google_storage_bucket_iam_member.artifact_writer,
   ]
 
-  # Ignore image changes as they are managed by the deployment script usually
+  # Terraform owns the image; only gcloud client metadata is ignored.
   lifecycle {
     ignore_changes = [
-        client,
-        client_version
+      client,
+      client_version
     ]
   }
 }
@@ -227,7 +291,10 @@ resource "google_firebase_web_app" "default" {
   provider     = google-beta
   project      = var.project_id
   display_name = "Idea Evolution Web"
-  depends_on   = [google_project_service.apis]
+  lifecycle {
+    prevent_destroy = true
+  }
+  depends_on = [google_project_service.apis]
 }
 
 # Enable Authentication (Note: Terraform support for configuring Auth providers is limited/beta,

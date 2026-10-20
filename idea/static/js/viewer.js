@@ -47,6 +47,10 @@ let latestDiagnosticsTokenCounts = null;
 let evolutionViewMode = 'tree';
 let rankedSortMetric = 'fitness';
 let rankedScope = 'history';
+let geneCatalogue = null;
+let geneScope = 'current';
+let selectedGeneId = null;
+let lastGeneObservationSignature = '';
 let lastEvolutionTreeSignature = '';
 let treeResizeListenerAttached = false;
 let currentEvolutionTree = null;
@@ -267,7 +271,6 @@ function selectTemplate(id, slideBack = true) {
     if (typeof window.onTemplateSelectionChanged === 'function') {
         window.onTemplateSelectionChanged();
     }
-
     if (slideBack) {
         showSidebarView('main');
     }
@@ -275,7 +278,13 @@ function selectTemplate(id, slideBack = true) {
     return true;
 }
 
+let executionSettingsCache = null;
 
+async function loadExecutionSettings(force = false) {
+    const data = await window.IdeaWorkbench.loadProviderSettings(force);
+    executionSettingsCache = data;
+    return data;
+}
 
 function filterTemplates(query) {
     if (!query) {
@@ -299,29 +308,30 @@ window.refreshTemplateCatalog = async function (options = {}) {
     await loadTemplateTypes(options);
 };
 
-window.addEventListener('idea-auth-ready', () => {
-    loadTemplateTypes({ preserveSelection: true, suppressDefaultSelection: false });
-});
-
-if (window.__refreshTemplatesOnViewerReady) {
-    window.__refreshTemplatesOnViewerReady = false;
-    loadTemplateTypes({ preserveSelection: true, suppressDefaultSelection: false });
+let initializedWorkspaceOwner = null;
+async function initializeAuthenticatedWorkspace() {
+    const owner = window.currentUser?.uid;
+    if (!owner || initializedWorkspaceOwner === owner) return;
+    initializedWorkspaceOwner = owner;
+    await loadTemplateTypes({ preserveSelection: true, suppressDefaultSelection: false });
+    await loadHistory();
+    const restored = await restoreCurrentEvolution();
+    if (!restored) await checkForResumableCheckpoints();
 }
 
-// Initialize
-// Initialize
+window.addEventListener('idea-auth-ready', () => {
+    if (document.readyState !== 'loading') void initializeAuthenticatedWorkspace();
+});
+window.addEventListener('idea-auth-cleared', () => {
+    initializedWorkspaceOwner = null;
+    isEvolutionRunning = false;
+    clearTimeout(progressPollTimer);
+    stopElapsedTimeUpdater();
+});
+
+// Wire controls immediately; load private data only once authentication is ready.
 document.addEventListener('DOMContentLoaded', async () => {
-    // Load initial data
-    await loadTemplateTypes();
-    await loadHistory();
-
-    // Check if we have a current evolution running or saved
-    const restored = await restoreCurrentEvolution();
-
-    // If not restored from running evolution, check for resumable checkpoints
-    if (!restored) {
-        await checkForResumableCheckpoints();
-    }
+    void initializeAuthenticatedWorkspace();
 
     // Start polling for progress
     // pollProgress(); // Managed by restoreCurrentEvolution / startEvolution
@@ -368,6 +378,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     addListener('refineAllIdeas', 'change', updateSurvivorRefinementControls);
     addListener('survivorRefinementRate', 'input', updateSurvivorRefinementControls);
     updateSurvivorRefinementControls();
+    addListener('independentBirthRate', 'input', updateBirthMixHelp);
+    addListener('singleParentBirthRate', 'input', updateBirthMixHelp);
+    updateBirthMixHelp();
     addListener('islandCount', 'input', () => {
         const el = document.getElementById('islandCount');
         const valueEl = document.getElementById('islandCountValue');
@@ -396,65 +409,24 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // --- Evolution Controls ---
 
-    function buildVisualizationArtifactEvaluation(fitnessAlpha) {
-        const qualityWeight = Number.isFinite(Number(fitnessAlpha))
-            ? Math.max(0, Math.min(1, Number(fitnessAlpha)))
-            : 0.7;
-        return {
-            enabled: true,
-            allow_generated_code_execution: true,
-            components: [
-                {
-                    id: 'render',
-                    kind: 'llm_code_artifact',
-                    execution_profile: 'gemini-visualization-v1',
-                    artifact_role: 'primary',
-                    source_role: 'source',
-                    metadata_role: 'metadata',
-                    provides: ['artifact.primary', 'artifact.source', 'artifact.metadata']
-                },
-                {
-                    id: 'quality',
-                    kind: 'llm_pairwise',
-                    requires: ['artifact.primary'],
-                    metric_name: 'quality_elo',
-                    failure_policy: 'fail_run'
-                },
-                {
-                    id: 'diversity',
-                    kind: 'embedding_diversity',
-                    metric_name: 'diversity',
-                    failure_policy: 'penalize'
-                }
-            ],
-            fitness: {
-                enabled: true,
-                strategy: 'weighted_sum',
-                metrics: [
-                    {
-                        component_id: 'quality',
-                        metric_name: 'quality_elo',
-                        weight: qualityWeight,
-                        normalization: 'running_zscore'
-                    },
-                    {
-                        component_id: 'diversity',
-                        metric_name: 'diversity',
-                        weight: 1 - qualityWeight,
-                        normalization: 'running_zscore',
-                        penalty_score: 0.5
-                    }
-                ]
-            },
-            metadata: { preset: 'visual-artifacts-v1' }
-        };
-    }
-
     addListener('startButton', 'click', async function () {
         console.log("Starting evolution...");
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
 
+        updateBirthMixHelp();
+        for (const input of document.querySelectorAll('#view-main input, #view-advanced input')) {
+            if (input.disabled || input.type === 'hidden' || input.checkValidity()) continue;
+            showSidebarView(input.closest('#view-advanced') ? 'advanced' : 'main');
+            window.IdeaWorkbench?.openSidebar?.();
+            for (let parent = input.parentElement; parent; parent = parent.parentElement) {
+                if (parent.tagName === 'DETAILS') parent.open = true;
+            }
+            input.reportValidity();
+            input.focus();
+            return;
+        }
+        document.getElementById('workspaceNotice')?.remove();
         const popSize = parseInt(document.getElementById('popSize').value);
         const generations = parseInt(document.getElementById('generations').value);
         const ideaType = document.getElementById('ideaType').value;
@@ -469,7 +441,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             return;
         }
-
         const creativeTemp = parseFloat(document.getElementById('creativeTemp').value);
         const topP = parseFloat(document.getElementById('topP').value);
 
@@ -504,7 +475,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Get evolution name (optional)
         const evolutionNameInput = document.getElementById('evolutionNameInput');
         const evolutionName = evolutionNameInput?.value?.trim() || null;
-        const enableVisualizationArtifacts = document.getElementById('enableVisualizationArtifacts')?.checked ?? false;
 
         const requestBody = {
             popSize,
@@ -515,6 +485,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             topP,
             tournamentCount,
             mutationRate,
+            independentBirthRate: Number(document.getElementById('independentBirthRate')?.value ?? '0.5'),
+            singleParentBirthRate: Number(document.getElementById('singleParentBirthRate')?.value ?? '0.25'),
+            diversityRepresentation: document.getElementById('diversityRepresentation')?.value ?? 'criterion_summaries',
             seedContextPoolSize: Number.isInteger(seedContextPoolSize) ? seedContextPoolSize : null,
             replacementRate,
             fitnessAlpha,
@@ -530,32 +503,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             maxBudget,
             evolutionName
         };
-        if (enableVisualizationArtifacts) {
-            requestBody.evaluation = buildVisualizationArtifactEvaluation(fitnessAlpha);
-        }
-
         console.log("Request body JSON:", JSON.stringify(requestBody));
 
         // Hide name input section when starting
         const nameSection = document.getElementById('evolutionNameSection');
         if (nameSection) nameSection.style.display = 'none';
 
-        // Reset UI state
-        resetUIState();
-
-        // Hook for state management
-        if (window.onEvolutionStart) {
-            window.onEvolutionStart();
-        }
-
         // Update button states
         if (startButton) {
             startButton.disabled = true;
-            startButton.textContent = 'Running...';
+            startButton.textContent = 'Starting…';
         }
         if (stopButton) {
-            stopButton.disabled = false;
-            stopButton.style.display = 'block';
+            stopButton.disabled = true;
+            stopButton.style.display = 'none';
         }
 
         try {
@@ -567,10 +528,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             if (response.ok) {
                 const data = await response.json();
-
-                // Store evolution identity
                 currentEvolutionId = data.evolution_id;
                 currentEvolutionName = data.evolution_name;
+                resetUIState();
+                if (evolutionNameInput) evolutionNameInput.value = '';
+                window.IdeaWorkbench?.closeInspector();
+                window.IdeaWorkbench?.closeSidebar();
+                if (window.onEvolutionStart) window.onEvolutionStart();
 
                 // Reset contexts and index
                 contexts = data.contexts || [];
@@ -590,6 +554,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                     addActivityLogItem('✅ Evolution started. Seeding in progress...', 'success');
                 }
 
+                if (stopButton) { stopButton.disabled = false; stopButton.style.display = 'block'; }
+                startButton.textContent = 'Running…';
                 // Start polling for updates
                 isEvolutionRunning = true;
                 pollProgress();
@@ -607,13 +573,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                     showSystemBusyMessage(errorData.message);
                 } else {
                     // Other errors
-                    alert(`Error: ${errorData.message || 'Failed to start evolution'}`);
+                    showErrorMessage(apiErrorMessage(errorData, 'Unable to start this experiment. Check your settings and try again.'));
                 }
+                if (nameSection) nameSection.style.display = 'block';
                 resetButtonStates();
             }
         } catch (error) {
+            if (nameSection) nameSection.style.display = 'block';
             console.error("Error running evolution:", error);
+            showErrorMessage("We could not confirm whether the experiment started. Check History or reconnect before trying again.");
             resetButtonStates();
+            void checkRunningEvolution();
         }
     });
 
@@ -628,6 +598,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Show force stop button after 5 seconds if stop is taking too long
         const forceStopTimeout = setTimeout(() => {
+            if (!isEvolutionRunning) return;
             showForceStopButton();
             addActivityLogItem('⏳ Stop is taking a while - Force Stop available', 'warning');
         }, 5000);
@@ -643,7 +614,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 console.log("Stop request sent:", data.message);
                 // Polling will handle final reset
             } else {
-                console.error("Failed to stop evolution:", await response.text());
+                showErrorMessage(apiErrorMessage(await response.json().catch(() => ({})), "Unable to stop the experiment. Try Stop again."));
                 clearTimeout(forceStopTimeout);
                 if (stopButton) {
                     stopButton.disabled = false;
@@ -652,6 +623,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         } catch (error) {
             console.error("Error stopping evolution:", error);
+            showErrorMessage("Stop could not be confirmed. The experiment may still be running. Reconnect and try Stop again.");
             clearTimeout(forceStopTimeout);
             if (stopButton) {
                 stopButton.disabled = false;
@@ -673,6 +645,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log("Force stopping evolution...");
         const forceStopButton = document.getElementById('forceStopButton');
         const stopButton = document.getElementById('stopButton');
+        let cancellationPending = false;
+        let cancellationConfirmed = false;
 
         if (forceStopButton) {
             forceStopButton.disabled = true;
@@ -688,30 +662,47 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (response.ok) {
                 const data = await response.json();
                 console.log("Force stop successful:", data);
-                addActivityLogItem('⚡ Evolution force stopped - checkpoint saved', 'warning');
+                cancellationConfirmed = true;
+                cancellationPending = Boolean(data.cancel_pending || data.is_running);
+                addActivityLogItem(cancellationPending
+                    ? 'Stop requested. Requests already running may finish.'
+                    : (data.message || 'Evolution stopped.'), 'warning');
 
                 // Store checkpoint ID for resume
-                if (data.checkpoint_id) {
-                    localStorage.setItem('lastCheckpointId', data.checkpoint_id);
+                if (!cancellationPending && data.checkpoint_id) {
+                    rememberCheckpointId(data.checkpoint_id);
                     showResumeButton(data.checkpoint_id);
                 }
 
-                // Reset UI
-                resetButtonStates();
-                isEvolutionRunning = false;
+                if (cancellationPending) {
+                    isEvolutionRunning = true;
+                    if (stopButton) {
+                        stopButton.disabled = true;
+                        stopButton.textContent = 'Stopping…';
+                    }
+                } else {
+                    resetButtonStates();
+                    isEvolutionRunning = false;
+                }
             } else {
-                console.error("Failed to force stop:", await response.text());
+                showErrorMessage(apiErrorMessage(await response.json().catch(() => ({})), "Stop could not be confirmed. Please try again."));
             }
         } catch (error) {
             console.error("Error force stopping:", error);
+            showErrorMessage("Stop could not be confirmed. The experiment may still be running. Please try again.");
         } finally {
             if (forceStopButton) {
                 forceStopButton.disabled = false;
                 forceStopButton.innerHTML = '<i class="fas fa-bolt me-1"></i>Force Stop';
                 forceStopButton.style.display = 'none';
             }
-            if (stopButton) {
+            if (stopButton && cancellationConfirmed && !cancellationPending) {
                 stopButton.style.display = 'none';
+            } else if (stopButton && !cancellationConfirmed) {
+                stopButton.style.display = 'block';
+                stopButton.disabled = false;
+                stopButton.textContent = 'Stop Evolution';
+                if (forceStopButton) forceStopButton.style.display = 'block';
             }
         }
     });
@@ -725,18 +716,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     addListener('reviewEditBtn', 'click', reviewAndEditTemplate);
 
     // --- State Management ---
-    addListener('newEvolutionBtn', 'click', showNewEvolutionMode);
     addListener('evolutionSelect', 'change', handleEvolutionSelection);
 
     // --- Settings ---
     addListener('saveSettingsBtn', 'click', saveSettings);
+    addListener('apiKeyProviderSelect', 'change', () => {
+        const input = document.getElementById('apiKeyInput');
+        if (input) input.value = '';
+        const status = document.getElementById('settingsStatus');
+        if (status) status.style.display = 'none';
+        renderApiKeyProviderStatus(executionSettingsCache);
+    });
     addListener('deleteApiKeyBtn', 'click', deleteApiKey);
     addListener('confirmDeleteKeyBtn', 'click', confirmDeleteApiKey);
 
     // Setup button in alert (if present)
     const setupBtn = document.getElementById('setupApiKeyBtn');
     if (setupBtn) {
-        setupBtn.addEventListener('click', () => showSidebarView('settings'));
+        setupBtn.addEventListener('click', () => window.IdeaWorkbench?.openProviderSettings());
     }
 
     // Nav buttons
@@ -832,20 +829,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    // --- Welcome Modal Logic ---
-    const hasSeenWelcome = localStorage.getItem('hasSeenWelcomeModal');
-    if (!hasSeenWelcome) {
-        // Show modal after a short delay
-        setTimeout(() => {
-            const welcomeModal = new bootstrap.Modal(document.getElementById('welcomeModal'));
-            welcomeModal.show();
+    // The empty workspace teaches the workflow without blocking first use.
 
-            // Set flag when modal is closed
-            document.getElementById('welcomeModal').addEventListener('hidden.bs.modal', function () {
-                localStorage.setItem('hasSeenWelcomeModal', 'true');
-            });
-        }, 1000);
-    }
 });
 
 // Function to restore current evolution from localStorage
@@ -868,7 +853,7 @@ async function restoreCurrentEvolution() {
         }
 
         // Check localStorage for current evolution data
-        const storedData = localStorage.getItem('currentEvolutionData');
+        const storedData = localStorage.getItem(`idea.${window.currentUser?.uid || 'signed-out'}.currentEvolutionData`);
         if (storedData) {
             try {
                 const evolutionState = JSON.parse(storedData);
@@ -879,7 +864,7 @@ async function restoreCurrentEvolution() {
                 if (Array.isArray(evolutionState)) {
                     if (serverProgressData?.is_running && serverProgressData?.evolution_id) {
                         console.log("Legacy stored evolution has no id; using live active run instead");
-                        localStorage.removeItem('currentEvolutionData');
+                        localStorage.removeItem(`idea.${window.currentUser?.uid || 'signed-out'}.currentEvolutionData`);
                         startPollingActiveEvolution(serverProgressData);
                         return true;
                     }
@@ -898,7 +883,7 @@ async function restoreCurrentEvolution() {
                             "Stored evolution does not match active run; skipping localStorage restore",
                             { storedEvolutionId, serverEvolutionId }
                         );
-                        localStorage.removeItem('currentEvolutionData');
+                        localStorage.removeItem(`idea.${window.currentUser?.uid || 'signed-out'}.currentEvolutionData`);
                         startPollingActiveEvolution(serverProgressData);
                         return true;
                     }
@@ -937,6 +922,9 @@ async function restoreCurrentEvolution() {
                         || null;
 
                     // Render the generations
+                    selectedGeneId = null;
+                    geneScope = 'current';
+                    applyGeneCatalogue(evolutionState, true);
                     renderGenerations(generationsData);
                     const restoredVersion = Number.isInteger(evolutionState?.history_version)
                         ? evolutionState.history_version
@@ -959,6 +947,7 @@ async function restoreCurrentEvolution() {
                         evolution_id: currentEvolutionId,
                         evolution_name: currentEvolutionName,
                         history: generationsData,
+                        gene_catalogue: geneCatalogue,
                         history_version: restoredVersion,
                         diversity_history: diversityData,
                         contexts: contexts,
@@ -967,7 +956,9 @@ async function restoreCurrentEvolution() {
                         tournament_history: tournamentData,
                         island_diversity_history: islandDiversityData,
                         migration_history: migrationData,
-                        token_counts: tokenCounts
+                        token_counts: tokenCounts,
+                        config: evolutionState?.config || null,
+                        is_running: serverProgressData?.is_running ?? evolutionState?.is_running ?? false
                     };
                     if (typeof repairPersistedEvolutionFromClientCache === 'function') {
                         repairPersistedEvolutionFromClientCache(currentEvolutionData);
@@ -993,6 +984,8 @@ async function restoreCurrentEvolution() {
                     console.log("Successfully restored current evolution from localStorage");
                     if (serverProgressData?.is_running) {
                         startPollingActiveEvolution(serverProgressData);
+                    } else {
+                        await retryDeferredEvolutionRepairs(serverProgressData);
                     }
                     return true;
                 }
@@ -1049,11 +1042,19 @@ function setupDownloadButton(data) {
 function applyHistoryIfNew(data, force = false) {
     if (!data || !data.history || data.history.length === 0) return false;
 
+    const catalogueChanged = applyGeneCatalogue(data, force);
+    const observationSignature = safeSignature(data.history.map(population => population.map(idea => [idea.id, getGeneObservation(idea)])));
+    const observationsChanged = observationSignature !== lastGeneObservationSignature;
     const hasVersion = Number.isInteger(data.history_version);
-    const shouldRender = force || !hasVersion || data.history_version !== lastRenderedHistoryVersion;
+    const shouldRender = force || catalogueChanged || observationsChanged || !hasVersion || data.history_version !== lastRenderedHistoryVersion;
     if (!shouldRender) return false;
 
+    lastGeneObservationSignature = observationSignature;
     renderGenerations(data.history);
+    if (currentModalIdea && !document.getElementById('ideaModal')?.hidden) {
+        const latest = data.history.flat().filter(idea => idea.id === currentModalIdea.id).at(-1);
+        if (latest) renderIdeaModalGenes(latest);
+    }
     if (hasVersion) {
         lastRenderedHistoryVersion = data.history_version;
     }
@@ -1068,10 +1069,17 @@ function schedulePersistEvolutionState(stateData) {
     const stateWithIdentity = {
         ...stateData,
         evolution_id: stateData.evolution_id || currentEvolutionId || null,
-        evolution_name: stateData.evolution_name || currentEvolutionName || null
+        evolution_name: stateData.evolution_name || currentEvolutionName || null,
+        gene_catalogue: stateData.gene_catalogue ?? geneCatalogue
     };
+    const owner = window.currentUser?.uid;
     persistStateTimeout = setTimeout(() => {
-        localStorage.setItem('currentEvolutionData', JSON.stringify(stateWithIdentity));
+        if (!owner || window.currentUser?.uid !== owner) return;
+        try {
+            localStorage.setItem(`idea.${owner}.currentEvolutionData`, JSON.stringify(stateWithIdentity));
+        } catch (error) {
+            console.warn('Browser backup unavailable; server checkpoints remain authoritative.', error);
+        }
     }, LOCAL_STORAGE_PERSIST_DELAY_MS);
 }
 
@@ -1415,6 +1423,7 @@ function createBreedingGenotypeSummary(entries) {
             <li>
                 <div class="breeding-genotype-meta">
                     Selection ${index + 1} - Gen ${sourceGeneration} -> Gen ${childGeneration}
+                    ${entry.source === 'consolidated' ? ` · Catalogue revision ${escapeHtml(String(entry.gene_pool_revision))}` : entry.source === 'raw' ? ' · Raw genes' : ''}
                 </div>
                 <div class="breeding-genotype-text">${escapeHtml(entry.genotype)}</div>
             </li>
@@ -1481,6 +1490,18 @@ function getPrimaryImageArtifact(idea) {
     return imageRefs.find(ref => ref.role === 'primary') || imageRefs[0] || null;
 }
 
+function getArtifactEvaluationFailure(idea) {
+    const evaluations = idea?.evaluations ?? idea?.idea?.evaluations;
+    if (!evaluations || typeof evaluations !== 'object') return null;
+    const artifactRecords = Object.values(evaluations).filter(record => (
+        record
+        && record.component_kind === 'llm_code_artifact'
+    ));
+    return artifactRecords.find(record => ['failed', 'skipped'].includes(record.status))
+        || artifactRecords.find(record => ['ok', 'cached'].includes(record.status))
+        || null;
+}
+
 function getIdeaArtifactSignature(idea) {
     return getIdeaArtifactRefs(idea)
         .map(ref => `${ref.id}:${ref.sha256 || ''}:${ref.content_digest || ''}`)
@@ -1511,7 +1532,18 @@ async function hydrateAuthenticatedArtifactImages(container) {
             image.src = objectUrl;
         } catch (error) {
             image.hidden = true;
-            image.closest('figure, .idea-card-artifact')?.classList.add('artifact-unavailable');
+            const artifactContainer = image.closest('figure, .idea-card-artifact');
+            artifactContainer?.classList.add('artifact-unavailable');
+            if (
+                artifactContainer
+                && !artifactContainer.querySelector('.idea-card-artifact-failure')
+            ) {
+                const failure = document.createElement('div');
+                failure.className = 'idea-card-artifact-failure';
+                failure.setAttribute('role', 'status');
+                failure.textContent = `Visualization unavailable: ${error.message}`;
+                artifactContainer.appendChild(failure);
+            }
             console.warn('Artifact preview unavailable:', error);
         }
     });
@@ -1520,7 +1552,22 @@ async function hydrateAuthenticatedArtifactImages(container) {
 function renderCardArtifactPreview(idea) {
     const primary = getPrimaryImageArtifact(idea);
     const artifactUrl = getEvolutionArtifactUrl(primary);
-    if (!primary || !artifactUrl) return '';
+    if (!primary || !artifactUrl) {
+        const failure = getArtifactEvaluationFailure(idea);
+        if (!failure) return '';
+        const execution = failure?.metadata?.execution;
+        const finalCause = execution?.repair_loop?.final_cause;
+        const error = failure.error
+            || finalCause?.message
+            || failure?.metadata?.reason
+            || 'primary PNG was not produced';
+        return `
+            <div class="idea-card-artifact-failure" role="status">
+                <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+                <span>Visualization unavailable: ${escapeHtml(error)}</span>
+            </div>
+        `;
+    }
     return `
         <div class="idea-card-artifact">
             <img data-artifact-url="${escapeHtml(artifactUrl)}" alt="Generated visualization" loading="lazy">
@@ -1802,6 +1849,18 @@ function formatTreeMetric(value, digits = 2) {
 }
 
 function getTreeMetricValue(idea, key) {
+    if (key.startsWith('eval:')) {
+        const metricKey = key.slice(5);
+        const records = idea?.evaluations || {};
+        const component = Object.keys(records).sort((a, b) => b.length - a.length)
+            .find(id => metricKey.startsWith(`${id}.`));
+        const record = records[component];
+        if (!['ok', 'cached'].includes(record?.status)) return null;
+        const value = record?.metrics?.[metricKey.slice(component.length + 1)];
+        if (value === null || value === undefined || value === '') return null;
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : null;
+    }
     const selection = idea?.selection_metrics || {};
     const survival = idea?.survival_metrics || {};
     const aliases = {
@@ -1811,6 +1870,7 @@ function getTreeMetricValue(idea, key) {
     };
     const candidates = aliases[key] || [];
     for (const candidate of candidates) {
+        if (candidate === null || candidate === undefined || candidate === '') continue;
         const numeric = Number(candidate);
         if (Number.isFinite(numeric)) return numeric;
     }
@@ -2249,25 +2309,17 @@ function renderEvolutionTreeInspector(tree, nodeId) {
 }
 
 function updateEvolutionTreeInspector(tree, nodeId) {
-    const inspector = document.getElementById('evolution-tree-inspector');
-    if (!inspector) return;
-    if (!tree?.nodesById?.has(nodeId)) {
-        inspector.hidden = true;
-        inspector.innerHTML = '';
-        return;
-    }
-    inspector.hidden = false;
-    inspector.innerHTML = renderEvolutionTreeInspector(tree, nodeId);
-    inspector.querySelector('[data-tree-inspector-close]')?.addEventListener('click', clearEvolutionTreeSelection);
-    inspector.querySelector('[data-tree-inspector-popout]')?.addEventListener('click', () => {
-        const node = tree.nodesById.get(nodeId);
-        if (node) {
-            showIdeaModal(getIdeaData(node.idea || {}));
-        }
-    });
-    inspector.querySelectorAll('[data-tree-jump-node]').forEach((button) => {
-        button.addEventListener('click', () => selectEvolutionTreeNode(button.dataset.treeJumpNode));
-    });
+    // Every population view selects the same persistent candidate surface.
+    const legacyInspector = document.getElementById('evolution-tree-inspector');
+    if (legacyInspector) legacyInspector.hidden = true;
+    const node = tree?.nodesById?.get(nodeId);
+    if (!node) return;
+    const idea = getIdeaData(node.idea || {});
+    const signature = safeSignature(idea);
+    const inspector = document.getElementById('ideaModal');
+    if (inspector?.dataset.candidateSignature === signature && !inspector.hidden) return;
+    if (inspector) inspector.dataset.candidateSignature = signature;
+    showIdeaModal(idea);
 }
 
 function applyEvolutionTreeSelection({ redraw = true } = {}) {
@@ -2694,7 +2746,7 @@ function compareRankMetricDesc(left, right) {
 }
 
 function normalizeRankMetric(metric) {
-    return ['fitness', 'elo', 'diversity'].includes(metric) ? metric : 'fitness';
+    return ['fitness', 'elo', 'diversity'].includes(metric) || (typeof metric === 'string' && metric.startsWith('eval:')) ? metric : 'fitness';
 }
 
 function normalizeRankScope(scope) {
@@ -2803,6 +2855,7 @@ function buildEvolutionRankRows(gens, options = {}) {
             next.fitness = getTreeMetricValue(idea, 'fitness');
             next.elo = getTreeMetricValue(idea, 'elo');
             next.diversity = getTreeMetricValue(idea, 'diversity');
+            if (config.sortMetric.startsWith('eval:')) next[config.sortMetric] = getTreeMetricValue(idea, config.sortMetric);
             rowsById.set(id, next);
         });
     });
@@ -2814,7 +2867,7 @@ function buildEvolutionRankRows(gens, options = {}) {
         flags: getRankRowFlags(row)
     }));
 
-    ['fitness', 'elo', 'diversity'].forEach((metric) => {
+    [...new Set(['fitness', 'elo', 'diversity', config.sortMetric])].forEach((metric) => {
         const stats = getRankMetricRanks(allRows, metric);
         allRows.forEach((row) => {
             row.metricRanks[metric] = {
@@ -2857,6 +2910,7 @@ function formatRankMetric(value, digits = 2) {
 }
 
 function formatRankMetricLabel(metric) {
+    if (metric.startsWith('eval:')) return metric.slice(5).split('.').slice(1).join('.').replace(/_/g, ' ');
     if (metric === 'elo') return 'ELO';
     return metric.charAt(0).toUpperCase() + metric.slice(1);
 }
@@ -2916,6 +2970,7 @@ function renderEvolutionRankedList(gens) {
         return;
     }
 
+    const evaluatorMetrics = window.IdeaWorkbench?.metricEvidence(rows[0]?.idea, currentEvolutionData?.config?.evaluation || {}) || [];
     container.innerHTML = `
         <div class="evolution-ranked-header">
             <div>
@@ -2931,13 +2986,14 @@ function renderEvolutionRankedList(gens) {
                     <button type="button" class="${renderRankButtonClasses(rankedSortMetric, 'fitness')}" data-rank-sort="fitness">Fitness</button>
                     <button type="button" class="${renderRankButtonClasses(rankedSortMetric, 'elo')}" data-rank-sort="elo">ELO</button>
                     <button type="button" class="${renderRankButtonClasses(rankedSortMetric, 'diversity')}" data-rank-sort="diversity">Diversity</button>
+                    ${evaluatorMetrics.filter(metric => !['quality_elo.quality_elo', 'diversity.diversity'].includes(metric.key)).map(metric => `<button type="button" class="${renderRankButtonClasses(rankedSortMetric, `eval:${metric.key}`)}" data-rank-sort="${escapeHtml(`eval:${metric.key}`)}" title="${escapeHtml(`${metric.evaluator} · higher is better`)}">${escapeHtml(metric.name)}</button>`).join('')}
                 </div>
                 <div class="evolution-ranked-count">${rows.length} ideas</div>
             </div>
         </div>
         <div class="evolution-ranked-list" role="list" aria-label="Ranked evolution ideas">
             ${rows.map(row => `
-                <button type="button" class="evolution-rank-row ${Number.isInteger(row.islandId) ? `island-${row.islandId % 5}` : ''}" role="listitem" data-rank-id="${escapeHtml(row.id)}" data-rank-index="${row.rank - 1}">
+                <div role="listitem"><button type="button" class="evolution-rank-row ${Number.isInteger(row.islandId) ? `island-${row.islandId % 5}` : ''}" data-rank-id="${escapeHtml(row.id)}" data-rank-index="${row.rank - 1}">
                     <span class="evolution-rank-number">
                         <strong>#${row.rank}</strong>
                         <small>${escapeHtml(formatRankMetricLabel(row.sortMetric))}</small>
@@ -2961,8 +3017,9 @@ function renderEvolutionRankedList(gens) {
                         ${renderRankMetricPill(row, 'fitness')}
                         ${renderRankMetricPill(row, 'elo')}
                         ${renderRankMetricPill(row, 'diversity')}
+                        ${row.sortMetric.startsWith('eval:') ? renderRankMetricPill(row, row.sortMetric) : ''}
                     </span>
-                </button>
+                </button></div>
             `).join('')}
         </div>
     `;
@@ -2989,6 +3046,578 @@ function renderEvolutionRankedList(gens) {
     });
 }
 
+// Gene observations describe candidates; this view never changes selection or calls a model.
+function getGeneObservation(idea) {
+    const raw = idea?.gene_observation ?? idea?.idea?.gene_observation ?? null;
+    const projection = idea?.gene_projection ?? idea?.idea?.gene_projection;
+    if (raw?.status === 'ok' && projection?.status === 'ok' && projection.version === 1
+        && typeof raw.fingerprint === 'string' && projection.raw_fingerprint === raw.fingerprint
+        && Array.isArray(projection.genes) && typeof projection.genotype === 'string') {
+        return {...raw, ...projection, raw_genotype: raw.genotype, mapping_status: 'ok', consolidated: true};
+    }
+    return raw;
+}
+
+function buildGeneCatalogueView(history, catalogue, scope = 'current') {
+    const all = Array.isArray(history) ? history : [];
+    const requested = scope.startsWith('generation:') ? Number(scope.split(':')[1]) : all.length - 1;
+    const generationIndex = Number.isInteger(requested) ? Math.max(0, Math.min(all.length - 1, requested)) : all.length - 1;
+    const candidates = new Map();
+    all.forEach((population, index) => {
+        if (scope !== 'history' && index !== generationIndex) return;
+        (Array.isArray(population) ? population : []).forEach((idea, slot) => {
+            const id = idea?.id ?? idea?.idea?.id ?? `unknown:${index}:${slot}`;
+            const previous = candidates.get(String(id));
+            candidates.set(String(id), { id: String(id), idea, generation: index, firstGeneration: previous?.firstGeneration ?? index });
+        });
+    });
+    const rows = new Map();
+    (Array.isArray(catalogue?.genes) ? catalogue.genes : []).forEach(gene => {
+        if (typeof gene?.id !== 'string' || rows.has(gene.id)) return;
+        rows.set(gene.id, { ...gene, label: String(gene.label || gene.id), carriers: [] });
+    });
+    const unclassifiedRows = new Map();
+    let analysed = 0, missing = 0, failed = 0, unclassified = 0, unclassifiedGenes = 0, empty = 0, mappingFailed = 0;
+    candidates.forEach(candidate => {
+        const observation = getGeneObservation(candidate.idea);
+        if (!observation) { missing++; return; }
+        if (observation.status !== 'ok' || !Array.isArray(observation.genes)) { failed++; return; }
+        analysed++;
+        if (!observation.genes.length) empty++;
+        const memberships = new Set();
+        const rawMemberships = new Set();
+        let hasUnclassified = false;
+        observation.genes.forEach(gene => {
+            if (typeof gene?.gene_id === 'string' && rows.has(gene.gene_id)) memberships.add(gene.gene_id);
+            else {
+                hasUnclassified = true;
+                unclassifiedGenes++;
+                // Group exact saved wording for display only; never infer a canonical ID.
+                const label = typeof gene?.text === 'string' && gene.text.trim() ? gene.text : 'Unnamed extracted gene';
+                if (!unclassifiedRows.has(label)) unclassifiedRows.set(label, { label, carriers: [] });
+                rawMemberships.add(label);
+            }
+        });
+        if (hasUnclassified) unclassified++;
+        if (hasUnclassified && observation.mapping_status === 'failed') mappingFailed++;
+        memberships.forEach(id => rows.get(id).carriers.push(candidate));
+        rawMemberships.forEach(label => unclassifiedRows.get(label).carriers.push(candidate));
+    });
+    return {
+        rows: [...rows.values()].sort((a, b) => b.carriers.length - a.carriers.length || a.label.localeCompare(b.label)),
+        unclassifiedRows: [...unclassifiedRows.values()].sort((a, b) => b.carriers.length - a.carriers.length || a.label.localeCompare(b.label)),
+        total: candidates.size, analysed, missing, failed, unclassified, unclassifiedGenes, empty, mappingFailed, generationIndex,
+    };
+}
+
+// Snapshot membership, not inferred ancestry. Never fill a missing observation with a later one.
+function buildGeneHistory(history, catalogue, fitnessValue = (idea, generation) =>
+    typeof getFitnessPlotMetricValue === 'function' ? getFitnessPlotMetricValue(idea, 'fitness', generation) : null) {
+    const snapshots = (Array.isArray(history) ? history : []).map((_, index) =>
+        buildGeneCatalogueView(history, catalogue, `generation:${index}`));
+    const seen = new Set();
+    const rows = (catalogue?.genes || []).filter((gene, index, genes) =>
+        typeof gene?.id === 'string' && genes.findIndex(other => other.id === gene.id) === index)
+        .map(gene => ({ ...gene, label: String(gene.label || gene.id), points: [], unique: new Set(), first: null, peak: 0 }));
+    const means = candidates => {
+        const values = candidates.map(c => fitnessValue(c.idea, c.generation)).filter(v => typeof v === 'number' && Number.isFinite(v));
+        return { mean: values.length ? values.reduce((a, b) => a + b, 0) / values.length : null, measured: values.length };
+    };
+    const summaries = snapshots.map((view, generation) => {
+        const byId = new Map(view.rows.map(row => [row.id, row]));
+        const active = new Set(view.rows.filter(row => row.carriers.length).map(row => row.id));
+        const added = [...active].filter(id => !seen.has(id));
+        added.forEach(id => seen.add(id));
+        const previous = generation ? snapshots[generation - 1] : null;
+        const previousRows = new Map((previous?.rows || []).map(row => [row.id, row]));
+        const complete = view.total > 0 && view.analysed === view.total && view.unclassified === 0;
+        const previousComplete = previous && previous.total > 0 && previous.analysed === previous.total && previous.unclassified === 0;
+        const lost = previousComplete && complete ? previous.rows.filter(row => row.carriers.length && !active.has(row.id)).length : null;
+        const candidates = new Map();
+        (history[generation] || []).forEach((idea, slot) => candidates.set(String(idea?.id ?? idea?.idea?.id ?? `unknown:${slot}`), { idea, generation }));
+        const populationFitness = means([...candidates.values()]);
+        rows.forEach(row => {
+            const carriers = byId.get(row.id)?.carriers || [];
+            const priorIds = new Set((previousRows.get(row.id)?.carriers || []).map(c => c.id));
+            const survived = carriers.filter(c => priorIds.has(c.id)).length;
+            const parentLinked = carriers.filter(c => !priorIds.has(c.id)
+                && (c.idea.parent_ids || []).some(id => priorIds.has(String(id)))).length;
+            carriers.forEach(c => row.unique.add(c.id));
+            if (carriers.length && row.first === null) row.first = generation;
+            row.peak = Math.max(row.peak, carriers.length);
+            row.points.push({ generation, count: carriers.length, analysed: view.analysed, total: view.total,
+                survived, parentLinked, connected: survived + parentLinked > 0,
+                complete, share: view.analysed ? carriers.length / view.analysed : null,
+                ...means(carriers), populationMean: populationFitness.mean, populationMeasured: populationFitness.measured });
+        });
+        return { generation, active: active.size, added: added.length, lost, cumulative: seen.size,
+            total: view.total, analysed: view.analysed, complete, ...populationFitness };
+    });
+    // Retired vocabulary stays in the catalogue for provenance, but empty
+    // tracks must not consume space in the all-genes history overview.
+    return { rows: rows.filter(row => row.unique.size).map(row => ({ ...row, unique: row.unique.size })), summaries };
+}
+
+function orderGeneThreads(history) {
+    return [...history.rows].sort((a, b) => (a.first ?? Infinity) - (b.first ?? Infinity)
+        || (b.points[0]?.share || 0) - (a.points[0]?.share || 0)
+        || b.peak - a.peak || b.unique - a.unique || a.label.localeCompare(b.label));
+}
+
+// Identity accents only: stable across ordering, search and generation changes.
+function geneThreadColor(id) {
+    const palette = ['#9364a7', '#408a83', '#c17c53', '#6a82b2', '#b56582', '#8a904b', '#527f9a', '#ac7448'];
+    let hash = 0;
+    for (const char of String(id)) hash = (Math.imul(hash, 31) + char.codePointAt(0)) | 0;
+    return palette[(hash >>> 0) % palette.length];
+}
+
+function buildGeneThreads(history, width = 900, height = 430) {
+    const rows = orderGeneThreads(history);
+    const left = 12, right = width - 14, top = 30, bottom = height - 28;
+    const step = (right - left) / Math.max(1, history.summaries.length);
+    const lane = (bottom - top) / Math.max(1, rows.length);
+    // Each snapshot owns a full band, including the first and last snapshots.
+    const x = gen => left + (gen + .5) * step;
+    const tracks = rows.map((row, index) => {
+        const y = top + (index + .5) * lane;
+        const half = point => Math.max(.18, Math.min(3, lane * .4) * (point.share || 0));
+        const runs = []; let run = [];
+        row.points.forEach(point => {
+            if (run.length && !point.connected) { runs.push(run); run = []; }
+            if (point.count) run.push(point);
+            else if (run.length) { runs.push(run); run = []; }
+        });
+        if (run.length) runs.push(run);
+        const path = runs.map(points => {
+            const first = points[0], last = points.at(-1);
+            // Only trim adjacent occupied bands without an observed carrier link.
+            // Keep genuine absences empty and surviving/parent-linked runs seamless.
+            const gap = Math.min(3, step * .12);
+            const start = Math.max(left, x(first.generation) - step / 2)
+                + (row.points[first.generation - 1]?.count ? gap : 0);
+            const end = Math.min(right, x(last.generation) + step / 2)
+                - (row.points[last.generation + 1]?.count ? gap : 0);
+            const upper = [[start, y - half(first)], ...points.map(p => [x(p.generation), y - half(p)]), [end, y - half(last)]];
+            const lower = [[end, y + half(last)], ...[...points].reverse().map(p => [x(p.generation), y + half(p)]), [start, y + half(first)]];
+            // Smooth width changes without moving lanes or overshooting measured occupancy.
+            const edge = points => points.slice(1).map((p, i) => {
+                const previous = points[i], middle = (previous[0] + p[0]) / 2;
+                return `C${middle.toFixed(2)},${previous[1].toFixed(2)} ${middle.toFixed(2)},${p[1].toFixed(2)} ${p.map(n => n.toFixed(2)).join(',')}`;
+            }).join('');
+            return `M${upper[0].map(n => n.toFixed(2)).join(',')}${edge(upper)}L${lower[0].map(n => n.toFixed(2)).join(',')}${edge(lower)}Z`;
+        }).join('');
+        const lastSeen = row.points.findLastIndex(point => point.count > 0);
+        return { row, y, path, lastSeen, start: row.first === null ? left : x(row.first) - step / 2, end: lastSeen < 0 ? right : x(lastSeen) + step / 2 };
+    });
+    // Explicit ticks keep 100+ generations on the same axis without a column per generation.
+    const generations = [...new Set(Array.from({length: Math.min(6, history.summaries.length)}, (_, i) =>
+        Math.round(i * (history.summaries.length - 1) / Math.max(1, Math.min(6, history.summaries.length) - 1))))];
+    return { tracks, left, right, top, bottom, width, height, lane, step, generations, x };
+}
+
+function geneTrendPath(points, value, width = 210, height = 90, min = 0, max = 1) {
+    let path = '', connected = false;
+    points.forEach((point, index) => {
+        const v = value(point);
+        if (typeof v !== 'number' || !Number.isFinite(v)) { connected = false; return; }
+        const x = geneTrendX(index, points.length, width);
+        const y = 8 + (height - 24) * (1 - (v - min) / Math.max(.0001, max - min));
+        path += `${connected ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`;
+        connected = true;
+    });
+    return path;
+}
+
+function geneTrendX(index, count, width = 210) {
+    return count === 1 ? (24 + width - 8) / 2 : 24 + index * (width - 32) / Math.max(1, count - 1);
+}
+
+function renderGeneTrend(row, metric, generation) {
+    const occupancy = metric === 'occupancy';
+    const value = point => occupancy ? (point.complete ? point.share : null) : point.mean;
+    const values = row.points.flatMap(p => [value(p), ...(!occupancy ? [p.populationMean] : [])]).filter(v => typeof v === 'number' && Number.isFinite(v));
+    const min = occupancy ? 0 : Math.min(0, ...values), max = occupancy ? 1 : Math.max(1, ...values);
+    const selected = row.points[generation];
+    const x = geneTrendX(generation, row.points.length);
+    const exact = occupancy
+        ? selected?.complete ? `${selected.count} / ${selected.total}` : `${selected?.count ?? 0} known`
+        : !selected?.count || selected.mean === null ? '—' : selected.mean.toFixed(3);
+    const note = occupancy ? selected?.complete ? '' : `${selected?.analysed ?? 0}/${selected?.total ?? 0} analysed · mapping incomplete`
+        : selected?.count ? `${selected.measured}/${selected.count} scored · population ${selected.populationMean === null ? '—' : selected.populationMean.toFixed(3)}` : 'No carriers';
+    const description = row.points.map(p => `Gen ${p.generation}: ${occupancy ? p.complete ? `${p.count} of ${p.total}` : `${p.count} known carriers; incomplete analysis` : p.mean === null ? 'fitness unavailable' : `${p.mean.toFixed(3)}, ${p.measured} of ${p.count} scored`}`).join('; ');
+    const latest = row.points[row.points.length - 1];
+    const latestCount = latest.complete ? `${latest.count} / ${latest.total}` : `${latest.count} known`;
+    const counts = occupancy ? `<div class="gene-occupancy-counts">
+        ${generation !== row.points.length - 1 ? `<span title="Carriers in selected generation ${generation}"><small>Gen ${generation}</small><strong>${escapeHtml(exact)}</strong></span>` : ''}
+        <span title="Carriers in latest generation ${latest.generation}${latest.complete ? '' : '; mapping incomplete'}"><small>Now</small><strong>${escapeHtml(latestCount)}</strong></span>
+        <span title="Unique observed carriers across all generations; each idea counted once"><small>Ever</small><strong>${row.unique}</strong></span>
+    </div>` : '';
+    return `<section class="gene-trend"><div class="gene-trend-label"><h5>${occupancy ? 'Occupancy' : 'Carrier fitness'}</h5>${occupancy ? '' : `<strong>${escapeHtml(exact)}</strong>`}</div>${counts}
+        <svg viewBox="0 0 210 112" role="img" aria-label="${occupancy ? 'Occupancy' : 'Mean carrier fitness'} by generation"><title>${escapeHtml(description)}</title>
+            <text x="0" y="12">${occupancy ? '100%' : max.toFixed(1)}</text><text x="9" y="99">${occupancy ? '0' : min.toFixed(1)}</text>
+            <path class="gene-trend-axis" d="M24,8V96H202"/>
+            ${!occupancy ? `<path class="gene-trend-population" d="${geneTrendPath(row.points, p => p.populationMean, 210, 112, min, max)}"/>${row.points.map((p, i) => {
+                if (typeof p.populationMean !== 'number' || !Number.isFinite(p.populationMean)) return '';
+                const px = geneTrendX(i, row.points.length), py = 8 + 88 * (1 - (p.populationMean - min) / (max - min));
+                return `<path class="gene-trend-population" d="M${px - 2},${py}h4"><title>Population: ${p.populationMean.toFixed(3)}</title></path>`;
+            }).join('')}` : ''}
+            <path class="gene-trend-line" d="${geneTrendPath(row.points, value, 210, 112, min, max)}"/>
+            ${row.points.map((p, i) => {
+                const val = value(p);
+                if (typeof val !== 'number' || !Number.isFinite(val)) return '';
+                return `<circle class="gene-trend-dot" cx="${geneTrendX(i, row.points.length)}" cy="${8 + 88 * (1 - (val - min) / (max - min))}" r="${i === generation ? 3.5 : 2}"><title>${escapeHtml(`Gen ${i}: ${val.toFixed(3)}`)}</title></circle>`;
+            }).join('')}
+            <path class="gene-trend-cursor" d="M${x},8V96"/>
+            ${row.points.length === 1 ? '<text x="113" y="110" text-anchor="middle">Gen 0</text>' : `<text x="24" y="110">0</text><text x="202" y="110" text-anchor="end">${row.points.length - 1}</text>`}
+        </svg>${note ? `<p>${escapeHtml(note)}</p>` : ''}</section>`;
+}
+
+function renderGeneThreadDetail(row, generation) {
+    const point = row.points[generation];
+    const continuity = generation > 0 && point?.count
+        ? `<p class="gene-continuity" title="Links to carriers in the preceding snapshot, using saved IDs and parent links through the current gene vocabulary. Shared parent–child annotations do not prove the gene was selected during breeding. Gaps mean no observed link; missing mappings can also cause gaps.">${point.survived} surviving · ${point.parentLinked} parent-linked</p>` : '';
+    return `<p class="gene-trend-subject">${escapeHtml(row.label)}</p>${renderGeneTrend(row, 'occupancy', generation)}${continuity}${renderGeneTrend(row, 'fitness', generation)}`;
+}
+
+// Keep one entry per carrier, including ideas that have since left the population.
+// Use its latest carrying snapshot for DNA; never invent membership in missing data.
+function geneHistoryCarriers(gens, geneId) {
+    const carriers = new Map();
+    gens.forEach((population, generation) => {
+        (population || []).forEach((idea, slot) => {
+            const id = String(idea?.id ?? idea?.idea?.id ?? `unknown:${generation}:${slot}`);
+            const candidate = {id, idea, generation};
+            if (!geneStoryIds(candidate).has(geneId)) return;
+            const previous = carriers.get(id);
+            carriers.set(id, {...candidate, firstGeneration: previous?.firstGeneration ?? generation});
+        });
+    });
+    return [...carriers.values()].sort((a, b) => a.firstGeneration - b.firstGeneration);
+}
+
+function geneStoryIds(candidate) {
+    const observation = getGeneObservation(candidate?.idea);
+    return new Set(observation?.status === 'ok' && Array.isArray(observation.genes)
+        ? observation.genes.map(g => g.gene_id).filter(id => typeof id === 'string') : []);
+}
+
+function changeGeneExplorerFocus(state, id, generation, mode = 'hover') {
+    if (mode === 'hover' && (state.pinnedGeneId || state.candidateId)) return false;
+    state.focusId = id;
+    state.focusGeneration = generation;
+    if (mode === 'pin') { state.pinnedGeneId = id; state.candidateId = null; }
+    if (mode === 'keyboard' && state.pinnedGeneId) state.pinnedGeneId = id;
+    return true;
+}
+
+function clearGeneExplorerSelection(state) {
+    state.pinnedGeneId = null;
+    state.candidateId = null;
+}
+
+function renderGeneStories(candidates, row, state) {
+    return `<div class="gene-stories-heading"><h5>Ideas <span title="Unique carriers across all history">${candidates.length}</span></h5></div>
+        <ul class="gene-story-list">${candidates.map((candidate, index) => {
+            const title = getIdeaData(candidate.idea).title || 'Untitled';
+            return `<li class="is-carrier ${state.candidateId === candidate.id ? 'is-selected' : ''}">
+                <button type="button" class="gene-story-select" data-gene-story="${index}" aria-pressed="${state.candidateId === candidate.id}" title="${escapeHtml(title)}"><span class="gene-story-dot" aria-hidden="true"></span><span>${escapeHtml(title)}</span><span class="visually-hidden"> · highlight DNA</span></button>
+                <small class="gene-idea-generation" title="First observed carrying this gene in generation ${candidate.firstGeneration}">G${candidate.firstGeneration}</small>
+                <button type="button" class="gene-story-read" data-gene-story-read="${index}" aria-label="Read ${escapeHtml(title)}" title="Read idea">↗</button></li>`;
+        }).join('')}</ul>${candidates.length ? '' : '<p class="gene-explanation">No observed carriers.</p>'}`;
+}
+
+function geneExplorerHeading(row, candidates, state) {
+    const candidate = candidates.find(c => c.id === state.candidateId);
+    return candidate ? {name: getIdeaData(candidate.idea).title || 'Untitled', summary: getGeneObservation(candidate.idea)?.status === 'ok' ? (geneStoryIds(candidate).size ? `DNA · ${geneStoryIds(candidate).size} mapped genes highlighted` : 'Gene mapping pending · use ↗ to inspect raw genes') : 'Gene analysis unavailable'}
+        : {name: row.label, summary: `${state.pinnedGeneId ? 'Pinned · ' : ''}${row.unique} unique carrier${row.unique === 1 ? '' : 's'}`};
+}
+
+function renderGeneHistory(history, state, gens = []) {
+    if (!history.summaries.length || !history.rows.length) return '';
+    const containerWidth = typeof document !== 'undefined' ? document.getElementById('evolution-genes-container')?.clientWidth || 1000 : 1000;
+    const width = Math.max(260, containerWidth - (containerWidth <= 600 ? 0 : containerWidth <= 900 ? 180 : 440));
+    const model = buildGeneThreads(history, width);
+    const query = state.search.trim().toLocaleLowerCase();
+    const matches = new Set(model.tracks.filter(t => [t.row.label, ...(t.row.aliases || [])].some(label => String(label).toLocaleLowerCase().includes(query))).map(t => t.row.id));
+    if (state.pinnedGeneId && !history.rows.some(r => r.id === state.pinnedGeneId)) state.pinnedGeneId = null;
+    const activeIndex = Math.max(0, model.tracks.findIndex(t => t.row.id === (state.pinnedGeneId || state.focusId || selectedGeneId)));
+    const active = model.tracks[activeIndex].row;
+    const generation = Math.max(0, Math.min(history.summaries.length - 1, state.focusGeneration ?? history.summaries.length - 1));
+    const candidates = geneHistoryCarriers(gens, active.id);
+    if (state.candidateId && !candidates.some(c => c.id === state.candidateId)) state.candidateId = null;
+    const dna = geneStoryIds(candidates.find(c => c.id === state.candidateId));
+    state.focusId = active.id; state.focusGeneration = generation;
+    const heading = geneExplorerHeading(active, candidates, state);
+    return `<section class="gene-history" aria-label="Gene history" style="--gene-active-color:${geneThreadColor(active.id)}">
+        <div class="gene-thread-toolbar"><p><strong>${model.tracks.length} genes</strong> · ${history.summaries.length} generation${history.summaries.length === 1 ? '' : 's'}</p>
+            <div class="gene-thread-actions"><button type="button" id="gene-thread-pin" aria-pressed="${Boolean(state.pinnedGeneId)}">${state.pinnedGeneId ? 'Pinned' : 'Pin gene'}</button><button type="button" id="gene-thread-clear" ${state.pinnedGeneId || state.candidateId ? '' : 'disabled'}>Clear <kbd>Esc</kbd></button>
+            <label><span class="visually-hidden">Find a gene</span><input id="gene-history-search" class="form-control form-control-sm" type="search" value="${escapeHtml(state.search)}" placeholder="Find a gene…" list="gene-thread-options"><datalist id="gene-thread-options">${model.tracks.map(t => `<option value="${escapeHtml(t.row.label)}"></option>`).join('')}</datalist></label></div></div>
+        <div class="gene-river-layout"><aside class="gene-stories" id="gene-thread-stories" aria-label="Ideas and their DNA">${renderGeneStories(candidates, active, state)}</aside><div class="gene-river-main">
+            <div class="gene-thread-heading"><h4 id="gene-thread-name" aria-live="polite">${escapeHtml(heading.name)}</h4><p id="gene-thread-summary">${escapeHtml(heading.summary)}</p></div>
+            <svg id="gene-thread-canvas" viewBox="0 0 ${model.width} ${model.height}" preserveAspectRatio="none" tabindex="0" role="group" aria-label="${model.tracks.length} gene paths. Arrow keys explore. Click or Enter pins a gene. Escape clears selection." style="height:${model.height}px">
+                ${model.generations.map(gen => `<path class="gene-thread-grid" d="M${model.x(gen)},22V${model.bottom + 4}"/><text class="gene-thread-axis-label" x="${model.x(gen)}" y="14" text-anchor="middle">Gen ${gen}</text>`).join('')}
+                ${model.tracks.map((track, index) => `<g data-gene-track="${index}" style="--gene-color:${geneThreadColor(track.row.id)}" class="gene-thread ${matches.has(track.row.id) ? '' : 'is-search-dimmed'} ${index === activeIndex ? 'is-active' : ''} ${state.candidateId ? dna.has(track.row.id) ? 'is-dna' : 'is-dna-dimmed' : ''}"><title>${escapeHtml(track.row.label)} · Gaps: no observed carrier link</title><path class="gene-thread-ribbon" d="${track.path}"/></g>`).join('')}
+                <path id="gene-thread-time-guide" class="gene-thread-time-guide" d="M${model.x(generation)},24V${model.bottom}"/>
+            </svg><p class="gene-thread-hint" id="gene-thread-hint">${query ? `${matches.size} matching · all ${model.tracks.length} visible` : ''}</p>
+        </div><aside class="gene-thread-detail" id="gene-thread-detail" aria-label="Selected gene trends">${renderGeneThreadDetail(active, generation)}</aside></div>
+        <p class="gene-history-footer">Click a gene to pin · Select an idea to see its DNA <span>Width = occupancy</span></p>
+    </section>`;
+}
+
+function bindGeneThreads(container, history, state, gens) {
+    const canvas = container.querySelector('#gene-thread-canvas');
+    if (!canvas) return;
+    const root = container.querySelector('.gene-history');
+    const model = buildGeneThreads(history, Number(canvas.viewBox.baseVal.width));
+    const groups = [...canvas.querySelectorAll('[data-gene-track]')];
+    let activeIndex = Math.max(0, model.tracks.findIndex(t => t.row.id === state.focusId));
+    let generation = state.focusGeneration ?? history.summaries.length - 1;
+    const sync = () => {
+        const row = model.tracks[activeIndex].row;
+        const candidates = geneHistoryCarriers(gens, row.id);
+        if (state.candidateId && !candidates.some(c => c.id === state.candidateId)) state.candidateId = null;
+        const dna = geneStoryIds(candidates.find(c => c.id === state.candidateId));
+        groups.forEach((group, index) => {
+            group.classList.toggle('is-active', index === activeIndex);
+            group.classList.toggle('is-dna', Boolean(state.candidateId) && dna.has(model.tracks[index].row.id));
+            group.classList.toggle('is-dna-dimmed', Boolean(state.candidateId) && !dna.has(model.tracks[index].row.id));
+        });
+        if (groups[activeIndex]) canvas.append(groups[activeIndex]);
+        const heading = geneExplorerHeading(row, candidates, state);
+        container.querySelector('#gene-thread-name').textContent = heading.name;
+        container.querySelector('#gene-thread-summary').textContent = heading.summary;
+        root.style.setProperty('--gene-active-color', geneThreadColor(row.id));
+        container.querySelector('#gene-thread-time-guide').setAttribute('d', `M${model.x(generation)},24V${model.bottom}`);
+        container.querySelector('#gene-thread-detail').innerHTML = renderGeneThreadDetail(row, generation);
+        const stories = container.querySelector('#gene-thread-stories');
+        const scroll = stories.querySelector('.gene-story-list')?.scrollTop || 0;
+        stories.innerHTML = renderGeneStories(candidates, row, state);
+        if (stories.querySelector('.gene-story-list')) stories.querySelector('.gene-story-list').scrollTop = scroll;
+        const pin = container.querySelector('#gene-thread-pin');
+        pin.textContent = state.pinnedGeneId ? 'Pinned' : 'Pin gene';
+        pin.setAttribute('aria-pressed', String(Boolean(state.pinnedGeneId)));
+        container.querySelector('#gene-thread-clear').disabled = !state.pinnedGeneId && !state.candidateId;
+        canvas.setAttribute('aria-label', `${row.label}, Gen ${generation}: ${row.points[generation].count}/${row.points[generation].analysed} carriers. ${state.candidateId ? `${dna.size} idea genes highlighted.` : state.pinnedGeneId ? 'Pinned.' : ''} Arrow keys explore; Enter pins; Escape clears.`);
+    };
+    const update = (index, gen, mode = 'hover') => {
+        index = Math.max(0, Math.min(model.tracks.length - 1, index));
+        gen = Math.max(0, Math.min(history.summaries.length - 1, gen));
+        if (mode === 'hover' && index === activeIndex && gen === generation) return;
+        if (!changeGeneExplorerFocus(state, model.tracks[index].row.id, gen, mode)) return;
+        activeIndex = index; generation = gen;
+        if (mode === 'pin') selectedGeneId = state.pinnedGeneId;
+        sync();
+    };
+    const hit = event => {
+        const rect = canvas.getBoundingClientRect();
+        const y = (event.clientY - rect.top) * model.height / rect.height;
+        const x = (event.clientX - rect.left) * model.width / rect.width;
+        if (y < model.top || y > model.bottom || x < model.left || x > model.right) return null;
+        const targetTrack = event.target.closest?.('[data-gene-track]');
+        return [targetTrack ? Number(targetTrack.dataset.geneTrack) : Math.floor((y - model.top) / model.lane), Math.floor((x - model.left) / model.step)];
+    };
+    canvas.addEventListener('pointermove', event => {
+        if (event.pointerType === 'touch' || state.pinnedGeneId || state.candidateId) return;
+        const position = hit(event); if (position) update(...position);
+    });
+    canvas.addEventListener('click', event => {
+        const position = hit(event); if (position) update(...position, 'pin');
+    });
+    canvas.addEventListener('keydown', event => {
+        const changes = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1], Home: [-activeIndex, 0], End: [model.tracks.length - activeIndex - 1, 0] };
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); update(activeIndex, generation, 'pin'); }
+        else if (changes[event.key]) { event.preventDefault(); update(activeIndex + changes[event.key][0], generation + changes[event.key][1], 'keyboard'); }
+    });
+    const clear = () => { clearGeneExplorerSelection(state); selectedGeneId = null; sync(); };
+    root.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); clear(); canvas.focus(); } });
+    root.addEventListener('click', event => {
+        const button = event.target.closest('button');
+        if (!button) return;
+        if (button.id === 'gene-thread-clear') { clear(); canvas.focus(); }
+        else if (button.id === 'gene-thread-pin') {
+            if (state.pinnedGeneId) clear(); else update(activeIndex, generation, 'pin');
+        } else if (button.hasAttribute('data-gene-story-read')) {
+            const candidate = geneHistoryCarriers(gens, model.tracks[activeIndex].row.id)[Number(button.dataset.geneStoryRead)];
+            if (candidate) showIdeaModal(getIdeaData(candidate.idea));
+        } else if (button.hasAttribute('data-gene-story')) {
+            const index = Number(button.dataset.geneStory);
+            const candidate = geneHistoryCarriers(gens, model.tracks[activeIndex].row.id)[index];
+            if (!candidate) return;
+            state.candidateId = state.candidateId === candidate.id ? null : candidate.id;
+            state.pinnedGeneId = null; selectedGeneId = null;
+            const dna = geneStoryIds(candidate);
+            if (state.candidateId && !dna.has(model.tracks[activeIndex].row.id)) {
+                const first = model.tracks.findIndex(t => dna.has(t.row.id));
+                if (first >= 0) { activeIndex = first; state.focusId = model.tracks[first].row.id; }
+            }
+            sync();
+            root.querySelector(`[data-gene-story="${index}"]`)?.focus();
+        }
+    });
+    const search = container.querySelector('#gene-history-search');
+    let searchMatches = model.tracks.map((track, index) => [track.row.label, ...(track.row.aliases || [])].some(label => String(label).toLocaleLowerCase().includes(state.search.trim().toLocaleLowerCase())) ? index : -1).filter(i => i >= 0);
+    search?.addEventListener('input', event => {
+        state.search = event.target.value;
+        const query = state.search.trim().toLocaleLowerCase();
+        searchMatches = model.tracks.map((track, index) => [track.row.label, ...(track.row.aliases || [])].some(label => String(label).toLocaleLowerCase().includes(query)) ? index : -1).filter(i => i >= 0);
+        const matched = new Set(searchMatches);
+        groups.forEach((group, index) => group.classList.toggle('is-search-dimmed', !matched.has(index)));
+        container.querySelector('#gene-thread-hint').textContent = query ? `${searchMatches.length} matching · all ${model.tracks.length} visible` : '';
+        if (searchMatches.length && query) update(searchMatches[0], generation);
+    });
+    search?.addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); update(searchMatches[0] ?? activeIndex, generation, 'pin'); canvas.focus(); }
+    });
+}
+
+function applyGeneCatalogue(data, reset = false) {
+    const supplied = data && Object.prototype.hasOwnProperty.call(data, 'gene_catalogue');
+    if (!supplied && !reset) return false;
+    if (reset) getGeneExplorerState.state = null;
+    const next = supplied && data.gene_catalogue && Array.isArray(data.gene_catalogue.genes) ? data.gene_catalogue : null;
+    const changed = safeSignature(geneCatalogue) !== safeSignature(next);
+    geneCatalogue = next;
+    if (selectedGeneId && !geneCatalogue?.genes.some(gene => gene.id === selectedGeneId)) selectedGeneId = null;
+    return changed;
+}
+
+function getGeneExplorerState() {
+    return getGeneExplorerState.state ||= { mode: 'history', search: '', focusId: null, focusGeneration: null, pinnedGeneId: null, candidateId: null };
+}
+
+function renderGeneCatalogue(gens = generations) {
+    const container = document.getElementById('evolution-genes-container');
+    if (!container) return;
+    const view = buildGeneCatalogueView(gens, geneCatalogue, geneScope);
+    const selected = view.rows.find(row => row.id === selectedGeneId);
+    const explorer = getGeneExplorerState();
+    if (typeof ResizeObserver === 'function' && !container.geneMapObserver) {
+        let previousWidth = container.clientWidth;
+        container.geneMapObserver = new ResizeObserver(() => {
+            const width = container.clientWidth;
+            if (width > 0 && Math.abs(width - previousWidth) > 2) {
+                previousWidth = width;
+                if (!container.hidden) renderGeneCatalogue(generations);
+            }
+        });
+        container.geneMapObserver.observe(container);
+    }
+    const history = buildGeneHistory(gens, geneCatalogue);
+    const selectedHistory = history.rows.find(row => row.id === selectedGeneId);
+    const selectedPoint = geneScope !== 'history' ? selectedHistory?.points[view.generationIndex] : null;
+    const selectedStats = selectedPoint ? `<p class="gene-coverage"><strong>Generation ${selectedPoint.generation} · ${selectedPoint.count} observed carriers / ${selectedPoint.analysed} analysed${selectedPoint.complete ? '' : ' · incomplete coverage'}</strong><span>Mean carrier fitness: ${selectedPoint.mean === null ? 'unavailable' : selectedPoint.mean.toFixed(3)} (${selectedPoint.measured}/${selectedPoint.count} measured). Generation mean: ${selectedPoint.populationMean === null ? 'unavailable' : selectedPoint.populationMean.toFixed(3)} (${selectedPoint.populationMeasured}/${selectedPoint.total} measured).</span></p>` : selected ? '<p class="gene-explanation">Unique carriers across history. Choose a generation in the timeline to compare fitness within the same population.</p>' : '';
+    const scopeOptions = [
+        ['current', 'Current generation'], ['history', 'All history · unique candidates'],
+        ...(Array.isArray(gens) ? gens : []).map((_, index) => [`generation:${index}`, `Generation ${index}${index === 0 ? ' · initial' : ''}`]),
+    ];
+    const coverage = `${view.analysed} of ${view.total} unique candidates analysed`;
+    const omissions = [`${view.missing} not analysed`, `${view.failed} failed`, `${view.unclassified} with unclassified genes`];
+    container.innerHTML = `
+        <div class="gene-catalogue-header">
+            <div><h3>Gene pool</h3></div>
+            <label class="gene-scope-control" ${explorer.mode === 'history' ? 'hidden' : ''}>Carrier scope<select id="gene-scope-select" class="form-select form-select-sm">${scopeOptions.map(([value, label]) => `<option value="${escapeHtml(value)}" ${geneScope === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select></label>
+        </div>
+        ${geneCatalogue?.consolidation?.revision ? `<p class="gene-explanation">Catalogue revision ${escapeHtml(String(geneCatalogue.consolidation.revision))} · history shown through this vocabulary.</p>` : ''}
+        ${geneCatalogue?.mapping_status === 'failed' ? `<p class="gene-error" role="status">Consolidation unavailable. Saved factors are retained; new candidates may have raw genes only.</p>` : ''}
+        ${explorer.mode === 'catalogue' || view.missing || view.failed || view.unclassified ? `<p class="gene-coverage" role="status"><strong>${escapeHtml(coverage)}</strong><span>${escapeHtml(omissions.join(' · '))}</span></p>` : ''}
+        <div class="gene-view-switch" role="group" aria-label="Gene view"><button type="button" data-gene-view="history" aria-pressed="${explorer.mode === 'history'}">History</button><button type="button" data-gene-view="catalogue" aria-pressed="${explorer.mode === 'catalogue'}">Catalogue</button></div>
+        ${explorer.mode === 'history' ? renderGeneHistory(history, explorer, gens) : ''}
+        ${view.rows.length && explorer.mode === 'catalogue' ? `
+            <div class="gene-table-scroll"><table class="gene-catalogue-table">
+                <caption>Observed carriers / analysed candidates. A candidate can carry several genes; repeated survivors count once. Missing or unclassified observations may hide additional carriers.</caption>
+                <thead><tr><th scope="col">Gene</th><th scope="col">Carriers / analysed</th><th scope="col">First seen</th></tr></thead>
+                <tbody>${view.rows.map((row, index) => `<tr ${selectedGeneId === row.id ? 'class="gene-selected"' : ''}><th scope="row"><button type="button" class="gene-label-button" data-gene-row="${index}" aria-controls="gene-carriers" aria-expanded="${selectedGeneId === row.id}">${escapeHtml(row.label)}</button></th><td>${view.analysed ? `${row.carriers.length} / ${view.analysed}` : 'Not measured'}</td><td>${Number.isInteger(row.first_seen_generation) ? `Gen ${row.first_seen_generation}` : 'Unknown'}</td></tr>`).join('')}</tbody>
+            </table></div>` : !view.rows.length && !view.unclassifiedRows.length ? `<div class="gene-empty"><h4>${view.analysed ? 'No catalogued genes yet' : 'No gene observations yet'}</h4><p>${view.analysed ? `${view.empty} analysed candidates have no extracted genes; ${view.unclassifiedGenes} extracted genes are unclassified.` : 'This run has no successful gene analysis in the selected scope. Older candidates may not have been analysed.'} Opening this view does not analyse or backfill candidates.</p></div>` : ''}
+        <section id="gene-carriers" class="gene-carriers" ${selected && explorer.mode === 'catalogue' ? '' : 'hidden'} aria-labelledby="gene-carriers-title">
+            ${selected ? `<div class="gene-carriers-header"><div><p class="gene-kicker">Carrying this gene</p><h4 id="gene-carriers-title" tabindex="-1">${escapeHtml(selected.label)}</h4></div><button type="button" class="btn btn-sm btn-outline-secondary" id="gene-clear-selection">Clear selection</button></div>
+                ${selectedStats}
+                ${Array.isArray(selected.aliases) && selected.aliases.length ? `<details class="gene-aliases"><summary>Observed wording (${selected.aliases.length})</summary><ul>${selected.aliases.map(alias => `<li>${escapeHtml(String(alias))}</li>`).join('')}</ul></details>` : ''}
+                ${selected.carriers.length ? `<ul class="gene-carrier-list">${selected.carriers.map((candidate, index) => `<li><button type="button" data-gene-carrier="${index}"><span>${escapeHtml(getIdeaData(candidate.idea).title || 'Untitled')}</span><small>Gen ${candidate.generation} · Open candidate</small></button></li>`).join('')}</ul>` : '<p class="gene-explanation">No observed carriers in this scope. Try all history to see earlier candidates.</p>'}` : ''}
+        </section>
+        ${view.unclassifiedRows.length && explorer.mode === 'catalogue' ? `<section class="gene-unmapped" aria-labelledby="gene-unmapped-title">
+            <h4 id="gene-unmapped-title" class="gene-inspector-title">Unmapped genes</h4>
+            <p class="gene-explanation">These extracted genes have not been matched to the catalogue. ${view.mappingFailed ? `Catalogue matching failed for ${view.mappingFailed} candidate${view.mappingFailed === 1 ? '' : 's'}. ` : ''}Their original wording is preserved; select a candidate to inspect it.</p>
+            <div class="gene-table-scroll"><table class="gene-catalogue-table gene-unmapped-table">
+                <caption>${view.unclassifiedRows.length} distinct raw terms · identical wording grouped for display only.</caption>
+                <thead><tr><th scope="col">Raw gene · unmapped</th><th scope="col">Candidates</th></tr></thead>
+                <tbody>${view.unclassifiedRows.map((row, rowIndex) => `<tr><th scope="row">${escapeHtml(row.label)}</th><td><ul class="gene-carrier-list">${row.carriers.map((candidate, candidateIndex) => `<li><button type="button" data-unmapped-gene="${rowIndex}" data-unmapped-carrier="${candidateIndex}"><span>${escapeHtml(getIdeaData(candidate.idea).title || 'Untitled')}</span><small>Gen ${candidate.generation} · Open candidate</small></button></li>`).join('')}</ul></td></tr>`).join('')}</tbody>
+            </table></div>
+        </section>` : ''}`;
+    container.querySelectorAll('[data-gene-view]').forEach(button => button.addEventListener('click', () => {
+        explorer.mode = button.dataset.geneView;
+        renderGeneCatalogue(gens);
+        container.querySelector(`[data-gene-view="${explorer.mode}"]`)?.focus();
+    }));
+    bindGeneThreads(container, history, explorer, gens);
+    container.querySelector('#gene-scope-select')?.addEventListener('change', event => {
+        geneScope = event.target.value;
+        renderGeneCatalogue(gens);
+        container.querySelector('#gene-scope-select')?.focus();
+    });
+    container.querySelectorAll('[data-gene-row]').forEach(button => button.addEventListener('click', () => {
+        selectedGeneId = view.rows[Number(button.dataset.geneRow)]?.id || null;
+        explorer.pinnedGeneId = selectedGeneId; explorer.focusId = selectedGeneId; explorer.candidateId = null;
+        renderGeneCatalogue(gens);
+        document.getElementById('gene-carriers-title')?.focus();
+    }));
+    container.querySelector('#gene-clear-selection')?.addEventListener('click', () => {
+        const rowIndex = view.rows.findIndex(row => row.id === selectedGeneId);
+        clearGeneExplorerSelection(explorer);
+        selectedGeneId = null;
+        renderGeneCatalogue(gens);
+        (container.querySelector(`[data-gene-row="${rowIndex}"]`) || container.querySelector('[data-gene-view="history"]'))?.focus();
+    });
+    container.querySelectorAll('[data-gene-carrier]').forEach(button => button.addEventListener('click', () => {
+        const candidate = selected?.carriers[Number(button.dataset.geneCarrier)];
+        if (candidate) showIdeaModal(getIdeaData(candidate.idea));
+    }));
+    container.querySelectorAll('[data-unmapped-carrier]').forEach(button => button.addEventListener('click', () => {
+        const row = view.unclassifiedRows[Number(button.dataset.unmappedGene)];
+        const candidate = row?.carriers[Number(button.dataset.unmappedCarrier)];
+        if (candidate) showIdeaModal(getIdeaData(candidate.idea));
+    }));
+}
+
+function openGeneCatalogue(geneId) {
+    selectedGeneId = geneId;
+    const state = getGeneExplorerState();
+    state.mode = 'history'; state.focusId = geneId; state.pinnedGeneId = geneId; state.candidateId = null;
+    // Include historical candidates when navigating from any candidate's inspector.
+    geneScope = 'history';
+    window.IdeaWorkbench?.closeInspector();
+    setEvolutionViewMode('genes');
+    document.getElementById('gene-thread-canvas')?.focus();
+}
+
+function renderIdeaModalGenes(idea) {
+    const panel = document.getElementById('ideaModalGenes');
+    if (!panel) return;
+    const observation = getGeneObservation(idea);
+    const rows = new Map((geneCatalogue?.genes || []).map(gene => [gene.id, gene]));
+    if (!observation) {
+        panel.innerHTML = '<p class="gene-explanation">This candidate has not been analysed for genes. Older runs may have no observations. Viewing a candidate does not trigger analysis.</p>';
+        return;
+    }
+    if (observation.status !== 'ok' || !Array.isArray(observation.genes)) {
+        panel.innerHTML = `<h3 class="gene-inspector-title">Gene analysis unavailable</h3><p class="gene-explanation">No successful observation was saved for this candidate.</p>${observation.error ? `<p class="gene-error">${escapeHtml(String(observation.error))}</p>` : ''}`;
+        return;
+    }
+    const unclassified = observation.genes.filter(gene => !rows.has(gene.gene_id)).length;
+    panel.innerHTML = `<p class="gene-explanation">${observation.consolidated ? `Breeding ingredients · catalogue revision ${escapeHtml(String(observation.revision))}` : 'Concepts extracted from this candidate.'}</p>
+        ${unclassified ? `<p class="gene-coverage">${unclassified} gene${unclassified === 1 ? '' : 's'} unclassified${observation.mapping_status === 'failed' ? ' · catalogue mapping failed' : ''}.</p>` : ''}
+        ${observation.genes.length ? `<ul class="candidate-gene-list">${observation.genes.map((gene, index) => {
+            const canonical = rows.get(gene.gene_id);
+            const provenance = Array.isArray(gene.decisions) ? `<details><summary>Source &amp; reasoning</summary>${gene.decisions.map(d => `<p><strong>${escapeHtml(String(d.source || ''))}</strong> — ${escapeHtml(String(d.reason || ''))}${d.unresolved ? ` · Unresolved: ${escapeHtml(String(d.unresolved))}` : ''}</p>`).join('')}</details>` : '';
+            return `<li>${canonical ? `<button type="button" class="gene-label-button" data-candidate-gene="${index}">${escapeHtml(String(canonical.label || gene.text || canonical.id))}</button>${String(canonical.label) !== String(gene.text) ? `<p>${escapeHtml(String(gene.text || ''))}</p>` : ''}` : `<span>${escapeHtml(String(gene.text || 'Unnamed gene'))}</span><small>Unclassified</small>`}${provenance}</li>`;
+        }).join('')}</ul>` : '<p class="gene-explanation">Analysis completed with no extracted genes.</p>'}
+        ${typeof observation.genotype === 'string' && observation.genotype ? `<details class="gene-raw"><summary>Raw genotype</summary><pre>${escapeHtml(observation.raw_genotype ?? observation.genotype)}</pre></details>` : ''}`;
+    panel.querySelectorAll('[data-candidate-gene]').forEach(button => button.addEventListener('click', () => {
+        const gene = observation.genes[Number(button.dataset.candidateGene)];
+        if (gene && rows.has(gene.gene_id)) openGeneCatalogue(gene.gene_id);
+    }));
+}
+
 function getRovingTabIndex(currentIndex, key, tabCount) {
     const count = Math.max(0, Math.trunc(Number(tabCount) || 0));
     if (count === 0 || currentIndex < 0 || currentIndex >= count) {
@@ -3013,10 +3642,11 @@ function handleEvolutionViewTabKeydown(event) {
 }
 
 function setEvolutionViewMode(mode) {
-    evolutionViewMode = mode === 'tree' || mode === 'ranked' ? mode : 'cards';
+    evolutionViewMode = ['tree', 'ranked', 'genes'].includes(mode) ? mode : 'cards';
     const cardsContainer = document.getElementById('generations-container');
     const treeContainer = document.getElementById('evolution-tree-container');
     const rankedContainer = document.getElementById('evolution-ranked-container');
+    const genesContainer = document.getElementById('evolution-genes-container');
     const toolbar = document.getElementById('evolution-view-toolbar');
     if (toolbar) {
         toolbar.style.display = generations && generations.length > 0 ? 'flex' : 'none';
@@ -3030,6 +3660,7 @@ function setEvolutionViewMode(mode) {
     if (rankedContainer) {
         rankedContainer.hidden = evolutionViewMode !== 'ranked';
     }
+    if (genesContainer) genesContainer.hidden = evolutionViewMode !== 'genes';
     document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
         const isActive = button.dataset.viewMode === evolutionViewMode;
         button.classList.toggle('active', isActive);
@@ -3042,6 +3673,7 @@ function setEvolutionViewMode(mode) {
     if (evolutionViewMode === 'ranked') {
         renderEvolutionRankedList(generations);
     }
+    if (evolutionViewMode === 'genes') renderGeneCatalogue(generations);
 }
 
 function syncEvolutionViewMode() {
@@ -3063,6 +3695,7 @@ function resetEvolutionTreeView() {
         treeContainer.hidden = true;
     }
     const rankedContainer = document.getElementById('evolution-ranked-container');
+    const genesContainer = document.getElementById('evolution-genes-container');
     if (rankedContainer) {
         rankedContainer.innerHTML = '';
         rankedContainer.hidden = true;
@@ -3078,6 +3711,12 @@ function resetEvolutionTreeView() {
     evolutionViewMode = 'tree';
     rankedSortMetric = 'fitness';
     rankedScope = 'history';
+    geneCatalogue = null;
+    geneScope = 'current';
+    selectedGeneId = null;
+    lastGeneObservationSignature = '';
+    currentModalIdea = null;
+    if (genesContainer) { genesContainer.innerHTML = ''; genesContainer.hidden = true; }
     document.querySelectorAll('.evolution-view-toggle-btn').forEach((button) => {
         const isActive = button.dataset.viewMode === 'tree';
         button.classList.toggle('active', isActive);
@@ -3188,6 +3827,7 @@ function renderGenerations(gens) {
             const islandId = getIdeaIslandId(idea);
             const isOracleGenerated = idea.oracle_generated === true;
             const artifactSignature = getIdeaArtifactSignature(idea);
+            const geneSignature = safeSignature([idea.id, getGeneObservation(idea)]);
             let insertBeforeNode = null;
 
             // Check if this idea card already exists
@@ -3205,13 +3845,14 @@ function renderGenerations(gens) {
                 );
                 const oracleChanged = (existingCard.dataset.oracle === 'true') !== isOracleGenerated;
                 const artifactsChanged = (existingCard.dataset.artifactSignature || '') !== artifactSignature;
+                const genesChanged = existingCard.dataset.geneSignature !== geneSignature;
 
                 // We also check if the existing card in the DOM reflects this.
                 // A simple way is to check the button's inner HTML for the icon.
                 const lineageButton = existingCard.querySelector('.view-lineage');
                 const cardIsAlreadyOracle = lineageButton && lineageButton.innerHTML.includes('fa-eye');
 
-                if ((isOracleGenerated && !cardIsAlreadyOracle) || genotypeCountChanged || islandChanged || migrationChanged || oracleChanged || artifactsChanged) {
+                if ((isOracleGenerated && !cardIsAlreadyOracle) || genotypeCountChanged || islandChanged || migrationChanged || oracleChanged || artifactsChanged || genesChanged) {
                     // The data is now an Oracle idea, but the card isn't.
                     // This means a replacement happened, or metadata was added after the card rendered.
                     console.log(`Card refresh needed for idea ${ideaIndex} in generation ${index}. Re-rendering card.`);
@@ -3229,6 +3870,7 @@ function renderGenerations(gens) {
             card.id = `idea-${index}-${ideaIndex}`;
             card.dataset.genotypeCount = String(genotypeEntries.length);
             card.dataset.artifactSignature = artifactSignature;
+            card.dataset.geneSignature = geneSignature;
             if (islandId !== null) {
                 card.dataset.islandId = String(islandId);
                 card.classList.add(`island-${islandId % 5}`);
@@ -3483,6 +4125,8 @@ function activateIdeaModalTab(tabName) {
     modal.querySelectorAll('[data-idea-modal-panel]').forEach(panel => {
         panel.hidden = panel.dataset.ideaModalPanel !== tabName;
     });
+    if (tabName === 'artifacts') hydrateAuthenticatedArtifactImages(document.getElementById('ideaModalArtifacts'));
+    if (tabName === 'code') document.getElementById('ideaModalCode')?._loadSource?.();
 }
 
 function configureIdeaModalTabs(availableTabs) {
@@ -3545,13 +4189,13 @@ function renderIdeaModalArtifacts(idea) {
     });
 
     hydrateAuthenticatedArtifactImages(primaryContainer);
-    hydrateAuthenticatedArtifactImages(gallery);
     return refs.length > 0;
 }
 
 function renderIdeaModalCode(idea) {
     const panel = document.getElementById('ideaModalCode');
     clearIdeaDetailElement(panel);
+    panel._loadSource = null;
     const sourceRef = getIdeaArtifactRefs(idea).find(ref => (
         ref.role === 'source' || ref.media_type === 'text/x-python'
     ));
@@ -3561,9 +4205,12 @@ function renderIdeaModalCode(idea) {
     const output = document.createElement('pre');
     output.className = 'idea-code-output';
     output.setAttribute('aria-label', 'Generated Python source');
-    output.textContent = 'Loading generated source…';
+    output.textContent = 'Select Code & run to load generated source.';
     panel.dataset.artifactId = sourceRef.id;
     panel.appendChild(output);
+    panel._loadSource = () => {
+    panel._loadSource = null;
+    output.textContent = 'Loading generated source…';
     fetch(artifactUrl, { headers: { Accept: 'text/plain' } })
         .then(response => {
             if (!response.ok) throw new Error(`source request failed (${response.status})`);
@@ -3577,6 +4224,7 @@ function renderIdeaModalCode(idea) {
                 output.textContent = `Generated source is unavailable: ${error.message}`;
             }
         });
+    };
     return true;
 }
 
@@ -3599,7 +4247,27 @@ function renderIdeaModalEvaluations(idea) {
     const selection = idea?.selection_metrics && typeof idea.selection_metrics === 'object'
         ? idea.selection_metrics
         : null;
-    if (entries.length === 0 && !selection) return false;
+    const diversitySummary = idea?.diversity_summary;
+    const hasDiversitySummary = Array.isArray(diversitySummary?.summaries);
+    if (entries.length === 0 && !selection && !hasDiversitySummary && !idea?.birth_type) return false;
+
+    if (idea?.birth_type) {
+        const origin = document.createElement('p');
+        origin.textContent = `Birth type: ${String(idea.birth_type).replaceAll('_', ' ')}`;
+        panel.appendChild(origin);
+    }
+    if (hasDiversitySummary) {
+        const section = document.createElement('article');
+        section.className = 'idea-evaluation-card';
+        const heading = document.createElement('h3');
+        heading.textContent = 'Descriptions used for diversity';
+        const descriptions = document.createElement('dl');
+        diversitySummary.summaries.forEach((summary, index) => {
+            appendEvaluationDetail(descriptions, diversitySummary.criteria?.[index] || `Criterion ${index+1}`, summary);
+        });
+        section.append(heading, descriptions);
+        panel.appendChild(section);
+    }
 
     if (selection) {
         const summary = document.createElement('div');
@@ -3626,6 +4294,30 @@ function renderIdeaModalEvaluations(idea) {
             ? `${Number(record.duration_ms)} ms`
             : null);
         appendEvaluationDetail(details, 'Error', record?.error);
+        const execution = record?.metadata?.execution;
+        if (execution && typeof execution === 'object') {
+            const repairLoop = execution?.repair_loop;
+            const finalCause = repairLoop?.final_cause;
+            appendEvaluationDetail(details, 'Failure stage', execution.stage || finalCause?.stage);
+            appendEvaluationDetail(details, 'Container exit', execution.container_exit_code);
+            appendEvaluationDetail(
+                details,
+                'Execution attempts',
+                execution.execution_attempts ?? repairLoop?.execution_attempts,
+            );
+            appendEvaluationDetail(
+                details,
+                'Repair attempts',
+                execution.repair_attempts ?? repairLoop?.repair_attempts,
+            );
+            appendEvaluationDetail(details, 'Detail', execution.detail || finalCause?.message);
+        }
+        const provenance = record?.metadata?.provenance;
+        if (provenance && typeof provenance === 'object') {
+            appendEvaluationDetail(details, 'Execution attempts', provenance.execution_attempts);
+            appendEvaluationDetail(details, 'Repair attempts', provenance.repair_attempts);
+            appendEvaluationDetail(details, 'Repair provider', provenance.repair_provider);
+        }
         card.append(heading, details);
         panel.appendChild(card);
     });
@@ -3637,8 +4329,12 @@ function showIdeaModal(idea) {
     // Get the modal element
     const modalElement = document.getElementById('ideaModal');
 
-    // Store the idea for clipboard copying
+    // Store the idea for clipboard copying and keep selection shared between views.
+    const previousId = currentModalIdea?.id;
+    const previousTab = modalElement.querySelector('[data-idea-modal-tab][aria-selected="true"]')?.dataset.ideaModalTab;
     currentModalIdea = idea;
+    if (idea.id && currentEvolutionTree?.nodesById?.has(String(idea.id))) selectedTreeNodeId = String(idea.id);
+    modalElement.dataset.candidateSignature = safeSignature(idea);
 
     // Set the title
     document.getElementById('ideaModalLabel').textContent = idea.title || 'Untitled';
@@ -3652,47 +4348,25 @@ function showIdeaModal(idea) {
     const hasArtifacts = renderIdeaModalArtifacts(idea);
     const hasCode = renderIdeaModalCode(idea);
     const hasEvaluations = renderIdeaModalEvaluations(idea);
+    renderIdeaModalGenes(idea);
     configureIdeaModalTabs([
         'overview',
+        'genes',
         ...(hasArtifacts ? ['artifacts'] : []),
         ...(hasCode ? ['code'] : []),
         ...(hasEvaluations ? ['evaluations'] : []),
     ]);
+    if (previousId === idea.id && previousTab && !modalElement.querySelector(`[data-idea-modal-tab="${previousTab}"]`)?.hidden) activateIdeaModalTab(previousTab);
 
-    // Initialize the modal if it hasn't been already
-    let modal;
-    if (window.bootstrap) {
-        rememberModalFocusOrigin(modalElement);
-        modal = new bootstrap.Modal(modalElement);
-
-        // Add event listener to clean up when modal is hidden
-        // Use a named function so we can check if it already exists
-        const cleanupFunction = function (event) {
-            // Remove any lingering backdrop elements
-            const backdrops = document.querySelectorAll('.modal-backdrop');
-            backdrops.forEach(backdrop => {
-                backdrop.remove();
-            });
-
-            // Reset body classes that might have been added by Bootstrap
-            document.body.classList.remove('modal-open');
-            document.body.style.overflow = '';
-            document.body.style.paddingRight = '';
-        };
-
-        // We don't want to add multiple cleanup listeners
-        // First remove any existing cleanup listener
-        modalElement.removeEventListener('hidden.bs.modal', cleanupFunction);
-
-        // Then add our cleanup listener
-        // Note: This won't interfere with other named listeners like reopenLineage
-        modalElement.addEventListener('hidden.bs.modal', cleanupFunction);
-
-        modal.show();
+    window.IdeaWorkbench?.renderMetrics(
+        document.getElementById('candidateMetricEvidence'),
+        idea,
+        currentEvolutionData?.config?.evaluation || {},
+    );
+    if (window.IdeaWorkbench) {
+        window.IdeaWorkbench.openInspector(modalElement);
     } else {
-        console.error("Bootstrap is not available. Make sure it's properly loaded.");
-        // Fallback for testing - just make the modal visible
-        modalElement.style.display = 'block';
+        modalElement.hidden = false;
     }
 }
 
@@ -3778,6 +4452,7 @@ function downloadResults(data) {
     // Include all available data in the save
     const saveData = {
         history: data.history || [],
+        gene_catalogue: data.gene_catalogue ?? geneCatalogue,
         diversity_history: data.diversity_history || [],
         island_diversity_history: data.island_diversity_history || [],
         migration_history: data.migration_history || [],
@@ -3842,13 +4517,14 @@ function downloadResults(data) {
 let historyItems = [];
 let selectedHistoryItem = null;
 const repairedEvolutionCacheIds = new Set();
+const deferredEvolutionCacheStates = new Map();
 
 function getCachedEvolutionState() {
     if (currentEvolutionData?.history?.length) {
         return currentEvolutionData;
     }
     try {
-        const storedData = localStorage.getItem('currentEvolutionData');
+        const storedData = localStorage.getItem(`idea.${window.currentUser?.uid || 'signed-out'}.currentEvolutionData`);
         return storedData ? JSON.parse(storedData) : null;
     } catch (error) {
         console.warn('Unable to read cached evolution state:', error);
@@ -3906,22 +4582,61 @@ function cachedEvolutionIsNewer(evolutionState, persistedData = null) {
 async function repairPersistedEvolutionFromClientCache(evolutionState) {
     const normalized = normalizeCachedEvolutionState(evolutionState);
     const evolutionId = normalized?.evolution_id;
-    if (!evolutionId || !normalized?.history?.length || repairedEvolutionCacheIds.has(evolutionId)) {
+    if (!evolutionId || !normalized?.history?.length) {
         return;
     }
+    if (isEvolutionRunning || normalized.is_running || deferredEvolutionCacheStates.has(evolutionId)) {
+        deferEvolutionRepair(normalized);
+        return;
+    }
+    if (repairedEvolutionCacheIds.has(evolutionId)) return;
     repairedEvolutionCacheIds.add(evolutionId);
     try {
-        const response = await fetch(`/api/evolution/${evolutionId}/repair`, {
+        const response = await fetch(`/api/evolution/${encodeURIComponent(evolutionId)}/repair`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ data: normalized })
         });
+        if (response.status === 409) {
+            const payload = await response.json();
+            if (payload.status === 'conflict') {
+                // Another tab may have started a worker after this browser's
+                // last progress check. Wait for a confirmed stopped state.
+                deferEvolutionRepair(normalized);
+                return;
+            }
+        }
         if (!response.ok) {
             repairedEvolutionCacheIds.delete(evolutionId);
         }
     } catch (error) {
         repairedEvolutionCacheIds.delete(evolutionId);
         console.warn('Unable to repair persisted evolution from local cache:', error);
+    }
+}
+
+function deferEvolutionRepair(evolutionState) {
+    const evolutionId = getCachedEvolutionId(evolutionState);
+    const previous = deferredEvolutionCacheStates.get(evolutionId);
+    if (!previous || !cachedEvolutionIsNewer(previous, evolutionState)) {
+        deferredEvolutionCacheStates.set(evolutionId, evolutionState);
+    }
+}
+
+async function retryDeferredEvolutionRepairs(serverState) {
+    if (serverState?.is_running !== false || isEvolutionRunning) return;
+    for (const [evolutionId, cached] of [...deferredEvolutionCacheStates]) {
+        const sameRun = getCachedEvolutionId(serverState) === evolutionId;
+        const latest = sameRun && serverState.history?.length && !cachedEvolutionIsNewer(cached, serverState)
+            ? serverState : cached;
+        const stopped = { ...latest, evolution_id: evolutionId, is_running: false };
+        if (sameRun) {
+            stopped.status = typeof serverState.status === 'string' ? serverState.status
+                : serverState.is_stopped || serverState.is_resumable ? 'paused' : 'complete';
+        }
+        deferredEvolutionCacheStates.delete(evolutionId);
+        repairedEvolutionCacheIds.delete(evolutionId);
+        await repairPersistedEvolutionFromClientCache(stopped);
     }
 }
 
@@ -3945,6 +4660,7 @@ function overlayHistoryItemsWithCachedEvolution(items) {
     const overlaid = items.map(item => {
         if (item.id !== cachedId) return item;
         found = true;
+        if (item.execution_archived || item.type === 'legacy_checkpoint') return item;
         if (!cachedEvolutionIsNewer(cached, { history: new Array((item.generations || 0) + 1), current_generation: item.generations || 0 })) {
             return item;
         }
@@ -3957,7 +4673,7 @@ function overlayHistoryItemsWithCachedEvolution(items) {
             total_ideas: getEvolutionTotalIdeas(cached.history),
             config: cached.config || item.config || {},
             can_use_config: Boolean((cached.config && Object.keys(cached.config).length > 0) || item.can_use_config),
-            can_resume: ['paused', 'in_progress', 'force_stopped'].includes(status),
+            can_resume: ['paused', 'in_progress', 'force_stopped', 'error'].includes(status),
             can_continue: status === 'complete',
             can_rate: cached.current_generation > 0
         };
@@ -3981,7 +4697,7 @@ function overlayHistoryItemsWithCachedEvolution(items) {
             total_ideas: getEvolutionTotalIdeas(cached.history),
             config: cached.config || {},
             can_use_config: Boolean(cached.config && Object.keys(cached.config).length > 0),
-            can_resume: ['paused', 'in_progress', 'force_stopped'].includes(status),
+            can_resume: ['paused', 'in_progress', 'force_stopped', 'error'].includes(status),
             can_continue: status === 'complete',
             can_rate: cached.current_generation > 0,
             can_rename: true,
@@ -4085,6 +4801,13 @@ function buildEvolutionConfigDetailsHtml(config = {}, item = {}) {
 
     const generationCount = config.generations ?? item.total_generations;
     const populationSize = config.pop_size ?? item.pop_size;
+    const localSizes = [];
+    if (config.independent_birth_rate !== undefined && Number(populationSize) > 0) {
+        const total = Number(populationSize);
+        const islands = Math.max(1, Math.min(Number(config.island_count) || 1, Math.max(1, Math.floor(total/2))));
+        for (let idx = 0; idx < islands; idx++) localSizes.push(Math.floor(total/islands) + (idx < total%islands ? 1 : 0));
+    }
+    const localRoundCounts = localSizes.map(size => Math.max(1, Math.floor(Number(config.tournament_count) * Math.max(1, size-1) + 0.5)));
     const sections = [
         renderConfigSection('Basic', [
             ['Template', getTemplateDisplayName(config.idea_type || item.idea_type)],
@@ -4094,8 +4817,8 @@ function buildEvolutionConfigDetailsHtml(config = {}, item = {}) {
             ['Max Budget', config.max_budget === null || config.max_budget === undefined ? '-' : `$${formatConfigNumber(config.max_budget, 2)}`],
         ]),
         renderConfigSection('LLM', [
-            ['Creative Temperature', formatConfigNumber(config.creative_temp, 2)],
-            ['Top P', formatConfigNumber(config.top_p, 2)],
+            ['Creative Temperature', supportsSamplingControls(config.model_type, config.thinking_level) ? formatConfigNumber(config.creative_temp, 2) : 'Provider controlled'],
+            ['Top P', supportsSamplingControls(config.model_type, config.thinking_level) ? formatConfigNumber(config.top_p, 2) : 'Provider controlled'],
             ['Seed Context Pool Size', formatConfigInteger(config.seed_context_pool_size)],
             ['Thinking', formatThinkingConfig(config)],
         ]),
@@ -4103,9 +4826,14 @@ function buildEvolutionConfigDetailsHtml(config = {}, item = {}) {
             ['Tournament Count', formatConfigNumber(config.tournament_count, 2)],
             ['Full Tournament Rounds', formatConfigInteger(config.full_tournament_rounds)],
             ['Target Tournament Rounds', formatConfigInteger(config.tournament_rounds)],
+            ['Rounds per Island', localRoundCounts.length ? localRoundCounts.join(', ') : 'Legacy global sizing'],
         ]),
         renderConfigSection('Breeding and Selection', [
             ['Mutation Rate', formatConfigNumber(config.mutation_rate, 2)],
+            ['Births from Scratch', formatConfigNumber(config.independent_birth_rate ?? 0, 2)],
+            ['Single-parent Births', formatConfigNumber(config.single_parent_birth_rate ?? 0, 2)],
+            ['Crossover Births', formatConfigNumber(Math.max(0, 1 - (config.independent_birth_rate ?? 0) - (config.single_parent_birth_rate ?? 0)), 2)],
+            ['Diversity Representation', config.diversity_representation === 'criterion_summaries' ? 'Per-criterion summaries' : 'Full text (legacy)'],
             ['Replacement Rate', formatConfigNumber(config.replacement_rate, 2)],
             ['Fitness Alpha', formatConfigNumber(config.fitness_alpha, 2)],
             ['Age Decay Rate', formatConfigNumber(config.age_decay_rate, 2)],
@@ -4123,6 +4851,21 @@ function buildEvolutionConfigDetailsHtml(config = {}, item = {}) {
     return `<div class="history-config-details">${sections.join('')}</div>`;
 }
 
+function updateBirthMixHelp() {
+    const fresh = document.getElementById('independentBirthRate');
+    const single = document.getElementById('singleParentBirthRate');
+    const help = document.getElementById('birthMixHelp');
+    if (!fresh || !single || !help) return;
+    const a = Number(fresh.value), b = Number(single.value);
+    const valid = Number.isFinite(a) && Number.isFinite(b) && a >= 0 && b >= 0 && a + b <= 1;
+    const error = valid ? '' : 'Birth fractions must be between 0 and 1 and add up to at most 1.';
+    fresh.setCustomValidity(error);
+    single.setCustomValidity(error);
+    help.textContent = valid
+        ? `Of new births: ${(a*100).toFixed(0)}% fresh, ${(b*100).toFixed(0)}% single-parent, ${((1-a-b)*100).toFixed(0)}% crossover. Small counts are rounded across the whole generation. Oracle adds one direct replacement per generation.`
+        : error;
+}
+
 function hasSavedConfig(config) {
     return Boolean(config && typeof config === 'object' && Object.keys(config).length > 0);
 }
@@ -4137,7 +4880,38 @@ function findHistoryItemElement(itemId) {
         .find(element => element.dataset.itemId === String(itemId)) || null;
 }
 
+function renderRecentHistory(items) {
+    const container = document.getElementById('recentHistoryList');
+    if (!container) return;
+    container.replaceChildren();
+    if (!items.length) {
+        const hint = document.createElement('p');
+        hint.className = 'recent-history-empty';
+        hint.textContent = 'Start your first experiment. Saved runs will be kept here for comparison.';
+        container.appendChild(hint);
+        return;
+    }
+    items.slice(0, 3).forEach(item => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'recent-experiment';
+        const name = document.createElement('strong');
+        name.textContent = item.display_name || item.name || item.id;
+        const meta = document.createElement('small');
+        meta.textContent = `${formatStatus(item.status)} · Generation ${item.generations ?? 0}`;
+        button.append(name, meta);
+        button.addEventListener('click', () => {
+            selectedHistoryItem = item;
+            renderHistoryList(historyItems, false);
+            void loadHistoryItemData(item);
+            window.IdeaWorkbench?.closeSidebar();
+        });
+        container.appendChild(button);
+    });
+}
+
 function renderHistoryList(items, updateGlobal = true) {
+    renderRecentHistory(items);
     const container = document.getElementById('historyList');
     if (!container) return;
 
@@ -4157,7 +4931,7 @@ function renderHistoryList(items, updateGlobal = true) {
         const date = item.timestamp ? new Date(item.timestamp).toLocaleDateString() : '';
         const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
         const isSelected = String(selectedHistoryItem?.id ?? '') === String(item.id ?? '');
-        const canUseConfig = item.can_use_config || hasSavedConfig(item.config);
+        const canUseConfig = !item.execution_archived && (item.can_use_config || hasSavedConfig(item.config));
 
         // Truncate display name (more room in expanded view)
         let displayName = String(item.display_name || item.id || 'Untitled');
@@ -4167,8 +4941,9 @@ function renderHistoryList(items, updateGlobal = true) {
 
         // Build action buttons for expanded state
         let actionsHtml = '';
+        if (isSelected && item.execution_archived) actionsHtml += '<p class="small text-muted mb-2">Archived experiment · saved results remain available.</p>';
         if (isSelected) {
-            if (item.can_resume) {
+            if (item.can_resume && !item.execution_archived) {
                 actionsHtml += `<button class="btn btn-sm btn-success" data-history-action="resume">
                     <i class="fas fa-play me-1"></i>Resume
                 </button>`;
@@ -4178,7 +4953,7 @@ function renderHistoryList(items, updateGlobal = true) {
                     <i class="fas fa-sliders-h me-1"></i>Use Config
                 </button>`;
             }
-            if (item.can_continue) {
+            if (item.can_continue && !item.execution_archived) {
                 actionsHtml += `
                     <div class="continue-action-group d-flex gap-1">
                         <button class="btn btn-sm btn-info" data-history-action="continue">
@@ -4479,6 +5254,8 @@ function applyThinkingConfigToForm(config) {
     const lowRadio = document.getElementById('thinkingLow');
     const mediumRadio = document.getElementById('thinkingMedium');
     const highRadio = document.getElementById('thinkingHigh');
+    const xhighRadio = document.getElementById('thinkingXHigh');
+    const maxRadio = document.getElementById('thinkingMax');
     const budgetSlider = document.getElementById('thinkingBudgetSlider');
 
     if (thinkingBudget !== null && thinkingBudget !== undefined && customRadio && budgetSlider) {
@@ -4490,7 +5267,7 @@ function applyThinkingConfigToForm(config) {
     }
 
     const normalizedLevel = String(thinkingLevel || '').toLowerCase();
-    if (['off', 'minimal'].includes(normalizedLevel) && offRadio) {
+    if (['off', 'none', 'minimal'].includes(normalizedLevel) && offRadio) {
         offRadio.checked = true;
     } else if (normalizedLevel === 'low' && lowRadio) {
         lowRadio.checked = true;
@@ -4498,6 +5275,10 @@ function applyThinkingConfigToForm(config) {
         mediumRadio.checked = true;
     } else if (normalizedLevel === 'high' && highRadio) {
         highRadio.checked = true;
+    } else if (normalizedLevel === 'xhigh' && xhighRadio) {
+        xhighRadio.checked = true;
+    } else if (normalizedLevel === 'max' && maxRadio) {
+        maxRadio.checked = true;
     }
     updateThinkingBudgetMode();
 }
@@ -4523,12 +5304,23 @@ function applyEvolutionConfigToForm(config = {}, sourceName = '') {
 
     setFormControlValue('popSize', config.pop_size);
     setFormControlValue('generations', config.generations);
-    setFormControlValue('modelType', config.model_type);
+    if (config.model_type && !window.IdeaWorkbench?.selectModel('modelType', config.model_type, { fallback: true })) {
+        const modelSelect = document.getElementById('modelType');
+        if (Array.from(modelSelect?.options || []).some(option => option.value === config.model_type)) {
+            setFormControlValue('modelType', config.model_type);
+        } else {
+            addActivityLogItem(`Saved model ${config.model_type} is no longer available. Using ${modelSelect?.selectedOptions?.[0]?.textContent || modelSelect?.value || 'the current model'}.`, 'warning');
+        }
+    }
     setFormControlValue('creativeTemp', config.creative_temp, value => String(value));
     setFormControlValue('topP', config.top_p, value => Number(value).toFixed(2));
     setFormControlValue('seedContextPoolSize', config.seed_context_pool_size, value => String(parseInt(value, 10)));
     setFormControlValue('tournamentCount', config.tournament_count, value => Number(value).toFixed(2));
     setFormControlValue('mutationRate', config.mutation_rate, value => Number(value).toFixed(2));
+    setFormControlValue('independentBirthRate', config.independent_birth_rate ?? 0.5, value => Number(value).toFixed(2));
+    setFormControlValue('singleParentBirthRate', config.single_parent_birth_rate ?? 0.25, value => Number(value).toFixed(2));
+    setFormControlValue('diversityRepresentation', config.diversity_representation ?? 'criterion_summaries');
+    updateBirthMixHelp();
     setFormControlValue('replacementRate', config.replacement_rate, value => Number(value).toFixed(2));
     setFormControlValue('fitnessAlpha', config.fitness_alpha, value => Number(value).toFixed(2));
     setFormControlValue('ageDecayRate', config.age_decay_rate, value => Number(value).toFixed(2));
@@ -4617,17 +5409,20 @@ async function handleUseHistoryConfig(itemId) {
 
 async function loadHistoryItemData(item) {
     try {
-        if (item.type === 'saved' || item.type === 'evolution') {
+        if (item.type === 'saved' || item.type === 'evolution' || item.type === 'legacy_checkpoint') {
             // Load from saved evolution file or Firestore
             const response = await fetch(`/api/evolution/${item.id}`);
             if (response.ok) {
                 const data = await response.json();
                 let evolutionData = data.data;
-                const cachedEvolution = await repairCurrentEvolutionIfNewer(item.id, evolutionData);
+                // Legacy checkpoints stay read-only until Resume creates a copy.
+                const cachedEvolution = item.type === 'legacy_checkpoint'
+                    ? null : await repairCurrentEvolutionIfNewer(item.id, evolutionData);
                 if (cachedEvolution) {
                     evolutionData = cachedEvolution;
                 }
                 if (evolutionData && evolutionData.history) {
+                    clearTokenCounts();
                     // Set identity before rendering because artifact previews
                     // build authenticated URLs synchronously during card creation.
                     currentEvolutionId = data.id || evolutionData.evolution_id || item.id;
@@ -4647,6 +5442,10 @@ async function loadHistoryItemData(item) {
                     // Hide the template entry section
                     const templateEntry = document.getElementById('templateEntry');
                     if (templateEntry) templateEntry.style.display = 'none';
+                    const library = document.getElementById('existingTemplates');
+                    if (library) library.style.display = 'none';
+                    document.getElementById('newEvolutionBtn')?.style.setProperty('display', 'inline-flex');
+                    window.IdeaWorkbench?.closeInspector();
 
                     // Hide name input section
                     const nameSection = document.getElementById('evolutionNameSection');
@@ -4661,6 +5460,9 @@ async function loadHistoryItemData(item) {
                     if (genContainer) genContainer.style.display = 'block';
 
                     document.getElementById('generations-container').innerHTML = '';
+                    selectedGeneId = null;
+                    geneScope = 'current';
+                    applyGeneCatalogue(evolutionData, true);
                     renderGenerations(evolutionData.history);
                     currentEvolutionData = evolutionData;
 
@@ -4706,7 +5508,11 @@ async function loadHistoryItemData(item) {
             if (response.ok) {
                 const data = await response.json();
                 if (data.history) {
+                    clearTokenCounts();
                     document.getElementById('generations-container').innerHTML = '';
+                    selectedGeneId = null;
+                    geneScope = 'current';
+                    applyGeneCatalogue(data, true);
                     renderGenerations(data.history);
                     currentEvolutionData = data;
 
@@ -4767,7 +5573,7 @@ async function handleHistoryResume(checkpointId) {
             const data = await response.json();
 
             // Store checkpoint ID
-            localStorage.setItem('lastCheckpointId', data.checkpoint_id || checkpointId);
+            rememberCheckpointId(data.checkpoint_id || checkpointId);
 
             // Restore state
             if (data.history) {
@@ -4895,7 +5701,7 @@ async function handleHistoryContinue(itemId, itemType, additionalGens = 3) {
             const data = await response.json();
 
             // Store checkpoint ID
-            localStorage.setItem('lastCheckpointId', data.checkpoint_id || itemId);
+            rememberCheckpointId(data.checkpoint_id || itemId);
 
             // Restore state
             if (data.history) {
@@ -5078,7 +5884,20 @@ if (evolutionSelectEl) {
     });
 }
 
+let progressPollTimer = null;
+let progressPollInFlight = false;
+let progressPollRequested = false;
+let progressConnectionLost = false;
+
+function scheduleProgressPoll(delay) {
+    clearTimeout(progressPollTimer);
+    progressPollTimer = setTimeout(pollProgress, delay);
+}
+
 async function pollProgress() {
+    if (progressPollInFlight) { progressPollRequested = true; return; }
+    clearTimeout(progressPollTimer);
+    progressPollInFlight = true;
     try {
         const response = await fetch('/api/progress');
         if (!response.ok) {
@@ -5086,6 +5905,11 @@ async function pollProgress() {
         }
 
         let data = await response.json();
+        if (progressConnectionLost) {
+            progressConnectionLost = false;
+            document.getElementById('workspaceNotice')?.remove();
+            addActivityLogItem('Connection restored. Progress is up to date.', 'info');
+        }
 
         const shouldFetchFullHistory =
             (!data.history && data.history_changed) ||
@@ -5228,6 +6052,7 @@ async function pollProgress() {
             if (rendered) {
                 const historyVersionToStore = Number.isInteger(data.history_version) ? data.history_version : null;
                 const shouldStore =
+                    !!data.gene_catalogue ||
                     historyVersionToStore === null ||
                     historyVersionToStore !== lastStoredHistoryVersion;
                 if (shouldStore) {
@@ -5325,7 +6150,7 @@ async function pollProgress() {
         // Continue polling if evolution is still running
         if (data.is_running) {
             isEvolutionRunning = true;
-            setTimeout(pollProgress, 1000); // Poll every second
+            scheduleProgressPoll(1500);
         } else {
             // Evolution complete or stopped
             isEvolutionRunning = false;
@@ -5335,7 +6160,9 @@ async function pollProgress() {
             markEvolutionComplete(
                 data.is_stopped,
                 data.is_resumable || false,
-                data.checkpoint_id || null
+                data.checkpoint_id || null,
+                data.error || (data.status === 'error' || data.status === 'failed' ? 'This experiment failed. Open History to inspect saved progress.' : null),
+                data.stop_reason || null
             );
 
             if (data.history && data.history.length > 0) {
@@ -5345,7 +6172,7 @@ async function pollProgress() {
 
                 // Store checkpoint ID if available for future resume/continue
                 if (data.checkpoint_id) {
-                    localStorage.setItem('lastCheckpointId', data.checkpoint_id);
+                    rememberCheckpointId(data.checkpoint_id);
                 }
 
                 // Store the final evolution data in localStorage including diversity data and token counts
@@ -5411,71 +6238,62 @@ async function pollProgress() {
             const startButton = document.getElementById('startButton');
             const stopButton = document.getElementById('stopButton');
 
-            if (data.is_stopped) {
-                startButton.textContent = 'Evolution Stopped';
-                startButton.disabled = false;
-                stopButton.style.display = 'none';
-                stopButton.disabled = true;
-                stopButton.textContent = 'Stop Evolution';
-
-                setTimeout(() => {
-                    startButton.textContent = 'Start Evolution';
-                }, 3000);
-            } else {
-                startButton.textContent = 'Evolution Complete!';
-                startButton.disabled = false;
-                stopButton.style.display = 'none';
-                stopButton.disabled = true;
-                stopButton.textContent = 'Stop Evolution';
-
-                setTimeout(() => {
-                    startButton.textContent = 'Start Evolution';
-                }, 2000);
+            resetButtonStates();
+            if (data.error || ['error', 'failed'].includes(data.status)) {
+                showErrorMessage(`${data.error || 'The experiment failed.'} ${data.is_resumable ? 'Open History to resume from the saved checkpoint.' : 'Open History to inspect any saved progress.'}`);
             }
 
             // Reset tracking variables for next evolution
             previousStatusMessage = '';
             previousProgress = 0;
+            await retryDeferredEvolutionRepairs(data);
         }
 
-        // Handle explicit errors from backend
-        if (data.error) {
-            console.error("Evolution error:", data.error);
-            showErrorMessage(`Evolution Error: ${data.error}`);
-            addActivityLogItem(`❌ Error: ${data.error}`, 'error');
-        }
     } catch (error) {
         console.error('Error polling progress:', error);
-        // Continue polling even if there's an error, but only if evolution is still running
         if (isEvolutionRunning) {
-            setTimeout(pollProgress, 2000); // Longer timeout on error
+            if (!progressConnectionLost) {
+                progressConnectionLost = true;
+                showErrorMessage('Connection lost. The experiment may still be running. Reconnecting automatically…');
+                updateEvolutionStatusIndicator(true, 'Reconnecting…');
+            }
+            scheduleProgressPoll(4000);
         }
+    } finally {
+        progressPollInFlight = false;
+        if (progressPollRequested && isEvolutionRunning) scheduleProgressPoll(0);
+        progressPollRequested = false;
     }
 }
 
-// Add a function to show error messages
+function apiErrorMessage(data, fallback) {
+    if (typeof data?.message === 'string') return data.message;
+    if (typeof data?.detail === 'string') return data.detail;
+    if (Array.isArray(data?.detail)) {
+        return data.detail.map(item => `${(item.loc || []).filter(part => part !== 'body').join(' → ')}: ${item.msg}`).join('; ');
+    }
+    return fallback;
+}
+
 function showErrorMessage(message) {
-    const errorDiv = document.createElement('div');
-    errorDiv.className = 'error-message';
-    errorDiv.style.position = 'fixed';
-    errorDiv.style.top = '20px';
-    errorDiv.style.left = '50%';
-    errorDiv.style.transform = 'translateX(-50%)';
-    errorDiv.style.backgroundColor = '#f44336';
-    errorDiv.style.color = 'white';
-    errorDiv.style.padding = '15px';
-    errorDiv.style.borderRadius = '5px';
-    errorDiv.style.zIndex = '1001';
-    errorDiv.textContent = message;
-
-    document.body.appendChild(errorDiv);
-
-    // Remove after 3 seconds
-    setTimeout(() => {
-        if (document.body.contains(errorDiv)) {
-            document.body.removeChild(errorDiv);
-        }
-    }, 3000);
+    let notice = document.getElementById('workspaceNotice');
+    if (!notice) {
+        notice = document.createElement('div');
+        notice.id = 'workspaceNotice';
+        notice.className = 'workspace-notice alert alert-danger';
+        notice.setAttribute('role', 'alert');
+        const text = document.createElement('span');
+        text.className = 'workspace-notice-text';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'btn-close';
+        close.setAttribute('aria-label', 'Dismiss message');
+        close.addEventListener('click', () => notice.remove());
+        notice.append(text, close);
+        (document.getElementById('mainContent') || document.body).prepend(notice);
+    }
+    notice.querySelector('.workspace-notice-text').textContent = message;
+    notice.scrollIntoView({ block: 'nearest' });
 }
 
 // Function to reset button states
@@ -5503,9 +6321,6 @@ function resetButtonStates() {
     const nameSection = document.getElementById('evolutionNameSection');
     if (nameSection) nameSection.style.display = 'block';
 
-    // Clear the name input for next evolution
-    const nameInput = document.getElementById('evolutionNameInput');
-    if (nameInput) nameInput.value = '';
 }
 
 /**
@@ -5614,6 +6429,7 @@ async function checkRunningEvolution() {
         } else {
             // No evolution running - hide the banner if present
             hideRunningEvolutionBanner();
+            await retryDeferredEvolutionRepairs(progressData);
         }
     } catch (error) {
         console.error("Error checking running evolution:", error);
@@ -5636,16 +6452,17 @@ function showRunningEvolutionBanner(progressData) {
             top: 0;
             left: 0;
             right: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background: var(--primary);
+            color: var(--text-on-primary);
             padding: 10px 20px;
             z-index: 9998;
             display: flex;
             align-items: center;
             justify-content: center;
             gap: 15px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            box-shadow: 0 2px 10px color-mix(in srgb, var(--text-primary) 30%, transparent);
             font-size: 14px;
+            font-family: Figtree, sans-serif;
         `;
 
         banner.innerHTML = `
@@ -5786,7 +6603,7 @@ window.checkRunningEvolution = checkRunningEvolution;
 // Now just stores checkpoint ID - the history panel handles the UI
 function showResumeButton(checkpointId) {
     if (checkpointId) {
-        localStorage.setItem('lastCheckpointId', checkpointId);
+        rememberCheckpointId(checkpointId);
     }
     // History panel handles resume/continue UI now
 }
@@ -5813,7 +6630,7 @@ async function checkForResumableCheckpoints() {
                 );
                 if (resumable) {
                     console.log("Found resumable checkpoint:", resumable);
-                    localStorage.setItem('lastCheckpointId', resumable.id);
+                    rememberCheckpointId(resumable.id);
                     // Log to activity if UI is ready
                     if (typeof addActivityLogItem === 'function') {
                         try {
@@ -5832,8 +6649,15 @@ async function checkForResumableCheckpoints() {
     return null;
 }
 
+function clearTokenCounts() {
+    document.getElementById('token-counts-container')?.remove();
+    latestDiagnosticsTokenCounts = null;
+    lastTokenCountsSignature = '';
+}
+
 // Function to reset the UI state
 function resetUIState() {
+    window.IdeaWorkbench?.closeInspector();
     // Clear generations container
     const container = document.getElementById('generations-container');
     if (container) {
@@ -5911,7 +6735,11 @@ function resetUIState() {
         clearTimeout(persistStateTimeout);
         persistStateTimeout = null;
     }
-    localStorage.removeItem('currentEvolutionData');
+    try {
+        localStorage.removeItem(`idea.${window.currentUser?.uid || 'signed-out'}.currentEvolutionData`);
+    } catch (error) {
+        console.warn('Browser backup unavailable; starting with server state.', error);
+    }
 
     // Reset download button
     const downloadButton = document.getElementById('downloadButton');
@@ -5920,10 +6748,7 @@ function resetUIState() {
     }
 
     // Remove token counts container if it exists
-    const tokenCountsContainer = document.getElementById('token-counts-container');
-    if (tokenCountsContainer) {
-        tokenCountsContainer.innerHTML = '';
-    }
+    clearTokenCounts();
 }
 
 // Function to create the progress bar with enhanced visual feedback
@@ -6312,7 +7137,7 @@ function updateEvolutionStatusIndicator(isRunning, statusText = '') {
     if (spinner) {
         if (isRunning) {
             spinner.classList.add('spinning');
-            spinner.classList.remove('complete', 'stopped');
+            spinner.classList.remove('complete', 'stopped', 'failed');
         } else {
             spinner.classList.remove('spinning');
         }
@@ -6325,13 +7150,13 @@ function updateEvolutionStatusIndicator(isRunning, statusText = '') {
     if (progressCard) {
         if (isRunning) {
             progressCard.classList.add('running');
-            progressCard.classList.remove('complete', 'stopped');
+            progressCard.classList.remove('complete', 'stopped', 'failed');
         }
     }
 }
 
 // Function to mark evolution as complete
-function markEvolutionComplete(isStopped = false, isResumable = false, checkpointId = null) {
+function markEvolutionComplete(isStopped = false, isResumable = false, checkpointId = null, error = null, stopReason = null) {
     const spinner = document.getElementById('evolution-spinner');
     const statusTextEl = document.getElementById('evolution-status-text');
     const progressCard = document.getElementById('progress-container');
@@ -6339,13 +7164,15 @@ function markEvolutionComplete(isStopped = false, isResumable = false, checkpoin
     const forceStopButton = document.getElementById('forceStopButton');
 
     if (spinner) {
-        spinner.classList.remove('spinning');
-        spinner.classList.add(isStopped ? 'stopped' : 'complete');
+        spinner.classList.remove('spinning', 'complete', 'stopped', 'failed');
+        spinner.classList.add(error ? 'failed' : isStopped ? 'stopped' : 'complete');
     }
 
     if (statusTextEl) {
-        if (isStopped && isResumable) {
-            statusTextEl.textContent = 'Paused';
+        if (error) {
+            statusTextEl.textContent = isResumable ? 'Failed · checkpoint saved' : 'Failed';
+        } else if (isStopped && isResumable) {
+            statusTextEl.textContent = stopReason === 'budget' ? 'Paused · budget reached' : 'Paused';
         } else if (isStopped) {
             statusTextEl.textContent = 'Stopped';
         } else {
@@ -6354,8 +7181,8 @@ function markEvolutionComplete(isStopped = false, isResumable = false, checkpoin
     }
 
     if (progressCard) {
-        progressCard.classList.remove('running');
-        progressCard.classList.add(isStopped ? 'stopped' : 'complete');
+        progressCard.classList.remove('running', 'complete', 'stopped', 'failed');
+        progressCard.classList.add(error ? 'failed' : isStopped ? 'stopped' : 'complete');
     }
 
     if (activityIndicator) {
@@ -6371,8 +7198,12 @@ function markEvolutionComplete(isStopped = false, isResumable = false, checkpoin
 
     // Add final activity log entry
     const elapsed = evolutionStartTime ? formatDuration(Date.now() - evolutionStartTime) : 'unknown';
-    if (isStopped && isResumable) {
-        addActivityLogItem(`⏸️ Paused after ${elapsed} - checkpoint saved`, 'info');
+    if (error) {
+        addActivityLogItem(`Failed after ${elapsed}: ${error}`, 'error');
+    } else if (isStopped && isResumable) {
+        addActivityLogItem(stopReason === 'budget'
+            ? `Paused after ${elapsed}: budget reached; checkpoint saved. Use this configuration to start a new experiment with a larger budget.`
+            : `Paused after ${elapsed} · checkpoint saved`, 'info');
     } else if (isStopped) {
         addActivityLogItem(`⏹️ Stopped after ${elapsed}`, 'warning');
     } else {
@@ -6381,7 +7212,7 @@ function markEvolutionComplete(isStopped = false, isResumable = false, checkpoin
 
     // Store checkpoint info for history panel
     if (checkpointId) {
-        localStorage.setItem('lastCheckpointId', checkpointId);
+        rememberCheckpointId(checkpointId);
         // Refresh history to show new checkpoint
         if (typeof loadHistory === 'function') {
             loadHistory();
@@ -6390,6 +7221,17 @@ function markEvolutionComplete(isStopped = false, isResumable = false, checkpoin
 }
 
 
+
+// This is a convenience cache; a storage failure must not interrupt a saved run.
+function rememberCheckpointId(checkpointId) {
+    const owner = window.currentUser?.uid;
+    if (!owner || !checkpointId) return;
+    try {
+        localStorage.setItem(`idea.${owner}.lastCheckpointId`, checkpointId);
+    } catch (error) {
+        console.warn('Checkpoint saved on the server; browser shortcut unavailable.', error);
+    }
+}
 
 // Function to show the context modal
 function showContextModal(ideaIndex) {
@@ -6687,7 +7529,7 @@ function showLineageModal(idea, generationIndex) {
                 </div>
                 <div class="oracle-analysis-content">
                     <h6>Analysis & Recommendations:</h6>
-                    <div class="analysis-text" style="white-space: pre-wrap; line-height: 1.6; background-color: #f8f9fa; padding: 1rem; border-radius: 0.375rem; border-left: 4px solid #0d6efd;"></div>
+                    <div class="analysis-text" style="white-space: pre-wrap; line-height: 1.6; background-color: var(--surface-alt); padding: 1rem; border-radius: 0.375rem; border-left: 4px solid var(--primary);"></div>
                 </div>
             </div>
         `;
@@ -6976,7 +7818,8 @@ function displayTokenCounts(tokenCounts) {
         total_cached_input: tokenCounts.total_cached_input,
         cost: tokenCounts.cost,
     });
-    if (nextSignature === lastTokenCountsSignature) {
+    if (nextSignature === lastTokenCountsSignature
+        && document.getElementById('token-counts-container')?.querySelector('#token-cost-value')) {
         return;
     }
     lastTokenCountsSignature = nextSignature;
@@ -7081,6 +7924,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
     const totalOutputTokens = tokenCounts.total_output.toLocaleString();
     const totalThoughtTokens = (tokenCounts.total_thoughts || 0).toLocaleString();
     const totalCachedInputTokens = (tokenCounts.total_cached_input || 0).toLocaleString();
+    const totalToolInputTokens = (tokenCounts.total_tool_input || 0).toLocaleString();
 
     // Get cost information
     const costInfo = tokenCounts.cost;
@@ -7127,41 +7971,46 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
 
     // Dynamically build component data for all available components
     const componentData = [];
-    const colors = [
-        'rgba(54, 162, 235, 0.7)',   // Blue
-        'rgba(75, 192, 192, 0.7)',   // Teal
-        'rgba(255, 99, 132, 0.7)',   // Red
-        'rgba(255, 206, 86, 0.7)',   // Yellow
-        'rgba(153, 102, 255, 0.7)',  // Purple
-        'rgba(255, 159, 64, 0.7)'    // Orange
-    ];
-    const borderColors = [
-        'rgba(54, 162, 235, 1)',
-        'rgba(75, 192, 192, 1)',
-        'rgba(255, 99, 132, 1)',
-        'rgba(255, 206, 86, 1)',
-        'rgba(153, 102, 255, 1)',
-        'rgba(255, 159, 64, 1)'
-    ];
+    const chartTheme = getViewerChartTheme();
+    const borderColors = [chartTheme.violet, chartTheme.green, chartTheme.blue,
+        chartTheme.coral, chartTheme.amber, chartTheme.text];
+    const colors = borderColors.map(color => viewerChartColorWithAlpha(color, 0.7));
 
     let colorIndex = 0;
 
-    // Check for each possible component and add to componentData if it exists
-    const possibleComponents = ['ideator', 'formatter', 'critic', 'breeder', 'genotype_encoder', 'diversity_embeddings', 'oracle'];
+    // Keep core agents in their familiar order, then include dynamically
+    // registered evaluators such as artifact_render.
+    const coreComponents = ['ideator', 'formatter', 'critic', 'breeder', 'genotype_encoder', 'diversity_embeddings', 'oracle'];
+    const possibleComponents = [
+        ...coreComponents.filter(componentName => tokenCounts[componentName]),
+        ...Object.keys(tokenCounts.models || {}).filter(componentName => (
+            tokenCounts[componentName] && !coreComponents.includes(componentName)
+        )),
+    ];
+    const componentDisplayNames = {
+        genotype_encoder: 'Genotype Encoder',
+        diversity_embeddings: 'Diversity Embeddings',
+        artifact_render: 'Artifact Render / Code Execution',
+        restored_usage: 'Restored Usage',
+    };
 
     for (const componentName of possibleComponents) {
         if (tokenCounts[componentName]) {
             const component = tokenCounts[componentName];
+            const defaultDisplayName = componentName
+                .split('_')
+                .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+                .join(' ');
+            const displayName = componentDisplayNames[componentName] || defaultDisplayName;
             componentData.push({
-                name: componentName.charAt(0).toUpperCase() + componentName.slice(1).replace('_', ' '),
-                displayName: componentName === 'genotype_encoder' ? 'Genotype Encoder' :
-                    componentName === 'diversity_embeddings' ? 'Diversity Embeddings' :
-                    componentName.charAt(0).toUpperCase() + componentName.slice(1),
+                name: displayName,
+                displayName,
                 total: component.total.toLocaleString(),
                 input: component.input.toLocaleString(),
                 output: component.output.toLocaleString(),
                 thoughts: (component.thoughts || 0).toLocaleString(),
                 cachedInput: (component.cached_input || 0).toLocaleString(),
+                toolInput: (component.tool_input || 0).toLocaleString(),
                 model: component.model,
                 cost: component.cost.toFixed(4),
                 totalValue: component.total,
@@ -7178,6 +8027,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
     componentData.forEach(comp => {
         const thoughtHtml = comp.thoughts !== '0' ? `<span>Thoughts: ${comp.thoughts}</span> |` : '';
         const cachedHtml = comp.cachedInput !== '0' ? `<span>Cached input: ${comp.cachedInput}</span> |` : '';
+        const toolInputHtml = comp.toolInput !== '0' ? `<span>Tool/intermediate input: ${comp.toolInput}</span> |` : '';
         componentBreakdownHtml += `
             <li class="list-group-item">
                 <div class="d-flex justify-content-between align-items-center">
@@ -7189,6 +8039,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
                     <span>Output: ${comp.output}</span> |
                     ${thoughtHtml}
                     ${cachedHtml}
+                    ${toolInputHtml}
                     <span>Cost: $${comp.cost}</span>
                 </div>
             </li>
@@ -7228,6 +8079,7 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
                                     <div class="small text-muted mt-1">
                                         <span>Thoughts: ${totalThoughtTokens}</span>
                                         ${tokenCounts.total_cached_input ? `<span class="ms-2">Cached input: ${totalCachedInputTokens}</span>` : ''}
+                                        ${tokenCounts.total_tool_input ? `<span class="ms-2">Tool/intermediate input: ${totalToolInputTokens}</span>` : ''}
                                     </div>
                                     <hr>
                                     <h6>Cost Breakdown:</h6>
@@ -7440,8 +8292,8 @@ function showTokenDetailsModal(tokenCounts, options = {}) {
                         parseFloat(thoughtCost),
                         parseFloat(totalCost)
                     ],
-                    backgroundColor: ['#36a2eb', '#4bc0c0', '#9966ff', '#ff9f40'],
-                    borderColor: ['#36a2eb', '#4bc0c0', '#9966ff', '#ff9f40'],
+                    backgroundColor: [chartTheme.violet, chartTheme.green, chartTheme.blue, chartTheme.coral],
+                    borderColor: [chartTheme.violet, chartTheme.green, chartTheme.blue, chartTheme.coral],
                     borderWidth: 1
                 }]
             },
@@ -7508,18 +8360,18 @@ function getDiversityChartScales() {
             title: {
                 display: true,
                 text: 'Generation',
-                color: '#64748B',
+                color: getViewerChartTheme().secondary,
                 font: {
                     size: 14,
                     weight: 'bold'
                 }
             },
             grid: {
-                color: 'rgba(139, 124, 246, 0.1)',
+                color: viewerChartColorWithAlpha(getViewerChartTheme().violet, 0.1),
                 lineWidth: 1
             },
             ticks: {
-                color: '#64748B',
+                color: getViewerChartTheme().secondary,
                 font: {
                     size: 12
                 },
@@ -7533,18 +8385,18 @@ function getDiversityChartScales() {
             title: {
                 display: true,
                 text: metricConfig.axisLabel,
-                color: '#64748B',
+                color: getViewerChartTheme().secondary,
                 font: {
                     size: 14,
                     weight: 'bold'
                 }
             },
             grid: {
-                color: 'rgba(139, 124, 246, 0.1)',
+                color: viewerChartColorWithAlpha(getViewerChartTheme().violet, 0.1),
                 lineWidth: 1
             },
             ticks: {
-                color: '#64748B',
+                color: getViewerChartTheme().secondary,
                 font: {
                     size: 12
                 }
@@ -7631,6 +8483,10 @@ function initializeDiversityChart() {
         return;
     }
 
+    // Progress can arrive before the deferred page-load initializer. Keep the
+    // populated chart instead of replacing it with an empty generation axis.
+    if (diversityChart?.canvas === canvas) return;
+
     try {
         const ctx = canvas.getContext('2d');
 
@@ -7643,8 +8499,8 @@ function initializeDiversityChart() {
         const config = {
             type: 'line',
             data: {
-                labels: [],
-                datasets: getDiversityChartDatasets(diversityData, fitnessPlotMetric)
+                labels: [...(diversityData?.labels || [])],
+                datasets: getDiversityChartDatasets(diversityData, fitnessPlotMetric, fitnessPlotScope)
             },
             options: {
                 responsive: true,
@@ -7671,14 +8527,14 @@ function initializeDiversityChart() {
                             font: {
                                 size: 12
                             },
-                            color: '#64748B'
+                            color: getViewerChartTheme().secondary
                         }
                     },
                     tooltip: {
-                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                        titleColor: '#1E293B',
-                        bodyColor: '#64748B',
-                        borderColor: 'rgba(139, 124, 246, 0.2)',
+                        backgroundColor: getViewerChartTheme().surface,
+                        titleColor: getViewerChartTheme().text,
+                        bodyColor: getViewerChartTheme().secondary,
+                        borderColor: getViewerChartTheme().border,
                         borderWidth: 1,
                         cornerRadius: 12,
                         displayColors: true,
@@ -7825,7 +8681,50 @@ function normalizeFitnessPlotScope(scope) {
     return scope === 'islands' ? 'islands' : 'population';
 }
 
+function getViewerChartTheme() {
+    const styles = typeof getComputedStyle === 'function' && typeof document !== 'undefined' && document.documentElement
+        ? getComputedStyle(document.documentElement) : null;
+    const token = (name, fallback) => styles?.getPropertyValue(name).trim() || fallback;
+    const theme = {
+        violet: token('--chart-violet', '#7146d8'),
+        coral: token('--chart-coral', '#c45d28'),
+        green: token('--chart-green', '#27836a'),
+        amber: token('--chart-amber', '#9b7019'),
+        blue: token('--chart-blue', '#4378b8'),
+        text: token('--text-primary', '#342151'),
+        secondary: token('--text-secondary', '#695c78'),
+        border: token('--border', '#ded4e8'),
+        surface: token('--surface', '#fcf9f5')
+    };
+    if (typeof Chart !== 'undefined' && Chart.defaults) {
+        Chart.defaults.font.family = "'Figtree', sans-serif";
+        Chart.defaults.color = theme.secondary;
+        Chart.defaults.borderColor = theme.border;
+        const plugins = Chart.defaults.plugins;
+        if (plugins?.title) plugins.title.color = theme.text;
+        if (plugins?.legend?.labels) plugins.legend.labels.color = theme.secondary;
+        if (plugins?.tooltip) {
+            plugins.tooltip.backgroundColor = theme.surface;
+            plugins.tooltip.titleColor = theme.text;
+            plugins.tooltip.bodyColor = theme.secondary;
+            plugins.tooltip.borderColor = theme.border;
+        }
+    }
+    return theme;
+}
+
+function viewerChartColorWithAlpha(color, alpha) {
+    const hex = /^#([a-f\d]{6})$/i.exec(color);
+    if (hex) {
+        const channels = [0, 2, 4].map(offset => parseInt(hex[1].slice(offset, offset + 2), 16));
+        return `rgba(${channels.join(', ')}, ${alpha})`;
+    }
+    const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(color);
+    return rgb ? `rgba(${rgb.slice(1).join(', ')}, ${alpha})` : color;
+}
+
 function getFitnessPlotMetricConfig(metric) {
+    const chartTheme = getViewerChartTheme();
     const configs = {
         fitness: {
             label: 'Fitness',
@@ -7835,9 +8734,9 @@ function getFitnessPlotMetricConfig(metric) {
             lowLabel: 'Lowest Fitness',
             digits: 3,
             colors: {
-                average: 'rgba(79, 70, 229, 1)',
-                best: 'rgba(16, 185, 129, 1)',
-                low: 'rgba(244, 63, 94, 1)'
+                average: chartTheme.violet,
+                best: chartTheme.green,
+                low: chartTheme.coral
             }
         },
         elo: {
@@ -7848,9 +8747,9 @@ function getFitnessPlotMetricConfig(metric) {
             lowLabel: 'Lowest ELO',
             digits: 0,
             colors: {
-                average: 'rgba(14, 165, 233, 1)',
-                best: 'rgba(37, 99, 235, 1)',
-                low: 'rgba(217, 119, 6, 1)'
+                average: chartTheme.violet,
+                best: chartTheme.green,
+                low: chartTheme.coral
             }
         },
         diversity: {
@@ -7861,9 +8760,9 @@ function getFitnessPlotMetricConfig(metric) {
             lowLabel: 'Lowest Diversity',
             digits: 3,
             colors: {
-                average: 'rgba(124, 58, 237, 1)',
-                best: 'rgba(5, 150, 105, 1)',
-                low: 'rgba(148, 163, 184, 1)'
+                average: chartTheme.violet,
+                best: chartTheme.green,
+                low: chartTheme.coral
             }
         }
     };
@@ -7942,6 +8841,10 @@ function getFitnessPlotMetricValue(idea, metric, generation = null) {
     const selection = idea?.selection_metrics || {};
     const ratings = idea?.ratings || {};
     const requestedGeneration = toFiniteDiversityInteger(generation);
+    const component = metric === 'diversity' ? 'diversity' : metric === 'elo' ? 'quality_elo' : null;
+    const evaluation = component ? idea?.evaluations?.[component] : null;
+    if (evaluation && evaluation.status !== 'ok'
+        && (requestedGeneration === null || toFiniteDiversityInteger(evaluation.generation) === requestedGeneration)) return null;
     const generationRecord = getFitnessPlotGenerationMetricRecord(idea, requestedGeneration);
     if (generationRecord) {
         const snapshotValue = firstFiniteDiversityValue(generationRecord[metric]);
@@ -8011,7 +8914,7 @@ function buildFitnessPlotSummaries(population, generation) {
     const summaries = {};
     getFitnessPlotMetricKeys().forEach((metric) => {
         const values = population.map(idea => getFitnessPlotMetricValue(idea, metric, generation));
-        summaries[metric] = summarizeFitnessPlotValues(values);
+        summaries[metric] = { ...summarizeFitnessPlotValues(values), total: population.length };
     });
     return summaries;
 }
@@ -8115,6 +9018,9 @@ function buildIslandDiversitySeries(labels, diversityHistory, islandDiversityHis
 
 function processDiversityData(diversityHistory, generationHistory = null, islandDiversityHistory = []) {
     const processedData = createEmptyFitnessPlotData();
+    const historicalRows = Array.isArray(diversityHistory) ? diversityHistory : [];
+    const historicalSnapshot = [...historicalRows].reverse().find(snapshot => snapshot?.history_sampling || snapshot?.metadata?.history_sampling);
+    processedData.historySampling = historicalSnapshot?.history_sampling || historicalSnapshot?.metadata?.history_sampling || null;
     const generationRows = normalizeGenerationHistory(generationHistory);
 
     if (generationRows.length > 0) {
@@ -8148,12 +9054,12 @@ function processDiversityData(diversityHistory, generationHistory = null, island
 function getDiversityDatasetStyle(color, options = {}) {
     return {
         borderColor: color,
-        backgroundColor: color.replace('1)', '0.10)'),
+        backgroundColor: viewerChartColorWithAlpha(color, 0.10),
         borderWidth: options.borderWidth ?? 2,
         fill: options.fill ?? false,
         tension: 0.3,
         pointBackgroundColor: color,
-        pointBorderColor: '#ffffff',
+        pointBorderColor: getViewerChartTheme().surface,
         pointBorderWidth: 1.5,
         pointRadius: options.pointRadius ?? 4,
         pointHoverRadius: 6,
@@ -8163,13 +9069,8 @@ function getDiversityDatasetStyle(color, options = {}) {
 }
 
 function getIslandDiversityColor(index) {
-    const colors = [
-        'rgba(20, 184, 166, 1)',
-        'rgba(59, 130, 246, 1)',
-        'rgba(168, 85, 247, 1)',
-        'rgba(245, 158, 11, 1)',
-        'rgba(236, 72, 153, 1)'
-    ];
+    const theme = getViewerChartTheme();
+    const colors = [theme.violet, theme.green, theme.coral, theme.amber, theme.blue];
     return colors[index % colors.length];
 }
 
@@ -8179,12 +9080,12 @@ function getIslandDiversityDatasets(processedData) {
         {
             label: 'Mean Island Diversity',
             data: islandData.mean || [],
-            ...getDiversityDatasetStyle('rgba(5, 150, 105, 1)', { fill: true, borderWidth: 3 })
+            ...getDiversityDatasetStyle(getViewerChartTheme().violet, { fill: true, borderWidth: 3 })
         },
         {
             label: 'Inter-Island Diversity',
             data: islandData.inter || [],
-            ...getDiversityDatasetStyle('rgba(37, 99, 235, 1)', { borderWidth: 2.5, borderDash: [7, 4] })
+            ...getDiversityDatasetStyle(getViewerChartTheme().green, { borderWidth: 2.5, borderDash: [7, 4] })
         }
     ];
 
@@ -8231,8 +9132,8 @@ function getDiversityChartDatasets(processedData, mode = fitnessPlotMetric, scop
 }
 
 function formatDiversityMetric(value, digits = 3) {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? numeric.toFixed(digits) : '-';
+    const numeric = toFiniteDiversityNumber(value);
+    return numeric !== null ? numeric.toFixed(digits) : '—';
 }
 
 function formatFitnessPlotMetric(value, metric = fitnessPlotMetric, digits = null) {
@@ -8242,6 +9143,15 @@ function formatFitnessPlotMetric(value, metric = fitnessPlotMetric, digits = nul
 }
 
 function renderDiversitySummary(latest, processedData = diversityData) {
+    const samplingNotice = window.IdeaWorkbench?.renderHistorySamplingNote(
+        document.getElementById('diversitySamplingNote'), processedData?.historySampling,
+    ) || '';
+    window.IdeaWorkbench?.renderChartTable(
+        document.getElementById('fitnessChartTable'),
+        processedData?.labels || [],
+        getDiversityChartDatasets(processedData, fitnessPlotMetric, fitnessPlotScope),
+        `${getFitnessPlotMetricConfig(fitnessPlotMetric).label} by generation${samplingNotice ? `. ${samplingNotice}` : ''}`,
+    );
     const summary = document.getElementById('diversity-summary');
     if (!summary) return;
     if (fitnessPlotMetric === 'diversity' && fitnessPlotScope === 'islands') {
@@ -8261,7 +9171,7 @@ function renderDiversitySummary(latest, processedData = diversityData) {
         {
             label: `Average ${config.label}`,
             value: formatFitnessPlotMetric(metricSummary.average, fitnessPlotMetric),
-            hint: count > 0 ? `${count} ideas in ${generationHint.toLowerCase()}` : generationHint
+            hint: `${count}/${metricSummary.total ?? count} measured · ${generationHint}`
         },
         {
             label: config.bestLabel,
@@ -8403,6 +9313,7 @@ function buildDiversitySignature(processedData) {
         labels: processedData.labels,
         metrics: processedData.metrics,
         islandDiversity: processedData.islandDiversity,
+        historySampling: processedData.historySampling,
         metric: fitnessPlotMetric,
         scope: fitnessPlotScope
     });
@@ -8468,7 +9379,7 @@ function updateDiversityChart(diversityHistory, generationHistory = null, island
         // Check if chart canvas context is still valid
         try {
             const ctx = canvas.getContext('2d');
-            if (!ctx || !diversityChart.canvas) {
+            if (!ctx || diversityChart.canvas !== canvas) {
                 if (diversityChart) {
                     diversityChart.destroy();
                 }
@@ -8535,7 +9446,6 @@ function updateDiversityChart(diversityHistory, generationHistory = null, island
             // Ensure proper sizing of canvas and container
             const canvas = document.getElementById('diversity-chart');
             const plotContainer = document.querySelector('.diversity-plot-container');
-            const plotSection = document.getElementById('diversity-plot-section');
 
             if (canvas && plotContainer) {
                 // Ensure parent section is visible
@@ -8907,6 +9817,10 @@ const FALLBACK_THINKING_UI_CONFIGS = {
 
 function buildThinkingHelp(config, lowestLevel) {
     if (config.supports_thinking_level && !config.supports_thinking_budget) {
+        const allowedLevels = Array.isArray(config.allowed_levels) ? config.allowed_levels : [];
+        if (allowedLevels.includes('max')) {
+            return 'Default is Medium. Use None/Low for latency or High/Extra High/Max for quality-first workloads.';
+        }
         if (lowestLevel === 'minimal') {
             return 'Default is Low. Use Medium/High for deeper reasoning or Minimal to reduce latency and cost.';
         }
@@ -8930,7 +9844,9 @@ function buildThinkingUiConfig(config) {
     const allowedLevels = Array.isArray(config.allowed_levels) ? config.allowed_levels : [];
     const lowestLevel = allowedLevels.includes('minimal')
         ? 'minimal'
-        : (allowedLevels.includes('off') || config.allow_off ? 'off' : null);
+        : (allowedLevels.includes('none')
+            ? 'none'
+            : (allowedLevels.includes('off') || config.allow_off ? 'off' : null));
     const minBudget = Number(config.min_budget ?? 0);
     const maxBudget = Number(config.max_budget ?? 0);
     let defaultBudget = Number(config.default_budget);
@@ -8943,9 +9859,11 @@ function buildThinkingUiConfig(config) {
         supportsBudget: config.supports_thinking_budget === true,
         allowOff: lowestLevel !== null,
         allowMedium: allowedLevels.length === 0 || allowedLevels.includes('medium'),
+        allowXHigh: allowedLevels.includes('xhigh'),
+        allowMax: allowedLevels.includes('max'),
         defaultMode: config.default_level || (config.default_budget !== null && config.default_budget !== undefined ? 'custom' : 'low'),
         offValue: lowestLevel || 'off',
-        offLabel: lowestLevel === 'minimal' ? 'Minimal' : 'Off',
+        offLabel: lowestLevel === 'minimal' ? 'Minimal' : (lowestLevel === 'none' ? 'None' : 'Off'),
         offDescription: lowestLevel === 'minimal'
             ? ' - Lowest Gemini 3 thinking level'
             : ' - Prefer speed and lower cost',
@@ -8983,9 +9901,17 @@ function setupModelChangeListener() {
     const modelSelect = document.getElementById('modelType');
     const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
     if (!modelSelect || !thinkingBudgetContainer) return;
+    window.IdeaWorkbench?.configureModelPicker({
+        modelId: 'modelType', providerId: 'providerSelect',
+        models: Array.from(modelSelect.options).map(option => ({ id: option.value, name: option.textContent, provider: option.dataset.provider })),
+        defaultModel: window.IDEA_DEFAULT_MODEL,
+    });
 
     modelSelect.addEventListener('change', function () {
         updateThinkingBudgetVisibility();
+        if (typeof window.checkApiKeyStatus === 'function') {
+            void window.checkApiKeyStatus();
+        }
     });
     updateThinkingBudgetVisibility();
 }
@@ -8993,15 +9919,50 @@ function setupModelChangeListener() {
 /**
  * Update thinking control visibility based on selected model
  */
+function supportsSamplingControls(model, thinkingLevel) {
+    const capabilities = window.IDEA_THINKING_MODEL_CONFIG?.[String(model || '').replace(/^models\//, '')];
+    const support = capabilities?.supports_sampling_parameters;
+    return support !== false && (support !== 'reasoning_none_only' || thinkingLevel === 'none');
+}
+
+function updateSamplingControls() {
+    const model = document.getElementById('modelType');
+    if (!model) return;
+    const enabled = supportsSamplingControls(model.value, getThinkingSettings().thinkingLevel);
+    for (const id of ['creativeTemp', 'topP']) {
+        const control = document.getElementById(id);
+        if (control) control.disabled = !enabled;
+        const value = document.getElementById(`${id}Value`);
+        if (value && control) value.textContent = enabled ? control.value : 'Provider controlled';
+    }
+    const notice = document.getElementById('samplingControlsNotice');
+    if (notice) {
+        notice.hidden = enabled;
+        notice.textContent = enabled ? '' : 'This model controls sampling. Temperature and top P do not apply with these settings.';
+    }
+    const geneNotice = document.getElementById('geneAnalysisModelNotice');
+    if (geneNotice) {
+        const google = model.selectedOptions?.[0]?.dataset?.provider === 'google_generative_ai';
+        geneNotice.textContent = `Gene extraction and consolidation use ${google ? 'Argon' : 'the selected model'} and share the run budget.`;
+    }
+}
+
 function updateThinkingBudgetVisibility() {
     const modelSelect = document.getElementById('modelType');
     const thinkingBudgetContainer = document.getElementById('thinkingBudgetContainer');
     if (!modelSelect || !thinkingBudgetContainer) return;
 
     const selectedModel = modelSelect.value;
+    const selectedProvider = modelSelect.selectedOptions?.[0]?.dataset?.provider;
+    const providerSelect = document.getElementById('apiKeyProviderSelect');
+    if (providerSelect && ['openai', 'google_generative_ai'].includes(selectedProvider)) {
+        providerSelect.value = selectedProvider;
+        renderApiKeyProviderStatus(executionSettingsCache);
+    }
     const config = getThinkingModelConfig(selectedModel);
     if (!config || !config.supportsThinking) {
         thinkingBudgetContainer.style.display = 'none';
+        updateSamplingControls();
         return;
     }
 
@@ -9020,6 +9981,8 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
     const thinkingBudgetMax = document.getElementById('thinkingBudgetMax');
     const offOption = document.getElementById('thinkingOffOption');
     const mediumOption = document.getElementById('thinkingMediumOption');
+    const xhighOption = document.getElementById('thinkingXHighOption');
+    const maxOption = document.getElementById('thinkingMaxOption');
     const offLabel = document.getElementById('thinkingOffLabel');
     const offDescription = document.getElementById('thinkingOffDescription');
 
@@ -9027,6 +9990,8 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
     const lowRadio = document.getElementById('thinkingLow');
     const mediumRadio = document.getElementById('thinkingMedium');
     const highRadio = document.getElementById('thinkingHigh');
+    const xhighRadio = document.getElementById('thinkingXHigh');
+    const maxRadio = document.getElementById('thinkingMax');
     const customRadio = document.getElementById('thinkingCustomBudget');
     const customBudgetOption = document.getElementById('thinkingCustomBudgetOption') || customRadio?.closest('.form-check');
 
@@ -9036,6 +10001,8 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
     const supportsBudget = config.supportsBudget !== false;
     if (offOption) offOption.style.display = config.allowOff ? 'block' : 'none';
     if (mediumOption) mediumOption.style.display = config.allowMedium ? 'block' : 'none';
+    if (xhighOption) xhighOption.style.display = config.allowXHigh ? 'block' : 'none';
+    if (maxOption) maxOption.style.display = config.allowMax ? 'block' : 'none';
     if (customBudgetOption) customBudgetOption.style.display = supportsBudget ? 'block' : 'none';
     if (offRadio) offRadio.value = config.offValue || 'off';
     if (offLabel) offLabel.textContent = config.offLabel || 'Off';
@@ -9045,6 +10012,8 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
     if (lowRadio) lowRadio.checked = false;
     if (mediumRadio) mediumRadio.checked = false;
     if (highRadio) highRadio.checked = false;
+    if (xhighRadio) xhighRadio.checked = false;
+    if (maxRadio) maxRadio.checked = false;
     customRadio.checked = false;
 
     let effectiveDefault = config.defaultMode;
@@ -9066,6 +10035,10 @@ function configureThinkingBudgetForModel(modelName, providedConfig = null) {
         mediumRadio.checked = true;
     } else if (effectiveDefault === 'high' && highRadio) {
         highRadio.checked = true;
+    } else if (effectiveDefault === 'xhigh' && xhighRadio) {
+        xhighRadio.checked = true;
+    } else if (effectiveDefault === 'max' && maxRadio) {
+        maxRadio.checked = true;
     } else if (supportsBudget) {
         customRadio.checked = true;
     } else if (highRadio) {
@@ -9100,6 +10073,7 @@ function updateThinkingBudgetDisplay() {
  * Handle thinking mode changes (radio buttons).
  */
 function updateThinkingBudgetMode() {
+    updateSamplingControls();
     const customContainer = document.getElementById('thinkingBudgetCustomContainer');
     const customRadio = document.getElementById('thinkingCustomBudget');
     if (!customContainer || !customRadio) return;
@@ -9131,6 +10105,8 @@ function getThinkingSettings() {
     const lowRadio = document.getElementById('thinkingLow');
     const mediumRadio = document.getElementById('thinkingMedium');
     const highRadio = document.getElementById('thinkingHigh');
+    const xhighRadio = document.getElementById('thinkingXHigh');
+    const maxRadio = document.getElementById('thinkingMax');
     const customRadio = document.getElementById('thinkingCustomBudget');
     const thinkingBudgetSlider = document.getElementById('thinkingBudgetSlider');
 
@@ -9153,6 +10129,12 @@ function getThinkingSettings() {
     if (highRadio && highRadio.checked) {
         return { thinkingLevel: 'high', thinkingBudget: null };
     }
+    if (xhighRadio && xhighRadio.checked) {
+        return { thinkingLevel: 'xhigh', thinkingBudget: null };
+    }
+    if (maxRadio && maxRadio.checked) {
+        return { thinkingLevel: 'max', thinkingBudget: null };
+    }
 
     if (config.supportsBudget !== false && config.defaultMode === 'custom' && thinkingBudgetSlider) {
         const budget = parseInt(thinkingBudgetSlider.value || '0', 10);
@@ -9170,45 +10152,11 @@ function getThinkingSettings() {
 
 // Sidebar View Navigation
 function showSidebarView(viewName) {
-    // Hide all views first (move to right)
-    document.querySelectorAll('.sidebar-view').forEach(view => {
-        view.classList.remove('active');
-        view.classList.remove('slide-left');
-    });
-
-    // Logic for transitions
-    const mainView = document.getElementById('view-main');
-    const targetView = document.getElementById(`view-${viewName}`);
-    const sidebar = document.querySelector('.controls-panel');
-
-    if (viewName === 'main') {
-        mainView.classList.add('active');
-        // Collapse sidebar when returning to main
-        if (sidebar) sidebar.classList.remove('expanded');
-        // Show name input section
-        const nameSection = document.getElementById('evolutionNameSection');
-        if (nameSection) nameSection.style.display = 'block';
-    } else {
-        // Move main view to left (parallax)
-        mainView.classList.add('slide-left');
-        // Bring target view in
-        if (targetView) targetView.classList.add('active');
-
-        // Expand sidebar for history view
-        if (viewName === 'history') {
-            if (sidebar) sidebar.classList.add('expanded');
-            // Load/refresh history when entering
-            loadHistory();
-        } else {
-            // Collapse for other views
-            if (sidebar) sidebar.classList.remove('expanded');
-        }
-    }
-
-    // Special handling for settings
-    if (viewName === 'settings') {
-        checkSettingsStatus();
-    }
+    window.IdeaWorkbench?.selectSidebarView(viewName);
+    const nameSection = document.getElementById('evolutionNameSection');
+    if (nameSection && viewName === 'main') nameSection.style.display = 'block';
+    if (viewName === 'history') loadHistory();
+    if (viewName === 'settings') return checkSettingsStatus();
 }
 
 // Expose to window for HTML onclick attributes
@@ -9229,28 +10177,75 @@ window.navigateToRatePage = navigateToRatePage;
 /**
  * Check if API key is set and update UI
  */
+let settingsStatusVersion = 0;
+let settingsSaveInFlight = false;
 async function checkSettingsStatus() {
+    const version = ++settingsStatusVersion;
+    const panel = document.getElementById('view-settings');
+    const save = document.getElementById('saveSettingsBtn');
+    if (save) save.disabled = true;
+    panel?.setAttribute('aria-busy', 'true');
+    document.getElementById('apiKeyInputContainer')?.style.setProperty('display', 'none');
+    document.getElementById('apiKeyConfiguredContainer')?.style.setProperty('display', 'none');
+    showStatusInSettings('Checking provider key…', 'info');
     try {
-        const response = await fetch('/api/settings/status');
-        const data = await response.json();
-
-        const inputContainer = document.getElementById('apiKeyInputContainer');
-        const configuredContainer = document.getElementById('apiKeyConfiguredContainer');
-        const maskedDisplay = document.getElementById('maskedKeyDisplay');
-
-        if (data.masked_key) {
-            // Key is set
-            if (inputContainer) inputContainer.style.display = 'none';
-            if (configuredContainer) configuredContainer.style.display = 'block';
-            if (maskedDisplay) maskedDisplay.textContent = data.masked_key;
-
-        } else {
-            // No key set
-            if (inputContainer) inputContainer.style.display = 'block';
-            if (configuredContainer) configuredContainer.style.display = 'none';
+        const data = await loadExecutionSettings(true);
+        if (version !== settingsStatusVersion) return false;
+        const status = document.getElementById('settingsStatus');
+        if (status) { status.hidden = true; status.style.display = 'none'; }
+        renderApiKeyProviderStatus(data);
+        return true;
+    } catch (error) {
+        if (version !== settingsStatusVersion) return false;
+        console.error('Error checking settings:', error);
+        showStatusInSettings('Could not refresh key status. Check your connection and reopen Settings to retry.', 'danger');
+        return false;
+    } finally {
+        if (version === settingsStatusVersion) {
+            panel?.removeAttribute('aria-busy');
+            if (save) save.disabled = settingsSaveInFlight;
         }
-    } catch (e) {
-        console.error("Error checking settings:", e);
+    }
+}
+
+function selectedApiKeyProvider() {
+    return document.getElementById('apiKeyProviderSelect')?.value || 'google_generative_ai';
+}
+
+function apiKeyProviderName(provider) {
+    return provider === 'openai' ? 'OpenAI' : 'Gemini';
+}
+
+function renderApiKeyProviderStatus(data) {
+    data = data || window.IdeaWorkbench?.providerSettingsSnapshot();
+    if (data) window.IdeaWorkbench?.setProviderSettings(data);
+    const provider = selectedApiKeyProvider();
+    const providerName = apiKeyProviderName(provider);
+    const status = data?.api_keys?.[provider] || { configured: false, masked_key: null };
+    const inputContainer = document.getElementById('apiKeyInputContainer');
+    const configuredContainer = document.getElementById('apiKeyConfiguredContainer');
+    const maskedDisplay = document.getElementById('maskedKeyDisplay');
+    const configuredProviderName = document.getElementById('configuredProviderName');
+    const providerLabel = document.getElementById('apiKeyProviderLabel');
+    const keyInput = document.getElementById('apiKeyInput');
+
+    if (providerLabel) providerLabel.textContent = `${providerName} API Key`;
+    if (configuredProviderName) configuredProviderName.textContent = providerName;
+    if (keyInput) keyInput.placeholder = `Enter ${providerName} API key`;
+    if (inputContainer) inputContainer.style.display = status.configured ? 'none' : 'block';
+    if (configuredContainer) configuredContainer.style.display = status.configured ? 'block' : 'none';
+    if (maskedDisplay) maskedDisplay.textContent = status.masked_key || '...';
+    const source = status.source || data?.key_sources?.[provider];
+    const sourceNote = document.getElementById('apiKeySourceNote');
+    if (sourceNote) sourceNote.textContent = source === 'environment'
+        ? 'Using this machine’s local environment key. Replace it only if you want to save a different key.'
+        : 'Saved securely for this provider. Switching models reuses this key.';
+    const remove = document.getElementById('deleteApiKeyBtn');
+    if (remove) remove.hidden = source === 'environment';
+    const cancel = document.getElementById('cancelApiKeyEdit');
+    if (cancel) cancel.hidden = true;
+    if (status.error_code === 'stored_key_unreadable') {
+        showStatusInSettings(status.message || 'This saved key cannot be opened. Enter a replacement key to use this provider.', 'warning');
     }
 }
 
@@ -9258,6 +10253,7 @@ async function checkSettingsStatus() {
  * Save API Key
  */
 async function saveSettings() {
+    if (settingsSaveInFlight) return;
     const keyInput = document.getElementById('apiKeyInput');
     const key = keyInput ? keyInput.value.trim() : '';
 
@@ -9266,8 +10262,14 @@ async function saveSettings() {
         return;
     }
 
+    settingsSaveInFlight = true;
+    const provider = selectedApiKeyProvider();
+    const providerName = apiKeyProviderName(provider);
     const btn = document.getElementById('saveSettingsBtn');
     const originalText = btn.innerHTML;
+    const providerSelect = document.getElementById('apiKeyProviderSelect');
+    if (providerSelect) providerSelect.disabled = true;
+    keyInput.disabled = true;
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Saving...';
 
@@ -9275,29 +10277,31 @@ async function saveSettings() {
         const response = await fetch('/api/settings/api-key', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ api_key: key })
+            body: JSON.stringify({ api_key: key, provider })
         });
 
         const data = await response.json();
 
-        if (data.status === 'success') {
-            showStatusInSettings('API Key saved successfully!', 'success');
+        if (response.ok && data.status === 'success') {
             // Clear input
             keyInput.value = '';
             // Refresh status to switch view
-            await checkSettingsStatus();
-            // Reload page after a short delay to apply changes
-            setTimeout(() => {
-                window.location.reload();
-            }, 1000);
+            const refreshed = await checkSettingsStatus();
+            if (refreshed) showStatusInSettings(`${providerName} API key saved.`, 'success');
+            else showStatusInSettings(`${providerName} key was saved, but its status could not be refreshed. Reopen Settings to retry.`, 'warning');
+            if (typeof window.checkApiKeyStatus === 'function') {
+                await window.checkApiKeyStatus();
+            }
         } else {
-            showStatusInSettings('Error: ' + data.message, 'danger');
-            btn.disabled = false;
-            btn.innerHTML = originalText;
+            showStatusInSettings(apiErrorMessage(data, 'The key could not be saved. Try again.'), 'danger');
         }
     } catch (e) {
         showStatusInSettings('Error: ' + e.message, 'danger');
+    } finally {
+        settingsSaveInFlight = false;
         btn.disabled = false;
+        if (providerSelect) providerSelect.disabled = false;
+        keyInput.disabled = false;
         btn.innerHTML = originalText;
     }
 }
@@ -9308,19 +10312,25 @@ async function saveSettings() {
 async function deleteApiKey(e) {
     if (e) e.preventDefault();
 
+    const providerName = apiKeyProviderName(selectedApiKeyProvider());
+    const deleteProviderName = document.getElementById('deleteKeyProviderName');
+    if (deleteProviderName) deleteProviderName.textContent = providerName;
+
     // Show the Bootstrap modal
     const deleteModal = new bootstrap.Modal(document.getElementById('deleteKeyModal'));
     deleteModal.show();
 }
 
 async function confirmDeleteApiKey() {
+    const provider = selectedApiKeyProvider();
+    const providerName = apiKeyProviderName(provider);
     const btn = document.getElementById('confirmDeleteKeyBtn');
     const originalText = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Deleting...';
 
     try {
-        const response = await fetch('/api/settings/api-key', {
+        const response = await fetch(`/api/settings/api-key?provider=${encodeURIComponent(provider)}`, {
             method: 'DELETE'
         });
 
@@ -9332,21 +10342,19 @@ async function confirmDeleteApiKey() {
             const modal = bootstrap.Modal.getInstance(deleteModalEl);
             if (modal) modal.hide();
 
-            showStatusInSettings('API Key deleted.', 'success');
+            showStatusInSettings(`${providerName} API key deleted.`, 'success');
             // Refresh status to switch view
             await checkSettingsStatus();
-            // Reload page to clear state
-            setTimeout(() => {
-                window.location.reload();
-            }, 1000);
+            if (typeof window.checkApiKeyStatus === 'function') {
+                await window.checkApiKeyStatus();
+            }
         } else {
             const msg = data.message || data.detail || 'Unknown error';
             showStatusInSettings('Error: ' + msg, 'danger');
-            btn.disabled = false;
-            btn.innerHTML = originalText;
         }
     } catch (e) {
         showStatusInSettings('Error: ' + e.message, 'danger');
+    } finally {
         btn.disabled = false;
         btn.innerHTML = originalText;
     }
@@ -9360,6 +10368,8 @@ function showStatusInSettings(msg, type) {
         el.className = `alert alert-${type}`;
         el.textContent = msg;
         el.style.display = 'block';
+        el.hidden = false;
+        el.setAttribute('role', type === 'danger' ? 'alert' : 'status');
     }
 }
 

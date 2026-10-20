@@ -30,6 +30,44 @@ class DummyAgent:
         self.total_token_count = input_tokens + output_tokens + thought_tokens
 
 
+def test_openai_model_routes_every_generation_agent_and_diversity_to_openai():
+    engine = EvolutionEngine(
+        pop_size=1,
+        generations=1,
+        model_type="gpt-5.6-luna",
+        api_key="test-key",
+        thinking_level="max",
+    )
+
+    assert engine.provider == "openai"
+    for agent in (
+        engine.ideator,
+        engine.formatter,
+        engine.critic,
+        engine.breeder,
+        engine.gene_manager,
+        engine.oracle,
+    ):
+        assert agent.provider == "openai"
+        assert agent.model_name == "gpt-5.6-luna"
+    assert engine.diversity_calculator.provider == "openai"
+    assert engine.diversity_calculator.embedding_model == "text-embedding-3-small"
+
+
+def test_gene_analysis_has_independent_model_and_counted_usage():
+    engine = EvolutionEngine(pop_size=1, generations=1, model_type="gemini-3.8-flash")
+    assert engine.gene_manager.model_name == "gemini-4-argon"
+    assert engine.gene_manager.thinking_level == "medium"
+    assert engine.breeder.gene_encoder is engine.gene_manager
+    baseline = engine.get_total_token_count()
+    engine.gene_manager = DummyAgent("gemini-4-argon", 1000, 100, thought_tokens=50)
+    usage = engine.get_total_token_count()
+    assert usage["total"] - baseline["total"] == 1150
+    prices = model_prices_per_million_tokens["gemini-4-argon"]
+    expected = (prices["input"] * 1000 + prices["output"] * 150) / 1_000_000
+    assert usage["cost"]["total_cost"] - baseline["cost"]["total_cost"] == pytest.approx(expected)
+
+
 def test_get_total_token_count():
     engine = EvolutionEngine(pop_size=1, generations=1)
     engine.ideator = DummyAgent("gemini-2.0-flash-lite", 100, 200)
@@ -185,7 +223,13 @@ def test_get_total_token_count_includes_thinking_cached_and_tiered_costs():
     )
     assert result["cost"]["thought_cost"] == 2_000 * 15.00 / 1_000_000
     assert result["cost"]["total_cost"] == expected_cost
-    assert result["estimates"]["gemini-2.5-pro"]["cost"] == expected_cost
+    # Counterfactual estimates follow the current picker; the actual legacy
+    # agent still retains its own model's tiered cost above.
+    assert result["estimates"]["gpt-6.1-sol"]["cost"] == pytest.approx(
+        160_000 * 2.00 / 1_000_000
+        + 50_000 * 0.10 / 1_000_000
+        + 3_000 * 10.00 / 1_000_000
+    )
 
 
 def test_island_sizes_split_total_population_evenly():
@@ -204,7 +248,7 @@ def test_default_config_uses_stochastic_refine_and_two_islands():
     assert engine._initial_island_ids() == [0, 0, 0, 1, 1]
 
 
-def test_population_diversity_scores_use_global_history_centroid():
+def test_population_novelty_ignores_historical_cache_and_collinear_duplicates():
     engine = EvolutionEngine(pop_size=2, generations=1)
     engine.diversity_calculator = SimpleNamespace(is_enabled=lambda: True)
     engine.idea_embeddings = {
@@ -232,7 +276,7 @@ def test_population_diversity_scores_use_global_history_centroid():
         )
     )
 
-    assert scores == {0: 3.0, 1: 4.0}
+    assert scores == {0: 0.0, 1: 0.0}
 
 
 def test_diversity_analytics_tracks_island_and_inter_island_metrics():

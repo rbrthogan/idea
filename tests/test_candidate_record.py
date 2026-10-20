@@ -168,7 +168,7 @@ def test_merge_candidate_records_preserves_extensions_and_new_content():
     assert CANDIDATE_RECORD_VERSION_KEY not in merged
 
 
-def test_orchestrator_format_boundary_carries_extension_metadata_forward():
+def test_refinement_boundary_preserves_provenance_but_invalidates_content_evidence():
     candidate = _rich_candidate()
 
     class _Critic:
@@ -202,10 +202,12 @@ def test_orchestrator_format_boundary_carries_extension_metadata_forward():
     )
 
     assert result["idea"].title == "Formatted refinement"
-    assert result["artifacts"] is candidate["artifacts"]
-    assert result["evaluations"] is candidate["evaluations"]
-    assert result["provenance"] is candidate["provenance"]
-    assert result["future_extension"] is candidate["future_extension"]
+    assert "artifacts" not in result
+    assert "evaluations" not in result
+    assert result["id"] != candidate["id"]
+    assert result["provenance"] == candidate["provenance"]
+    assert result["future_extension"] == candidate["future_extension"]
+    assert result["future_extension"] is not candidate["future_extension"]
 
 
 def test_candidate_record_is_compatible_with_rating_extraction():
