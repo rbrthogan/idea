@@ -251,7 +251,7 @@
                     </label>
                     <input type="range" class="form-range" min="0.25" max="3" step="0.25" id="autoTournamentCount" value="1">
                     <small id="autoTournamentRoundsHint" class="form-text text-muted" style="font-size: 0.75rem;">
-                      1.00 = full Swiss tournament (pop size - 1 rounds).
+                      1.00 = log₂(number of ideas) Swiss rounds, rounded up.
                     </small>
                     <small class="form-text text-muted" style="font-size: 0.75rem;">
                       Fractions run proportional Swiss rounds, matching the evolution loop.
@@ -365,9 +365,9 @@
               <div class="mb-3 mt-3">
                 <label class="form-label">Rating Type</label>
                 <div class="btn-group w-100" role="group">
-                  <button id="autoRatingTypeBtn" type="button" class="btn btn-outline-primary active"
+                  <button id="autoRatingTypeBtn" type="button" class="btn btn-outline-primary"
                     onclick="toggleRatingType('auto')">Auto</button>
-                  <button id="manualRatingTypeBtn" type="button" class="btn btn-outline-primary"
+                  <button id="manualRatingTypeBtn" type="button" class="btn btn-outline-primary active"
                     onclick="toggleRatingType('manual')">Manual</button>
                   <button id="diffRatingTypeBtn" type="button" class="btn btn-outline-primary"
                     onclick="toggleRatingType('diff')">Diff</button>
@@ -538,7 +538,7 @@
   <script src="/static/js/workbench.js?v=0.2.0-rc.13"></script>
   <script src="/static/js/auth_logic.js?v=0.2.0-rc.13"></script>
 
-  <script src="/static/js/rater.js?v=0.2.0-rc.13"></script>
+  <script src="/static/js/rater.js?v=0.2.0-rc.13-swiss-log"></script>
 
   <!-- Shared responsive workspace behavior lives in workbench.js. -->
 

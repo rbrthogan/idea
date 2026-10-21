@@ -3,6 +3,21 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Set, Tuple
 
 
+def tournament_round_budget(population_size: int, policy: str = "swiss_log2") -> int:
+    """Baseline rounds for one group; logarithmic unless restoring a legacy run.
+
+    At count 1.0, n >= 2 candidates schedule floor(n/2) * ceil(log2(n))
+    comparisons. The minimum of one keeps empty/singleton config metadata valid;
+    the evaluator skips those groups without making comparisons.
+    """
+    size = max(1, int(population_size))
+    if policy == "legacy_linear":
+        return max(1, size - 1)
+    if policy != "swiss_log2":
+        raise ValueError(f"Unknown tournament round policy: {policy}")
+    return max(1, (size - 1).bit_length())
+
+
 def elo_update(
     elo_a: float,
     elo_b: float,

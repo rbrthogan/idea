@@ -81,7 +81,7 @@ class EvolutionEngine:
         creative_temp: float = DEFAULT_CREATIVE_TEMP,
         top_p: float = DEFAULT_TOP_P,
         random_seed: Optional[int] = None,
-        tournament_rounds: int = 1,
+        tournament_rounds: Optional[int] = None,
         tournament_count: Optional[float] = None,
         full_tournament_rounds: Optional[int] = None,
         thinking_budget: Optional[int] = None,
@@ -110,6 +110,7 @@ class EvolutionEngine:
         evaluation_config: Optional[Dict[str, Any]] = None,
         evaluation_runners: Optional[Dict[str, Any]] = None,
         artifact_store: Optional[Any] = None,
+        tournament_rounds_policy: str = "swiss_log2",
     ):
         # Normalize legacy constructor input before any provider or RNG is
         # initialized. Every consumer uses the same settings that we persist.
@@ -154,10 +155,7 @@ class EvolutionEngine:
             migration_novelty_protection_quantile,
             default=0.8,
         )
-        if full_tournament_rounds is None or full_tournament_rounds <= 0:
-            full_tournament_rounds = max(1, pop_size - 1)
-        if tournament_rounds is None or tournament_rounds <= 0:
-            tournament_rounds = 1
+        self.tournament_rounds_policy = config.tournament_rounds_policy
         self.full_tournament_rounds = int(full_tournament_rounds)
         self.tournament_rounds = int(tournament_rounds)
         if tournament_count is None:
@@ -261,17 +259,16 @@ class EvolutionEngine:
             random_seed=self._random_randbits(64),
         )
 
-        # Gene analysis is an analytical role, independent of creative sampling.
-        # Stay within the configured credential's provider; Google uses the
-        # manager validated on saved gene pools, OpenAI keeps the selected model.
-        gene_model = "gemini-4-argon" if self.provider == "google_generative_ai" else model_type
-        from idea.config import THINKING_MODEL_CONFIG
-        gene_capabilities = THINKING_MODEL_CONFIG.get(gene_model, {})
-        gene_level = ("medium" if "medium" in gene_capabilities.get("allowed_levels", [])
-                      else gene_capabilities.get("default_level"))
+        # Gene analysis keeps analytical sampling but follows the run's model
+        # and thinking settings, so it cannot silently upgrade to a costlier model.
         self.gene_manager = Breeder(
-            provider=self.provider, model_name=gene_model, temperature=0.2, top_p=1.0,
-            thinking_level=gene_level, api_key=api_key,
+            provider=self.provider,
+            model_name=model_type,
+            temperature=0.2,
+            top_p=1.0,
+            thinking_budget=thinking_budget,
+            thinking_level=self.thinking_level,
+            api_key=api_key,
         )
         self.breeder.gene_encoder = self.gene_manager
 

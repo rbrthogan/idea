@@ -19,8 +19,9 @@ rather than encode an entire candidate in one dense phrase.
    genotype. Each child saves the exact parent genotypes, pool revision and
    selected ingredients used at birth.
 
-Google runs use Argon for gene analysis; OpenAI runs use the selected model.
-These requests count toward the same run budget. There is one pass per changed
+Gene extraction and consolidation use the selected evolution model for both
+Google and OpenAI runs, with the same thinking level or token budget as the core
+model. These requests count toward the same run budget. There is one pass per changed
 boundary, with no catalogue cap, occupancy pressure or repeated cleanup until
 convergence.
 

@@ -106,7 +106,7 @@ function beginRatingSelection(evolutionId) {
     return captureRatingContext();
 }
 let ideasDb = {};
-let currentRatingType = 'auto';
+let currentRatingType = 'manual';
 let currentGenerationView = 'death';
 let autoRatingInProgress = false;
 let currentModalIdea = null;
@@ -125,7 +125,7 @@ const chartFocusLookup = {
 };
 
 // Sorting state
-let currentSortColumn = 'fitness';
+let currentSortColumn = 'rating';
 let currentSortDirection = 'desc';
 let originalIdeasOrder = [];
 let autoRatingProgressPollTimer = null;
@@ -265,7 +265,8 @@ function setManualSwissStatus(swissStatus) {
 
     let text = `Round ${roundNumber}`;
     if (typeof remainingPairs === 'number') {
-        text += ` · ${remainingPairs} pairs remaining`;
+        const comparisonsLeft = Math.max(0, Math.trunc(remainingPairs)) + 1;
+        text += ` · ${comparisonsLeft} comparison${comparisonsLeft === 1 ? '' : 's'} left in this round (including this pair)`;
     }
     if (byeIdeaId) {
         text += ` · Bye: ${byeIdeaId}`;
@@ -877,13 +878,20 @@ async function showRanking() {
             `;
         } else if (currentRatingType === 'manual') {
             ideas.sort((a, b) => {
-                const aRating = a.ratings?.manual || 1500;
-                const bRating = b.ratings?.manual || 1500;
+                const aRating = getRatingValueByType(a, 'manual') ?? -Infinity;
+                const bRating = getRatingValueByType(b, 'manual') ?? -Infinity;
                 return bRating - aRating;
             });
+            const counts = ideas.map(idea => idea.manual_match_count || 0);
+            const compared = counts.filter(count => count > 0).length;
+            const minimum = counts.length ? Math.min(...counts) : 0;
+            const maximum = counts.length ? Math.max(...counts) : 0;
+            const coverage = minimum === maximum ? String(minimum) : `${minimum}–${maximum}`;
             document.getElementById('ratingStats').innerHTML = `
-                <p>Manual ratings (human-based)</p>
-                <p>Total manual comparisons: ${totalManualMatches / 2}</p>
+                <p><strong>Provisional manual ranking</strong></p>
+                <p>${totalManualMatches / 2} saved comparisons · ${compared} of ${ideas.length} ideas compared · ${coverage} comparisons per idea</p>
+                <p>Each vote is saved immediately. You can stop and resume the current Swiss round.</p>
+                <p class="text-muted mb-0">Elo depends on results and opponents; with few or uneven comparisons, the order is uncertain. Unrated ideas appear last when sorted by rating. Evolution fitness is separate from your preferences.</p>
             `;
         } else if (currentRatingType === 'diff') {
             // Sort by absolute difference between auto and manual
@@ -907,6 +915,7 @@ async function showRanking() {
 
 // Toggle between manual and auto rating modes
 function toggleRatingMode(mode) {
+    toggleRatingType(mode === 'manual' ? 'manual' : 'auto');
     const manualControls = document.getElementById('manualRatingControls');
     const autoControls = document.getElementById('autoRatingControls');
     const votes = document.getElementById('manualVoteBar');
@@ -1120,11 +1129,11 @@ function normalizeTournamentCountValue(value) {
 function getAutoTournamentEstimate() {
     const countEl = document.getElementById('autoTournamentCount');
     const ideaCount = Object.keys(ideasDb).length;
-    const fullTournamentRounds = Math.max(1, ideaCount - 1);
+    const fullTournamentRounds = Math.max(1, Math.ceil(Math.log2(Math.max(1, ideaCount))));
     const tournamentCount = normalizeTournamentCountValue(countEl ? countEl.value : 1.0);
     const targetRounds = Math.max(1, Math.round(tournamentCount * fullTournamentRounds));
-    const matchesPerRound = Math.max(1, Math.floor(ideaCount / 2));
-    const estimatedTotalMatches = Math.max(1, targetRounds * matchesPerRound);
+    const matchesPerRound = Math.floor(ideaCount / 2);
+    const estimatedTotalMatches = targetRounds * matchesPerRound;
 
     return {
         ideaCount,
@@ -1153,7 +1162,7 @@ function syncAutoTournamentCountUI() {
     }
     if (hintEl) {
         const roundsLabel = estimate.targetRounds === 1 ? 'round' : 'rounds';
-        hintEl.textContent = `${estimate.tournamentCount.toFixed(2)}x tournament = ${estimate.targetRounds} Swiss ${roundsLabel} (${estimate.fullTournamentRounds} rounds = 1 full tournament).`;
+        hintEl.textContent = `${estimate.tournamentCount.toFixed(2)}x tournament = ${estimate.targetRounds} Swiss ${roundsLabel} (${estimate.estimatedTotalMatches} pairings; cached results can reduce new calls).`;
     }
 }
 
@@ -1322,7 +1331,7 @@ startAutoRatingBtn.addEventListener('click', async function () {
                             <p>A wins: ${Number(winCounts.A) || 0}</p>
                             <p>B wins: ${Number(winCounts.B) || 0}</p>
                             <p>Ties: ${Number(winCounts.tie) || 0}</p>
-                            <p class="text-muted mb-0">1 full tournament = ${fullRounds} Swiss rounds</p>
+                            <p class="text-muted mb-0">1.00 round budget = ${fullRounds} Swiss rounds</p>
                         `;
                     }
                 }
@@ -1428,7 +1437,7 @@ startAutoRatingBtn.addEventListener('click', async function () {
             <p>A wins: ${finalOutcomeCounts.A}</p>
             <p>B wins: ${finalOutcomeCounts.B}</p>
             <p>Ties: ${finalOutcomeCounts.tie}</p>
-            <p class="text-muted mb-0">1 full tournament = ${finalFullRounds} Swiss rounds</p>
+            <p class="text-muted mb-0">1.00 round budget = ${finalFullRounds} Swiss rounds</p>
         `;
 
         if (finalTokenCounts) {
@@ -1489,9 +1498,9 @@ function updateRankingsTable(ideas) {
     // Set up sorting event listeners
     setupTableSorting();
 
-    // Default to overall fitness descending
+    // Rank by the selected rating; fitness remains an explicit column sort.
     if (!currentSortColumn) {
-        currentSortColumn = 'fitness';
+        currentSortColumn = 'rating';
         currentSortDirection = 'desc';
     }
     updateSortIndicators();
@@ -1565,9 +1574,8 @@ function sortTable(column, direction) {
 
         switch (column) {
             case 'rank':
-                // Find the original index in the rankedIdeas array
-                aValue = window.rankedIdeas.indexOf(a);
-                bValue = window.rankedIdeas.indexOf(b);
+                aValue = a.table_rating_rank;
+                bValue = b.table_rating_rank;
                 break;
 
             case 'title':
@@ -1744,6 +1752,19 @@ function getIdeaTableFitnessScore(idea) {
         ?? normalizeToFiniteNumber(idea?.table_overall_fitness);
 }
 
+function assignRatingRanks(ideas) {
+    const score = idea => {
+        const value = getRatingValueByType(idea, currentRatingType);
+        return currentRatingType === 'diff' && Number.isFinite(value) ? Math.abs(value) : value;
+    };
+    const orderedScores = ideas.map(score).filter(Number.isFinite).sort((a, b) => b - a);
+    const ranks = new Map();
+    orderedScores.forEach((value, index) => {
+        if (!ranks.has(value)) ranks.set(value, index + 1);
+    });
+    ideas.forEach(idea => { idea.table_rating_rank = ranks.get(score(idea)) ?? null; });
+}
+
 function decorateIdeasWithTableMetrics(ideas) {
     const rankedIdeas = Array.isArray(ideas) ? ideas : [];
     if (rankedIdeas.length === 0) {
@@ -1778,6 +1799,7 @@ function decorateIdeasWithTableMetrics(ideas) {
         idea.table_overall_fitness = explicitFitness !== null ? explicitFitness : fallbackFitness;
     });
 
+    assignRatingRanks(rankedIdeas);
     return rankedIdeas;
 }
 
@@ -1795,7 +1817,7 @@ function getIdeaRatingCellHtml(idea) {
     const diffRating = autoRating - manualRating;
 
     if (currentRatingType === 'manual') {
-        return `<td>${Math.round(manualRating)}</td>`;
+        return idea.manual_match_count > 0 ? `<td>${Math.round(manualRating)}</td>` : '<td>Unrated</td>';
     }
     if (currentRatingType === 'diff') {
         const diffClass = diffRating > 0 ? 'text-success' : (diffRating < 0 ? 'text-danger' : '');
@@ -1822,7 +1844,7 @@ function buildRankingRowHtml(idea, index) {
     const deathGeneration = getIdeaGenerationLabel(idea, 'death');
 
     return `
-        <td>${index + 1}</td>
+        <td>${idea.table_rating_rank ?? '—'}</td>
         <td><button type="button" class="idea-details-trigger">${escapeHtml(idea.title || 'Untitled')}</button></td>
         ${getIdeaRatingCellHtml(idea)}
         <td>${escapeHtml(getIdeaMatchCountByType(idea))}</td>
@@ -1869,7 +1891,7 @@ function toggleRatingType(type) {
     currentRatingType = type;
 
     // Reset sorting state when switching rating types
-    currentSortColumn = 'fitness';
+    currentSortColumn = 'rating';
     currentSortDirection = 'desc';
 
     // Update button states
@@ -2277,7 +2299,7 @@ function getRatingValueByType(idea, ratingType) {
     const manualRating = normalizeToFiniteNumber(idea?.ratings?.manual) ?? 1500;
 
     if (ratingType === 'manual') {
-        return manualRating;
+        return idea?.manual_match_count > 0 ? manualRating : null;
     }
     if (ratingType === 'diff') {
         return autoRating - manualRating;
