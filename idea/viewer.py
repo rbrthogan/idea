@@ -25,6 +25,7 @@ import uuid
 from typing import Dict, List, Tuple, Optional, Any, Set
 
 from idea.evolution import EvolutionEngine, get_default_template_id
+from idea.models import encode_json_safe
 from idea.evolution_types import EvolutionRunConfig
 from idea.run_requests import RequestRunConfig, parse_run_request, parse_additional_generations
 from idea.provider_execution import await_provider_call
@@ -40,7 +41,7 @@ from idea.evaluation import (
 )
 from idea.artifact_store import ArtifactStore, ArtifactStoreError
 from idea.llm import Critic
-from idea.swiss_tournament import elo_update, generate_swiss_round_pairs
+from idea.swiss_tournament import elo_update, generate_swiss_round_pairs, tournament_round_budget
 from idea.config import (
     LLM_MODELS,
     ARCHIVED_EXECUTION_MESSAGE,
@@ -179,7 +180,7 @@ def _resolve_tournament_settings(
     tournament_count_input: Any,
     legacy_rounds_input: Any,
 ) -> Tuple[float, int, int]:
-    full_tournament_rounds = max(1, pop_size - 1)
+    full_tournament_rounds = tournament_round_budget(pop_size)
 
     if tournament_count_input is not None:
         tournament_count = _normalize_tournament_count(float(tournament_count_input))
@@ -2489,7 +2490,7 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
             if response.get(flag):
                 state.status.pop(flag, None)
 
-        return JSONResponse(convert_uuids_to_strings(response))
+        return JSONResponse(encode_json_safe(response))
 
     # Fallback to Firestore-backed run state for reconnects or cross-instance requests
     run_state = await db.get_active_run(user.uid)
@@ -2603,7 +2604,7 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
             response["history_available"] = False
 
         state.status = response
-        return JSONResponse(convert_uuids_to_strings(response))
+        return JSONResponse(encode_json_safe(response))
 
     # No active run in Firestore and no in-memory engine. Ensure stale local running flags
     # do not keep the UI in a phantom "running" state.
@@ -2614,7 +2615,7 @@ async def get_progress(request: Request, user: UserInfo = Depends(require_auth))
         if not state.status.get("status_message"):
             state.status["status_message"] = "No active evolution run found."
 
-    return JSONResponse(convert_uuids_to_strings(state.status))
+    return JSONResponse(encode_json_safe(state.status))
 
 
 def _allow_unscoped_legacy_local_files() -> bool:
@@ -3272,12 +3273,12 @@ async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth
                 # Viewing never migrates a checkpoint or follows an embedded
                 # evolution ID that may now identify a newer experiment.
                 legacy.update({"evolution_id": evolution_id, "source_checkpoint_id": evolution_id})
-                return JSONResponse({
+                return JSONResponse(encode_json_safe({
                     "id": evolution_id,
                     "name": legacy.get("name") or f"Checkpoint {evolution_id}",
                     "timestamp": legacy.get("updated_at") or legacy.get("checkpoint_time"),
                     "data": legacy,
-                })
+                }))
         if data:
             # The durable evolution remains useful even when the optional
             # active-run overlay is temporarily unavailable (for example,
@@ -3307,7 +3308,12 @@ async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth
                 live_history = live_data.get("history", [])
                 if not isinstance(live_history, list):
                     live_history = []
-                if len(live_history) >= len(saved_history):
+                # A finished in-memory engine predates later manual/auto ratings
+                # and resets. On equal-length histories the saved snapshot wins;
+                # active work or genuinely newer generations can still overlay it.
+                if (len(live_history) > len(saved_history)
+                        or (len(live_history) == len(saved_history)
+                            and state.status.get("is_running") is True)):
                     data.update({
                         "status": live_data.get("status", data.get("status")),
                         "config": live_data.get("config", data.get("config", {})),
@@ -3351,22 +3357,22 @@ async def get_evolution(evolution_id: str, user: UserInfo = Depends(require_auth
                             data.get("token_counts"),
                         ),
                     })
-            return JSONResponse({
+            return JSONResponse(encode_json_safe({
                 'id': evolution_id,
                 'name': data.get('name', evolution_id),
                 'timestamp': data.get('updated_at') or data.get('created_at'),
                 'data': data
-            })
+            }))
 
         if live_data:
             data = dict(live_data)
             data["evolution_id"] = evolution_id
-            return JSONResponse({
+            return JSONResponse(encode_json_safe({
                 'id': evolution_id,
                 'name': data.get('name', evolution_id),
                 'timestamp': datetime.now().isoformat(),
                 'data': data
-            })
+            }))
 
         raise HTTPException(status_code=404, detail="Evolution not found")
     except HTTPException:
@@ -4025,7 +4031,7 @@ async def auto_rate(
             raise HTTPException(status_code=400, detail="Not enough ideas to compare (minimum 2 required)")
 
         # Align auto-rating with evolution-loop semantics:
-        # - full_tournament_rounds = pop_size - 1
+        # - full_tournament_rounds = ceil(log2(pop_size)), minimum one
         # - tournamentCount controls fractional/multiple Swiss tournaments
         legacy_rounds_input = data.get("numRounds", data.get("numComparisons"))
         try:

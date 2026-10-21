@@ -53,8 +53,9 @@ elements.modelType.value='gemini-2.5-flash'; updateSamplingControls();
 const legacy=JSON.parse(JSON.stringify(elements));
 elements.modelType.value='gpt-5.6-luna'; updateSamplingControls();
 const reasoningDisabled=elements.topP.disabled;
+const openaiNotice=elements.geneAnalysisModelNotice.textContent;
 level='none'; updateSamplingControls();
-process.stdout.write(JSON.stringify({argon,legacy,reasoningDisabled,noneDisabled:elements.topP.disabled}));
+process.stdout.write(JSON.stringify({argon,legacy,openaiNotice,reasoningDisabled,noneDisabled:elements.topP.disabled}));
 '''
     script = 'const window={IDEA_THINKING_MODEL_CONFIG:' + json.dumps(THINKING_MODEL_CONFIG) + '};\n'
     result = json.loads(subprocess.run(['node', '-e', script + SOURCE[start:end] + body],
@@ -62,7 +63,10 @@ process.stdout.write(JSON.stringify({argon,legacy,reasoningDisabled,noneDisabled
     assert result['argon']['creativeTemp']['disabled'] is True
     assert result['argon']['topPValue']['textContent'] == 'Provider controlled'
     assert result['argon']['samplingControlsNotice']['hidden'] is False
-    assert 'Argon' in result['argon']['geneAnalysisModelNotice']['textContent']
+    expected_notice = 'Gene analysis uses the selected model and thinking settings, within the run budget.'
+    assert result['argon']['geneAnalysisModelNotice']['textContent'] == expected_notice
+    assert result['legacy']['geneAnalysisModelNotice']['textContent'] == expected_notice
+    assert result['openaiNotice'] == expected_notice
     assert result['legacy']['creativeTemp']['disabled'] is False
     assert result['legacy']['creativeTempValue']['textContent'] == '1.5'
     assert result['reasoningDisabled'] is True and result['noneDisabled'] is False

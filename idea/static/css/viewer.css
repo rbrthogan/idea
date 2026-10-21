@@ -2318,7 +2318,7 @@ small {
 
 .entry-input {
   font-size: 1.125rem;
-  padding: 1rem 3.25rem 1rem 1rem;
+  padding: 1rem 1rem 4rem;
   border-radius: var(--radius-lg);
   border: 2px solid var(--border);
   resize: none;
@@ -2339,6 +2339,48 @@ small {
   margin: 0;
   cursor: pointer;
 }
+
+.template-dictation-btn {
+  position: absolute;
+  right: 3.65rem;
+  bottom: 0.65rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-alt);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.template-dictation-btn:hover:not(:disabled),
+.template-dictation-btn:focus-visible {
+  background: var(--primary-subtle);
+  color: var(--primary);
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.template-dictation-btn[aria-pressed="true"] {
+  background: var(--primary);
+  color: var(--text-on-primary);
+}
+
+.template-dictation-btn:disabled { opacity: .5; cursor: not-allowed; }
+.template-dictation-btn[data-state="stopping"] { opacity: .8; cursor: wait; }
+.template-dictation-status, .template-dictation-preview {
+  margin: .5rem 0 .75rem;
+  font-size: .8rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.template-dictation-status[data-state="listening"] { color: var(--primary); }
+.template-dictation-status[data-state="error"] { color: var(--danger); }
+.template-dictation-preview { font-style: italic; }
 
 .template-context-file-input {
   position: absolute;

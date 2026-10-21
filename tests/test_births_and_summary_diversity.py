@@ -68,7 +68,7 @@ def test_all_birth_types_have_actual_parentage_and_generation():
     assert len(set(children[2]["parent_ids"])) == 2
 
 
-@pytest.mark.parametrize("size,expected", [(6, 1), (8, 2), (12, 3)])
+@pytest.mark.parametrize("size,expected", [(6, 1), (8, 1), (12, 1), (64, 2)])
 def test_tournament_fraction_is_scaled_to_local_size(size, expected):
     engine = _FakeEngine()
     engine.tournament_count = .25
@@ -76,7 +76,7 @@ def test_tournament_fraction_is_scaled_to_local_size(size, expected):
     orchestrator = EvolutionOrchestrator(engine, lambda _: asyncio.sleep(0))
     assert orchestrator._local_tournament_rounds(size) == expected
     engine.tournament_count = 1
-    assert orchestrator._local_tournament_rounds(size) == size-1
+    assert orchestrator._local_tournament_rounds(size) == (size - 1).bit_length()
 
 
 @pytest.mark.parametrize("rate", [0, .2, .5, 1])
@@ -190,13 +190,13 @@ def test_legacy_resume_keeps_old_diversity_space_and_new_birth_defaults():
     assert EvolutionRunConfig().diversity_representation == "criterion_summaries"
 
 
-@pytest.mark.parametrize("islands,rounds", [(1, 6), (2, 3), (3, 2)])
+@pytest.mark.parametrize("islands,rounds", [(1, 5), (2, 4), (3, 3)])
 def test_complete_generation_uses_new_defaults_in_every_execution_path(islands, rounds):
     import hashlib
     import uuid
     with patch("idea.llm.LLMWrapper._setup_provider", return_value=None):
         engine = EvolutionEngine(pop_size=24, generations=1, island_count=islands,
-                                 tournament_count=.25, tournament_rounds=99,
+                                 tournament_count=1.0, tournament_rounds=99,
                                  survivor_refinement_rate=0, random_seed=42)
     engine.oracle = None
     engine.migration_rate = 0

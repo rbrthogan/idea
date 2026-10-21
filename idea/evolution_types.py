@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from idea.config import DEFAULT_MODEL
+from idea.swiss_tournament import tournament_round_budget
 
 
 class EvolutionRunConfig(BaseModel):
@@ -46,9 +47,10 @@ class EvolutionRunConfig(BaseModel):
     creative_temp: float = Field(default=1.5, ge=0.0, le=2.0)
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     random_seed: Optional[int] = Field(default=None, ge=0, le=(2**64) - 1)
-    tournament_rounds: int = Field(default=1, ge=1, le=1000)
+    tournament_rounds: Optional[int] = Field(default=None, ge=1, le=1000)
     tournament_count: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     full_tournament_rounds: Optional[int] = Field(default=None, ge=1, le=1000)
+    tournament_rounds_policy: Literal["swiss_log2", "legacy_linear"] = "swiss_log2"
     thinking_budget: Optional[int] = Field(default=None, ge=-1, le=131072)
     thinking_level: Optional[str] = None
     max_budget: Optional[float] = Field(default=None, ge=0.0)
@@ -165,7 +167,9 @@ class EvolutionRunConfig(BaseModel):
 
     @field_validator("tournament_rounds", mode="before")
     @classmethod
-    def coerce_tournament_rounds(cls, value: Any) -> int:
+    def coerce_tournament_rounds(cls, value: Any) -> Optional[int]:
+        if value is None:
+            return None
         try:
             numeric = int(value)
         except (TypeError, ValueError):
@@ -292,7 +296,12 @@ class EvolutionRunConfig(BaseModel):
         if self.independent_birth_rate + self.single_parent_birth_rate > 1.0 + 1e-12:
             raise ValueError("Independent and single-parent birth rates must sum to at most 1")
         if self.full_tournament_rounds is None:
-            self.full_tournament_rounds = max(1, self.pop_size - 1)
+            self.full_tournament_rounds = tournament_round_budget(
+                self.pop_size, self.tournament_rounds_policy
+            )
+        if self.tournament_rounds is None:
+            count = self.tournament_count if self.tournament_count is not None else 1.0
+            self.tournament_rounds = max(1, int(math.floor(count * self.full_tournament_rounds + 0.5)))
         if self.tournament_count is None:
             self.tournament_count = (
                 self.tournament_rounds / self.full_tournament_rounds
@@ -310,6 +319,10 @@ class EvolutionRunConfig(BaseModel):
         """
 
         source = dict(stored or {})
+        # Preserve the meaning of counts and explicit round budgets on resume.
+        source.setdefault("tournament_rounds_policy", "legacy_linear")
+        if source.get("tournament_rounds") is None:
+            source["tournament_rounds"] = 1
         # Raising the new-run default must not alter legacy runs on resume.
         source.setdefault("mutation_rate", 0.2)
         # Legacy vectors and running normalization must keep their original

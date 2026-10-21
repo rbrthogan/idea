@@ -166,3 +166,38 @@ def test_same_candidate_cannot_be_rated_against_itself():
     pair = store.preview()
     assert store.vote(pair, idea_b_id=pair["idea_a"]["id"]).status_code == 400
     store.save.assert_not_awaited()
+
+
+def test_stopping_mid_round_saves_only_played_matches_and_resumes_pending_pair():
+    store = RatingStore(size=6)
+    first = store.preview()
+    assert store.vote(first).status_code == 200
+    persisted = copy.deepcopy(store.data)
+    counts = [idea['manual_match_count'] for idea in persisted['history'][0]]
+    assert sorted(counts) == [0, 0, 0, 0, 1, 1]
+    assert len(persisted['rating_swiss_state']['manual']['pending_pairs']) == 2
+
+    # Simulate a new session: reload saved state, then preview repeatedly.
+    resumed = RatingStore(size=6)
+    resumed.data = copy.deepcopy(persisted)
+    next_pair = resumed.preview()
+    assert next_pair == resumed.preview()
+    assert resumed.data == persisted
+    assert resumed.writes == 0
+    assert {next_pair['idea_a']['id'], next_pair['idea_b']['id']}.isdisjoint(
+        {first['idea_a']['id'], first['idea_b']['id']})
+    for _ in range(2):
+        assert resumed.vote(resumed.preview()).status_code == 200
+    assert [idea['manual_match_count'] for idea in resumed.data['history'][0]] == [1] * 6
+    assert not resumed.data['rating_swiss_state']['manual']['pending_pairs']
+
+
+@pytest.mark.parametrize('size,rounds,matches_each', [(6, 3, 3), (5, 5, 4)])
+def test_completed_swiss_rounds_balance_participation_including_rotating_byes(size, rounds, matches_each):
+    store = RatingStore(size=size)
+    for _ in range(rounds * (size // 2)):
+        assert store.vote(store.preview()).status_code == 200
+    state = store.data['rating_swiss_state']['manual']
+    assert state['round_number'] == rounds
+    assert not state['pending_pairs']
+    assert [idea['manual_match_count'] for idea in store.data['history'][0]] == [matches_each] * size

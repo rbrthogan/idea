@@ -26,7 +26,7 @@ def test_aliases_preserve_config_and_tournament_semantics():
     config = parse_run_request({'popSize': 8, 'generations': 4,
                                'tournamentCount': 0.5, 'randomSeed': 42})
     assert config.pop_size == 8
-    assert config.tournament_rounds == 4
+    assert config.tournament_rounds == 2
     assert config.random_seed == 42
     assert config == type(config).from_stored_mapping(config.to_persistence_dict())
 

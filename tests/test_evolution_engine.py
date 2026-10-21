@@ -54,18 +54,41 @@ def test_openai_model_routes_every_generation_agent_and_diversity_to_openai():
     assert engine.diversity_calculator.embedding_model == "text-embedding-3-small"
 
 
-def test_gene_analysis_has_independent_model_and_counted_usage():
-    engine = EvolutionEngine(pop_size=1, generations=1, model_type="gemini-3.8-flash")
-    assert engine.gene_manager.model_name == "gemini-4-argon"
-    assert engine.gene_manager.thinking_level == "medium"
+@pytest.mark.parametrize("model", LLM_MODELS, ids=lambda model: model["id"])
+def test_gene_analysis_follows_selected_model_and_counts_its_usage(model):
+    engine = EvolutionEngine(
+        pop_size=1, generations=1, model_type=model["id"], api_key="test-key",
+    )
+    assert engine.gene_manager.model_name == engine.ideator.model_name == model["id"]
+    assert engine.gene_manager.provider == engine.ideator.provider == model["provider"]
+    assert engine.gene_manager.api_key == engine.ideator.api_key == "test-key"
+    assert engine.gene_manager.thinking_level == engine.ideator.thinking_level
+    assert engine.gene_manager.thinking_budget == engine.ideator.thinking_budget
     assert engine.breeder.gene_encoder is engine.gene_manager
     baseline = engine.get_total_token_count()
-    engine.gene_manager = DummyAgent("gemini-4-argon", 1000, 100, thought_tokens=50)
+    engine.gene_manager = DummyAgent(model["id"], 1000, 100, thought_tokens=50)
     usage = engine.get_total_token_count()
     assert usage["total"] - baseline["total"] == 1150
-    prices = model_prices_per_million_tokens["gemini-4-argon"]
+    prices = model_prices_per_million_tokens[model["id"]]
     expected = (prices["input"] * 1000 + prices["output"] * 150) / 1_000_000
     assert usage["cost"]["total_cost"] - baseline["cost"]["total_cost"] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("model,settings", [
+    ("gemini-3.5-flash-lite", {"thinking_level": "minimal"}),
+    ("gemini-3.8-flash", {"thinking_level": "low"}),
+    ("gemini-4-argon", {"thinking_level": "high"}),
+    ("gpt-6-luna", {"thinking_level": "none"}),
+    ("gpt-6.1-sol", {"thinking_level": "low"}),
+    ("gpt-6-astra", {"thinking_level": "high"}),
+    ("gemini-2.5-flash", {"thinking_budget": 0}),
+    ("gemini-2.5-flash", {"thinking_budget": 8192}),
+])
+def test_gene_analysis_respects_selected_thinking_settings(model, settings):
+    engine = EvolutionEngine(pop_size=1, generations=1, model_type=model, **settings)
+    assert engine.gene_manager.model_name == engine.ideator.model_name == model
+    assert engine.gene_manager.thinking_level == engine.ideator.thinking_level == settings.get("thinking_level")
+    assert engine.gene_manager.thinking_budget == engine.ideator.thinking_budget == settings.get("thinking_budget")
 
 
 def test_get_total_token_count():

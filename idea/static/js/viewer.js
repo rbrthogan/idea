@@ -444,7 +444,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const creativeTemp = parseFloat(document.getElementById('creativeTemp').value);
         const topP = parseFloat(document.getElementById('topP').value);
 
-        // Tournament count (1.0 = full Swiss tournament)
+        // Tournament count (1.0 = ceil(log2(island size)) Swiss rounds)
         const tournamentCount = parseFloat(document.getElementById('tournamentCount').value);
 
         // Get mutation rate
@@ -4913,7 +4913,11 @@ function buildEvolutionConfigDetailsHtml(config = {}, item = {}) {
         const islands = Math.max(1, Math.min(Number(config.island_count) || 1, Math.max(1, Math.floor(total/2))));
         for (let idx = 0; idx < islands; idx++) localSizes.push(Math.floor(total/islands) + (idx < total%islands ? 1 : 0));
     }
-    const localRoundCounts = localSizes.map(size => Math.max(1, Math.floor(Number(config.tournament_count) * Math.max(1, size-1) + 0.5)));
+    const logarithmicRounds = config.tournament_rounds_policy === 'swiss_log2';
+    const localRoundCounts = localSizes.map(size => {
+        const fullRounds = Math.max(1, logarithmicRounds ? Math.ceil(Math.log2(size)) : size - 1);
+        return Math.max(1, Math.floor(Number(config.tournament_count) * fullRounds + 0.5));
+    });
     const sections = [
         renderConfigSection('Basic', [
             ['Template', getTemplateDisplayName(config.idea_type || item.idea_type)],
@@ -4930,6 +4934,7 @@ function buildEvolutionConfigDetailsHtml(config = {}, item = {}) {
         ]),
         renderConfigSection('Tournament', [
             ['Tournament Count', formatConfigNumber(config.tournament_count, 2)],
+            ['Round Budget', logarithmicRounds ? 'Logarithmic Swiss rounds' : 'Legacy: group size minus one'],
             ['Full Tournament Rounds', formatConfigInteger(config.full_tournament_rounds)],
             ['Target Tournament Rounds', formatConfigInteger(config.tournament_rounds)],
             ['Rounds per Island', localRoundCounts.length ? localRoundCounts.join(', ') : 'Legacy global sizing'],
@@ -10048,8 +10053,7 @@ function updateSamplingControls() {
     }
     const geneNotice = document.getElementById('geneAnalysisModelNotice');
     if (geneNotice) {
-        const google = model.selectedOptions?.[0]?.dataset?.provider === 'google_generative_ai';
-        geneNotice.textContent = `Gene extraction and consolidation use ${google ? 'Argon' : 'the selected model'} and share the run budget.`;
+        geneNotice.textContent = 'Gene analysis uses the selected model and thinking settings, within the run budget.';
     }
 }
 

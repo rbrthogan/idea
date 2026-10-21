@@ -12,9 +12,9 @@ def test_tournament_count_one_full_tournament():
         tournament_count_input=1.0,
         legacy_rounds_input=None,
     )
-    assert full_rounds == 4
+    assert full_rounds == 3
     assert count == 1.0
-    assert target_rounds == 4
+    assert target_rounds == 3
 
 
 def test_tournament_count_fractional_rounding():
@@ -23,9 +23,9 @@ def test_tournament_count_fractional_rounding():
         tournament_count_input=0.75,
         legacy_rounds_input=None,
     )
-    assert full_rounds == 4
+    assert full_rounds == 3
     assert count == 0.75
-    assert target_rounds == 3
+    assert target_rounds == 2
 
 
 def test_tournament_count_multiple_tournaments():
@@ -34,9 +34,9 @@ def test_tournament_count_multiple_tournaments():
         tournament_count_input=1.5,
         legacy_rounds_input=None,
     )
-    assert full_rounds == 4
+    assert full_rounds == 3
     assert count == 1.5
-    assert target_rounds == 6
+    assert target_rounds == 5
 
 
 def test_legacy_tournament_rounds_compatibility():
@@ -45,6 +45,6 @@ def test_legacy_tournament_rounds_compatibility():
         tournament_count_input=None,
         legacy_rounds_input=2,
     )
-    assert full_rounds == 4
+    assert full_rounds == 3
     assert target_rounds == 2
-    assert count == 0.5
+    assert count == 2 / 3

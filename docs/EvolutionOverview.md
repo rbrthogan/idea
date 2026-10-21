@@ -34,6 +34,27 @@ survive or reproduce. A gene's carrier fitness is an association, not an
 estimate of its causal value. Gene occupancy itself does not affect selection.
 See [evaluator contracts](PluggableEvaluators.md) for custom metrics and failures.
 
+## Swiss comparison budget
+
+For new runs, tournament count **1.00** schedules `ceil(log2(n))` rounds
+within each island of `n` ideas. Each round pairs `floor(n/2)` ideas against
+another idea, giving `floor(n/2) * ceil(log2(n))` comparisons: **O(n log n)**
+per island. For example, 16 ideas use 4 rounds and 32 pairings, instead of the
+previous 15 rounds and 120 pairings. An odd-sized group has one rotating bye
+per round; groups with fewer than two ideas make no comparisons.
+
+The count scales that round budget with nearest-integer rounding (halves up)
+and a minimum of one. The final population uses the same budget. Auto-rating
+uses the same formula for its selected group. Cached unchanged comparisons
+reduce fresh model calls and are not applied as new rating evidence.
+A template's explicit evaluator round override takes precedence.
+
+This is a comparison budget, not a guarantee that the best idea wins or that
+all rankings are certain. Pairings use Elo proximity and avoid repeats where
+possible. Saved runs without a round-policy marker retain their previous
+`n - 1` baseline when resumed; new runs store `swiss_log2` and history labels
+the policy so the two meanings of 1.00 remain distinguishable.
+
 ## Genes
 
 Each candidate keeps its raw extraction and a normalized genotype. The manager

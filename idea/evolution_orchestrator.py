@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from idea.evolution_progress import ProgressEmitter, terminal_status_fields
 from idea.evolution_types import GenerationWorkState
+from idea.swiss_tournament import tournament_round_budget
 from idea.models import merge_candidate_records
 from idea.template_runtime import generation_prompt
 from idea.genes import empty_gene_catalogue, reconcile_gene_catalogue, valid_gene_observation
@@ -490,7 +491,7 @@ class EvolutionOrchestrator:
                         generation_index=generation_index,
                         target_generation=generation_index,
                         rounds=local_rounds,
-                        full_rounds=max(1, len(island_population) - 1),
+                        full_rounds=self._local_full_tournament_rounds(len(island_population)),
                         island_id=island_id,
                     )
                 )
@@ -500,7 +501,7 @@ class EvolutionOrchestrator:
                 generation_index=generation_index,
                 target_generation=generation_index,
                 rounds=self._local_tournament_rounds(len(self.engine.population)),
-                full_rounds=max(1, len(self.engine.population)-1),
+                full_rounds=self._local_full_tournament_rounds(len(self.engine.population)),
             )
 
         self.engine._set_tournament_history(generation_index, tournament_rounds_details)
@@ -1514,8 +1515,13 @@ class EvolutionOrchestrator:
 
         print(f"✅ Initial seeding complete. Population size: {len(self.engine.population)}")
 
+    def _local_full_tournament_rounds(self, population_size):
+        return tournament_round_budget(
+            population_size, getattr(self.engine, "tournament_rounds_policy", "swiss_log2")
+        )
+
     def _local_tournament_rounds(self, population_size):
-        full_rounds = max(1, population_size-1)
+        full_rounds = self._local_full_tournament_rounds(population_size)
         count = getattr(self.engine, "tournament_count", None)
         if count is None:
             return max(1, int(getattr(self.engine, "tournament_rounds", 1) or 1))
@@ -2123,7 +2129,7 @@ class EvolutionOrchestrator:
         )
 
         local_rounds = self._local_tournament_rounds(current_pop_size)
-        local_full_rounds = max(1, current_pop_size - 1)
+        local_full_rounds = self._local_full_tournament_rounds(current_pop_size)
         tournament_start_cost = self.engine.get_total_token_count()["cost"]["total_cost"]
         loop = asyncio.get_running_loop()
         pairs_per_round = max(1, current_pop_size // 2)

@@ -22,7 +22,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
 
   <!-- Custom CSS -->
-  <link rel="stylesheet" href="/static/css/viewer.css?v=0.2.0-rc.13" />
+  <link rel="stylesheet" href="/static/css/viewer.css?v=0.2.0-rc.13-dictation" />
   <link rel="stylesheet" href="/static/css/workbench.css?v=0.2.0-rc.13" />
 
   <!-- Firebase SDK (for cloud deployment) -->
@@ -333,7 +333,7 @@
                   <span id="tournamentCountValue">1.00</span>
                 </label>
                   <button type="button" class="control-help-toggle" data-control-help="tournamentCountHelp" aria-label="About Tournament count" aria-expanded="false" aria-controls="tournamentCountHelp"><span aria-hidden="true">i</span></button>
-                  <span id="tournamentCountHelp" class="control-help-content" role="tooltip" hidden>1.00 = full Swiss tournament in each island (island size − 1 rounds). Fractions scale those rounds, rounded to the nearest whole round with a minimum of one.</span>
+                  <span id="tournamentCountHelp" class="control-help-content" role="tooltip" hidden>1.00 = log₂(island size) Swiss rounds, rounded up. For example, 16 ideas in an island use 4 rounds and 32 pairings. Fractions scale the round budget, rounded to the nearest whole round with a minimum of one.</span>
                 </div>
                 <input type="range" class="form-range" min="0.25" max="3" step="0.25" id="tournamentCount" aria-describedby="tournamentCountHelp" value="1"
                   oninput="document.getElementById('tournamentCountValue').textContent = parseFloat(this.value).toFixed(2)">
@@ -679,7 +679,12 @@
               <div class="template-prompt-field">
                 <textarea class="form-control entry-input" id="ideaTypeInput"
                   placeholder="Describe the ideas you want to generate and evolve, specifying any important constraints and/or evaluation criteria"
-                  rows="3" aria-label="Describe your research or creative direction"></textarea>
+                  rows="3" aria-label="Describe your research or creative direction" aria-describedby="templateDictationStatus"></textarea>
+                <button type="button" class="template-dictation-btn" id="templateDictationBtn"
+                  aria-label="Dictate brief" aria-pressed="false" aria-controls="ideaTypeInput"
+                  aria-describedby="templateDictationStatus" title="Dictate brief" disabled>
+                  <i class="fas fa-microphone" aria-hidden="true"></i>
+                </button>
                 <label class="template-attach-control" title="Attach context file">
                   <input type="file" id="templateContextFile" class="template-context-file-input"
                     aria-label="Attach context file"
@@ -689,6 +694,8 @@
                   </span>
                 </label>
               </div>
+              <p id="templateDictationStatus" class="template-dictation-status" role="status" aria-live="polite">Free dictation. Your browser may process speech online.</p>
+              <p id="templateDictationPreview" class="template-dictation-preview" aria-live="off" hidden></p>
               <p id="templateAttachmentHelp" class="form-text" hidden>Use Gemini for file attachments; you can paste source text into your brief with either provider.</p>
               <div class="template-attachment-chip" id="templateAttachmentChip" style="display: none;">
                 <i class="fas fa-file-alt"></i>
@@ -1107,6 +1114,7 @@
   </div>
 
   <!-- Bootstrap JS -->
+  <script src="/static/js/template-dictation.js?v=0.2.0-rc.13-dictation"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
   <!-- Chart.js library for cost visualization -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
@@ -1148,6 +1156,7 @@
 
       const isBrowse = currentTemplateFlowMode === 'browse';
       const isGenerate = currentTemplateFlowMode === 'generate';
+      if (!isGenerate) window.templateBriefDictation?.cancel();
       document.getElementById('templateEntry')?.classList?.toggle('template-generation-active', isGenerate);
       if (browseBtn) {
         browseBtn.classList.toggle('active', isBrowse);
@@ -1227,6 +1236,12 @@
       document.getElementById('templateContextFile')?.addEventListener('change', handleTemplateAttachmentChange);
       document.getElementById('templateRemoveAttachmentBtn')?.addEventListener('click', clearTemplateAttachment);
       document.getElementById('ideaTypeInput')?.addEventListener('input', handleTemplateBriefInput);
+      window.templateBriefDictation = window.IdeaDictation?.create({
+        input: document.getElementById('ideaTypeInput'),
+        button: document.getElementById('templateDictationBtn'),
+        status: document.getElementById('templateDictationStatus'),
+        preview: document.getElementById('templateDictationPreview')
+      });
       document.getElementById('saveTemplateBtn')?.addEventListener('click', saveAndUseTemplate);
       document.getElementById('reviewEditBtn')?.addEventListener('click', reviewAndEditTemplate);
       document.getElementById('reviseTemplateBtn')?.addEventListener('click', handleTemplateRevision);
@@ -1603,6 +1618,7 @@
     }
 
     function applyTemplateBriefExample(key) {
+      window.templateBriefDictation?.cancel();
       if (templateGenerationInFlight || !TEMPLATE_BRIEF_EXAMPLES[key]) return;
       const input = document.getElementById('ideaTypeInput');
       input.value = TEMPLATE_BRIEF_EXAMPLES[key].brief;
@@ -1823,6 +1839,7 @@
 
     function updateTemplateDraftControls() {
       const busy = !!templateDraftBusy();
+      window.templateBriefDictation?.setDisabled(busy);
       const model = document.getElementById('templateGenerationModel');
       const modelName = model?.selectedOptions?.[0]?.textContent || model?.value || 'selected model';
       const revision = document.getElementById('reviseTemplateBtn');
@@ -1868,6 +1885,7 @@
     }
 
     function clearTemplateDraftForAccountChange() {
+      window.templateBriefDictation?.cancel();
       clearGeneratedTemplateDraft();
       templateDraftOwner = window.currentUser?.uid || null;
       const brief = document.getElementById('ideaTypeInput');
@@ -1885,6 +1903,8 @@
     }
 
     async function handleTemplateGeneration() {
+      if (templateDraftBusy()) return;
+      if (window.templateBriefDictation && !(await window.templateBriefDictation.stop())) return;
       if (templateDraftBusy()) return;
       const brief = document.getElementById('ideaTypeInput');
       const ideaType = brief.value.trim();
@@ -2937,7 +2957,7 @@
   </script>
   <script src="/static/js/workbench.js?v=0.2.0-rc.13"></script>
   <script src="/static/js/auth_logic.js?v=0.2.0-rc.13"></script>
-  <script src="/static/js/viewer.js?v=0.2.0-rc.13"></script>
+  <script src="/static/js/viewer.js?v=0.2.0-rc.13-swiss-log"></script>
 </body>
 
 </html>
